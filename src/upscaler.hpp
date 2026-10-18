@@ -1,0 +1,78 @@
+#pragma once
+
+#include "ui_redirect.hpp"
+#include "upscaler_settings.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <string>
+
+// NVIDIA DLSS in place of Fox Engine's FXAA, at native resolution (DLAA) or upscaling from a lower
+// render size (render_scale.hpp, ui_redirect.hpp); docs/DEVELOPMENT.md ("What the add-on changes")
+// describes how. The ReShade add-on (upscaler_addon.cpp) forwards the game's Direct3D calls, with
+// native objects. Command lists are identified by their native deferred context or ID3D11CommandList.
+namespace mgsv_dlss::upscaler
+{
+struct Diagnostics
+{
+    int debugView{}; // 0 final image, 1 motion vectors, 2 where the engine's velocity was used
+    bool noJitter{};
+    bool gameFxaa{}; // Comparison: leave the frame to the game's FXAA, keeping DLSS ready
+};
+
+struct Status
+{
+    bool supportedBuild{}, failed{}, running{}, fxaaRecognised{}, upscalingAvailable{};
+    std::string failure, lastFallback;
+    unsigned renderWidth{}, renderHeight{}, outputWidth{}, outputHeight{};
+    std::uint64_t evaluations{}, fallbacks{}, resets{};
+    float jitter[2]{};
+    float mipBias{};
+};
+
+// ---- Setup ----
+// `directory` is the add-on's, which holds MGSVDLSS.ini and nvngx_dlss.dll. On an unsupported game
+// build DLSS stays off.
+void initialize(const std::filesystem::path& directory, bool supportedBuild) noexcept;
+// The game's device and immediate context; NGX receives `ngxContext`, ReShade's wrapper where there
+// is one, so other add-ons can follow the evaluation.
+void attach(ID3D11Device* device, ID3D11DeviceContext* immediate, ID3D11DeviceContext* ngxContext) noexcept;
+// Releases everything; only when no Direct3D work can run (device teardown, unload).
+void detach() noexcept;
+// The swap chain's size: the output size DLSS upscales to.
+void setOutputSize(unsigned width, unsigned height) noexcept;
+
+// ---- Recording, on the game's render and worker threads ----
+void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
+// Notes the FXAA and camera velocity passes as they are recorded. Returns true when the draw was
+// made on the UI target instead (the 2D pass and GammaControl while upscaling), so the game's own
+// draw must be skipped; the render target clear likewise.
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
+bool clearTarget(ID3D11DeviceContext* context, ID3D11RenderTargetView* view, const float color[4]) noexcept;
+void depthStencilCleared(ID3D11DeviceContext* context, ID3D11DepthStencilView* view, UINT flags, float depth, UINT8 stencil) noexcept;
+// Fills `biased` and returns true when any sampler should carry the texture LOD bias for the render size.
+bool biasSamplers(ID3D11DeviceContext* context, unsigned count, ID3D11SamplerState* const* samplers, ID3D11SamplerState** biased) noexcept;
+// A buffer mapped for writing, then unmapped with the data still mapped: the scene constants get
+// the jitter here.
+void bufferMapped(ID3D11Resource* buffer, void* data) noexcept;
+void bufferUnmapped(ID3D11Resource* buffer) noexcept;
+// What `from` recorded now belongs to `into`: FinishCommandList, or a command list executed in a
+// deferred context.
+void recorded(std::uint64_t into, std::uint64_t from) noexcept;
+void forget(std::uint64_t list) noexcept;
+
+// ---- Immediate context ----
+// Before the immediate context executes `list`.
+void executing(ID3D11DeviceContext* immediate, std::uint64_t list) noexcept;
+void present() noexcept;
+
+// ---- Settings UI (upscaler_menu.cpp) ----
+Status status();
+Settings currentSettings();
+// Applies at once; MGSVDLSS.ini is written when the settings settle, or at detach().
+void applySettings(const Settings& settings);
+Diagnostics currentDiagnostics();
+void applyDiagnostics(const Diagnostics& diagnostics);
+void drawMenu();
+}
