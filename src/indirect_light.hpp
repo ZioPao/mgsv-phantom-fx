@@ -1,0 +1,53 @@
+#pragma once
+
+#include "ui_redirect.hpp"
+
+#include <d3d11.h>
+#include <cstddef>
+#include <string>
+
+// What the add-on does to the game's indirect light (docs/DEVELOPMENT.md, "Ambient occlusion",
+// "GTVBAO" and "SSILVB"). Both share one visibility bitmask march.
+//
+// GTVBAO, ground-truth visibility bitmask ambient occlusion, replaces the game's SSAO. Fox Engine
+// multiplies all of a pixel's light by its occlusion in the deferred resolve, sunlight included.
+// GTVBAO multiplies the indirect light only: the diffuse light buffer right after the engine
+// upscales its probe and sky lighting into it, before the sun and the local lights add to it. While
+// it is on, the resolve reads a white texture in place of the game's occlusion, and the game's own
+// SSAO passes are left out.
+//
+// SSILVB, screen-space indirect lighting with visibility bitmask, adds the light that nearby
+// surfaces on screen reflect onto each other: at the resolve, once the sun and the local lights are
+// in the diffuse light, the resolve reads the diffuse light with that bounce added.
+namespace phantom_fx::indirect_light
+{
+struct Options
+{
+    bool occlusion{};           // GTVBAO
+    float occlusionRadius{1};   // Metres
+    float occlusionStrength{1}; // Exponent on the visibility
+    bool light{};               // SSILVB
+    float lightRadius{2};       // Metres
+    float lightStrength{1};     // Multiplies the light
+    bool showOcclusion{};       // Diagnostics: the resolve draws GTVBAO's occlusion alone
+    bool showLight{};           // Diagnostics: the resolve draws SSILVB's light alone
+};
+
+void attach(ID3D11Device* device) noexcept;
+// Releases everything; only when no Direct3D work can run (device teardown, unload).
+void detach() noexcept;
+// Applies from the frame recorded after the next present.
+void configure(const Options& options) noexcept;
+// Empty while the effect is off or running; otherwise what it waits for, for the overlay.
+std::string occlusionProblem();
+std::string lightProblem();
+
+// ---- Recording, on the game's render and worker threads ----
+void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
+// Before a draw. Returns true when the add-on made the draw itself, or left it out, so the game's
+// draw must be skipped.
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
+// Each present. The game records a whole frame between presents, so every pass of a frame sees the
+// same options.
+void present() noexcept;
+}

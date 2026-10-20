@@ -1,5 +1,6 @@
 #pragma once
 
+#include "frame_generation.hpp"
 #include "ui_redirect.hpp"
 #include "upscaler_settings.hpp"
 
@@ -8,22 +9,26 @@
 #include <filesystem>
 #include <string>
 
-// NVIDIA DLSS in place of Fox Engine's FXAA, at native resolution (DLAA) or upscaling from a lower
-// render size (render_scale.hpp, ui_redirect.hpp); docs/DEVELOPMENT.md ("What the add-on changes")
-// describes how. The ReShade add-on (upscaler_addon.cpp) forwards the game's Direct3D calls, with
+// NVIDIA DLSS or AMD FSR (fsr_upscaler.hpp) in place of Fox Engine's FXAA, at native resolution
+// (DLAA) or upscaling from a lower render size (render_scale.hpp, ui_redirect.hpp);
+// docs/DEVELOPMENT.md ("What the add-on changes") describes how. The ReShade add-on (upscaler_addon.cpp) forwards the game's Direct3D calls, with
 // native objects. Command lists are identified by their native deferred context or ID3D11CommandList.
-namespace mgsv_dlss::upscaler
+namespace phantom_fx::upscaler
 {
 struct Diagnostics
 {
     int debugView{}; // 0 final image, 1 motion vectors, 2 where the engine's velocity was used
     bool noJitter{};
     bool gameFxaa{}; // Comparison: leave the frame to the game's FXAA, keeping DLSS ready
+    bool onlyScreenSpaceShadows{}; // The sun shadowed by the screen-space shadows alone
+    bool showAmbientOcclusion{};   // GTVBAO's occlusion alone in place of the lit scene
+    bool showIndirectLight{};      // SSILVB's light alone in place of the lit scene
 };
 
 struct Status
 {
     bool supportedBuild{}, failed{}, running{}, fxaaRecognised{}, upscalingAvailable{};
+    std::string upscalerName; // "DLSS", or "FSR" with its version ("FSR 3.1.5") once it ran
     std::string failure, lastFallback;
     unsigned renderWidth{}, renderHeight{}, outputWidth{}, outputHeight{};
     std::uint64_t evaluations{}, fallbacks{}, resets{};
@@ -32,15 +37,15 @@ struct Status
 };
 
 // ---- Setup ----
-// `directory` is the add-on's, which holds MGSVDLSS.ini and nvngx_dlss.dll. On an unsupported game
-// build DLSS stays off.
+// `directory` is the add-on's, which holds PhantomFX.ini and the DLSS and FSR DLLs. On an unsupported
+// game build upscaling stays off.
 void initialize(const std::filesystem::path& directory, bool supportedBuild) noexcept;
 // The game's device and immediate context; NGX receives `ngxContext`, ReShade's wrapper where there
 // is one, so other add-ons can follow the evaluation.
 void attach(ID3D11Device* device, ID3D11DeviceContext* immediate, ID3D11DeviceContext* ngxContext) noexcept;
 // Releases everything; only when no Direct3D work can run (device teardown, unload).
 void detach() noexcept;
-// The swap chain's size: the output size DLSS upscales to.
+// The swap chain's size: the output size the upscaler upscales to.
 void setOutputSize(unsigned width, unsigned height) noexcept;
 
 // ---- Recording, on the game's render and worker threads ----
@@ -67,12 +72,24 @@ void forget(std::uint64_t list) noexcept;
 void executing(ID3D11DeviceContext* immediate, std::uint64_t list) noexcept;
 void present() noexcept;
 
+// ---- Frame generation (presenter.hpp) ----
+// While the game presents through Direct3D 12: the upscaler's depth and motion are shared with it,
+// and GammaControl also draws the frame before the HUD. Set at each present.
+void setFrameGeneration(bool on) noexcept;
+// What frame generation needs from the frame being presented, before present().
+frame_generation::Inputs frameGenerationInputs() noexcept;
+
 // ---- Settings UI (upscaler_menu.cpp) ----
 Status status();
 Settings currentSettings();
-// Applies at once; MGSVDLSS.ini is written when the settings settle, or at detach().
+// Applies at once; PhantomFX.ini is written when the settings settle, or at detach().
 void applySettings(const Settings& settings);
 Diagnostics currentDiagnostics();
 void applyDiagnostics(const Diagnostics& diagnostics);
+// Soft shadows, screen-space shadows, GTVBAO and SSILVB together, for comparing with the game's own
+// lighting (F1). Not saved: each start begins with them on, as their own settings say.
+bool enhancementsOn();
+void setEnhancements(bool on);
+void toggleEnhancements();
 void drawMenu();
 }

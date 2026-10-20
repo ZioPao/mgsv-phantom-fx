@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace mgsv_dlss
+namespace phantom_fx
 {
 namespace
 {

@@ -21,7 +21,7 @@
 #include <utility>
 #include <vector>
 
-namespace mgsv_dlss::frame_log
+namespace phantom_fx::frame_log
 {
 namespace
 {
@@ -38,7 +38,7 @@ constexpr GUID DebugObjectName{0x429b8c22, 0x9188, 0x4b0c, {0x87, 0x42, 0xac, 0x
 // contexts ahead of executing them, and the warm-up catches lists executed early in the next frame.
 enum class Capture { Off, WarmingUp, Recording };
 
-// The MGSVDLSS-frame-log folder, which turns the frame log on and receives its files.
+// The PhantomFX-frame-log folder, which turns the frame log on and receives its files.
 std::filesystem::path outputDirectory;
 bool active{}, saveShaders{};
 
@@ -876,13 +876,13 @@ void onDestroyCommandList(command_list* list)
 
 void install(const std::filesystem::path& addonDirectory)
 {
-    outputDirectory = addonDirectory / "MGSVDLSS-frame-log";
+    outputDirectory = addonDirectory / "PhantomFX-frame-log";
     std::error_code error;
     if (!std::filesystem::is_directory(outputDirectory, error)) return;
 
     active = true;
     saveShaders = std::filesystem::is_directory(outputDirectory / "shaders", error);
-    log("Frame log on: F10 records a frame into MGSVDLSS-frame-log.");
+    log("Frame log on: F10 records a frame into PhantomFX-frame-log.");
 
     reshade::register_event<reshade::addon_event::init_pipeline>(onInitPipeline);
     reshade::register_event<reshade::addon_event::destroy_pipeline>(onDestroyPipeline);

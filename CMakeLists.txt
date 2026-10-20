@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.25)
-project(MGSVDLSS VERSION 1.0.0 LANGUAGES C CXX)
+project(PhantomFX VERSION 1.1.0 LANGUAGES C CXX)
 
 if(NOT WIN32 OR NOT MSVC)
-    message(FATAL_ERROR "MGSV DLSS requires Windows and MSVC.")
+    message(FATAL_ERROR "Phantom FX requires Windows and MSVC.")
 endif()
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "MGSV DLSS must be built for 64-bit Windows.")
+    message(FATAL_ERROR "Phantom FX must be built for 64-bit Windows.")
 endif()
 
 include(FetchContent)
@@ -79,6 +79,49 @@ download_pinned("${RESHADE_DIR}"
     "${imgui}/LICENSE.txt|imgui/LICENSE.txt|c80c5789748d955c4a650562baa0d750494e2c7128c2ca66aaebe2e3c4e198bf"
 )
 
+# NVIDIA Streamline SDK 2.14.1 for DLSS Frame Generation. Only its release archive carries the
+# frame generation plugin, so the archive is downloaded once and the headers, the license and the
+# x64 runtime files are extracted. The add-on loads Streamline at run time; nothing is linked.
+set(STREAMLINE_VERSION 2.14.1)
+set(STREAMLINE_DIR "${CMAKE_BINARY_DIR}/_deps/streamline-sdk-${STREAMLINE_VERSION}")
+set(STREAMLINE_RUNTIME sl.interposer.dll sl.common.dll sl.dlss_g.dll sl.reflex.dll sl.pcl.dll nvngx_dlssg.dll)
+if(NOT EXISTS "${STREAMLINE_DIR}/license.txt")
+    set(archive "${CMAKE_BINARY_DIR}/_deps/streamline-sdk-v${STREAMLINE_VERSION}.zip")
+    message(STATUS "Downloading the Streamline SDK ${STREAMLINE_VERSION}")
+    file(DOWNLOAD "https://github.com/NVIDIA-RTX/Streamline/releases/download/v${STREAMLINE_VERSION}/streamline-sdk-v${STREAMLINE_VERSION}.zip"
+        "${archive}" EXPECTED_HASH SHA256=92c4d954631a1710da86ca3fa8d5034f2b9503838c95fc4ae977ae149319781b TLS_VERIFY ON STATUS status)
+    list(GET status 0 code)
+    if(NOT code EQUAL 0)
+        message(FATAL_ERROR "Could not download the Streamline SDK: ${status}")
+    endif()
+    list(TRANSFORM STREAMLINE_RUNTIME PREPEND "bin/x64/" OUTPUT_VARIABLE runtime)
+    file(ARCHIVE_EXTRACT INPUT "${archive}" DESTINATION "${STREAMLINE_DIR}" PATTERNS "include/*" license.txt ${runtime})
+    file(REMOVE "${archive}")
+endif()
+list(TRANSFORM STREAMLINE_RUNTIME PREPEND "${STREAMLINE_DIR}/bin/x64/" OUTPUT_VARIABLE STREAMLINE_FILES)
+
+# AMD FSR SDK 2.3.0 for FSR upscaling and frame generation: the API headers and AMD's signed
+# Direct3D 12 runtime. The upscaler DLL holds FSR 4 and FSR 3.1 and picks by GPU. The add-on loads
+# the runtime at run time; nothing is linked.
+set(FIDELITYFX_COMMIT 60f4ea81909200d8542eca14dccb2628b763a9a3) # v2.3.0
+set(FIDELITYFX_DIR "${CMAKE_BINARY_DIR}/_deps/fidelityfx-sdk")
+set(ffx "GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/${FIDELITYFX_COMMIT}/Kits/FidelityFX")
+download_pinned("${FIDELITYFX_DIR}"
+    "${ffx}/docs/license.md|license.md|6757f2fec461238da6f84f83536ec195e8c036b1773a06f6f34301b9ed8c0963"
+    "${ffx}/api/include/ffx_api.h|api/include/ffx_api.h|e1a9d1b559eaf75f4cb401f1c43a66e2f3dc9621abfeb58b9c6fac56443177fd"
+    "${ffx}/api/include/ffx_api_types.h|api/include/ffx_api_types.h|cc0adc0ffc804dd7cd03c39c15581b575e416383177ffe95060201d52cc0fc49"
+    "${ffx}/api/include/dx12/ffx_api_dx12.h|api/include/dx12/ffx_api_dx12.h|c9afbc3c4c673723e9e5369a666f0ff54560543b5a93537f8ff453bf1c3bf530"
+    "${ffx}/upscalers/include/ffx_upscale.h|upscalers/include/ffx_upscale.h|65be36d5653eb71c10379e0204f7bb7cd6a8aeec96e6f8cffc5f59ffeb1f89bf"
+    "${ffx}/framegeneration/include/ffx_framegeneration.h|framegeneration/include/ffx_framegeneration.h|e6c42f8a38aab2c7c4fc6931545a8e5463fdf87349902ec9687d9fe4949a0566"
+    "${ffx}/framegeneration/include/ffx_framegeneration_api_types.h|framegeneration/include/ffx_framegeneration_api_types.h|396596af3df63310674e8036abd2ad0fcd061e61334e7a2c76653a2be3c686b4"
+    "${ffx}/framegeneration/include/dx12/ffx_api_framegeneration_dx12.h|framegeneration/include/dx12/ffx_api_framegeneration_dx12.h|d533810bbd6fd4f87dfa2c1657c1457c7b1597b66345827d375b081d67127f66"
+    "${ffx}/signedbin/amd_fidelityfx_loader_dx12.dll|bin/amd_fidelityfx_loader_dx12.dll|e2d85aa05a9bd9ed8b38935fdf5199372cca6f74c12015143bb6f945ee1608aa"
+    "${ffx}/signedbin/amd_fidelityfx_upscaler_dx12.dll|bin/amd_fidelityfx_upscaler_dx12.dll|d0dcccc74a43c44ba435b7a369b456e0970d8a4464e4bd683119b374f2c9fb46"
+    "${ffx}/signedbin/amd_fidelityfx_framegeneration_dx12.dll|bin/amd_fidelityfx_framegeneration_dx12.dll|02297beedd285e822d3a64f314cf00faf378dcec0edc47ff0c4dd71b3a8c2f18"
+)
+set(FIDELITYFX_FILES "${FIDELITYFX_DIR}/bin/amd_fidelityfx_loader_dx12.dll" "${FIDELITYFX_DIR}/bin/amd_fidelityfx_upscaler_dx12.dll"
+    "${FIDELITYFX_DIR}/bin/amd_fidelityfx_framegeneration_dx12.dll")
+
 add_library(ngx STATIC IMPORTED)
 set_target_properties(ngx PROPERTIES
     IMPORTED_LOCATION "${DLSS_SDK_DIR}/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib"
@@ -90,43 +133,53 @@ set_target_properties(ngx PROPERTIES
 configure_file(src/version.rc.in "${CMAKE_BINARY_DIR}/version.rc" @ONLY)
 
 # The add-on uses ReShade's ImGui through the overlay function table, so none is linked.
-add_library(mgsv_dlss SHARED src/upscaler_addon.cpp src/upscaler.cpp src/upscaler_menu.cpp src/upscaler_settings.cpp src/camera.cpp
+add_library(phantom_fx SHARED src/upscaler_addon.cpp src/upscaler.cpp src/upscaler_menu.cpp src/upscaler_settings.cpp src/camera.cpp
     src/device_check.cpp src/motion_blur.cpp src/fxaa.cpp src/frame_rate.cpp src/render_scale.cpp src/ui_redirect.cpp src/frame_log.cpp src/resource_dump.cpp
-    src/log.cpp src/shader_bytecode.cpp "${CMAKE_BINARY_DIR}/version.rc")
-target_include_directories(mgsv_dlss PRIVATE src)
-target_include_directories(mgsv_dlss SYSTEM PRIVATE "${RESHADE_DIR}/include" "${RESHADE_DIR}/imgui")
-target_link_libraries(mgsv_dlss PRIVATE minhook ngx d3d11 dxgi d3dcompiler)
-target_compile_features(mgsv_dlss PRIVATE cxx_std_20)
-target_compile_definitions(mgsv_dlss PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX ImTextureID=ImU64 MGSV_DLSS_VERSION="${PROJECT_VERSION}")
-target_compile_options(mgsv_dlss PRIVATE /W4 /WX /permissive- /utf-8)
+    src/log.cpp src/shader_bytecode.cpp src/presenter.cpp src/frame_generation.cpp src/game_loop.cpp src/shadows.cpp
+    src/indirect_light.cpp src/photo_mode.cpp src/focus.cpp src/depth_of_field.cpp src/hdr.cpp src/weather.cpp src/atmosphere.cpp
+    src/fidelityfx.cpp src/fsr_upscaler.cpp src/fsr_frame_generation.cpp
+    "${CMAKE_BINARY_DIR}/version.rc")
+target_include_directories(phantom_fx PRIVATE src)
+target_include_directories(phantom_fx SYSTEM PRIVATE "${RESHADE_DIR}/include" "${RESHADE_DIR}/imgui" "${STREAMLINE_DIR}/include" third_party
+    "${FIDELITYFX_DIR}")
+target_link_libraries(phantom_fx PRIVATE minhook ngx d3d11 d3d12 dxgi d3dcompiler)
+target_compile_features(phantom_fx PRIVATE cxx_std_20)
+target_compile_definitions(phantom_fx PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX ImTextureID=ImU64 PHANTOM_FX_VERSION="${PROJECT_VERSION}")
+target_compile_options(phantom_fx PRIVATE /W4 /WX /permissive- /utf-8)
 # Record only the PDB's file name, not the build machine's path.
-target_link_options(mgsv_dlss PRIVATE /PDBALTPATH:%_PDB%)
-set_target_properties(mgsv_dlss PROPERTIES
-    OUTPUT_NAME MGSVDLSS
+target_link_options(phantom_fx PRIVATE /PDBALTPATH:%_PDB%)
+set_target_properties(phantom_fx PROPERTIES
+    OUTPUT_NAME PhantomFX
     SUFFIX .addon64
     CXX_EXTENSIONS OFF
 )
-# NGX loads the model DLL from the add-on's directory.
-add_custom_command(TARGET mgsv_dlss POST_BUILD
+# NGX loads the model DLL, and the add-on Streamline and the FSR runtime, from the add-on's directory.
+add_custom_command(TARGET phantom_fx POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-        "${DLSS_SDK_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll" "$<TARGET_FILE_DIR:mgsv_dlss>"
+        "${DLSS_SDK_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll" ${STREAMLINE_FILES} ${FIDELITYFX_FILES} "$<TARGET_FILE_DIR:phantom_fx>"
 )
 
-# The add-on and the DLSS model DLL go beside mgsvtpp.exe; documentation and licenses into MGSVDLSS/.
-install(TARGETS mgsv_dlss RUNTIME DESTINATION . COMPONENT addon)
-install(FILES "${DLSS_SDK_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll" DESTINATION . COMPONENT addon)
-install(FILES README.md CHANGELOG.md LICENSE DESTINATION MGSVDLSS COMPONENT addon)
-install(FILES "${DLSS_SDK_DIR}/LICENSE.txt" DESTINATION MGSVDLSS RENAME NVIDIA-DLSS-LICENSE.txt COMPONENT addon)
-install(FILES "${minhook_SOURCE_DIR}/LICENSE.txt" DESTINATION MGSVDLSS RENAME MinHook-LICENSE.txt COMPONENT addon)
-install(FILES "${RESHADE_DIR}/LICENSE.md" DESTINATION MGSVDLSS RENAME ReShade-LICENSE.txt COMPONENT addon)
-install(FILES "${RESHADE_DIR}/imgui/LICENSE.txt" DESTINATION MGSVDLSS RENAME ImGui-LICENSE.txt COMPONENT addon)
-# The sharpening shader is ported from FidelityFX FSR 1 RCAS.
-install(FILES licenses/AMD-FidelityFX-LICENSE.txt DESTINATION MGSVDLSS COMPONENT addon)
+# The add-on and its DLLs go beside mgsvtpp.exe; documentation and licenses into PhantomFX/.
+install(TARGETS phantom_fx RUNTIME DESTINATION . COMPONENT addon)
+install(FILES "${DLSS_SDK_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll" ${STREAMLINE_FILES} ${FIDELITYFX_FILES} DESTINATION . COMPONENT addon)
+install(FILES README.md CHANGELOG.md LICENSE DESTINATION PhantomFX COMPONENT addon)
+install(FILES "${DLSS_SDK_DIR}/LICENSE.txt" DESTINATION PhantomFX RENAME NVIDIA-DLSS-LICENSE.txt COMPONENT addon)
+install(FILES "${STREAMLINE_DIR}/license.txt" DESTINATION PhantomFX RENAME NVIDIA-Streamline-LICENSE.txt COMPONENT addon)
+install(FILES "${FIDELITYFX_DIR}/license.md" DESTINATION PhantomFX RENAME AMD-FSR-SDK-LICENSE.txt COMPONENT addon)
+install(FILES "${minhook_SOURCE_DIR}/LICENSE.txt" DESTINATION PhantomFX RENAME MinHook-LICENSE.txt COMPONENT addon)
+install(FILES "${RESHADE_DIR}/LICENSE.md" DESTINATION PhantomFX RENAME ReShade-LICENSE.txt COMPONENT addon)
+install(FILES "${RESHADE_DIR}/imgui/LICENSE.txt" DESTINATION PhantomFX RENAME ImGui-LICENSE.txt COMPONENT addon)
+# The sharpening shader is ported from FidelityFX FSR 1 RCAS; the screen-space shadows are Bend Studio's;
+# GTVBAO is ported from three-gtvbao, with XeGTAO's noise and denoiser; SSILVB gathers light as SSRT3 does.
+install(FILES licenses/AMD-FidelityFX-LICENSE.txt licenses/Bend-Studio-SSS-LICENSE.txt licenses/three-gtvbao-LICENSE.txt
+    licenses/XeGTAO-LICENSE.txt licenses/SSRT3-LICENSE.txt licenses/RenoDX-LICENSE.txt
+    licenses/UnrealEngineSkyAtmosphere-LICENSE.txt DESTINATION PhantomFX COMPONENT addon)
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(upscaler_tests tests/upscaler_tests.cpp src/upscaler_settings.cpp src/camera.cpp)
+    add_executable(upscaler_tests tests/upscaler_tests.cpp src/upscaler_settings.cpp src/camera.cpp src/shader_bytecode.cpp)
     target_include_directories(upscaler_tests PRIVATE src)
+    target_link_libraries(upscaler_tests PRIVATE d3d11 d3dcompiler)
     target_compile_features(upscaler_tests PRIVATE cxx_std_20)
     target_compile_definitions(upscaler_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(upscaler_tests PRIVATE /W4 /WX /permissive- /utf-8)
@@ -137,7 +190,7 @@ endif()
 set(CPACK_GENERATOR ZIP)
 set(CPACK_COMPONENTS_ALL addon)
 set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
-set(CPACK_ARCHIVE_ADDON_FILE_NAME "MGSVDLSS-${PROJECT_VERSION}")
+set(CPACK_ARCHIVE_ADDON_FILE_NAME "PhantomFX-${PROJECT_VERSION}")
 set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY OFF)
 set(CPACK_PACKAGE_CHECKSUM SHA256)
 include(CPack)

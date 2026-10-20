@@ -7,7 +7,7 @@
 #include <cstdio>
 #include <fstream>
 
-namespace mgsv_dlss
+namespace phantom_fx
 {
 namespace
 {

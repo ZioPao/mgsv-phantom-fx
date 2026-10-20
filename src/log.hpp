@@ -5,7 +5,7 @@
 #include <string>
 #include <string_view>
 
-namespace mgsv_dlss
+namespace phantom_fx
 {
 // Opens the log at `file`, replacing a previous game session's.
 void openLog(const std::filesystem::path& file);

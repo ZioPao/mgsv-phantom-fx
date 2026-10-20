@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace mgsv_dlss::motion_blur
+namespace phantom_fx::motion_blur
 {
 namespace
 {

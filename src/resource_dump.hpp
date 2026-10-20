@@ -9,7 +9,7 @@ struct ID3D11DeviceContext;
 struct ID3D11Resource;
 
 // Text and file forms of Direct3D 11 resources for frame_log's diagnostics.
-namespace mgsv_dlss
+namespace phantom_fx
 {
 std::string formatName(DXGI_FORMAT format);
 // Constant buffer contents as "c<n>: x y z w" lines, one float4 register per line.

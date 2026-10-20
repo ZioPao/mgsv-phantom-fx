@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace mgsv_dlss
+namespace phantom_fx
 {
 // During start-up the game quits when the methods of its Direct3D 11 device context do not all
 // point into d3d11.dll, which is the case under ReShade and RenderDoc. ReShade loads the add-on

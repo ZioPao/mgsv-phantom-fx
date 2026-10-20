@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace mgsv_dlss::fxaa
+namespace phantom_fx::fxaa
 {
 namespace
 {

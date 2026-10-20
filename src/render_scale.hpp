@@ -7,7 +7,7 @@
 // The renderer keeps the size it renders at apart from the display's and rebuilds its targets when
 // a wanted size differs from the current one. The add-on sets the wanted size; the swap chain, the
 // window and the mouse stay at the display size.
-namespace mgsv_dlss::render_scale
+namespace phantom_fx::render_scale
 {
 struct Size
 {

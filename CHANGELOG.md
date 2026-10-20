@@ -1,4 +1,58 @@
-# MGSV DLSS changelog
+# Phantom FX changelog
+
+## 1.1.0
+
+- Rename the mod from MGSV DLSS to Phantom FX. Its files are now `PhantomFX.*`: delete
+  `MGSVDLSS.addon64`, and rename `MGSVDLSS.ini` to `PhantomFX.ini` to keep your settings.
+- Add NVIDIA DLSS Frame Generation: 2x to 6x, or Dynamic to reach the display's refresh rate. It
+  runs with any DLSS mode, DLAA included, and turns on NVIDIA Reflex; the overlay shows the
+  latency. The game then presents through Direct3D 12 by way of NVIDIA Streamline, so turning it
+  on takes a restart. Needs an RTX 40 (2x) or RTX 50 GPU and Windows' hardware-accelerated GPU
+  scheduling.
+- With frame generation on, ReShade and its add-ons still see the game as Direct3D 11, so add-ons
+  that follow the game's DLSS keep working.
+- Add **AMD FSR** upscaling, chosen with the new **Upscaler** setting: FSR 4 on Radeon RX 7000 and
+  9000, FSR 3.1 on other GPUs. It takes DLSS's place with the same modes at AMD's ratios, Native AA
+  in place of DLAA, and the same sharpening.
+- Add **FSR frame generation** (2x) on any GPU, with either upscaler. Like DLSS Frame Generation it
+  takes a restart; it has no Reflex.
+- Add **HDR10 output**: the sun, sky, lamps, fire and reflections keep their light beyond the game's
+  white, up to the display's peak, while the rest looks as the game graded it. **Peak brightness**
+  (the display's own by default) and **Paper white** in the overlay. Needs HDR on for the display in
+  Windows; turning it on takes a restart. Off by default.
+- Add **Soft shadows (PCSS)**: contact-hardening soft shadows from the sun's shadow map, sharp
+  where an object meets the ground and softer further from it. **Sun size** in the overlay. Off by
+  default; works in any mode and applies at once.
+- Add **Sun contact shadows** and **Lamp contact shadows**: Bend Studio's screen-space shadows add
+  contact shadows to the sun's shadow map (feet, rocks, grass) and give lamps, spot lights and
+  flashlights short shadows of their own. The sun's are cheap; the lamps' cost one trace per light,
+  so they are a separate toggle. Grass, bushes and leaves receive them but cast none, so clumps
+  don't darken themselves; the shadow map still shadows them. Off by default; works in any mode and
+  applies at once.
+- Add **Ambient occlusion (GTVBAO)**: ground-truth visibility bitmask ambient occlusion in place of
+  the game's SSAO, on the indirect light only, so it no longer darkens sunlight. Radius and strength
+  in the overlay. Off (the game's own SSAO) by default; works in any mode and applies at once.
+- Add **Indirect lighting (SSILVB)**: screen-space indirect lighting with visibility bitmask, one
+  bounce of sunlight and lamplight between nearby surfaces, tinted by their colour. Radius and
+  strength in the overlay. Off by default; works in any mode and applies at once.
+- Add **Volumetric fog**: the game's own haze and fog with the sun shadowed in it, for light shafts
+  through trees, buildings and dust. **Look** Physical draws the sky and the air as in nature
+  (Hillaire's atmosphere, as in Unreal Engine) with height fog that follows the game's weather.
+  Off by default; works in any mode and applies at once.
+- Add **Depth of field**: a gather in place of the game's sprite-based depth of field, smooth at
+  full resolution where the blur is slight, with blurred foreground spreading over what lies
+  behind it and lights blurred before the tonemap. **Aperture** shapes out-of-focus lights with 5
+  to 9 blades. Off (the game's own) by default; works in any mode and applies at once.
+- The overlay is grouped into **Upscaling**, **Visuals**, **Utility** and **Diagnostics**, with
+  each feature's settings indented under it.
+- Sliders set away from their default get a **Reset** button.
+- Add a photo mode on **F2**: the game freezes, the HUD hides, and a free camera flies with WASD,
+  the mouse, Space and Ctrl (Shift for faster).
+- **F3** hides the HUD, menus and subtitles at any time.
+- Photo mode focuses on the centre of the screen. **f-stop** in the overlay's Utility section sets the
+  blur, and **F4** turns it off and on.
+- **F5** in photo mode takes a lens shot: the frozen scene rendered from points across the lens's
+  opening and averaged, as a real lens forms its image. **Lens shot frames** sets how many.
 
 ## 1.0.0
 

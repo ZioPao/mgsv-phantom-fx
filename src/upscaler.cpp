@@ -1,12 +1,21 @@
 #include "upscaler.hpp"
 
 #include "camera.hpp"
+#include "atmosphere.hpp"
+#include "depth_of_field.hpp"
+#include "focus.hpp"
 #include "frame_rate.hpp"
+#include "fsr_upscaler.hpp"
 #include "fxaa.hpp"
+#include "game_loop.hpp"
+#include "hdr.hpp"
+#include "indirect_light.hpp"
 #include "log.hpp"
 #include "motion_blur.hpp"
+#include "photo_mode.hpp"
 #include "render_scale.hpp"
 #include "shader_bytecode.hpp"
+#include "shadows.hpp"
 #include "upscaler_shaders.hpp"
 
 #include <Windows.h>
@@ -21,6 +30,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -29,7 +39,7 @@
 #include <unordered_map>
 #include <utility>
 
-namespace mgsv_dlss::upscaler
+namespace phantom_fx::upscaler
 {
 namespace
 {
@@ -38,6 +48,8 @@ using Microsoft::WRL::ComPtr;
 // Any GUID identifies a custom-engine NGX project.
 constexpr char NgxProjectId[] = "3f6c2a91-7d4e-4b8a-a1c5-9e0d2b7f4c68";
 constexpr UINT SceneConstantsSize = sizeof(camera::SceneConstants);
+// Sub-pixel positions a lens shot's frames take turns at.
+constexpr int LensShotJitterPhases = 64;
 
 // The game's pixel shaders the add-on looks for, each drawn as one full-screen triangle.
 enum class Pass : std::uint8_t { Fxaa, CameraVelocity, GammaControl, Count, None = Count };
@@ -71,6 +83,18 @@ struct ObjectVelocity
     std::uint64_t frame{};
 };
 
+// Frame generation's frame before the HUD, at the output size, as the back buffer would hold it:
+// DLSS's image is copied into `source` before the UI draws over it, and GammaControl draws a second
+// time from it into `target`, which Direct3D 12 shares. Its colour then matches the back buffer's
+// wherever there is no HUD, which is how frame generation tells the HUD apart.
+struct Hudless
+{
+    unsigned width{}, height{};
+    ComPtr<ID3D11Texture2D> source, target;
+    ComPtr<ID3D11ShaderResourceView> sourceView; // As GammaControl reads the scene target: sRGB, or float with HDR
+    ComPtr<ID3D11RenderTargetView> targetView;   // As GammaControl writes the back buffer: sRGB, or R10G10B10A2 with HDR
+};
+
 // What a deferred context or command list recorded that the replacement needs.
 struct Recorded
 {
@@ -78,6 +102,8 @@ struct Recorded
     std::optional<ObjectVelocity> velocity;
     // Draws on the UI target, which must be filled before the list runs.
     bool drawsOnUiTarget{};
+    // Draws GammaControl into this hudless texture.
+    std::shared_ptr<const Hudless> hudless;
 };
 
 // The game records a whole frame, then executes it (docs/DEVELOPMENT.md, "Command lists"). A frame
@@ -86,9 +112,17 @@ struct Recorded
 struct Frame
 {
     std::uint64_t index{};
+    // The game loop's frame (game_loop.hpp) as the frame's recording started, for Reflex.
+    std::uint32_t gameFrame{};
     bool jittered{};
     std::array<float, 2> jitter{}; // Render pixels
     std::optional<camera::View> view;
+    // A lens shot (photo_mode.hpp): the camera's centre and focus, and the NDC shift every main-view
+    // upload gets, from the first that carries the camera.
+    bool lensShot{};
+    std::array<float, 3> lensCentre{};
+    float lensFocus{};
+    std::optional<std::array<float, 2>> lensShift;
 };
 
 struct Target
@@ -97,6 +131,7 @@ struct Target
     ComPtr<ID3D11ShaderResourceView> view;
     ComPtr<ID3D11UnorderedAccessView> access;
     UINT width{}, height{};
+    bool shared{}; // Direct3D 12 opens it: FSR or frame generation reads it
 };
 
 struct InputConstants
@@ -104,17 +139,17 @@ struct InputConstants
     float previousFromCurrent[4][4];
     float jitterNdc[2];
     std::uint32_t renderSize[2];
-    std::uint32_t objectMotion, padding[3];
+    std::uint32_t objectMotion, linear, padding[2];
 };
 
 struct CompositeConstants
 {
     std::uint32_t debugView;
     float sharpness;
-    std::uint32_t objectMotion, padding;
+    std::uint32_t objectMotion, linear;
 };
 
-// The render size DLSS reads and the engine is asked for, and the output size it writes.
+// The render size the upscaler reads and the engine is asked for, and the output size it writes.
 struct Plan
 {
     UINT renderWidth{}, renderHeight{}, outputWidth{}, outputHeight{};
@@ -145,13 +180,22 @@ bool supported{};
 std::mutex settingsMutex;
 Settings settings;
 Diagnostics diagnostics;
-std::optional<std::uint64_t> unsavedChange; // GetTickCount64 of the latest change MGSVDLSS.ini does not have yet
+bool enhancements{true}; // Off turns the lighting enhancements off whatever their settings say
+std::optional<std::uint64_t> unsavedChange; // GetTickCount64 of the latest change PhantomFX.ini does not have yet
 
 // Read on every recording thread: DLSS replaces FXAA this frame, and the next frame is jittered.
 std::atomic<bool> replacing{}, jitterNext{};
+// The game presents through Direct3D 12 for frame generation.
+std::atomic<bool> frameGeneration{};
 // The current plan's jitter phases and texture LOD bias.
 std::atomic<int> jitterPhases{8};
 std::atomic<float> targetMipBias{};
+
+// Frame generation's hudless texture, made at a present for the output size; GammaControl's
+// recording threads read it.
+std::mutex hudlessMutex;
+std::shared_ptr<const Hudless> hudless;
+bool hudlessFailed{};
 
 // Biased copies of the game's material samplers, by the game's sampler and the bias; read on every
 // recording thread.
@@ -215,6 +259,15 @@ std::optional<FxaaPass> pending;
 std::optional<ObjectVelocity> velocity;
 std::optional<Frame> lastEvaluated;
 LARGE_INTEGER lastEvaluation{};
+
+// What frame generation gets from the frame being presented, filled as it executes.
+struct Presented
+{
+    frame_generation::Inputs inputs;        // From DLSS's evaluation; not yet valid
+    std::shared_ptr<const Hudless> hudless; // DLSS's image went into its source
+    bool hudlessDrawn{};                    // A list drew GammaControl from it after that
+} presented;
+
 std::atomic<bool> failed{};
 std::string failure, lastFallback;
 std::uint64_t presents{}, lastEvaluatedPresent{}, evaluations{}, fallbacks{}, resets{}, cameraCuts{};
@@ -237,6 +290,57 @@ void updateReplacing()
     fxaa::setForced(replacing);
 }
 
+// Call with settingsMutex held, after updateReplacing.
+void configureShadows()
+{
+    shadows::configure({
+        .soft = enhancements && settings.softShadows,
+        .sunSize = settings.sunSize,
+        .turnPattern = replacing,
+        .screenSpaceSun = enhancements && settings.sunScreenSpaceShadows,
+        .screenSpaceLights = enhancements && settings.lightScreenSpaceShadows,
+        .onlyScreenSpace = diagnostics.onlyScreenSpaceShadows,
+    });
+}
+
+// Call with settingsMutex held.
+void configureIndirectLight()
+{
+    indirect_light::configure({
+        .occlusion = supported && enhancements && settings.ambientOcclusion,
+        .occlusionRadius = settings.occlusionRadius,
+        .occlusionStrength = settings.occlusionStrength,
+        .light = supported && enhancements && settings.indirectLight,
+        .lightRadius = settings.indirectLightRadius,
+        .lightStrength = settings.indirectLightStrength,
+        .showOcclusion = diagnostics.showAmbientOcclusion,
+        .showLight = diagnostics.showIndirectLight,
+    });
+}
+
+// Call with settingsMutex held.
+void configureAtmosphere()
+{
+    atmosphere::configure({
+        .volumetricFog = supported && enhancements && settings.volumetricFog,
+        .physical = settings.atmosphereLook == AtmosphereLook::Physical,
+    });
+}
+
+// Call with settingsMutex held.
+void configureDepthOfField()
+{
+    depth_of_field::configure({.gather = supported && settings.depthOfField, .blades = settings.apertureBlades});
+    photo_mode::configure({.fNumber = settings.fNumber, .blades = settings.apertureBlades,
+        .shotFrames = static_cast<std::uint32_t>(settings.lensShotFrames)});
+}
+
+// Call with settingsMutex held. Whether HDR runs is decided at start.
+void configureHdr()
+{
+    hdr::configure({.peakNits = settings.peakNits, .paperWhiteNits = settings.paperWhiteNits});
+}
+
 // The game keeps FXAA's output where DLSS cannot run.
 bool fallback(std::string reason)
 {
@@ -253,9 +357,10 @@ void fail(std::string_view reason)
     {
         std::lock_guard lock(settingsMutex);
         updateReplacing();
+        configureShadows();
     }
 
-    log("DLSS stopped: " + failure);
+    log("Upscaling stopped: " + failure);
 }
 
 // ---- Shader identity ----
@@ -346,7 +451,14 @@ void recordUiTargetUse(ID3D11DeviceContext* context)
 void startFrame()
 {
     frame.index++;
-    frame.jittered = jitterNext.load() && replacing.load();
+    frame.gameFrame = game_loop::currentFrame();
+    // A lens shot jitters on its own, and DLSS starts afresh on each of its frames.
+    const auto lens = photo_mode::lens();
+    frame.lensShot = lens.shooting;
+    frame.lensCentre = lens.centre;
+    frame.lensFocus = lens.focusDistance;
+    frame.lensShift.reset();
+    frame.jittered = jitterNext.load() && replacing.load() && !frame.lensShot;
     frame.jitter = frame.jittered ? camera::jitterPixels(frame.index, jitterPhases.load()) : std::array<float, 2>{};
     frame.view.reset();
 }
@@ -364,7 +476,50 @@ void sceneWritten(camera::SceneConstants& scene)
     }
 
     if (kind == camera::SceneView::MainCamera && !frame.view) frame.view = camera::viewOf(scene);
-    if (frame.jittered) camera::applyJitter(scene, camera::jitterNdc(frame.jitter, scene.c[22][0], scene.c[22][1]));
+    // The shift holds the focus plane still as the camera moves across the aperture; the jitter
+    // under it antialiases the shot's average.
+    if (frame.lensShot && kind == camera::SceneView::MainCamera && !frame.lensShift)
+    {
+        const auto shift = camera::lensShift(scene, frame.lensCentre, frame.lensFocus);
+        const auto jitter = camera::jitterNdc(camera::jitterPixels(frame.index, LensShotJitterPhases), scene.c[22][0], scene.c[22][1]);
+        frame.lensShift = std::array{shift[0] + jitter[0], shift[1] + jitter[1]};
+    }
+
+    if (frame.lensShift) camera::applyJitter(scene, *frame.lensShift);
+    else if (frame.jittered) camera::applyJitter(scene, camera::jitterNdc(frame.jitter, scene.c[22][0], scene.c[22][1]));
+}
+
+// GammaControl draws once more, from DLSS's image before the HUD into frame generation's hudless
+// texture, with the game's own constants and sampler.
+void drawHudless(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call)
+{
+    if (!frameGeneration.load(std::memory_order_relaxed)) return;
+
+    std::shared_ptr<const Hudless> target;
+    {
+        std::lock_guard lock(hudlessMutex);
+        target = hudless;
+    }
+
+    if (!target) return;
+
+    ComPtr<ID3D11RenderTargetView> backBuffer;
+    ComPtr<ID3D11DepthStencilView> depth;
+    context->OMGetRenderTargets(1, backBuffer.GetAddressOf(), depth.GetAddressOf());
+    const auto output = textureDesc(backBuffer.Get());
+    const auto format = hdr::active() ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    if (output.Width != target->width || output.Height != target->height || output.Format != format) return;
+
+    ComPtr<ID3D11ShaderResourceView> scene;
+    context->PSGetShaderResources(0, 1, scene.GetAddressOf());
+    context->PSSetShaderResources(0, 1, target->sourceView.GetAddressOf());
+    context->OMSetRenderTargets(1, target->targetView.GetAddressOf(), nullptr);
+    context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
+    context->OMSetRenderTargets(1, backBuffer.GetAddressOf(), depth.Get());
+    context->PSSetShaderResources(0, 1, scene.GetAddressOf());
+
+    std::lock_guard lock(recordMutex);
+    recordedLists[keyOf(context)].hudless = std::move(target);
 }
 
 // ---- Resources ----
@@ -431,9 +586,9 @@ void ensurePipeline()
         "Creating the DLSS device context state");
 }
 
-void ensureTarget(Target& target, UINT width, UINT height, DXGI_FORMAT format, const char* name)
+void ensureTarget(Target& target, UINT width, UINT height, DXGI_FORMAT format, const char* name, bool shared = false)
 {
-    if (target.texture && target.width == width && target.height == height) return;
+    if (target.texture && target.width == width && target.height == height && target.shared == shared) return;
 
     target = {};
     D3D11_TEXTURE2D_DESC desc{};
@@ -445,15 +600,65 @@ void ensureTarget(Target& target, UINT width, UINT height, DXGI_FORMAT format, c
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    if (shared) desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
     check(device->CreateTexture2D(&desc, nullptr, target.texture.GetAddressOf()), name);
     check(device->CreateShaderResourceView(target.texture.Get(), nullptr, target.view.GetAddressOf()), name);
     check(device->CreateUnorderedAccessView(target.texture.Get(), nullptr, target.access.GetAddressOf()), name);
     target.width = width;
     target.height = height;
+    target.shared = shared;
 }
 
-// The colour DLSS receives is already tone-mapped, with white at 1, so the exposure it is told is a
-// constant 1. Handing that over as a texture, rather than leaving it out, keeps add-ons that read the
+// Frame generation's hudless texture for the output size, made at a present before the frames that
+// draw it. Holders of the previous one keep it until they are done.
+void ensureHudless()
+{
+    if (!frameGeneration || !device || !outputSize[0] || !outputSize[1]) return;
+
+    std::lock_guard lock(hudlessMutex);
+    if (hudlessFailed || (hudless && hudless->width == outputSize[0] && hudless->height == outputSize[1])) return;
+
+    auto created = std::make_shared<Hudless>();
+    created->width = outputSize[0];
+    created->height = outputSize[1];
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = created->width;
+    desc.Height = created->height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    // The source takes the scene target's format, so DLSS's image copies into it.
+    const bool hdrOn = hdr::active();
+    desc.Format = hdr::sceneFormat();
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sourceView{hdrOn ? desc.Format : DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, D3D11_SRV_DIMENSION_TEXTURE2D};
+    sourceView.Texture2D.MipLevels = 1;
+    // The target holds the back buffer's bits; Streamline reads it as R8G8B8A8_UNORM, as the real swap
+    // chain holds them, or R10G10B10A2_UNORM with HDR (frame_generation.cpp).
+    D3D11_TEXTURE2D_DESC target = desc;
+    target.Format = hdrOn ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    target.BindFlags = D3D11_BIND_RENDER_TARGET;
+    target.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+    const D3D11_RENDER_TARGET_VIEW_DESC targetView{hdrOn ? target.Format : DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, D3D11_RTV_DIMENSION_TEXTURE2D};
+    if (FAILED(device->CreateTexture2D(&desc, nullptr, created->source.GetAddressOf()))
+        || FAILED(device->CreateShaderResourceView(created->source.Get(), &sourceView, created->sourceView.GetAddressOf()))
+        || FAILED(device->CreateTexture2D(&target, nullptr, created->target.GetAddressOf()))
+        || FAILED(device->CreateRenderTargetView(created->target.Get(), &targetView, created->targetView.GetAddressOf())))
+    {
+        hudless.reset();
+        hudlessFailed = true;
+        log("Could not create the hudless texture; frame generation stays paused.");
+
+        return;
+    }
+
+    hudless = std::move(created);
+    log("Created the hudless texture at " + std::to_string(outputSize[0]) + "x" + std::to_string(outputSize[1]) + " for frame generation.");
+}
+
+// The colour DLSS receives has the game's white at 1, tone-mapped or, with HDR, linear light, so the
+// exposure it is told is a constant 1. Handing that over as a texture, rather than leaving it out, keeps add-ons that read the
 // evaluation (OptiScaler) from turning on DLSS's auto-exposure.
 void ensureExposure()
 {
@@ -565,6 +770,21 @@ void initializeNgx()
     log("NGX initialized; DLSS is available. Model directory: " + dataDirectory.string());
 }
 
+// Throws with a message for the player when the chosen upscaler cannot run on this PC.
+void initializeUpscaler(Upscaler upscaler)
+{
+    if (upscaler == Upscaler::Fsr) fsr_upscaler::start(device.Get(), dataDirectory);
+    else initializeNgx();
+}
+
+// The upscaler not chosen gives back its memory, and both do while upscaling is off. The comparison
+// with FXAA keeps the chosen one for a quick switch.
+void releaseUnused(const Settings& wanted)
+{
+    if (wanted.mode == Mode::Off || wanted.upscaler != Upscaler::Dlss) releaseFeature();
+    if (wanted.mode == Mode::Off || wanted.upscaler != Upscaler::Fsr) fsr_upscaler::stop();
+}
+
 NVSDK_NGX_PerfQuality_Value perfQuality(Mode mode, float scale)
 {
     switch (mode)
@@ -581,15 +801,15 @@ NVSDK_NGX_PerfQuality_Value perfQuality(Mode mode, float scale)
     }
 }
 
-// DLSS's own optimal render size for the preset modes, the nominal scale for Custom. Odd sizes are
-// rounded up to even, as the engine rounds its own (0x2496A0).
+// DLSS's own optimal render size for the preset modes, the nominal scale for Custom and FSR. Odd
+// sizes are rounded up to even, as the engine rounds its own (0x2496A0).
 Plan makePlan(const Settings& wanted, UINT outputWidth, UINT outputHeight)
 {
-    const auto scale = nominalScale(wanted.mode, wanted.customScale);
+    const auto scale = nominalScale(wanted.upscaler, wanted.mode, wanted.customScale);
     Plan result{0, 0, outputWidth, outputHeight, perfQuality(wanted.mode, scale)};
     UINT maxWidth{}, maxHeight{}, minWidth{}, minHeight{};
     float sharpness{};
-    if (wanted.mode == Mode::Custom
+    if (wanted.mode == Mode::Custom || wanted.upscaler == Upscaler::Fsr
         || NVSDK_NGX_FAILED(NGX_DLSS_GET_OPTIMAL_SETTINGS(ngx.parameters, outputWidth, outputHeight, result.quality, &result.renderWidth,
             &result.renderHeight, &maxWidth, &maxHeight, &minWidth, &minHeight, &sharpness))
         || !result.renderWidth || !result.renderHeight)
@@ -622,8 +842,10 @@ bool ensureFeature(const Plan& target, const Settings& wanted)
     create.Feature.InTargetWidth = target.outputWidth;
     create.Feature.InTargetHeight = target.outputHeight;
     create.Feature.InPerfQualityValue = target.quality;
-    // The motion vectors are per render pixel; reversed-Z depth; the colour is LDR.
+    // The motion vectors are per render pixel; reversed-Z depth; the colour is LDR, or with HDR linear
+    // light, the game's white at 1.
     create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_DepthInverted | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
+    if (hdr::active()) create.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
     const auto result = NGX_D3D11_CREATE_DLSS_EXT(ngxContext.Get(), &ngx.feature, ngx.parameters, &create);
     if (NVSDK_NGX_FAILED(result))
     {
@@ -632,7 +854,7 @@ bool ensureFeature(const Plan& target, const Settings& wanted)
     }
 
     ngx.key = key;
-    log("Created DLSS " + std::string(label(wanted.mode)) + ": " + std::to_string(target.renderWidth) + "x" + std::to_string(target.renderHeight)
+    log("Created DLSS " + std::string(label(wanted.mode, Upscaler::Dlss)) + ": " + std::to_string(target.renderWidth) + "x" + std::to_string(target.renderHeight)
         + " -> " + std::to_string(target.outputWidth) + "x" + std::to_string(target.outputHeight) + ", preset "
         + std::string(label(wanted.preset)) + ".");
 
@@ -700,7 +922,8 @@ template<class Work> void inOwnState(Work&& work)
     restore();
 }
 
-void runInputs(const FxaaPass& pass, const Frame& current, const camera::Matrix& previousFromCurrent, ID3D11ShaderResourceView* objectVelocity)
+void runInputs(const FxaaPass& pass, const Frame& current, const camera::Matrix& previousFromCurrent, ID3D11ShaderResourceView* objectVelocity,
+    bool linear)
 {
     InputConstants constants{};
     for (int i = 0; i < 16; ++i) constants.previousFromCurrent[i / 4][i % 4] = static_cast<float>(previousFromCurrent[i]);
@@ -710,6 +933,7 @@ void runInputs(const FxaaPass& pass, const Frame& current, const camera::Matrix&
     constants.renderSize[0] = colorTarget.width;
     constants.renderSize[1] = colorTarget.height;
     constants.objectMotion = objectVelocity != nullptr;
+    constants.linear = linear;
     immediate->UpdateSubresource(inputConstants.Get(), 0, nullptr, &constants, 0, 0);
 
     ID3D11ShaderResourceView* inputs[]{pass.sceneCopy.Get(), depthView.Get(), objectVelocity};
@@ -722,9 +946,10 @@ void runInputs(const FxaaPass& pass, const Frame& current, const camera::Matrix&
     immediate->ClearState();
 }
 
-void runComposite(ID3D11RenderTargetView* destination, ID3D11ShaderResourceView* objectVelocity, const Diagnostics& options, float sharpness)
+void runComposite(ID3D11RenderTargetView* destination, ID3D11ShaderResourceView* objectVelocity, const Diagnostics& options, float sharpness,
+    bool linear)
 {
-    const CompositeConstants constants{static_cast<std::uint32_t>(options.debugView), sharpness, objectVelocity != nullptr, 0};
+    const CompositeConstants constants{static_cast<std::uint32_t>(options.debugView), sharpness, objectVelocity != nullptr, linear};
     immediate->UpdateSubresource(compositeConstants.Get(), 0, nullptr, &constants, 0, 0);
 
     const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(outputTarget.width), static_cast<float>(outputTarget.height), 0, 1};
@@ -792,7 +1017,7 @@ bool replaceFxaa(const FxaaPass& pass)
     Plan planned{width, height, width, height, NVSDK_NGX_PerfQuality_Value_DLAA};
     if (upscales(wanted.mode))
     {
-        if (!plan) return fallback("no DLSS plan yet");
+        if (!plan) return fallback("no upscaling plan yet");
         if (width != plan->renderWidth || height != plan->renderHeight) return fallback("waiting for the requested render size");
 
         planned = *plan;
@@ -806,15 +1031,21 @@ bool replaceFxaa(const FxaaPass& pass)
     if (upscaled && (uiTarget.width != planned.outputWidth || uiTarget.height != planned.outputHeight)) return fallback("the UI target is not ready");
 
     ensurePipeline();
-    initializeNgx();
-    ensureExposure();
-    ensureTarget(colorTarget, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the DLSS colour texture");
-    ensureTarget(depthTarget, width, height, DXGI_FORMAT_R32_FLOAT, "Creating the DLSS depth texture");
-    ensureTarget(motionTarget, width, height, DXGI_FORMAT_R16G16_FLOAT, "Creating the DLSS motion texture");
-    ensureTarget(outputTarget, planned.outputWidth, planned.outputHeight, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the DLSS output texture");
+    initializeUpscaler(wanted.upscaler);
+    // FSR reads its inputs and writes its output through Direct3D 12, and takes linear colour, as DLSS
+    // does in its HDR mode. Linear colour needs more than 8 bits.
+    const bool fsr = wanted.upscaler == Upscaler::Fsr;
+    const bool linear = fsr || hdr::active();
+    ensureTarget(colorTarget, width, height, linear ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM,
+        "Creating the upscaler's colour texture", fsr);
+    ensureTarget(depthTarget, width, height, DXGI_FORMAT_R32_FLOAT, "Creating the upscaler's depth texture", fsr || frameGeneration);
+    ensureTarget(motionTarget, width, height, DXGI_FORMAT_R16G16_FLOAT, "Creating the upscaler's motion texture", fsr || frameGeneration);
+    ensureTarget(outputTarget, planned.outputWidth, planned.outputHeight, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        "Creating the upscaler's output texture", fsr);
 
-    // A gap means DLSS missed frames; its history and the previous camera are stale.
-    bool reset = !lastEvaluated || lastEvaluated->index + 1 != current.index;
+    // A gap means the upscaler missed frames; its history and the previous camera are stale.
+    // A lens shot moves the camera every frame and shows the average of its frames.
+    bool reset = current.lensShot || !lastEvaluated || lastEvaluated->index + 1 != current.index;
     if (!reset && camera::cameraCut(*lastEvaluated->view, *current.view))
     {
         reset = true;
@@ -833,35 +1064,90 @@ bool replaceFxaa(const FxaaPass& pass)
         ? static_cast<float>(static_cast<double>(now.QuadPart - lastEvaluation.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart))
         : 16.7f;
 
+    // Frame generation's hudless colour starts as the upscaled image, before the UI draws over it.
+    const auto destination = upscaled ? uiTarget.target : pass.sceneTarget;
+    const auto destinationDesc = textureDesc(destination.Get());
+    std::shared_ptr<const Hudless> hudlessSource;
+    if (frameGeneration)
+    {
+        std::lock_guard lock(hudlessMutex);
+        hudlessSource = hudless;
+    }
+
+    if (hudlessSource
+        && (destinationDesc.Width != hudlessSource->width || destinationDesc.Height != hudlessSource->height
+            || destinationDesc.Format != hdr::sceneFormat()))
+        hudlessSource.reset();
+
     inOwnState([&]
     {
-        runInputs(pass, current, reprojection, objectVelocity);
-        reset = ensureFeature(planned, wanted) || reset;
+        runInputs(pass, current, reprojection, objectVelocity, linear);
+        if (fsr)
+        {
+            fsr_upscaler::Inputs inputs;
+            inputs.color = colorTarget.texture.Get();
+            inputs.depth = depthTarget.texture.Get();
+            inputs.motion = motionTarget.texture.Get();
+            inputs.output = outputTarget.texture.Get();
+            inputs.jitter[0] = current.jitter[0];
+            inputs.jitter[1] = current.jitter[1];
+            inputs.frameTime = frameTime;
+            inputs.cameraNear = current.view->nearPlane;
+            inputs.cameraFar = current.view->farPlane;
+            inputs.verticalFov = static_cast<float>(2 * std::atan(1 / current.view->projection[5]));
+            inputs.hdr = hdr::active();
+            inputs.reset = reset;
+            reset = fsr_upscaler::evaluate(inputs) || reset;
+        }
+        else
+        {
+            ensureExposure();
+            reset = ensureFeature(planned, wanted) || reset;
 
-        NVSDK_NGX_D3D11_DLSS_Eval_Params evaluation{};
-        evaluation.Feature.pInColor = colorTarget.texture.Get();
-        evaluation.Feature.pInOutput = outputTarget.texture.Get();
-        evaluation.pInDepth = depthTarget.texture.Get();
-        evaluation.pInMotionVectors = motionTarget.texture.Get();
-        evaluation.pInExposureTexture = exposureTexture.Get();
-        evaluation.InJitterOffsetX = current.jitter[0];
-        evaluation.InJitterOffsetY = current.jitter[1];
-        evaluation.InRenderSubrectDimensions = {width, height};
-        evaluation.InReset = reset ? 1 : 0;
-        evaluation.InMVScaleX = 1;
-        evaluation.InMVScaleY = 1;
-        evaluation.InFrameTimeDeltaInMsec = frameTime;
-        const auto result = evaluateDlss(evaluation);
-        immediate->ClearState();
-        if (NVSDK_NGX_FAILED(result)) throw std::runtime_error("DLSS evaluation failed (" + hex(static_cast<std::uint32_t>(result)) + ").");
+            NVSDK_NGX_D3D11_DLSS_Eval_Params evaluation{};
+            evaluation.Feature.pInColor = colorTarget.texture.Get();
+            evaluation.Feature.pInOutput = outputTarget.texture.Get();
+            evaluation.pInDepth = depthTarget.texture.Get();
+            evaluation.pInMotionVectors = motionTarget.texture.Get();
+            evaluation.pInExposureTexture = exposureTexture.Get();
+            evaluation.InJitterOffsetX = current.jitter[0];
+            evaluation.InJitterOffsetY = current.jitter[1];
+            evaluation.InRenderSubrectDimensions = {width, height};
+            evaluation.InReset = reset ? 1 : 0;
+            evaluation.InMVScaleX = 1;
+            evaluation.InMVScaleY = 1;
+            evaluation.InFrameTimeDeltaInMsec = frameTime;
+            const auto result = evaluateDlss(evaluation);
+            immediate->ClearState();
+            if (NVSDK_NGX_FAILED(result)) throw std::runtime_error("DLSS evaluation failed (" + hex(static_cast<std::uint32_t>(result)) + ").");
+        }
 
-        runComposite(upscaled ? uiTarget.target.Get() : pass.sceneTarget.Get(), objectVelocity, options, wanted.sharpness);
+        runComposite(destination.Get(), objectVelocity, options, wanted.sharpness, linear);
+        if (hudlessSource) immediate->CopyResource(hudlessSource->source.Get(), resourceOf(destination.Get()).Get());
     });
+    focus::depthReady(immediate.Get(), depthTarget.texture.Get(), *current.view);
+
+    if (frameGeneration)
+    {
+        auto& inputs = presented.inputs;
+        inputs = {};
+        inputs.frame = current.gameFrame;
+        inputs.depth = depthTarget.texture.Get();
+        inputs.motion = motionTarget.texture.Get();
+        inputs.renderWidth = width;
+        inputs.renderHeight = height;
+        inputs.jitter[0] = current.jitter[0];
+        inputs.jitter[1] = current.jitter[1];
+        inputs.reset = reset;
+        inputs.camera = camera::streamlineCamera(previous, *current.view);
+        presented.hudless = std::move(hudlessSource);
+        presented.hudlessDrawn = false;
+    }
 
     if (upscaled) uiTargetFilled = true;
     if (reset) ++resets;
     if (++evaluations == 1)
-        log("First DLSS frame: " + std::to_string(width) + "x" + std::to_string(height) + " -> " + std::to_string(planned.outputWidth) + "x"
+        log("First " + std::string(label(wanted.upscaler)) + " frame: " + std::to_string(width) + "x" + std::to_string(height) + " -> " + std::to_string(planned.outputWidth) + "x"
             + std::to_string(planned.outputHeight) + (objectVelocity ? ", with" : ", without") + " the engine's object velocity.");
 
     lastEvaluated = current;
@@ -881,8 +1167,6 @@ void runPending()
 
     if (!replacing)
     {
-        // Off gives back the feature's memory; the comparison with FXAA keeps it for a quick switch.
-        if (currentSettings().mode == Mode::Off) releaseFeature();
         jitterNext = false;
         return;
     }
@@ -932,15 +1216,16 @@ void updatePlan()
         return;
     }
 
-    // Only the mode, the custom scale and the output size decide the render size: anything else
-    // would rebuild the engine's targets for nothing.
-    if (!plan || planSettings.mode != wanted.mode || planSettings.customScale != wanted.customScale || plan->outputWidth != outputSize[0]
-        || plan->outputHeight != outputSize[1])
+    // Only the upscaler, the mode, the custom scale and the output size decide the render size:
+    // anything else would rebuild the engine's targets for nothing.
+    if (!plan || planSettings.upscaler != wanted.upscaler || planSettings.mode != wanted.mode || planSettings.customScale != wanted.customScale
+        || plan->outputWidth != outputSize[0] || plan->outputHeight != outputSize[1])
     {
-        initializeNgx();
+        // NGX knows DLSS's optimal render sizes.
+        if (wanted.upscaler == Upscaler::Dlss) initializeNgx();
         plan = makePlan(wanted, outputSize[0], outputSize[1]);
         planSettings = wanted;
-        log("DLSS " + std::string(label(wanted.mode)) + " renders at " + std::to_string(plan->renderWidth) + "x" + std::to_string(plan->renderHeight)
+        log(std::string(label(wanted.upscaler)) + " " + std::string(label(wanted.mode, wanted.upscaler)) + " renders at " + std::to_string(plan->renderWidth) + "x" + std::to_string(plan->renderHeight)
             + " for " + std::to_string(plan->outputWidth) + "x" + std::to_string(plan->outputHeight) + ".");
     }
 
@@ -1011,7 +1296,7 @@ void savePendingSettings(std::uint64_t settle)
 void initialize(const std::filesystem::path& directory, bool supportedBuild) noexcept
 {
     dataDirectory = directory;
-    settingsPath = directory / "MGSVDLSS.ini";
+    settingsPath = directory / "PhantomFX.ini";
     supported = supportedBuild;
 
     std::lock_guard lock(settingsMutex);
@@ -1026,7 +1311,13 @@ void initialize(const std::filesystem::path& directory, bool supportedBuild) noe
 
     updateReplacing();
     frame_rate::setUnlocked(settings.unlockFps);
-    log(std::string("DLSS mode ") + std::string(label(settings.mode)) + (supported ? "." : "; this game build is not supported, so it stays off."));
+    configureShadows();
+    configureIndirectLight();
+    configureAtmosphere();
+    configureDepthOfField();
+    configureHdr();
+    log(std::string(label(settings.upscaler)) + " mode " + std::string(label(settings.mode, settings.upscaler))
+        + (supported ? "." : "; this game build is not supported, so it stays off."));
 }
 
 void attach(ID3D11Device* gameDevice, ID3D11DeviceContext* context, ID3D11DeviceContext* wrapped) noexcept
@@ -1053,8 +1344,17 @@ void detach() noexcept
     pending.reset();
     velocity.reset();
     lastEvaluated.reset();
+    presented = {};
     plan.reset();
     releaseNgx();
+    fsr_upscaler::stop();
+
+    {
+        std::lock_guard hudlessLock(hudlessMutex);
+        hudless.reset();
+        hudlessFailed = false;
+    }
+
     colorTarget = depthTarget = motionTarget = outputTarget = {};
     exposureTexture.Reset();
     depthResource.Reset();
@@ -1142,11 +1442,25 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
         ComPtr<ID3D11PixelShader> shader;
         context->PSGetShader(shader.GetAddressOf(), nullptr, nullptr);
         const auto pass = passOf(shader.Get());
-        if (pass == Pass::GammaControl && ui_redirect::drawGamma(context, call))
+        if (pass == Pass::GammaControl)
         {
-            recordUiTargetUse(context);
+            // With HDR every GammaControl draw, the hudless one too, encodes for the display.
+            const hdr::OutputShader output(context);
+            drawHudless(context, call);
 
-            return true;
+            if (ui_redirect::drawGamma(context, call))
+            {
+                recordUiTargetUse(context);
+
+                return true;
+            }
+
+            if (output.bound())
+            {
+                context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
+
+                return true;
+            }
         }
 
         if (!replacing.load(std::memory_order_relaxed)) return false;
@@ -1254,6 +1568,7 @@ void recorded(std::uint64_t into, std::uint64_t from) noexcept
         auto& target = recordedLists[into];
         if (entry.fxaa) target.fxaa = std::move(entry.fxaa);
         if (entry.velocity) target.velocity = std::move(entry.velocity);
+        if (entry.hudless) target.hudless = std::move(entry.hudless);
         target.drawsOnUiTarget = target.drawsOnUiTarget || entry.drawsOnUiTarget;
     }
     catch (...)
@@ -1290,6 +1605,8 @@ void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
 
         if (entry.velocity) velocity = std::move(entry.velocity);
         if (entry.fxaa) pending = std::move(entry.fxaa);
+        // DLSS ran before this list, so the list's GammaControl draws this frame's hudless colour.
+        if (entry.hudless && entry.hudless == presented.hudless) presented.hudlessDrawn = true;
         if (!entry.drawsOnUiTarget) return;
 
         // DLSS runs after a list; within one it would cover the UI drawn after FXAA.
@@ -1323,10 +1640,13 @@ void present() noexcept
     if (lastEvaluatedPresent != presents) jitterNext = false;
     ++presents;
     uiTargetFilled = false;
+    presented = {};
 
     try
     {
+        releaseUnused(currentSettings());
         updatePlan();
+        ensureHudless();
     }
     catch (const std::exception& error)
     {
@@ -1334,9 +1654,24 @@ void present() noexcept
     }
 
     if (replacing && presents % 1800 == 0)
-        log("Status: " + std::to_string(evaluations) + " DLSS frames, " + std::to_string(fallbacks) + " without, "
+        log("Status: " + std::to_string(evaluations) + " upscaled frames, " + std::to_string(fallbacks) + " without, "
             + std::to_string(resets) + " history resets (" + std::to_string(cameraCuts) + " at camera cuts); last fallback: "
             + (lastFallback.empty() ? "none" : lastFallback) + ".");
+}
+
+void setFrameGeneration(bool on) noexcept
+{
+    frameGeneration = on;
+}
+
+frame_generation::Inputs frameGenerationInputs() noexcept
+{
+    std::lock_guard lock(executionMutex);
+    auto inputs = presented.inputs;
+    inputs.valid = frameGeneration && replacing && lastEvaluatedPresent == presents && presented.hudless && presented.hudlessDrawn;
+    if (inputs.valid) inputs.hudless = presented.hudless->target.Get();
+
+    return inputs;
 }
 
 Status status()
@@ -1349,6 +1684,7 @@ Status status()
 
     std::lock_guard lock(executionMutex);
     result.supportedBuild = supported;
+    result.upscalerName = currentSettings().upscaler == Upscaler::Fsr ? fsr_upscaler::name() : "DLSS";
     result.failed = failed;
     result.failure = failure;
     result.lastFallback = lastFallback;
@@ -1382,8 +1718,9 @@ void applySettings(const Settings& wanted)
 {
     {
         std::lock_guard lock(executionMutex);
-        // Choosing a mode again retries after a failure.
-        if (wanted.mode != currentSettings().mode) failed = false;
+        // Choosing a mode or upscaler again retries after a failure.
+        const auto current = currentSettings();
+        if (wanted.mode != current.mode || wanted.upscaler != current.upscaler) failed = false;
     }
 
     std::lock_guard lock(settingsMutex);
@@ -1391,6 +1728,11 @@ void applySettings(const Settings& wanted)
     unsavedChange = GetTickCount64();
     updateReplacing();
     frame_rate::setUnlocked(settings.unlockFps);
+    configureShadows();
+    configureIndirectLight();
+    configureAtmosphere();
+    configureDepthOfField();
+    configureHdr();
 }
 
 Diagnostics currentDiagnostics()
@@ -1404,5 +1746,29 @@ void applyDiagnostics(const Diagnostics& options)
     std::lock_guard lock(settingsMutex);
     diagnostics = options;
     updateReplacing();
+    configureShadows();
+    configureIndirectLight();
+    configureAtmosphere();
+}
+
+bool enhancementsOn()
+{
+    std::lock_guard lock(settingsMutex);
+    return enhancements;
+}
+
+void setEnhancements(bool on)
+{
+    std::lock_guard lock(settingsMutex);
+    enhancements = on;
+    configureShadows();
+    configureIndirectLight();
+    configureAtmosphere();
+    log(on ? "Visual enhancements on." : "Visual enhancements off.");
+}
+
+void toggleEnhancements()
+{
+    setEnhancements(!enhancementsOn());
 }
 }

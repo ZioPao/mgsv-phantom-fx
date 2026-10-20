@@ -5,7 +5,7 @@
 #include <fstream>
 #include <mutex>
 
-namespace mgsv_dlss
+namespace phantom_fx
 {
 namespace
 {

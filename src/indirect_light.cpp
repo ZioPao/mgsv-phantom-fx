@@ -1,0 +1,772 @@
+#include "indirect_light.hpp"
+
+#include "indirect_light_shaders.hpp"
+#include "log.hpp"
+#include "shader_bytecode.hpp"
+
+#include <Windows.h>
+#include <d3dcompiler.h>
+#include <wrl/client.h>
+#include <array>
+#include <atomic>
+#include <cstdint>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <shared_mutex>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace phantom_fx::indirect_light
+{
+namespace
+{
+using Microsoft::WRL::ComPtr;
+
+// The game's pixel shaders GTVBAO and SSILVB work with (docs/DEVELOPMENT.md, "Ambient occlusion").
+enum class Role : std::uint8_t
+{
+    SkyLight,      // Binds the G-buffer normals, right before the upscale in the same command list
+    Upscale,       // Writes the indirect light into the diffuse light buffer
+    Resolve,       // Multiplies all light by the game's occlusion
+    GameOcclusion, // The game's SSAO, whose result only the resolve reads
+    Sun,           // Binds the G-buffer's specular target, which holds the material
+};
+
+struct GameShader
+{
+    Role role;
+    const char* name;
+    const char* checksum;
+};
+
+constexpr GameShader Shaders[]{
+    {Role::SkyLight, "SSLighting2_SH_SkyLight_Encode", "ac49de83da6ebb80336de04c4ef7d022"},
+    {Role::Upscale, "BilateralUpscale2x2", "1314ac1eb31bb06b4e972fdc2c24ccbf"},
+    {Role::Resolve, "DR_VolFog_TppTonemap", "00a609370c2e8b47a645263f91f6d3e8"},
+    {Role::Resolve, "DR_VolFog_TppTonemap_MD", "79c001e295254d8a749e41d1d7e49de7"},
+    {Role::Resolve, "DR_TonemapRainFilter", "9a4abc815afc5f121572d695f07af5af"},
+    {Role::Resolve, "DR_TonemapRainFilter_NoIR", "47f52852eaccaa83c25745ce790a212c"},
+    {Role::Resolve, "DeferredRendering", "df87979884e90877ee0337c13e01664f"},
+    {Role::Resolve, "DeferredRendering_VolFog", "322890810465ee05f4895bc69e80a187"},
+    {Role::Resolve, "DeferredRenderingTone", "47256d38f45b59b6c46cf32bf29564f0"},
+    {Role::Resolve, "DeferredRenderingTone_GVFog", "86a042757928c965fff1c016647c4dfa"},
+    {Role::Resolve, "DeferredRenderingFilmic", "586e33bca62435478f23154da9e25187"},
+    {Role::Resolve, "DeferredRenderingFilmic_VolFog", "504b446c3e795d75e6adcd6753c11d12"},
+    {Role::GameOcclusion, "SSAOLineIntegrals", "1e716301e9c644c4d59c620e9b84f7de"},
+    {Role::GameOcclusion, "AmbientObscuranceSSAO", "9f963f50539aafc2ee77b888c56d3a0f"},
+    {Role::Sun, "SunLight_DL_CS_ES", "56ed4db892a7940f038146eeb0df0d30"},
+    {Role::Sun, "SunLight_DL_ES", "92726e8d231c8ed85f0db90400ef2258"},
+    {Role::Sun, "SunLight_DL_CS", "7e5c2fc99c9d84ddd32df4e789e7082a"}, // In rain
+    {Role::Sun, "SunLight_DL", "853f56a63e5bc66e6ee301c85ebfeaa8"},    // In rain
+};
+
+constexpr UINT NormalSlot = 0;     // The sky light's g_NormalTexture
+constexpr UINT SpecularSlot = 1;   // The sun's g_SpecularTexture
+constexpr UINT DepthSlot = 2;      // The upscale's inDepthBuffer
+constexpr UINT SourceSlot = 0;     // The upscale's inSourceBuffer, where shaders::Apply reads the visibility
+constexpr UINT SceneSlot = 2;      // cPSScene, in the upscale and the resolves
+// Every resolve's inAlbedo, inLightDiffuse, inDepth and inOcclusion.
+constexpr UINT AlbedoSlot = 8, DiffuseSlot = 9, ResolveDepthSlot = 11, OcclusionSlot = 13;
+constexpr UINT SceneConstantsSize = 480;
+constexpr int DenoisePasses = 2;
+// The march stops at this share of the render height, for surfaces close to the camera.
+constexpr float MaxRadiusShare = 0.15f;
+
+// The compute shaders' constant buffer (PHANTOM_FX_PARAMETERS in indirect_light_shaders.hpp).
+struct Parameters
+{
+    std::uint32_t size[2];
+    float radius, maxRadiusPixels, occlusionStrength, lightStrength, diffuseScale, padding;
+};
+
+struct Target
+{
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11ShaderResourceView> view;
+    ComPtr<ID3D11UnorderedAccessView> access;
+    UINT width{}, height{};
+};
+
+// When an effect last ran, and otherwise what it waits for, for the overlay.
+struct Progress
+{
+    const char* name;
+    std::uint64_t lastRun{}; // GetTickCount64
+    std::string waitingFor;
+};
+
+// What the overlay asked for, and what the frame being recorded uses.
+std::mutex optionsMutex;
+Options wanted, current;
+std::atomic<bool> active{}, pipelineFailed{};
+
+// Identified game shaders, by the object the game draws with. Holding them keeps their addresses
+// from being reused.
+std::shared_mutex shaderMutex;
+std::unordered_map<IUnknown*, Role> roles;
+std::vector<ComPtr<IUnknown>> shaderOwners;
+
+// The normals each context's sky light pass bound, for the upscale it records next. The resolve is
+// in another command list; it takes the G-buffer normals any sky light pass bound last. The sun pass
+// comes after the upscale, so the march takes the specular target from an earlier frame's: the
+// same texture while the render size stays.
+std::mutex gBufferMutex;
+std::unordered_map<ID3D11DeviceContext*, ComPtr<ID3D11ShaderResourceView>> normals;
+ComPtr<ID3D11ShaderResourceView> lastNormals, lastSpecular;
+
+// ---- Direct3D, guarded by resourceMutex ----
+std::mutex resourceMutex;
+ComPtr<ID3D11Device> device;
+ComPtr<ID3D11ComputeShader> occlusionShader, denoiseShader, finalDenoiseShader;
+ComPtr<ID3D11ComputeShader> lightShader, lightDenoiseShader, finalLightDenoiseShader;
+ComPtr<ID3D11PixelShader> applyShader, showOcclusionShader, showLightShader;
+ComPtr<ID3D11BlendState> multiplyBlend;
+ComPtr<ID3D11Buffer> parameterBuffer;
+ComPtr<ID3D11ShaderResourceView> whiteView; // 1x1, the resolve's occlusion while GTVBAO is on
+// The denoise passes alternate between the two; GTVBAO's last one writes visibility[Result],
+// SSILVB's diffuseWithLight.
+std::array<Target, 2> visibility, gathered;
+constexpr std::size_t Result = DenoisePasses % 2;
+Target edges;            // Depth edges for the denoiser, written by each march
+Target diffuseWithLight; // The game's diffuse light with SSILVB's added, read by the resolve in its place
+Progress occlusionProgress{"GTVBAO"}, lightProgress{"SSILVB"};
+std::map<std::string, bool, std::less<>> loggedOnce;
+
+void logOnce(const std::string& message)
+{
+    if (loggedOnce.emplace(message, true).second) log(message);
+}
+
+void check(HRESULT result, const char* what)
+{
+    if (FAILED(result)) throw std::runtime_error(std::string(what) + " failed (" + hex(static_cast<std::uint32_t>(result)) + ").");
+}
+
+ComPtr<ID3DBlob> compile(const char* source, const char* name, const char* profile, const D3D_SHADER_MACRO* defines = nullptr)
+{
+    ComPtr<ID3DBlob> code, errors;
+    const auto result = D3DCompile(source, std::strlen(source), name, defines, nullptr, "main", profile, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+        code.GetAddressOf(), errors.GetAddressOf());
+    if (FAILED(result))
+        throw std::runtime_error(std::string("Shader ") + name + " did not compile: "
+            + (errors ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize())
+                      : hex(static_cast<std::uint32_t>(result))));
+
+    return code;
+}
+
+ComPtr<ID3D11ComputeShader> computeShader(const char* source, const char* name, const D3D_SHADER_MACRO* defines)
+{
+    const auto code = compile(source, name, "cs_5_0", defines);
+    ComPtr<ID3D11ComputeShader> shader;
+    check(device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader.GetAddressOf()), name);
+
+    return shader;
+}
+
+ComPtr<ID3D11PixelShader> pixelShader(const char* source, const char* name, const D3D_SHADER_MACRO* defines = nullptr)
+{
+    const auto code = compile(source, name, "ps_5_0", defines);
+    ComPtr<ID3D11PixelShader> shader;
+    check(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader.GetAddressOf()), name);
+
+    return shader;
+}
+
+// Compiles the shaders and makes the fixed resources once; call with resourceMutex held. Returns
+// false when GTVBAO and SSILVB are unavailable.
+bool ensurePipeline()
+{
+    if (occlusionShader) return true;
+    if (!device || pipelineFailed) return false;
+
+    try
+    {
+        const D3D_SHADER_MACRO occlusionPass[]{{"LIGHT", "0"}, {"FINAL", "0"}, {}}, lastOcclusionPass[]{{"LIGHT", "0"}, {"FINAL", "1"}, {}};
+        const D3D_SHADER_MACRO lightPass[]{{"LIGHT", "1"}, {"FINAL", "0"}, {}}, lastLightPass[]{{"LIGHT", "1"}, {"FINAL", "1"}, {}};
+        denoiseShader = computeShader(shaders::Denoise, "gtvbao-denoise", occlusionPass);
+        finalDenoiseShader = computeShader(shaders::Denoise, "gtvbao-denoise-final", lastOcclusionPass);
+        lightShader = computeShader(shaders::March, "ssilvb", lightPass);
+        lightDenoiseShader = computeShader(shaders::Denoise, "ssilvb-denoise", lightPass);
+        finalLightDenoiseShader = computeShader(shaders::Denoise, "ssilvb-denoise-final", lastLightPass);
+        applyShader = pixelShader(shaders::Apply, "gtvbao-apply");
+        showOcclusionShader = pixelShader(shaders::Show, "gtvbao-show", occlusionPass);
+        showLightShader = pixelShader(shaders::Show, "ssilvb-show", lightPass);
+
+        // Multiplies the diffuse light by the visibility and leaves its alpha, and the specular light
+        // the upscale also binds, as they are.
+        D3D11_BLEND_DESC blend{};
+        blend.IndependentBlendEnable = TRUE;
+        auto& diffuse = blend.RenderTarget[0];
+        diffuse.BlendEnable = TRUE;
+        diffuse.SrcBlend = D3D11_BLEND_ZERO;
+        diffuse.DestBlend = D3D11_BLEND_SRC_COLOR;
+        diffuse.BlendOp = D3D11_BLEND_OP_ADD;
+        diffuse.SrcBlendAlpha = D3D11_BLEND_ZERO;
+        diffuse.DestBlendAlpha = D3D11_BLEND_ONE;
+        diffuse.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        diffuse.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
+        check(device->CreateBlendState(&blend, multiplyBlend.ReleaseAndGetAddressOf()), "Creating the GTVBAO blend");
+
+        D3D11_BUFFER_DESC buffer{};
+        buffer.ByteWidth = sizeof(Parameters);
+        buffer.Usage = D3D11_USAGE_DYNAMIC;
+        buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        check(device->CreateBuffer(&buffer, nullptr, parameterBuffer.ReleaseAndGetAddressOf()), "Creating the march constants");
+
+        D3D11_TEXTURE2D_DESC white{};
+        white.Width = white.Height = white.MipLevels = white.ArraySize = 1;
+        white.Format = DXGI_FORMAT_R8_UNORM;
+        white.SampleDesc.Count = 1;
+        white.Usage = D3D11_USAGE_IMMUTABLE;
+        white.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        constexpr std::uint8_t unoccluded = 255;
+        const D3D11_SUBRESOURCE_DATA data{&unoccluded, 1, 1};
+        ComPtr<ID3D11Texture2D> whiteTexture;
+        check(device->CreateTexture2D(&white, &data, whiteTexture.GetAddressOf()), "Creating the white occlusion");
+        check(device->CreateShaderResourceView(whiteTexture.Get(), nullptr, whiteView.ReleaseAndGetAddressOf()), "Creating the white occlusion");
+
+        // Last, so it marks a complete pipeline.
+        occlusionShader = computeShader(shaders::March, "gtvbao", occlusionPass);
+        log("GTVBAO and SSILVB ready.");
+
+        return true;
+    }
+    catch (const std::exception& error)
+    {
+        pipelineFailed = true;
+        log(std::string("GTVBAO and SSILVB unavailable: ") + error.what());
+
+        return false;
+    }
+}
+
+// Makes `target` at the size, unless it has it; call with resourceMutex held. Command lists that
+// still use the previous texture hold their own references. Returns true when it made one.
+bool ensureTarget(Target& target, UINT width, UINT height, DXGI_FORMAT format, const char* what)
+{
+    if (target.texture && target.width == width && target.height == height) return false;
+
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = desc.ArraySize = 1;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    Target made{.width = width, .height = height};
+    check(device->CreateTexture2D(&desc, nullptr, made.texture.GetAddressOf()), what);
+    check(device->CreateShaderResourceView(made.texture.Get(), nullptr, made.view.GetAddressOf()), what);
+    check(device->CreateUnorderedAccessView(made.texture.Get(), nullptr, made.access.GetAddressOf()), what);
+    target = std::move(made);
+
+    return true;
+}
+
+// GTVBAO's working textures at the render size; call with resourceMutex held.
+void ensureOcclusionTargets(UINT width, UINT height)
+{
+    bool made = ensureTarget(edges, width, height, DXGI_FORMAT_R8_UNORM, "Creating the depth edges");
+    for (auto& target : visibility) made |= ensureTarget(target, width, height, DXGI_FORMAT_R8_UNORM, "Creating the GTVBAO visibility");
+    if (made) log("GTVBAO at " + std::to_string(width) + "x" + std::to_string(height) + ".");
+}
+
+// SSILVB's working textures at the render size; call with resourceMutex held.
+void ensureLightTargets(UINT width, UINT height)
+{
+    bool made = ensureTarget(edges, width, height, DXGI_FORMAT_R8_UNORM, "Creating the depth edges");
+    for (auto& target : gathered) made |= ensureTarget(target, width, height, DXGI_FORMAT_R11G11B10_FLOAT, "Creating the SSILVB light");
+    // The game's diffuse light's format.
+    made |= ensureTarget(diffuseWithLight, width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the SSILVB diffuse light");
+    if (made) log("SSILVB at " + std::to_string(width) + "x" + std::to_string(height) + ".");
+}
+
+// The size of the 2D texture behind `view`; zero when there is none.
+std::pair<UINT, UINT> sizeOf(ID3D11View* view)
+{
+    ComPtr<ID3D11Resource> resource;
+    ComPtr<ID3D11Texture2D> texture;
+    D3D11_TEXTURE2D_DESC desc{};
+    if (view) view->GetResource(resource.GetAddressOf());
+    if (resource && SUCCEEDED(resource.As(&texture))) texture->GetDesc(&desc);
+
+    return {desc.Width, desc.Height};
+}
+
+std::optional<Role> roleOf(IUnknown* shader)
+{
+    if (!shader) return std::nullopt;
+
+    std::shared_lock lock(shaderMutex);
+    const auto found = roles.find(shader);
+
+    return found != roles.end() ? std::optional(found->second) : std::nullopt;
+}
+
+// The game's compute bindings on a deferred context, put back when this goes out of scope.
+class SavedComputeState
+{
+public:
+    explicit SavedComputeState(ID3D11DeviceContext* context) : context(context)
+    {
+        context->CSGetShader(shader.GetAddressOf(), nullptr, nullptr);
+        context->CSGetConstantBuffers(0, Slots, buffers);
+        context->CSGetShaderResources(0, Slots, views);
+        context->CSGetUnorderedAccessViews(0, Slots, accesses);
+    }
+
+    ~SavedComputeState()
+    {
+        context->CSSetShader(shader.Get(), nullptr, 0);
+        context->CSSetConstantBuffers(0, Slots, buffers);
+        context->CSSetShaderResources(0, Slots, views);
+        context->CSSetUnorderedAccessViews(0, Slots, accesses, nullptr);
+        for (UINT i = 0; i < Slots; ++i)
+        {
+            if (buffers[i]) buffers[i]->Release();
+            if (views[i]) views[i]->Release();
+            if (accesses[i]) accesses[i]->Release();
+        }
+    }
+
+    SavedComputeState(const SavedComputeState&) = delete;
+    SavedComputeState& operator=(const SavedComputeState&) = delete;
+
+private:
+    static constexpr UINT Slots = 5;
+
+    ID3D11DeviceContext* context;
+    ComPtr<ID3D11ComputeShader> shader;
+    ID3D11Buffer* buffers[Slots]{};
+    ID3D11ShaderResourceView* views[Slots]{};
+    ID3D11UnorderedAccessView* accesses[Slots]{};
+};
+
+UINT groups(UINT pixels)
+{
+    return (pixels + 7) / 8;
+}
+
+void writeParameters(ID3D11DeviceContext* context, UINT width, UINT height, float radius, const Options& options)
+{
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    check(context->Map(parameterBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Writing the march constants");
+    const Parameters parameters{{width, height}, radius, MaxRadiusShare * static_cast<float>(height), options.occlusionStrength,
+        options.lightStrength, options.showLight ? 0.0f : 1.0f, 0};
+    std::memcpy(mapped.pData, &parameters, sizeof(parameters));
+    context->Unmap(parameterBuffer.Get(), 0);
+}
+
+// Records the denoise passes over what a march wrote into sources[0]. The last pass writes
+// `output`; the passes before alternate between the two sources.
+void denoise(ID3D11DeviceContext* context, const std::array<Target, 2>& sources, ID3D11ComputeShader* shader, ID3D11ComputeShader* finalShader,
+    ID3D11UnorderedAccessView* output)
+{
+    for (int pass = 0; pass < DenoisePasses; ++pass)
+    {
+        const bool last = pass + 1 == DenoisePasses;
+        const auto& source = sources[pass % 2];
+        auto* target = last ? output : sources[1 - pass % 2].access.Get();
+        // A texture still bound as an output would be refused as an input.
+        ID3D11UnorderedAccessView* none[2]{};
+        ID3D11ShaderResourceView* inputs[]{source.view.Get(), edges.view.Get()};
+        context->CSSetUnorderedAccessViews(0, 2, none, nullptr);
+        context->CSSetShaderResources(0, 2, inputs);
+        context->CSSetUnorderedAccessViews(0, 1, &target, nullptr);
+        context->CSSetShader(last ? finalShader : shader, nullptr, 0);
+        context->Dispatch(groups(source.width), groups(source.height), 1);
+    }
+}
+
+// Records GTVBAO's march and denoise passes on `context`; call with resourceMutex held.
+void computeOcclusion(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* normalView,
+    ID3D11ShaderResourceView* specular, ID3D11Buffer* scene, const Options& options)
+{
+    const auto width = visibility[0].width, height = visibility[0].height;
+    writeParameters(context, width, height, options.occlusionRadius, options);
+
+    SavedComputeState saved(context);
+    ID3D11Buffer* buffers[]{parameterBuffer.Get(), scene};
+    // t2 and t3 are SSILVB's.
+    ID3D11ShaderResourceView* inputs[]{depth, normalView, nullptr, nullptr, specular};
+    ID3D11UnorderedAccessView* outputs[]{visibility[0].access.Get(), edges.access.Get()};
+    context->CSSetConstantBuffers(0, 2, buffers);
+    context->CSSetShaderResources(0, 5, inputs);
+    context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
+    context->CSSetShader(occlusionShader.Get(), nullptr, 0);
+    context->Dispatch(groups(width), groups(height), 1);
+    denoise(context, visibility, denoiseShader.Get(), finalDenoiseShader.Get(), visibility[Result].access.Get());
+}
+
+// Records SSILVB's march and denoise passes on `context`; call with resourceMutex held. The last
+// pass writes diffuseWithLight.
+void computeLight(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* normalView,
+    ID3D11ShaderResourceView* diffuse, ID3D11ShaderResourceView* albedo, ID3D11ShaderResourceView* specular, ID3D11Buffer* scene,
+    const Options& options)
+{
+    const auto width = gathered[0].width, height = gathered[0].height;
+    writeParameters(context, width, height, options.lightRadius, options);
+
+    SavedComputeState saved(context);
+    ID3D11Buffer* buffers[]{parameterBuffer.Get(), scene};
+    // The denoise passes bind their own t0 and t1; the last one reads the diffuse light from t2.
+    ID3D11ShaderResourceView* inputs[]{depth, normalView, diffuse, albedo, specular};
+    ID3D11UnorderedAccessView* outputs[]{gathered[0].access.Get(), edges.access.Get()};
+    context->CSSetConstantBuffers(0, 2, buffers);
+    context->CSSetShaderResources(0, 5, inputs);
+    context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
+    context->CSSetShader(lightShader.Get(), nullptr, 0);
+    context->Dispatch(groups(width), groups(height), 1);
+    denoise(context, gathered, lightDenoiseShader.Get(), finalLightDenoiseShader.Get(), diffuseWithLight.access.Get());
+}
+
+// Draws the upscale once more with shaders::Apply and the multiplying blend; call with resourceMutex held.
+void applyToIndirectLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call)
+{
+    ComPtr<ID3D11PixelShader> gameShader;
+    ComPtr<ID3D11ShaderResourceView> gameSource;
+    ComPtr<ID3D11BlendState> gameBlend;
+    float blendFactor[4]{};
+    UINT sampleMask{};
+    context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
+    context->PSGetShaderResources(SourceSlot, 1, gameSource.GetAddressOf());
+    context->OMGetBlendState(gameBlend.GetAddressOf(), blendFactor, &sampleMask);
+
+    context->PSSetShader(applyShader.Get(), nullptr, 0);
+    context->PSSetShaderResources(SourceSlot, 1, visibility[Result].view.GetAddressOf());
+    context->OMSetBlendState(multiplyBlend.Get(), nullptr, 0xFFFFFFFF);
+    context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
+
+    context->PSSetShader(gameShader.Get(), nullptr, 0);
+    context->PSSetShaderResources(SourceSlot, 1, gameSource.GetAddressOf());
+    context->OMSetBlendState(gameBlend.Get(), blendFactor, sampleMask);
+}
+
+// Leaves the game's pass alone this frame; call with resourceMutex held.
+bool wait(Progress& progress, std::string reason)
+{
+    logOnce(std::string(progress.name) + " waiting: " + reason + ".");
+    progress.waitingFor = std::move(reason);
+    return false;
+}
+
+void ran(Progress& progress)
+{
+    progress.lastRun = GetTickCount64();
+    progress.waitingFor.clear();
+}
+
+void noteNormals(ID3D11DeviceContext* context)
+{
+    ComPtr<ID3D11ShaderResourceView> view;
+    context->PSGetShaderResources(NormalSlot, 1, view.GetAddressOf());
+    std::lock_guard lock(gBufferMutex);
+    lastNormals = view;
+    normals[context] = std::move(view);
+}
+
+void noteSpecular(ID3D11DeviceContext* context)
+{
+    ComPtr<ID3D11ShaderResourceView> view;
+    context->PSGetShaderResources(SpecularSlot, 1, view.GetAddressOf());
+    std::lock_guard lock(gBufferMutex);
+    lastSpecular = std::move(view);
+}
+
+ComPtr<ID3D11ShaderResourceView> takeNormals(ID3D11DeviceContext* context)
+{
+    std::lock_guard lock(gBufferMutex);
+    const auto found = normals.find(context);
+    if (found == normals.end()) return nullptr;
+
+    auto view = std::move(found->second);
+    normals.erase(found);
+
+    return view;
+}
+
+ComPtr<ID3D11ShaderResourceView> latestNormals()
+{
+    std::lock_guard lock(gBufferMutex);
+    return lastNormals;
+}
+
+// The specular target a sun pass bound last, if it has the render size; otherwise none, and the
+// march treats nothing as foliage.
+ComPtr<ID3D11ShaderResourceView> latestSpecular(std::pair<UINT, UINT> size)
+{
+    ComPtr<ID3D11ShaderResourceView> view;
+    {
+        std::lock_guard lock(gBufferMutex);
+        view = lastSpecular;
+    }
+
+    return sizeOf(view.Get()) == size ? view : nullptr;
+}
+
+// The game's upscale, then GTVBAO's occlusion multiplied into what it wrote. False leaves the draw to the game.
+bool drawUpscale(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, const Options& options)
+{
+    const auto normalView = takeNormals(context);
+    ComPtr<ID3D11ShaderResourceView> depth;
+    ComPtr<ID3D11Buffer> scene;
+    ComPtr<ID3D11RenderTargetView> light;
+    context->PSGetShaderResources(DepthSlot, 1, depth.GetAddressOf());
+    context->PSGetConstantBuffers(SceneSlot, 1, scene.GetAddressOf());
+    context->OMGetRenderTargets(1, light.GetAddressOf(), nullptr);
+    D3D11_BUFFER_DESC sceneDesc{};
+    if (scene) scene->GetDesc(&sceneDesc);
+
+    const auto size = sizeOf(depth.Get());
+    const auto specular = latestSpecular(size);
+    std::lock_guard lock(resourceMutex);
+    if (!ensurePipeline()) return false;
+    if (!normalView) return wait(occlusionProgress, "the sky light pass bound no normals before the upscale");
+    if (!size.first || sizeOf(normalView.Get()) != size || sizeOf(light.Get()) != size)
+        return wait(occlusionProgress, "the lighting textures differ in size");
+    if (sceneDesc.ByteWidth != SceneConstantsSize) return wait(occlusionProgress, "the upscale has no scene constants");
+
+    ensureOcclusionTargets(size.first, size.second);
+    computeOcclusion(context, depth.Get(), normalView.Get(), specular.Get(), scene.Get(), options);
+    context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
+    applyToIndirectLight(context, call);
+    ran(occlusionProgress);
+
+    return true;
+}
+
+// SSILVB's passes, from what the resolve binds; call with resourceMutex held. False leaves the
+// resolve the game's diffuse light this frame.
+bool addLight(ID3D11DeviceContext* context, ID3D11ShaderResourceView* normalView, const Options& options)
+{
+    ComPtr<ID3D11ShaderResourceView> depth, diffuse, albedo;
+    ComPtr<ID3D11Buffer> scene;
+    context->PSGetShaderResources(ResolveDepthSlot, 1, depth.GetAddressOf());
+    context->PSGetShaderResources(DiffuseSlot, 1, diffuse.GetAddressOf());
+    context->PSGetShaderResources(AlbedoSlot, 1, albedo.GetAddressOf());
+    context->PSGetConstantBuffers(SceneSlot, 1, scene.GetAddressOf());
+    D3D11_BUFFER_DESC sceneDesc{};
+    if (scene) scene->GetDesc(&sceneDesc);
+
+    const auto size = sizeOf(depth.Get());
+    if (!normalView) return wait(lightProgress, "no sky light pass has bound the normals yet");
+    if (!size.first || sizeOf(normalView) != size || sizeOf(diffuse.Get()) != size || sizeOf(albedo.Get()) != size)
+        return wait(lightProgress, "the lighting textures differ in size");
+    if (sceneDesc.ByteWidth != SceneConstantsSize) return wait(lightProgress, "the resolve has no scene constants");
+
+    ensureLightTargets(size.first, size.second);
+    computeLight(context, depth.Get(), normalView, diffuse.Get(), albedo.Get(), latestSpecular(size).Get(), scene.Get(), options);
+    ran(lightProgress);
+
+    return true;
+}
+
+// The resolve, with the diffuse light SSILVB added to while it runs, and white in place of the
+// game's occlusion while GTVBAO runs; or, for the diagnostics, either effect alone. False leaves
+// the draw to the game.
+bool drawResolve(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, const Options& options)
+{
+    const auto normalView = options.light ? latestNormals() : nullptr;
+    std::lock_guard lock(resourceMutex);
+    if (!ensurePipeline()) return false;
+
+    const bool lit = options.light && addLight(context, normalView.Get(), options);
+    if (!lit && !options.occlusion) return false;
+
+    ComPtr<ID3D11PixelShader> gameShader;
+    ComPtr<ID3D11ShaderResourceView> gameDiffuse, gameOcclusion;
+    context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
+    context->PSGetShaderResources(DiffuseSlot, 1, gameDiffuse.GetAddressOf());
+    context->PSGetShaderResources(OcclusionSlot, 1, gameOcclusion.GetAddressOf());
+
+    if (lit) context->PSSetShaderResources(DiffuseSlot, 1, diffuseWithLight.view.GetAddressOf());
+    if (options.occlusion) context->PSSetShaderResources(OcclusionSlot, 1, whiteView.GetAddressOf());
+    if (lit && options.showLight) context->PSSetShader(showLightShader.Get(), nullptr, 0);
+    else if (options.occlusion && options.showOcclusion && visibility[Result].view)
+    {
+        context->PSSetShader(showOcclusionShader.Get(), nullptr, 0);
+        context->PSSetShaderResources(OcclusionSlot, 1, visibility[Result].view.GetAddressOf());
+    }
+
+    context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
+    context->PSSetShader(gameShader.Get(), nullptr, 0);
+    context->PSSetShaderResources(DiffuseSlot, 1, gameDiffuse.GetAddressOf());
+    context->PSSetShaderResources(OcclusionSlot, 1, gameOcclusion.GetAddressOf());
+
+    return true;
+}
+
+// Call with resourceMutex held.
+std::string problemOf(const Progress& progress)
+{
+    const std::string name = progress.name;
+    if (pipelineFailed) return name + " is unavailable (see PhantomFX.log).";
+    if (progress.lastRun && GetTickCount64() - progress.lastRun < 1000) return {};
+
+    return progress.waitingFor.empty() ? name + " is waiting for the game's 3D view." : name + " is waiting: " + progress.waitingFor + ".";
+}
+}
+
+void attach(ID3D11Device* gameDevice) noexcept
+{
+    bool enable{};
+    {
+        std::lock_guard lock(optionsMutex);
+        enable = wanted.occlusion || wanted.light;
+    }
+
+    std::lock_guard lock(resourceMutex);
+    device = gameDevice;
+    if (enable) ensurePipeline();
+}
+
+void detach() noexcept
+{
+    active = false;
+    {
+        std::lock_guard lock(resourceMutex);
+        occlusionShader.Reset();
+        denoiseShader.Reset();
+        finalDenoiseShader.Reset();
+        lightShader.Reset();
+        lightDenoiseShader.Reset();
+        finalLightDenoiseShader.Reset();
+        applyShader.Reset();
+        showOcclusionShader.Reset();
+        showLightShader.Reset();
+        multiplyBlend.Reset();
+        parameterBuffer.Reset();
+        whiteView.Reset();
+        visibility = {};
+        gathered = {};
+        edges = {};
+        diffuseWithLight = {};
+        device.Reset();
+        pipelineFailed = false;
+    }
+
+    {
+        std::lock_guard lock(gBufferMutex);
+        normals.clear();
+        lastNormals.Reset();
+        lastSpecular.Reset();
+    }
+
+    std::unique_lock lock(shaderMutex);
+    roles.clear();
+    shaderOwners.clear();
+}
+
+void configure(const Options& options) noexcept
+{
+    {
+        std::lock_guard lock(optionsMutex);
+        wanted = options;
+    }
+
+    if (!options.occlusion && !options.light) return;
+
+    std::lock_guard lock(resourceMutex);
+    ensurePipeline();
+}
+
+std::string occlusionProblem()
+{
+    {
+        std::lock_guard lock(optionsMutex);
+        if (!wanted.occlusion) return {};
+    }
+
+    std::lock_guard lock(resourceMutex);
+    return problemOf(occlusionProgress);
+}
+
+std::string lightProblem()
+{
+    {
+        std::lock_guard lock(optionsMutex);
+        if (!wanted.light) return {};
+    }
+
+    std::lock_guard lock(resourceMutex);
+    return problemOf(lightProgress);
+}
+
+void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
+{
+    const auto checksum = dxbcHashOf(code, size);
+    if (!checksum || !shader) return;
+
+    const auto text = toHex(*checksum);
+    for (const auto& known : Shaders)
+    {
+        if (text != known.checksum) continue;
+
+        try
+        {
+            std::unique_lock lock(shaderMutex);
+            roles[shader] = known.role;
+            shaderOwners.emplace_back(shader);
+        }
+        catch (...)
+        {
+            return;
+        }
+
+        log(std::string("Identified ") + known.name + ".");
+        return;
+    }
+}
+
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
+{
+    if (!active.load(std::memory_order_relaxed) || call.indexed || call.count != 3 || call.instances != 1) return false;
+
+    try
+    {
+        ComPtr<ID3D11PixelShader> shader;
+        context->PSGetShader(shader.GetAddressOf(), nullptr, nullptr);
+        const auto role = roleOf(shader.Get());
+        if (!role) return false;
+
+        Options options;
+        {
+            std::lock_guard lock(optionsMutex);
+            options = current;
+        }
+
+        switch (*role)
+        {
+        case Role::SkyLight: noteNormals(context); return false;
+        case Role::Upscale: return options.occlusion && drawUpscale(context, call, options);
+        case Role::Resolve: return drawResolve(context, call, options);
+        case Role::GameOcclusion: return options.occlusion;
+        case Role::Sun: noteSpecular(context); return false;
+        }
+    }
+    catch (const std::exception& error)
+    {
+        std::lock_guard lock(resourceMutex);
+        logOnce(std::string("GTVBAO or SSILVB: a pass kept the game's drawing: ") + error.what());
+    }
+    catch (...)
+    {
+    }
+
+    return false;
+}
+
+void present() noexcept
+{
+    std::lock_guard lock(optionsMutex);
+    current = wanted;
+    active = (current.occlusion || current.light) && !pipelineFailed;
+}
+}

@@ -6,7 +6,7 @@
 // The camera side of DLSS: recognising the main view in the engine's scene constants, adding the
 // jitter to it, and the matrices the motion vectors and camera cuts come from. Pure maths, so the
 // tests can check it without the game.
-namespace mgsv_dlss::camera
+namespace phantom_fx::camera
 {
 // cVSScene / cPSScene (slot b2, 480 bytes): c[n] is register cn as docs/DEVELOPMENT.md lists them.
 // Matrices are rows applied as dot(row, v).
@@ -32,10 +32,11 @@ SceneView classify(const SceneConstants& scene);
 // The main camera as one upload had it before the jitter.
 struct View
 {
-    Matrix projectionView{};
+    Matrix projectionView{}, projection{}, view{};
     std::array<float, 3> eye{}, forward{};
     float focal{}; // P11: changes with the field of view
     float width{}, height{};
+    float nearPlane{}, farPlane{};
 };
 
 View viewOf(const SceneConstants& scene);
@@ -52,10 +53,34 @@ std::array<float, 2> jitterPixels(std::uint64_t frame, int phases);
 // DLSS asks for 8 x (output / render)^2 phases; DLAA renders at output size.
 int jitterPhases(float renderScale);
 
+// A lens shot (photo_mode.hpp) renders the frozen scene from points across the aperture, each frame
+// with the camera moved off `centre` within its own plane. This NDC shift for a MainCamera upload
+// keeps the plane at `focusDistance` (metres along the view) where the centre sees it, as a lens
+// focused there does; nearer and farther points move apart.
+std::array<float, 2> lensShift(const SceneConstants& scene, const std::array<float, 3>& centre, float focusDistance);
+// Point `index` of a sequence whose every run spreads evenly over an aperture of radius 1: a disc,
+// or with `blades` of 3 or more a regular polygon with its corners at 1, one of them straight up (y).
+std::array<float, 2> aperturePoint(std::uint32_t index, int blades);
+
 // Maps this frame's unjittered NDC and depth to the previous frame's clip position.
 Matrix previousFromCurrent(const View& previous, const View& current);
 
 // A cut (cutscenes, menus into the game) moves or turns the camera further than gameplay does in
 // one frame, or changes the field of view at once; DLSS then drops its history.
 bool cameraCut(const View& previous, const View& current);
+
+// The camera as NVIDIA Streamline takes it for DLSS Frame Generation: matrices for row vectors
+// (v x M) and a view space with x right, y up and z forward. The engine's view mirrors x (P00 < 0);
+// the mirror moves from the projection into the view, so the projection is the usual one and P x V
+// is unchanged.
+struct StreamlineCamera
+{
+    std::array<float, 16> viewToClip{}, clipToView{}, clipToPreviousClip{}, previousClipToClip{};
+    std::array<float, 3> position{}, right{}, up{}, forward{};
+    float nearPlane{}, farPlane{};
+    float verticalFov{}; // Radians
+    float aspectRatio{};
+};
+
+StreamlineCamera streamlineCamera(const View& previous, const View& current);
 }

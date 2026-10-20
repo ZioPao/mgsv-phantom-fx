@@ -8,7 +8,7 @@
 #include <cstring>
 #include <mutex>
 
-namespace mgsv_dlss::frame_rate
+namespace phantom_fx::frame_rate
 {
 namespace
 {

@@ -6,7 +6,7 @@
 // velocity but not the blur, which would only smear DLSS's output. Two hooks on the motion blur
 // plugin (docs/DEVELOPMENT.md, "Velocity without motion blur") let the add-on ask for one without
 // the other, whatever the player chose in the game's settings.
-namespace mgsv_dlss::motion_blur
+namespace phantom_fx::motion_blur
 {
 // Hooks the plugin on the supported build, with MinHook initialised; returns what was done, for
 // the log. Without the hooks the game's own motion blur setting stays in charge.

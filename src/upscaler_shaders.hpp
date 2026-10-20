@@ -1,13 +1,17 @@
 #pragma once
 
-// HLSL for DLSS in place of the game's FXAA, compiled at runtime with d3dcompiler_47.
+#include "hdr_shaders.hpp"
+
+// HLSL for DLSS or FSR in place of the game's FXAA, compiled at runtime with d3dcompiler_47.
 //
 // Fox Engine tonemaps early and grades with a LUT, so the image FXAA reads is final LDR colour,
 // stored sRGB-encoded. DLSS runs in LDR mode on those values and the composite writes them back
-// where FXAA wrote, before the UI draws.
-namespace mgsv_dlss::upscaler::shaders
+// where FXAA wrote, before the UI draws. With HDR (hdr.hpp) the image holds light beyond white: DLSS
+// runs in its HDR mode on it, linear, and the composite encodes its result again. FSR always gets
+// linear colour, which it is made for.
+namespace phantom_fx::upscaler::shaders
 {
-// Runs once per frame at render resolution and writes what DLSS reads.
+// Runs once per frame at render resolution and writes what DLSS or FSR reads.
 //
 // Motion: the camera part is reprojected from depth with this and the previous frame's unjittered
 // matrices, in float, so it is exact for everything that stands still. The engine also draws its
@@ -18,14 +22,15 @@ namespace mgsv_dlss::upscaler::shaders
 // frame's jitter, because the engine projects the current position with the jittered matrices and
 // the previous one without. The object motion is the cell, less the jitter; the camera motion
 // clamped into it keeps full precision where a character does not move.
-inline constexpr char Inputs[] = R"(
+inline constexpr char Inputs[] = PHANTOM_FX_HDR_COMMON R"(
 cbuffer InputParameters : register(b0)
 {
     float4 PreviousFromCurrent[4]; // Previous clip position from this frame's unjittered NDC and depth
     float2 JitterNdc;
     uint2 RenderSize;
     uint ObjectMotion; // t2 holds the engine's velocity
-    uint3 Padding;
+    uint Linear;       // The upscaler gets linear colour: FSR, or DLSS in its HDR mode
+    uint2 Padding;
 };
 Texture2D<float4> SceneColor : register(t0);
 Texture2D<float> SceneDepth : register(t1);
@@ -59,7 +64,8 @@ void main(uint2 pixel : SV_DispatchThreadID)
         motion = clamp(motion, -moved - HalfCell, -moved + HalfCell);
     }
 
-    OutColor[pixel] = SceneColor[pixel];
+    const float4 color = SceneColor[pixel];
+    OutColor[pixel] = Linear ? float4(min(SrgbToLinear(color.rgb), HalfMax), color.a) : color;
     OutDepth[pixel] = depth;
     OutMotion[pixel] = motion;
 }
@@ -74,16 +80,16 @@ float4 main(uint vertex : SV_VertexID) : SV_Position
 }
 )";
 
-// Writes the DLSS output where FXAA wrote, sharpened with AMD FidelityFX RCAS (FsrRcasF in
+// Writes the upscaled output where FXAA wrote, sharpened with AMD FidelityFX RCAS (FsrRcasF in
 // ffx_fsr1.h, MIT: AMD-FidelityFX-LICENSE.txt), whose noise filter is left out. RCAS expects
 // perceptual values in 0 to 1, which the sRGB-encoded LDR colour is. FXAA writes alpha 0.
-inline constexpr char Composite[] = R"(
+inline constexpr char Composite[] = PHANTOM_FX_HDR_COMMON R"(
 cbuffer CompositeParameters : register(b0)
 {
     uint DebugView; // 1 motion vectors, 2 where the engine's velocity was used
     float Sharpness;
     uint ObjectMotion;
-    uint Padding;
+    uint Linear; // The upscaler made linear colour, sharpened through x / (1 + x) and encoded here
 };
 Texture2D<float4> Upscaled : register(t0);
 Texture2D<float2> Motion : register(t1);
@@ -93,7 +99,9 @@ float3 Load(int2 pixel)
 {
     uint width, height;
     Upscaled.GetDimensions(width, height);
-    return saturate(Upscaled.Load(int3(clamp(pixel, 0, int2(width, height) - 1), 0)).rgb);
+    const float3 color = Upscaled.Load(int3(clamp(pixel, 0, int2(width, height) - 1), 0)).rgb;
+    // RCAS takes values in 0 to 1; light maps there through x / (1 + x), and back after.
+    return Linear ? max(color, 0) / (1 + max(color, 0)) : saturate(color);
 }
 
 // b, d, f and h are the pixels above, left, right and below e.
@@ -124,6 +132,8 @@ float4 main(float4 position : SV_Position) : SV_Target
     }
     else if (Sharpness > 0)
         color = Rcas(Load(pixel + int2(0, -1)), Load(pixel + int2(-1, 0)), color, Load(pixel + int2(1, 0)), Load(pixel + int2(0, 1)));
+
+    if (Linear && DebugView == 0) color = LinearToSrgb(color / max(1 - color, 1.0 / HalfMax));
 
     return float4(color, 0);
 }

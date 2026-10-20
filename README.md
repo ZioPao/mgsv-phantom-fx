@@ -1,90 +1,80 @@
-# MGSV DLSS
+# Phantom FX
 
-Adds NVIDIA DLSS to Metal Gear Solid V: The Phantom Pain: DLAA in place of the game's FXAA, or
-upscaling from a lower render resolution. It can also lift the game's 60 fps cap.
+AIO visual enhancement ReShade add-on for Metal Gear Solid V: The Phantom Pain.
+
+![Vanilla](docs/images/outpost-full-vanilla.png)
+
+![Phantom FX](docs/images/outpost-full-phantom-fx.png)
+
+![Vanilla](docs/images/smoker-full-vanilla.png)
+
+![Phantom FX](docs/images/smoker-full-phantom-fx.png)
+
+**Very experimental! features are currently being implemented. There are bound to be issues with performance and visual artifacting.**
+
+## Features
+
+- **DLSS:** DLAA and upscaling
+- **FSR:** Native AA and upscaling, FSR 4 on Radeon RX 7000 and 9000, FSR 3.1 elsewhere
+- **DLSS Frame Generation:** 2x to 6x, with NVIDIA Reflex
+- **FSR frame generation:** 2x, on any GPU
+- **HDR10 output**
+- **Unlock frame rate:** lifts the 60 fps cap
+- **Soft shadows** (PCSS)
+- **Contact shadows** (Bend Studio's screen-space shadows)
+- **Ambient occlusion** (GTVBAO)
+- **Indirect lighting** (SSILVB)
+- **Volumetric fog** with light shafts and a physical sky
+- **Depth of field**
+- **Photo mode**
+- **Weather and time of day controls**
 
 ## Requirements
 
-- Metal Gear Solid V: The Phantom Pain, Steam version **1.0.15.4** (title screen "Ver. 1.15").
-  Other versions are not supported.
-- An **NVIDIA RTX GPU** and an up-to-date driver.
-- [ReShade 6.8+ with full add-on support](https://reshade.me/#download).
+- MGSV: TPP, Steam version 1.0.15.4 (title screen "Ver. 1.15")
+- DLSS: NVIDIA RTX GPU. FSR: any GPU with Direct3D 12
+- DLSS Frame Generation: RTX 40 (2x) or RTX 50 (up to 6x), and hardware-accelerated GPU scheduling on
+- HDR: HDR on in Windows display settings
+- [ReShade 6.8+ with full add-on support](https://reshade.me/#download)
 
 ## Install
 
-1. Install ReShade for `mgsvtpp.exe` (in `steamapps\common\MGS_TPP`), choosing **DirectX 10/11/12**.
-   No effect packs are needed.
-2. Extract the ZIP into the game folder. `MGSVDLSS.addon64` and `nvngx_dlss.dll` must sit beside
-   `mgsvtpp.exe`.
-3. Start the game, open the ReShade overlay (Home by default) and find **MGSV DLSS**.
-   **DLAA is on by default.**
+1. Install ReShade for `mgsvtpp.exe` with DirectX 10/11/12. Skip the effects.
+2. Extract the ZIP into the game folder.
+3. In game, press Home and open **Phantom FX**. DLAA is on, the rest is off. Not on NVIDIA? Set **Upscaler** to FSR.
 
-ReShade alone cannot run this game: the game closes at start-up under any Direct3D wrapper. The
-add-on gets it past that check, so keep both installed together.
+ReShade alone crashes the game at start-up. Phantom FX fixes that, so keep both installed.
 
-## Use
+## Hotkeys
 
-The overlay has the mode, the DLSS preset, sharpening, the texture detail bias and **Unlock frame
-rate**. Settings are saved in `MGSVDLSS.ini` beside the add-on.
-
-| Mode | Renders the 3D scene at |
+| Key | Action |
 | --- | --- |
-| Off | Native resolution, with the game's FXAA |
-| DLAA | Native resolution |
-| Quality | About 67% of the output resolution per axis |
-| Balanced | About 58% |
-| Performance | 50% |
-| Ultra Performance | 33% |
-| Custom | The **Render scale** slider, 33% to 100%; applies when you release it |
+| F1 | Visual enhancements on/off |
+| F2 | Photo mode |
+| F3 | Hide HUD |
+| F4 | Photo mode blur on/off |
+| F5 | Photo mode lens shot |
 
-- **Upscaling modes:** only the 3D scene renders smaller; the HUD, menus and subtitles stay at full
-  resolution. The section's first line shows the render and output resolution. Changing the
-  mode rebuilds the game's render targets, which takes a moment, like changing the resolution.
-  Keep the game's own resolution at your display's: it is the output resolution.
-- **DLSS preset:** Default lets DLSS choose. K and J are transformer models (J ghosts less); M and
-  L are made for Performance and Ultra Performance.
-- **Sharpening:** AMD FidelityFX RCAS on the DLSS image, 33% by default. 0% turns it off.
-- **Texture detail bias:** textures get a level-of-detail bias that matches the render resolution,
-  so they keep their detail. The slider adds to it when you release it: lower is sharper but can
-  shimmer.
-- **Unlock frame rate:** lifts the 60 fps cap at once, in any mode, including Off. Game speed stays
-  the same. It works like `framerate_control` `"Variable"` in the game's settings file, without
-  editing that file. Turning it off gives the game's own setting back.
-
-Where the game is limited by the CPU, for example at the 60 fps cap, upscaling lowers the GPU's load
-and power draw instead of raising the frame rate.
+Photo mode: WASD to move, mouse to look, Space/Ctrl up/down, Shift faster.
 
 ## Notes
 
-- **FXAA:** DLSS takes the place of the game's FXAA: it starts from the image FXAA would have
-  smoothed and writes its result where FXAA's went. It runs at any post processing setting: the
-  add-on keeps the game's FXAA pass on, even where the setting would turn it off.
-- **Motion blur:** the game's setting does not matter while DLSS runs. The add-on has the game draw
-  motion vectors for characters, which keeps them sharp, and leaves the blur out.
-- **Off** leaves the game as it is: native resolution, FXAA and its own motion blur setting.
+- Enabling frame generation, switching it between DLSS and FSR, or enabling HDR requires a game restart.
 
-To **update**, close the game and replace the ZIP's files. Keep your INI to keep your settings.
+## Uninstall
 
-To **uninstall**, delete `MGSVDLSS.addon64` and `nvngx_dlss.dll`, and uninstall ReShade too,
-since ReShade alone cannot run the game. You can also remove `MGSVDLSS.ini`, `MGSVDLSS.log` and
-the `MGSVDLSS` documentation folder.
+Delete `PhantomFX.*`, the `PhantomFX` folder, `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `sl.*.dll` and `amd_fidelityfx_*.dll`. Uninstall ReShade.
 
-## Problems
+## Bugs
 
-If the game closes by itself right after starting, the add-on could not get it past its start-up
-check: check the game version, that ReShade has full add-on support, and that `MGSVDLSS.addon64`
-sits beside `mgsvtpp.exe`. For DLSS errors, read the first line of the **MGSV DLSS** section and
-check your GPU driver.
+Attach `PhantomFX.log`, `ReShade.log` and `sl.log` from the game folder.
 
-Report issues with `MGSVDLSS.log` and `ReShade.log` from the game folder, plus your GPU, driver,
-resolution, window mode, DLSS mode and steps to reproduce.
+## Development
 
-## Technical reference
-
-See [DEVELOPMENT.md](docs/DEVELOPMENT.md) for build instructions and how the add-on works.
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## License
 
-Code and documentation: Bustanity, MIT. NVIDIA DLSS, MinHook, ReShade, Dear ImGui and AMD
-FidelityFX (the sharpening filter) retain their own licenses, included in the ZIP's `MGSVDLSS`
-folder.
+MIT. 
+
+Third-party licenses are in the ZIP's `PhantomFX` folder.

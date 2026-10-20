@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace mgsv_dlss::camera
+namespace phantom_fx::camera
 {
 namespace
 {
@@ -101,6 +101,33 @@ Matrix inverse(Matrix matrix)
 
     return result;
 }
+
+Matrix transpose(const Matrix& matrix)
+{
+    Matrix result{};
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column) result[column * 4 + row] = matrix[row * 4 + column];
+
+    return result;
+}
+
+std::array<float, 16> toFloat(const Matrix& matrix)
+{
+    std::array<float, 16> result{};
+    for (int i = 0; i < 16; ++i) result[i] = static_cast<float>(matrix[i]);
+
+    return result;
+}
+
+// Row `row` of the view's rotation, the direction of one of the camera's axes in the world.
+std::array<float, 3> axis(const Matrix& view, int row, double sign)
+{
+    const double x = view[row * 4], y = view[row * 4 + 1], z = view[row * 4 + 2];
+    const double length = std::sqrt(x * x + y * y + z * z);
+    if (length == 0) return {};
+
+    return {static_cast<float>(sign * x / length), static_cast<float>(sign * y / length), static_cast<float>(sign * z / length)};
+}
 }
 
 SceneView classify(const SceneConstants& scene)
@@ -134,7 +161,11 @@ View viewOf(const SceneConstants& scene)
     View result;
     for (int row = 0; row < 4; ++row)
         for (int column = 0; column < 4; ++column)
+        {
             result.projectionView[row * 4 + column] = scene.c[ProjectionView + row][column];
+            result.projection[row * 4 + column] = scene.c[Projection + row][column];
+            result.view[row * 4 + column] = scene.c[ViewMatrix + row][column];
+        }
 
     const auto& forward = scene.c[ViewMatrix + 2];
     const float length = std::sqrt(forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]);
@@ -147,6 +178,8 @@ View viewOf(const SceneConstants& scene)
     result.focal = scene.c[Projection + 1][1];
     result.width = scene.c[ViewportSize][0];
     result.height = scene.c[ViewportSize][1];
+    result.nearPlane = scene.c[ViewportSize][2];
+    result.farPlane = scene.c[ViewportSize][3];
 
     return result;
 }
@@ -185,6 +218,40 @@ int jitterPhases(float renderScale)
     return std::clamp(static_cast<int>(std::ceil(8.0f / (renderScale * renderScale))), 8, 128);
 }
 
+std::array<float, 2> lensShift(const SceneConstants& scene, const std::array<float, 3>& centre, float focusDistance)
+{
+    if (!(focusDistance > 0)) return {};
+
+    // The camera's offset in view space; its rotation stays, so view x and y move by this much.
+    const float offset[3]{scene.c[EyePosition][0] - centre[0], scene.c[EyePosition][1] - centre[1], scene.c[EyePosition][2] - centre[2]};
+    const auto along = [&offset](const float (&row)[4]) { return row[0] * offset[0] + row[1] * offset[1] + row[2] * offset[2]; };
+
+    // NDC x = (P00 x + shift z) / z, so at z = focus the shift puts back what the offset took away.
+    return {scene.c[Projection][0] * along(scene.c[ViewMatrix]) / focusDistance,
+        scene.c[Projection + 1][1] * along(scene.c[ViewMatrix + 1]) / focusDistance};
+}
+
+std::array<float, 2> aperturePoint(std::uint32_t index, int blades)
+{
+    // Roberts' R2 sequence: any run of it covers the square evenly.
+    constexpr double G = 1.32471795724474602596;
+    const double u = std::fmod(0.5 + index / G, 1.0), v = std::fmod(0.5 + index / (G * G), 1.0);
+    constexpr double Pi = 3.14159265358979323846;
+    const double radius = std::sqrt(v);
+    if (blades < 3)
+    {
+        const double angle = 2 * Pi * u;
+        return {static_cast<float>(radius * std::cos(angle)), static_cast<float>(radius * std::sin(angle))};
+    }
+
+    // The triangle from the centre to two neighbouring corners, chosen by u, filled evenly.
+    const double sector = 2 * Pi / blades, position = u * blades;
+    const double corner = std::floor(position), along = position - corner;
+    const double first = Pi / 2 + corner * sector, second = first + sector;
+    return {static_cast<float>(radius * ((1 - along) * std::cos(first) + along * std::cos(second))),
+        static_cast<float>(radius * ((1 - along) * std::sin(first) + along * std::sin(second)))};
+}
+
 Matrix previousFromCurrent(const View& previous, const View& current)
 {
     return multiply(previous.projectionView, inverse(current.projectionView));
@@ -201,5 +268,30 @@ bool cameraCut(const View& previous, const View& current)
 
     return std::sqrt(distance) > CutDistance || cosine < CutCosine || previous.focal == 0
         || std::abs(current.focal / previous.focal - 1) > CutFocalChange;
+}
+
+StreamlineCamera streamlineCamera(const View& previous, const View& current)
+{
+    // P x V = (P x M) x (M x V) with the mirror M = diag(-1, 1, 1, 1); the engine applies M x X as
+    // dot(row, v), Streamline as v x M, so each matrix is transposed.
+    auto projection = current.projection;
+    for (int row = 0; row < 4; ++row) projection[row * 4] = -projection[row * 4];
+
+    const auto toPrevious = previousFromCurrent(previous, current);
+    StreamlineCamera result;
+    result.viewToClip = toFloat(transpose(projection));
+    result.clipToView = toFloat(transpose(inverse(projection)));
+    result.clipToPreviousClip = toFloat(transpose(toPrevious));
+    result.previousClipToClip = toFloat(transpose(inverse(toPrevious)));
+    result.position = current.eye;
+    result.right = axis(current.view, 0, -1);
+    result.up = axis(current.view, 1, 1);
+    result.forward = axis(current.view, 2, 1);
+    result.nearPlane = current.nearPlane;
+    result.farPlane = current.farPlane;
+    result.verticalFov = static_cast<float>(2 * std::atan(1 / current.projection[5]));
+    result.aspectRatio = static_cast<float>(current.projection[5] / projection[0]);
+
+    return result;
 }
 }

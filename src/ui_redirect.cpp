@@ -1,7 +1,9 @@
 #include "ui_redirect.hpp"
 
+#include "hdr.hpp"
 #include "log.hpp"
 #include "render_scale.hpp"
+#include "shader_bytecode.hpp"
 
 #include <array>
 #include <atomic>
@@ -14,15 +16,24 @@
 #include <string_view>
 #include <unordered_map>
 
-namespace mgsv_dlss::ui_redirect
+namespace phantom_fx::ui_redirect
 {
 namespace
 {
 using Microsoft::WRL::ComPtr;
 
 // The scene target is B8G8R8A8_TYPELESS with UNORM views to draw and an UNORM_SRGB view that
-// GammaControl reads (docs/DEVELOPMENT.md, "Resources").
-constexpr DXGI_FORMAT SceneFormat = DXGI_FORMAT_B8G8R8A8_TYPELESS;
+// GammaControl reads (docs/DEVELOPMENT.md, "Resources"). With HDR it is float, with float views
+// holding the same encoded values (hdr.hpp).
+DXGI_FORMAT drawFormat()
+{
+    return hdr::active() ? hdr::sceneFormat() : DXGI_FORMAT_B8G8R8A8_UNORM;
+}
+
+DXGI_FORMAT gammaFormat()
+{
+    return hdr::active() ? hdr::sceneFormat() : DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+}
 
 struct Targets
 {
@@ -88,7 +99,7 @@ bool renderSized(const D3D11_TEXTURE2D_DESC& texture)
 
 bool sceneTarget(const D3D11_TEXTURE2D_DESC& texture)
 {
-    return texture.Format == SceneFormat && renderSized(texture);
+    return texture.Format == hdr::sceneFormat() && renderSized(texture);
 }
 
 std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
@@ -102,7 +113,7 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
     desc.Height = height;
     desc.MipLevels = 1;
     desc.ArraySize = 1;
-    desc.Format = SceneFormat;
+    desc.Format = hdr::sceneFormat();
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
@@ -115,8 +126,8 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
     const D3D11_SUBRESOURCE_DATA systemData{system};
     if (FAILED(device->CreateBuffer(&systemDesc, &systemData, created->systemConstants.GetAddressOf()))) return nullptr;
 
-    D3D11_RENDER_TARGET_VIEW_DESC targetDesc{DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_RTV_DIMENSION_TEXTURE2D};
-    D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, D3D11_SRV_DIMENSION_TEXTURE2D};
+    D3D11_RENDER_TARGET_VIEW_DESC targetDesc{drawFormat(), D3D11_RTV_DIMENSION_TEXTURE2D};
+    D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{gammaFormat(), D3D11_SRV_DIMENSION_TEXTURE2D};
     viewDesc.Texture2D.MipLevels = 1;
     desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
     desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
@@ -154,7 +165,7 @@ void rememberScene(ID3D11View* view)
 
     scene = resource;
     sceneView.Reset();
-    D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_SRV_DIMENSION_TEXTURE2D};
+    D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{drawFormat(), D3D11_SRV_DIMENSION_TEXTURE2D};
     viewDesc.Texture2D.MipLevels = 1;
     if (device) device->CreateShaderResourceView(scene.Get(), &viewDesc, sceneView.GetAddressOf());
 }
@@ -168,22 +179,6 @@ void issue(ID3D11DeviceContext* context, const DrawCall& call)
 LONG scaled(LONG value, double scale)
 {
     return static_cast<LONG>(std::lround(value * scale));
-}
-
-// The 2D pass's vertex shaders are generated as ...\Draw2D*_vs.hlsl, and the game's shaders keep that
-// path in their debug data. Other shaders mention Draw2D only through shared headers.
-bool draw2DSource(std::string_view code)
-{
-    constexpr std::string_view Prefix = "\\Draw2D", Suffix = "_vs.hlsl";
-    for (auto at = code.find(Prefix); at != code.npos; at = code.find(Prefix, at + 1))
-    {
-        auto end = at + Prefix.size();
-        while (end < code.size() && (std::isalnum(static_cast<unsigned char>(code[end])) || code[end] == '_')) ++end;
-        // The name ends in _vs, followed by .hlsl.
-        if (code.substr(end - 3, Suffix.size()) == Suffix) return true;
-    }
-
-    return false;
 }
 
 BoundShader* slotOf(ID3D11DeviceContext* context, bool add)
@@ -205,7 +200,7 @@ BoundShader* slotOf(ID3D11DeviceContext* context, bool add)
 
 void vertexShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
 {
-    if (!code || !shader || !draw2DSource(std::string_view(static_cast<const char*>(code), size))) return;
+    if (!code || !shader || !draw2DSource(std::string_view(static_cast<const char*>(code), size), "_vs.hlsl")) return;
 
     try
     {
@@ -238,6 +233,16 @@ bool drawing2D(ID3D11DeviceContext* context) noexcept
 {
     const auto* slot = slotOf(context, false);
     return slot && slot->draw2D.load(std::memory_order_relaxed);
+}
+
+bool drawingIntoScene(ID3D11DeviceContext* context) noexcept
+{
+    ComPtr<ID3D11RenderTargetView> view;
+    context->OMGetRenderTargets(1, view.GetAddressOf(), nullptr);
+    const auto texture = textureDesc(view.Get());
+    const auto render = render_scale::current();
+
+    return texture.Format == hdr::sceneFormat() && texture.Width == render.width && texture.Height == render.height;
 }
 
 void attach(ID3D11Device* gameDevice) noexcept

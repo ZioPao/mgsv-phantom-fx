@@ -9,7 +9,7 @@
 #include <cstring>
 #include <mutex>
 
-namespace mgsv_dlss::render_scale
+namespace phantom_fx::render_scale
 {
 namespace
 {

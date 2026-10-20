@@ -9,7 +9,7 @@
 // scene target instead: the upscaler fills it each frame before the UI draws, the 2D pass's draws
 // and clears are made on it at the output size, and GammaControl reads it in place of the scene
 // target. docs/DEVELOPMENT.md, "The UI at the output size".
-namespace mgsv_dlss::ui_redirect
+namespace phantom_fx::ui_redirect
 {
 struct DrawCall
 {
@@ -39,6 +39,9 @@ void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept;
 // FinishCommandList clears the context's state.
 void contextFinished(ID3D11DeviceContext* context) noexcept;
 bool drawing2D(ID3D11DeviceContext* context) noexcept;
+// The context draws into the engine's scene target, where the HUD and menus go. Lens flares, the
+// 2D pass's other draws, go into smaller targets.
+bool drawingIntoScene(ID3D11DeviceContext* context) noexcept;
 
 // On a recording context. Each returns true when the call was made on the output target instead,
 // so the game's own call must be skipped.
