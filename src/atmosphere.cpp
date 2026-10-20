@@ -4,6 +4,7 @@
 #include "device_check.hpp"
 #include "hdr.hpp"
 #include "log.hpp"
+#include "performance.hpp"
 #include "shader_bytecode.hpp"
 
 #include <Windows.h>
@@ -44,7 +45,7 @@ constexpr float HistoryWeight = 0.95f;
 constexpr std::uint32_t JitterPeriod = 64;
 // Hillaire's lookup tables (atmosphere_shaders.hpp).
 constexpr UINT TransmittanceWidth = 256, TransmittanceHeight = 64, MultipleScatteringSize = 32, SkyViewWidth = 192, SkyViewHeight = 108;
-constexpr UINT SkyParameterTexels = 6;
+constexpr UINT SkyParameterTexels = 7;
 // Milliseconds between the sky parameters in the log, while the physical look runs.
 constexpr std::uint64_t SkyLogInterval = 10000;
 
@@ -95,7 +96,7 @@ struct Constants
     std::uint32_t tileSize[2], shadowed, shadowSamples;
     float jitter[2], depthJitter, historyWeight;
     std::uint32_t physical, skySun;
-    float padding[2];
+    float haze, padding;
 };
 
 // Copies of the game's constant buffers, made on the GPU in the command list that bound them, so the
@@ -106,6 +107,7 @@ struct Copies
     ComPtr<ID3D11Buffer> sunScene, sunLight;              // The sun pass's
     ComPtr<ID3D11Buffer> lastSunScene;                    // The last fill's sunScene
     ComPtr<ID3D11Buffer> skyMaterial;                     // The last sky draw's cPSMaterial, whose sun lights the game's sky
+    ComPtr<ID3D11Buffer> skyObject;                       // And its cPSObject: how overcast the game draws its sky
 };
 
 // A texture the passes write and read.
@@ -119,6 +121,7 @@ struct Target
 std::mutex optionsMutex;
 Options wanted;
 std::atomic<bool> active{}, physicalLook{}, pipelineFailed{};
+std::atomic<float> haze{};
 std::atomic<std::uint64_t> lastFill{}; // GetTickCount64
 
 // The game's fog texture, once made larger. The game owns it.
@@ -292,7 +295,7 @@ bool ensurePipeline()
         buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         check(device->CreateBuffer(&buffer, nullptr, constantBuffer.ReleaseAndGetAddressOf()), "Creating the fog constants");
         copies = {constantCopy(SystemSize), constantCopy(SceneSize), constantCopy(MaterialSize), constantCopy(ObjectSize), constantCopy(SceneSize),
-            constantCopy(LightSize), constantCopy(SceneSize), constantCopy(MaterialSize)};
+            constantCopy(LightSize), constantCopy(SceneSize), constantCopy(MaterialSize), constantCopy(ObjectSize)};
 
         D3D11_SAMPLER_DESC sampler{};
         sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -416,7 +419,7 @@ public:
     SavedComputeState& operator=(const SavedComputeState&) = delete;
 
 private:
-    static constexpr UINT Buffers = 9, Views = 8, Accesses = 3, Samplers = 2;
+    static constexpr UINT Buffers = 10, Views = 8, Accesses = 3, Samplers = 2;
 
     ID3D11DeviceContext* context;
     ComPtr<ID3D11ComputeShader> shader;
@@ -497,7 +500,9 @@ bool drawFogPass(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     const D3D11_RECT all{0, 0, static_cast<LONG>(FogWidth), static_cast<LONG>(FogHeight)};
     context->RSSetViewports(1, &whole);
     context->RSSetScissorRects(1, &all);
+    performance::Timed timed(context, performance::Pass::FogPass);
     context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
+    timed.end();
     context->RSSetViewports(viewportCount, viewports);
     context->RSSetScissorRects(scissorCount, scissors);
 
@@ -534,6 +539,7 @@ void noteSun(ID3D11DeviceContext* context)
 // and the sky's mean light. Call with resourceMutex held and the fill's bindings set.
 void updateSky(ID3D11DeviceContext* context)
 {
+    const performance::Timed timed(context, performance::Pass::SkyTables);
     ID3D11ShaderResourceView* const none[4]{};
     if (!atmosphereTables)
     {
@@ -587,7 +593,7 @@ void fill(ID3D11DeviceContext* context, bool physical)
     const auto step = fills++ % JitterPeriod + 1;
     const float history = shadowed && lastFillShadowed ? HistoryWeight : 0;
     const Constants constants{{TileWidth, TileHeight}, shadowed ? 1u : 0u, ShadowSamples, {halton(step, 2) - 0.5f, halton(step, 3) - 0.5f},
-        halton(step, 5), history, physical ? 1u : 0u, skySun ? 1u : 0u, {}};
+        halton(step, 5), history, physical ? 1u : 0u, skySun ? 1u : 0u, haze.load(std::memory_order_relaxed), {}};
     D3D11_MAPPED_SUBRESOURCE mapped{};
     check(context->Map(constantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Writing the fog constants");
     std::memcpy(mapped.pData, &constants, sizeof(constants));
@@ -603,17 +609,19 @@ void fill(ID3D11DeviceContext* context, bool physical)
         SavedComputeState saved(context);
         const auto last = visibilityWritten, next = 1 - visibilityWritten;
         ID3D11Buffer* const buffers[]{constantBuffer.Get(), copies.scene.Get(), copies.material.Get(), copies.object.Get(), copies.system.Get(),
-            copies.sunScene.Get(), copies.sunLight.Get(), copies.lastSunScene.Get(), copies.skyMaterial.Get()};
+            copies.sunScene.Get(), copies.sunLight.Get(), copies.lastSunScene.Get(), copies.skyMaterial.Get(), copies.skyObject.Get()};
         ID3D11SamplerState* const samplers[]{linearClamp.Get(), shadowSampler.Get()};
         context->CSSetConstantBuffers(0, static_cast<UINT>(std::size(buffers)), buffers);
         context->CSSetSamplers(0, static_cast<UINT>(std::size(samplers)), samplers);
         if (physical) updateSky(context);
         if (shadowed)
         {
+            const performance::Timed timed(context, performance::Pass::FogShadow);
             context->CSSetShaderResources(1, 1, shadow.GetAddressOf());
             dispatch(context, visibilityShader.Get(), currentVisibility.access.Get(), groups(TileWidth), groups(TileHeight), Slices);
         }
 
+        performance::Timed timed(context, performance::Pass::FogScattering);
         ID3D11ShaderResourceView* const inputs[]{rain.Get(), nullptr, visibility[last].view.Get(), currentVisibility.view.Get(),
             transmittance.view.Get(), multipleScattering.view.Get(), skyParameters.view.Get(), nullptr};
         ID3D11UnorderedAccessView* const outputs[]{media.access.Get(), visibility[next].access.Get(), fogOnly.access.Get()};
@@ -623,6 +631,7 @@ void fill(ID3D11DeviceContext* context, bool physical)
         context->Dispatch(groups(TileWidth), groups(TileHeight), Slices);
         context->CSSetUnorderedAccessViews(0, static_cast<UINT>(std::size(noAccess)), noAccess, nullptr);
 
+        timed.next(performance::Pass::FogIntegration);
         ID3D11ShaderResourceView* const sums[]{media.view.Get(), fogOnly.view.Get()};
         context->CSSetShaderResources(0, static_cast<UINT>(std::size(none)), none);
         context->CSSetShaderResources(0, static_cast<UINT>(std::size(sums)), sums);
@@ -662,7 +671,7 @@ void logSkyParameters(ID3D11DeviceContext* immediate)
             + number(texels[5][1]) + ", air transmittance " + number(texels[5][2]) + "), camera " + number(texels[0][3] * 1000) + " m, towards the sun "
             + number(texels[1][0]) + " " + number(texels[1][1]) + " " + number(texels[1][2]) + ", mean light " + number(texels[2][0]) + " "
             + number(texels[2][1]) + " " + number(texels[2][2]) + ", game fog " + number(texels[5][3]) + " /m, height fog " + number(texels[3][3])
-            + " /m.");
+            + " /m, overcast " + number(texels[6][3]) + ".");
         return;
     }
 
@@ -677,7 +686,8 @@ void logSkyParameters(ID3D11DeviceContext* immediate)
 }
 
 // The physical sky in place of the game's sky draw, with its vertex shader and bindings. A sky with
-// the sun's sprite also gives its constants to the next fill: the sun the game lights its sky with.
+// the sun's sprite also gives its constants to the next fill: the sun the game lights its sky with,
+// and how overcast it draws it.
 bool drawSky(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, bool sprite)
 {
     ComPtr<ID3D11PixelShader> gameShader;
@@ -689,9 +699,11 @@ bool drawSky(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, bo
 
         if (sprite)
         {
-            ComPtr<ID3D11Buffer> material;
+            ComPtr<ID3D11Buffer> material, object;
             context->PSGetConstantBuffers(MaterialSlot, 1, material.GetAddressOf());
-            copied = copyConstants(context, copies.skyMaterial.Get(), material.Get(), MaterialSize);
+            context->PSGetConstantBuffers(ObjectSlot, 1, object.GetAddressOf());
+            copied = copyConstants(context, copies.skyMaterial.Get(), material.Get(), MaterialSize)
+                && copyConstants(context, copies.skyObject.Get(), object.Get(), ObjectSize);
         }
 
         context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
@@ -701,7 +713,9 @@ bool drawSky(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, bo
         context->PSSetShaderResources(SkyParameterSlot, static_cast<UINT>(std::size(views)), views);
     }
 
+    performance::Timed timed(context, performance::Pass::Sky);
     context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
+    timed.end();
     context->PSSetShader(gameShader.Get(), nullptr, 0);
     context->PSSetShaderResources(SkyParameterSlot, static_cast<UINT>(gameViews.size()), gameViews.data());
     for (auto* view : gameViews)
@@ -923,6 +937,7 @@ void present(ID3D11DeviceContext* immediate) noexcept
         std::lock_guard lock(optionsMutex);
         active = wanted.volumetricFog && !pipelineFailed;
         physicalLook = active && wanted.physical;
+        haze = wanted.haze;
     }
 
     if (physicalLook && immediate) logSkyParameters(immediate);

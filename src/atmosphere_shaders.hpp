@@ -20,7 +20,8 @@ cbuffer Fog : register(b0)
     float HistoryWeight; // Of the last frames' visibility, reprojected; 0 without
     uint Physical;       // 1: the physical look's air and height fog in place of the game's formula
     uint SkySun;         // 1: SkyMaterial holds a sky draw's constants
-    float2 Padding;
+    float Haze;          // The physical look's haze, 0 to 1: how much of the game's fog its height fog takes
+    float Padding;
 };
 
 cbuffer FogScene : register(b1) // cPSScene of the game's fog pass
@@ -124,7 +125,8 @@ static const int AmbientTexel = 2;   // rgb the sky's mean light, for the fog
 static const int FogTexel = 3;       // rgb the height fog's albedo, a its extinction at the camera, 1/m
 static const int FogShapeTexel = 4;  // x its height scale, m; y its phase's g; z the camera's height in the world, m
 static const int SourceTexel = 5;    // For the log: x the game's sunlight on the ground, y its sky's, z the air's transmittance to the sun
-static const uint SkyParameterTexels = 6;
+static const int OvercastTexel = 6;  // rgb the light of the game's cloud deck over the sky, a how much of the sky it covers
+static const uint SkyParameterTexels = 7;
 
 float3 ToAtmosphere(float3 world)
 {
@@ -413,6 +415,11 @@ cbuffer SkyMaterial : register(b8) // cPSMaterial of the last sky draw: [3] towa
     float4 SkyMaterial[8];
 };
 
+cbuffer SkyObject : register(b9) // cPSObject of the last sky draw: [10].x how overcast it draws the sky
+{
+    float4 SkyObject[13];
+};
+
 RWTexture2D<float4> Output : register(u0);
 
 float Luminance(float3 color)
@@ -448,22 +455,39 @@ void main()
     float skySunlight = min(SkyMaterial[3].w * m_exposure.z, 1000);
     float sunlight = SkySun ? skySunlight : Pi * groundSunlight / max(Luminance(transmittance), 0.002);
 
+    // The game's weather draws a grey cloud deck over its sky (its sky draws' "cloudy" share: 0 on a
+    // clear day, 1 in rain), and lights the ground under it with almost no sun. The deck takes that
+    // share of the blue sky and of the sun on the air and the fog, and lights them itself, with what
+    // the game's fog adds up to far away: (sun x mean phase x betaM + sky x betaU) / extinction, the
+    // game's own light for that weather (in rain at dusk about 0.18 grey, as its sky draws).
+    float overcast = SkySun ? saturate(SkyObject[10].x) : 0;
+    float3 betaM = max(FogMedium[2].xyz, 0), betaR = max(FogMedium[3].xyz, 0);
+    float betaU = max(FogMedium[3].w, 0), mieRatio = FogMedium[0].y;
+    float meanMiePhase = (1 - mieRatio) / (4 * Pi) + mieRatio;
+    float3 deckLight = (FogMedium[0].w * (meanMiePhase * betaM + betaR / (4 * Pi)) + FogMedium[1].xyz * betaU)
+        / max(betaM + betaR + betaU, 1e-6) + max(FogMedium[7].xyz, 0);
+
     // The game's fog thins the view to e^(-density x od(1 km)) over a kilometre, a clear day in
     // Afghanistan to a fifth: it fades the distant ground, and the game's sky leaves most of it out.
-    // As a medium that thick it would grey the whole sky, so the height fog takes a tenth of it on
-    // a clear day, rising to all of it at ten times that (fog, sandstorms), less what the air does.
+    // As a medium that thick it would grey the whole sky, so at no haze the height fog takes a tenth
+    // of it on a clear day, rising to all of it at ten times that (fog, sandstorms), less what the
+    // air does. Haze raises it to all of it in any weather, in a layer as deep as dust (1 km): the
+    // game's haze does not thin with height, and real dust pales the sky. Under the cloud deck it is
+    // rain and mist, which the air does not make: all of it too.
     float opticalDepth = exp2(log2(max(1000 - FogMedium[0].z, 0)) * FogMedium[1].w);
     float gameExtinction = FogMedium[0].x * opticalDepth / 1000;
-    float fogExtinction = max(gameExtinction * min(gameExtinction / 0.015, 1) - 0.000015, 0);
-    float3 betaM = max(FogMedium[2].xyz, 0);
+    float share = lerp(min(gameExtinction / 0.015, 1), 1, max(saturate(Haze), overcast));
+    float fogExtinction = max(gameExtinction * share - 0.000015, 0);
+    float fogScaleHeight = lerp(300, 1000, saturate(Haze));
     float3 albedo = 0.9 * betaM / max(max(betaM.r, max(betaM.g, betaM.b)), 1e-6);
     if (all(betaM <= 0)) albedo = 0.9;
 
-    Output[uint2(SunTexel, 0)] = float4(sunlight.xxx, cameraHeight);
+    Output[uint2(SunTexel, 0)] = float4((sunlight * (1 - overcast)).xxx, cameraHeight);
     Output[uint2(DirectionTexel, 0)] = float4(towardsSun, 0);
     Output[uint2(FogTexel, 0)] = float4(albedo, fogExtinction);
-    Output[uint2(FogShapeTexel, 0)] = float4(300, SchlickToG(FogMedium[2].w), m_eyepos.y, 0);
+    Output[uint2(FogShapeTexel, 0)] = float4(fogScaleHeight, SchlickToG(FogMedium[2].w), m_eyepos.y, 0);
     Output[uint2(SourceTexel, 0)] = float4(groundSunlight, SkySun ? skySunlight : 0, Luminance(transmittance), gameExtinction);
+    Output[uint2(OvercastTexel, 0)] = float4(deckLight * overcast, overcast);
 }
 )";
 
@@ -506,7 +530,7 @@ void main(uint3 id : SV_DispatchThreadID)
 )";
 
 // The mean light from all around, which lights the height fog: the sky above, and the ground below,
-// lit by the sun through the air and by the sky.
+// lit by the sun through the air and by the sky; under the game's cloud deck, its light.
 inline constexpr char SkyAmbient[] = PHANTOM_FX_ATMOSPHERE R"(
 RWTexture2D<float4> Output : register(u0); // SkyParameters
 groupshared float4 Sums[64];
@@ -532,7 +556,9 @@ void main(uint3 id : SV_GroupThreadID, uint index : SV_GroupIndex)
     float3 sky = sun.rgb * Sums[0].rgb / Sums[0].a;
     float3 sunlight = sun.rgb * TransmittanceToTop(BottomRadius + sun.a, towardsSun.y) * saturate(towardsSun.y);
     float3 ground = GroundAlbedo * (sunlight / Pi + sky);
-    Output[uint2(AmbientTexel, 0)] = float4(0.5 * (sky + ground), 0);
+    // The deck's light is the game's fog light, which already holds the ground's.
+    float3 deck = Output[uint2(OvercastTexel, 0)].rgb;
+    Output[uint2(AmbientTexel, 0)] = float4(0.5 * (sky + ground) + deck, 0);
 }
 )";
 
@@ -759,11 +785,17 @@ float4 PhysicalMedia(uint3 id, float visibility, out float4 fogOnly)
     // Lit as the game lights the ground: from the sun pass's sun, at least 26 degrees up, which casts
     // the shadow map, so a low sun's glow never shows through the hills in front of it; the light is
     // the sky's sun's through the air, so it reddens and fades as the real sun sets.
+    // The height fog also dims the sunlight that reaches the froxel: its optical depth towards the sun,
+    // density x scale height / sin(elevation), the sine at least 0.01 (around the Earth's curve a 1 km
+    // layer is about 100 km long at the horizon). Without it dense haze glowed white towards a low sun.
     float cosTheta = dot(normalize(m_lightParams[0].xyz), viewDirection);
-    float3 toSun = SunTransmittance(BottomRadius + altitude, towardsSunWorld.y) * visibility;
+    float hazeToSun = exp(-fogDensity * fogShape.x / max(towardsSunWorld.y, 0.01));
+    float3 toSun = SunTransmittance(BottomRadius + altitude, towardsSunWorld.y) * hazeToSun * visibility;
     float3 multiple = MultipleScattering(BottomRadius + altitude, towardsSunWorld.y);
+    // The game's cloud deck takes its share of the sun (in sun.rgb) and lights the air from all around.
+    float3 deck = SkyParameters.Load(int3(OvercastTexel, 0, 0)).rgb;
     float3 airLight = sun.rgb * (toSun * (air.rayleigh * RayleighPhase(cosTheta) + air.mie * MiePhase(MiePhaseG, cosTheta))
-        + multiple * air.scattering);
+        + multiple * air.scattering) + deck * air.scattering;
     float3 fogScattering = fog.rgb * fogDensity;
     float3 fogLight = fogScattering * (sun.rgb * toSun * MiePhase(fogShape.y, cosTheta) + ambient);
 
@@ -842,9 +874,9 @@ void main(uint3 id : SV_DispatchThreadID)
 
 // The physical look's sky, in place of the game's sky draws (Sky_Draw_TppBaked, Sky_Draw_Tpp,
 // Sky_Draw_TppNoSky), with their vertex shaders and bindings: the sky's light from the sky-view
-// table, the game's sun or moon sprite (MOON 1), the height fog in front of it from the fog's last
-// slice, the game's dither, and the game's TppTonemap and encoding, or the encoding alone with HDR
-// (HDR 1), which takes TppTonemap out of the scene.
+// table and the game's cloud deck, the game's sun or moon sprite (MOON 1), the height fog in front of
+// it from the fog's last slice, the game's dither, and the game's TppTonemap and encoding, or the
+// encoding alone with HDR (HDR 1), which takes TppTonemap out of the scene.
 inline constexpr char SkyDraw[] = "#define LINEAR_CLAMP_SAMPLER s11\n" PHANTOM_FX_ATMOSPHERE R"(
 cbuffer cPSSystem : register(b0)
 {
@@ -883,10 +915,13 @@ float4 main(float4 position : SV_Position, float3 ray : TEXCOORD0, float4 moonPl
 {
     float4 sun = SkyParameters.Load(int3(SunTexel, 0, 0));
     float3 towardsSun = SkyParameters.Load(int3(DirectionTexel, 0, 0)).xyz;
-    float3 color = SkyLight(normalize(ray), towardsSun, sun.a) * sun.rgb;
+    float4 deck = SkyParameters.Load(int3(OvercastTexel, 0, 0));
+    // The sun's share in sun.rgb is what the deck leaves of the sky.
+    float3 color = SkyLight(normalize(ray), towardsSun, sun.a) * sun.rgb + deck.rgb;
 
 #if MOON
     float4 moon = moonColor * MoonTexture.Sample(MoonSampler, moonPlace.zw);
+    moon.a *= 1 - deck.a;
     if (all(moonPlace.zw >= 0 && moonPlace.zw <= 1)) color = color * (1 - moon.a) + saturate(moon.a * moon.rgb);
 #endif
 

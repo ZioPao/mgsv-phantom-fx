@@ -2,6 +2,7 @@
 
 #include "indirect_light_shaders.hpp"
 #include "log.hpp"
+#include "performance.hpp"
 #include "shader_bytecode.hpp"
 
 #include <Windows.h>
@@ -401,7 +402,9 @@ void computeOcclusion(ID3D11DeviceContext* context, ID3D11ShaderResourceView* de
     context->CSSetShaderResources(0, 5, inputs);
     context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
     context->CSSetShader(occlusionShader.Get(), nullptr, 0);
+    performance::Timed timed(context, performance::Pass::OcclusionMarch);
     context->Dispatch(groups(width), groups(height), 1);
+    timed.next(performance::Pass::OcclusionDenoise);
     denoise(context, visibility, denoiseShader.Get(), finalDenoiseShader.Get(), visibility[Result].access.Get());
 }
 
@@ -423,7 +426,9 @@ void computeLight(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth,
     context->CSSetShaderResources(0, 5, inputs);
     context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
     context->CSSetShader(lightShader.Get(), nullptr, 0);
+    performance::Timed timed(context, performance::Pass::LightMarch);
     context->Dispatch(groups(width), groups(height), 1);
+    timed.next(performance::Pass::LightDenoise);
     denoise(context, gathered, lightDenoiseShader.Get(), finalLightDenoiseShader.Get(), diffuseWithLight.access.Get());
 }
 
@@ -442,7 +447,9 @@ void applyToIndirectLight(ID3D11DeviceContext* context, const ui_redirect::DrawC
     context->PSSetShader(applyShader.Get(), nullptr, 0);
     context->PSSetShaderResources(SourceSlot, 1, visibility[Result].view.GetAddressOf());
     context->OMSetBlendState(multiplyBlend.Get(), nullptr, 0xFFFFFFFF);
+    performance::Timed timed(context, performance::Pass::OcclusionApply);
     context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
+    timed.end();
 
     context->PSSetShader(gameShader.Get(), nullptr, 0);
     context->PSSetShaderResources(SourceSlot, 1, gameSource.GetAddressOf());

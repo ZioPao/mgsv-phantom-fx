@@ -2,6 +2,7 @@
 
 #include "hdr_shaders.hpp"
 #include "log.hpp"
+#include "performance.hpp"
 #include "shader_bytecode.hpp"
 
 #include <Windows.h>
@@ -453,6 +454,7 @@ void copyForDof(ID3D11DeviceContext* context)
         texture = dofCopy.texture;
     }
 
+    const performance::Timed timed(context, performance::Pass::HdrDecode);
     context->CopyResource(texture.Get(), scene.Get());
     gameDofCopy = copy.Get();
 }
@@ -856,6 +858,7 @@ void encode(ID3D11DeviceContext* context) noexcept
         context->OMSetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
         {
             SavedComputeState saved(context);
+            const performance::Timed timed(context, performance::Pass::HdrEncode);
             context->CSSetUnorderedAccessViews(0, 1, access.GetAddressOf(), nullptr);
             context->CSSetShader(encodeShader.Get(), nullptr, 0);
             context->Dispatch(groups(width), groups(height), 1);
@@ -896,7 +899,9 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
         context->PSGetShaderResources(CurveSlot, 1, slot.GetAddressOf());
         context->PSSetShader(replacement, nullptr, 0);
         context->PSSetShaderResources(CurveSlot, 1, curveView.GetAddressOf());
+        performance::Timed timed(context, performance::Pass::HdrGrade);
         context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
+        timed.end();
         context->PSSetShader(shader.Get(), nullptr, 0);
         context->PSSetShaderResources(CurveSlot, 1, slot.GetAddressOf());
 
@@ -950,6 +955,7 @@ bool copy(ID3D11DeviceContext* context, ID3D11Resource* source, ID3D11Resource* 
             check(device->CreateShaderResourceView(destination, nullptr, sourceView.GetAddressOf()), "Viewing the scene copy");
         }
 
+        const performance::Timed timed(context, performance::Pass::HdrDecode);
         context->CopyResource(destination, source);
         SavedComputeState saved(context);
         context->CSSetShaderResources(0, 1, sourceView.GetAddressOf());

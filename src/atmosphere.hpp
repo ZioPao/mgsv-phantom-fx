@@ -24,6 +24,9 @@ struct Options
     // The physical look: Hillaire's sky and air (2020) in place of the game's sky and fog formula,
     // with height fog as dense as the game's weather makes its fog.
     bool physical{};
+    // How much of the game's haze the physical look's height fog takes on a clear day: 0 a sliver,
+    // 1 all of it, in a deeper layer.
+    float haze{};
 };
 
 void attach(ID3D11Device* device) noexcept;

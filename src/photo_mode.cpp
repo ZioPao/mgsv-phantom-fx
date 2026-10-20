@@ -54,6 +54,20 @@ constexpr unsigned char CreatePauseStart[]{0x40, 0x56, 0x57, 0x41, 0x56, 0x48, 0
 constexpr std::uint32_t PhotoPauses = 0x7FFFFFFE, Active = 0x80000000;
 constexpr std::uint32_t PauseName = 0x4F544850; // A hash none of the game's requests use
 
+// The weather manager's update (0x537DD0) tests two pause bits: bit 9 holds the weather and time of
+// day where they are, bit 8 skips the rest of the update. Either keeps the weather menu's changes
+// from showing, so while photo mode pauses, the update ignores both. Its clock still stands: game
+// time steps by zero under any pause bit.
+constexpr std::uintptr_t WeatherPauseTestsRva = 0x537FA3;
+// mov ebx, [rax + 8]; shr ebx, 9; and bl, 1; jne; cmp byte ptr [rbp + 0xEC8], r13b; je;
+// xorps xmm7, xmm7; call 0xF1D80; mov ecx, [rax + 8]; shr ecx, 8; test cl, 1; je +0x0C
+constexpr unsigned char WeatherPauseTests[]{0x8B, 0x58, 0x08, 0xC1, 0xEB, 0x09, 0x80, 0xE3, 0x01, 0x75, 0x09, 0x44, 0x38, 0xAD, 0xC8,
+    0x0E, 0x00, 0x00, 0x74, 0x03, 0x0F, 0x57, 0xFF, 0xE8, 0xC1, 0x9D, 0xBB, 0xFF, 0x8B, 0x48, 0x08, 0xC1, 0xE9, 0x08, 0xF6, 0xC1, 0x01,
+    0x74, 0x0C};
+// In photo mode the bit 9 test becomes `and bl, 0` and the jump past the bit 8 test a `jmp`.
+constexpr std::size_t HoldMask = 8, SkipJump = 0x25;
+constexpr unsigned char TestBit = 0x01, NoBit = 0x00, JumpIfZero = 0x74, Jump = 0xEB;
+
 // Metres per second, radians per mouse count.
 constexpr float Speed = 5, FastSpeed = 25, MouseSensitivity = 0.001f;
 // Just short of straight up or down, where the yaw would be lost.
@@ -77,6 +91,7 @@ SelectorUpdate originalSelectorUpdate{};
 RawInput originalRawInput{};
 CreatePause createPause{};
 void* pauseManager{};
+std::uint8_t* weatherPauseTests{}; // Null when the update's code is unexpected
 
 // Fox Engine is right-handed with y up, and a camera looks along its local +z. Yaw 0 looks along
 // +z, and the pitch is positive upwards.
@@ -204,6 +219,20 @@ void fly(FreeCamera& camera, std::uint8_t keys, int turnX, int turnY, float seco
     camera.position[1] += distance * rise;
 }
 
+void letWeatherRun(bool run)
+{
+    auto* const code = weatherPauseTests;
+    if (!code) return;
+
+    DWORD protection{};
+    if (!VirtualProtect(code, sizeof(WeatherPauseTests), PAGE_EXECUTE_READWRITE, &protection)) return;
+
+    code[HoldMask] = run ? NoBit : TestBit;
+    code[SkipJump] = run ? Jump : JumpIfZero;
+    VirtualProtect(code, sizeof(WeatherPauseTests), protection, &protection);
+    FlushInstructionCache(GetCurrentProcess(), code, sizeof(WeatherPauseTests));
+}
+
 void pause(bool on)
 {
     auto* request = pauseRequest.load();
@@ -220,6 +249,8 @@ void pause(bool on)
     std::atomic_ref<std::uint32_t> flags(*request);
     if (on) flags.fetch_or(Active);
     else flags.fetch_and(~Active);
+
+    letWeatherRun(on);
 }
 
 double secondsSince(LARGE_INTEGER& last)
@@ -386,6 +417,7 @@ std::string hook() noexcept
 
     pauseManager = manager;
     createPause = reinterpret_cast<CreatePause>(base + CreatePauseRva);
+    if (!std::memcmp(base + WeatherPauseTestsRva, WeatherPauseTests, sizeof(WeatherPauseTests))) weatherPauseTests = base + WeatherPauseTestsRva;
     auto status = hookAt(base + SelectorUpdateRva, reinterpret_cast<void*>(&selectorUpdate), originalSelectorUpdate);
     if (status == MH_OK)
     {

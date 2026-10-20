@@ -1,6 +1,7 @@
 #include "shadows.hpp"
 
 #include "log.hpp"
+#include "performance.hpp"
 #include "shader_bytecode.hpp"
 #include "shadows_shaders.hpp"
 
@@ -515,6 +516,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
 
         if (!tracedFrom(context, depth.Get()))
         {
+            const performance::Timed timed(context, performance::Pass::SunTrace);
             const float* direction = light + LightDirection;
             const auto where = trace(context, depth.Get(), specular.Get(), project(scene, {direction[0], direction[1], direction[2], 0}), sunShadow);
             noteTraced(context, depth.Get());
@@ -538,7 +540,9 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
     context->PSSetShader(replacements[static_cast<std::size_t>(sun)].Get(), nullptr, 0);
     context->PSSetShaderResources(ShadowSlot, 1, sunShadow.view.GetAddressOf());
     context->PSSetConstantBuffers(OptionsSlot, 1, optionsBuffer.GetAddressOf());
+    performance::Timed timed(context, performance::Pass::SunLight);
     context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
+    timed.end();
     context->PSSetShader(gameShader, nullptr, 0);
     context->PSSetShaderResources(ShadowSlot, 1, gameView.GetAddressOf());
     context->PSSetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
@@ -604,7 +608,9 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
 
     float point[4]{position[0], position[1], position[2], 1};
     if (std::abs(point[2]) < MinLightDepth) point[2] = std::copysign(MinLightDepth, point[2]);
+    performance::Timed timed(context, performance::Pass::LampTraces);
     const auto where = trace(context, depth.Get(), specular.Get(), project(scene, point), lightShadow);
+    timed.end();
     if (!tracedLightOnce)
     {
         tracedLightOnce = true;
@@ -623,12 +629,14 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     context->RSGetState(gameRasterizer.GetAddressOf());
 
     context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
+    timed.next(performance::Pass::LampShadows);
     context->PSSetShader(lightShadowShader.Get(), nullptr, 0);
     context->PSSetShaderResources(ShadowSlot, 1, lightShadow.view.GetAddressOf());
     context->OMSetBlendState(alphaOnly.Get(), blendFactor, sampleMask);
     context->OMSetDepthStencilState(noDepth.Get(), 0);
     context->RSSetState(bothFaces.Get());
     context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
+    timed.end();
     context->PSSetShader(gameShader.Get(), nullptr, 0);
     context->PSSetShaderResources(ShadowSlot, 1, gameView.GetAddressOf());
     context->OMSetBlendState(gameBlend.Get(), blendFactor, sampleMask);

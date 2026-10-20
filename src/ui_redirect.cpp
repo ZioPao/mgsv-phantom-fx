@@ -1,5 +1,6 @@
 #include "ui_redirect.hpp"
 
+#include "camera.hpp"
 #include "hdr.hpp"
 #include "log.hpp"
 #include "render_scale.hpp"
@@ -45,6 +46,10 @@ struct Targets
     // cPSSystem (slot b0) for the output size. The 2D pass's pixel shaders read only m_renderInfo (c1)
     // and m_renderBuffer (c2) from it, to place screen-space effects.
     ComPtr<ID3D11Buffer> systemConstants;
+    // cPSScene (slot b2): the game's, copied before each draw, with m_viewportSize.xy (c22) set to
+    // the output size from `viewportSize`. The camera filters measure the screen with it, and the
+    // sandstorm's vignette (Draw2D_TppNoiseFilter) is placed by pixel position over it.
+    ComPtr<ID3D11Buffer> sceneConstants, viewportSize;
 };
 
 // Whether each recording context has a 2D pass vertex shader bound, by the context ReShade reports
@@ -126,6 +131,14 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
     const D3D11_SUBRESOURCE_DATA systemData{system};
     if (FAILED(device->CreateBuffer(&systemDesc, &systemData, created->systemConstants.GetAddressOf()))) return nullptr;
 
+    const D3D11_BUFFER_DESC sceneDesc{sizeof(camera::SceneConstants), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
+    const float viewport[4]{static_cast<float>(width), static_cast<float>(height)};
+    const D3D11_BUFFER_DESC viewportDesc{sizeof(viewport), D3D11_USAGE_IMMUTABLE, D3D11_BIND_CONSTANT_BUFFER};
+    const D3D11_SUBRESOURCE_DATA viewportData{viewport};
+    if (FAILED(device->CreateBuffer(&sceneDesc, nullptr, created->sceneConstants.GetAddressOf()))
+        || FAILED(device->CreateBuffer(&viewportDesc, &viewportData, created->viewportSize.GetAddressOf())))
+        return nullptr;
+
     D3D11_RENDER_TARGET_VIEW_DESC targetDesc{drawFormat(), D3D11_RTV_DIMENSION_TEXTURE2D};
     D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{gammaFormat(), D3D11_SRV_DIMENSION_TEXTURE2D};
     viewDesc.Texture2D.MipLevels = 1;
@@ -179,6 +192,22 @@ void issue(ID3D11DeviceContext* context, const DrawCall& call)
 LONG scaled(LONG value, double scale)
 {
     return static_cast<LONG>(std::lround(value * scale));
+}
+
+// Fills the output's cPSScene from the game's on `context`. The game's m_viewportSize.xy is the
+// render size, the size of the scene target the draw was meant for.
+bool copyScene(ID3D11DeviceContext* context, const Targets& output, ID3D11Buffer* gameScene)
+{
+    D3D11_BUFFER_DESC desc{};
+    if (gameScene) gameScene->GetDesc(&desc);
+    if (!gameScene || desc.ByteWidth != sizeof(camera::SceneConstants)) return false;
+
+    constexpr UINT viewportSizeOffset = 22 * sizeof(float[4]);
+    const D3D11_BOX viewportSize{0, 0, 0, 2 * sizeof(float), 1, 1};
+    context->CopyResource(output.sceneConstants.Get(), gameScene);
+    context->CopySubresourceRegion(output.sceneConstants.Get(), 0, viewportSizeOffset, 0, 0, output.viewportSize.Get(), 0, &viewportSize);
+
+    return true;
 }
 
 BoundShader* slotOf(ID3D11DeviceContext* context, bool add)
@@ -314,19 +343,23 @@ bool draw2D(ID3D11DeviceContext* context, const DrawCall& call) noexcept
             scaledRects[i] = {scaled(rects[i].left, scaleX), scaled(rects[i].top, scaleY), scaled(rects[i].right, scaleX),
                 scaled(rects[i].bottom, scaleY)};
 
-        ComPtr<ID3D11Buffer> system;
+        ComPtr<ID3D11Buffer> system, gameScene;
         context->PSGetConstantBuffers(0, 1, system.GetAddressOf());
+        context->PSGetConstantBuffers(2, 1, gameScene.GetAddressOf());
+        const bool sceneCopied = copyScene(context, *output, gameScene.Get());
         context->OMSetRenderTargetsAndUnorderedAccessViews(1, output->target.GetAddressOf(), depth ? output->depth.Get() : nullptr, 0,
             D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
         context->RSSetViewports(viewportCount, scaledViewports);
         context->RSSetScissorRects(rectCount, scaledRects);
         context->PSSetConstantBuffers(0, 1, output->systemConstants.GetAddressOf());
+        if (sceneCopied) context->PSSetConstantBuffers(2, 1, output->sceneConstants.GetAddressOf());
         issue(context, call);
 
         context->OMSetRenderTargetsAndUnorderedAccessViews(1, bound.data(), depth.Get(), 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
         context->RSSetViewports(viewportCount, viewports);
         context->RSSetScissorRects(rectCount, rects);
         context->PSSetConstantBuffers(0, 1, system.GetAddressOf());
+        if (sceneCopied) context->PSSetConstantBuffers(2, 1, gameScene.GetAddressOf());
         rememberScene(views[0].Get());
 
         if (!loggedDraw.exchange(true))

@@ -1,0 +1,572 @@
+#include "performance.hpp"
+#include "log.hpp"
+#include "upscaler.hpp"
+
+#include <Windows.h>
+#include <atomic>
+#include <cmath>
+#include <format>
+#include <fstream>
+#include <iterator>
+#include <mutex>
+#include <unordered_map>
+#include <utility>
+
+namespace phantom_fx::performance
+{
+namespace
+{
+using Microsoft::WRL::ComPtr;
+
+// A frame on the immediate context: the disjoint query around it, timestamps at its first command
+// list and at its present, and the passes its command lists ran.
+struct Frame
+{
+    ComPtr<ID3D11Query> disjoint, start, end;
+    std::vector<TimedRun> runs;
+    bool started{}; // A command list executed, so `start` was ended
+    bool pending{}; // Closed and not read yet
+};
+
+// What a frame took on the GPU.
+struct Sample
+{
+    float gpuFrame{}; // 0 when no command list executed
+    Milliseconds passes{};
+};
+
+// What a measurement step leaves out, with the steps before it.
+struct Setting
+{
+    std::string removed;
+    upscaler::LeftOut leftOut;
+};
+
+// Frames the GPU may still be working on, and the one being recorded.
+constexpr std::size_t FrameCount = 5;
+constexpr float AverageMilliseconds = 500;
+constexpr float SettleSeconds = 1.5f, TimedSeconds = 2.5f;
+
+// ---- The timer: taken from any thread, and nothing else is locked while it is held ----
+std::mutex timerMutex;
+ComPtr<ID3D11Device> device;
+ComPtr<ID3D11DeviceContext> immediate;
+std::array<Frame, FrameCount> frames;
+std::size_t current{};
+bool open{}; // frames[current] takes the runs of the command lists executed now
+std::vector<TimedRun> spare;
+// The runs a deferred context recorded since its last FinishCommandList, and those of finished
+// command lists, by native pointer.
+std::unordered_map<std::uint64_t, std::vector<TimedRun>> recordedRuns;
+
+// Read on every recording thread.
+std::atomic<bool> timing{};
+std::atomic<std::uint64_t> watchedAt{};
+std::atomic<bool> overlay{}, measurementRequested{};
+
+// ---- On the presenting thread ----
+std::filesystem::path reportPath;
+Costs costs;
+bool averaging{}; // `costs` has a GPU sample since the timing began
+LONGLONG lastPresent{}, lastSample{};
+
+struct
+{
+    std::vector<Setting> steps;
+    std::size_t step{};
+    LONGLONG stepStart{}, timingStart{};
+    double gpuSum{};
+    unsigned gpuFrames{};
+    std::vector<Measurement::Step> results, finished;
+    std::uint64_t finishedAt{};
+    bool running{};
+} measurement;
+
+std::mutex statusMutex;
+Status published;
+
+LONGLONG ticksNow()
+{
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+
+    return now.QuadPart;
+}
+
+float millisecondsOf(LONGLONG ticks)
+{
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+
+    return static_cast<float>(static_cast<double>(ticks) * 1000.0 / static_cast<double>(frequency.QuadPart));
+}
+
+// Call with timerMutex held. Null when the device refuses.
+ComPtr<ID3D11Query> query(D3D11_QUERY type)
+{
+    ComPtr<ID3D11Query> result;
+    const D3D11_QUERY_DESC description{type, 0};
+    if (device && FAILED(device->CreateQuery(&description, result.GetAddressOf()))) result.Reset();
+
+    return result;
+}
+
+// Call with timerMutex held.
+void giveBack(std::vector<TimedRun>& runs)
+{
+    spare.insert(spare.end(), std::make_move_iterator(runs.begin()), std::make_move_iterator(runs.end()));
+    runs.clear();
+}
+
+std::optional<TimedRun> acquire(Pass pass)
+{
+    if (!timing.load(std::memory_order_relaxed)) return std::nullopt;
+
+    std::lock_guard lock(timerMutex);
+    if (!device) return std::nullopt;
+
+    TimedRun run;
+    if (!spare.empty())
+    {
+        run = std::move(spare.back());
+        spare.pop_back();
+    }
+    else run = {pass, query(D3D11_QUERY_TIMESTAMP), query(D3D11_QUERY_TIMESTAMP)};
+
+    if (!run.start || !run.end) return std::nullopt;
+
+    run.pass = pass;
+
+    return run;
+}
+
+// A run the immediate context recorded counts for the frame now executing; a deferred context's
+// waits for its command list.
+void finish(ID3D11DeviceContext* context, TimedRun run)
+{
+    std::lock_guard lock(timerMutex);
+    if (context != immediate.Get()) recordedRuns[reinterpret_cast<std::uint64_t>(context)].push_back(std::move(run));
+    else if (open) frames[current].runs.push_back(std::move(run));
+    else spare.push_back(std::move(run));
+}
+
+// Call with timerMutex held.
+std::optional<float> millisecondsBetween(ID3D11Query* start, ID3D11Query* end, UINT64 frequency)
+{
+    UINT64 from{}, to{};
+    if (immediate->GetData(start, &from, sizeof(from), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK
+        || immediate->GetData(end, &to, sizeof(to), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK || to < from)
+        return std::nullopt;
+
+    return static_cast<float>(static_cast<double>(to - from) * 1000.0 / static_cast<double>(frequency));
+}
+
+// Call with timerMutex held. Nullopt while the GPU has not finished the frame, or when its clock
+// changed speed during it (a power state change), which makes its times meaningless.
+std::optional<Sample> read(Frame& frame)
+{
+    D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
+    if (immediate->GetData(frame.disjoint.Get(), &disjoint, sizeof(disjoint), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) return std::nullopt;
+
+    frame.pending = false;
+    if (disjoint.Disjoint || !disjoint.Frequency)
+    {
+        giveBack(frame.runs);
+        return std::nullopt;
+    }
+
+    Sample sample;
+    if (frame.started) sample.gpuFrame = millisecondsBetween(frame.start.Get(), frame.end.Get(), disjoint.Frequency).value_or(0.0f);
+    for (const auto& run : frame.runs)
+        if (const auto time = millisecondsBetween(run.start.Get(), run.end.Get(), disjoint.Frequency))
+            sample.passes[static_cast<std::size_t>(run.pass)] += *time;
+
+    giveBack(frame.runs);
+
+    return sample;
+}
+
+// Closes the frame being recorded, then returns the newest frame the GPU has finished since the last
+// call, if any. Oldest first; the frame about to be recorded into again is given up if the GPU has
+// not finished it.
+std::optional<Sample> closeAndRead()
+{
+    std::lock_guard lock(timerMutex);
+    if (!immediate) return std::nullopt;
+
+    if (std::exchange(open, false))
+    {
+        auto& frame = frames[current];
+        if (frame.started) immediate->End(frame.end.Get());
+        immediate->End(frame.disjoint.Get());
+        frame.pending = true;
+        current = (current + 1) % FrameCount;
+    }
+
+    std::optional<Sample> newest;
+    for (std::size_t i = 0; i < FrameCount; ++i)
+    {
+        auto& candidate = frames[(current + i) % FrameCount];
+        if (!candidate.pending) continue;
+
+        if (auto sample = read(candidate)) newest = sample;
+        else if (candidate.pending && &candidate == &frames[current])
+        {
+            candidate.pending = false;
+            giveBack(candidate.runs);
+        }
+    }
+
+    return newest;
+}
+
+// Starts timing the next frame, or stops when no one looks.
+void openFrame(bool wanted)
+{
+    std::lock_guard lock(timerMutex);
+    auto& frame = frames[current];
+    if (!wanted || !immediate || frame.pending)
+    {
+        timing = false;
+        return;
+    }
+
+    if (!frame.disjoint)
+    {
+        frame.disjoint = query(D3D11_QUERY_TIMESTAMP_DISJOINT);
+        frame.start = query(D3D11_QUERY_TIMESTAMP);
+        frame.end = query(D3D11_QUERY_TIMESTAMP);
+    }
+
+    if (!frame.disjoint || !frame.start || !frame.end)
+    {
+        timing = false;
+        return;
+    }
+
+    immediate->Begin(frame.disjoint.Get());
+    frame.started = false;
+    open = true;
+    timing = true;
+}
+
+// Adds the frame to the averages, which follow about the last half second.
+void average(LONGLONG now, const std::optional<Sample>& sample)
+{
+    if (lastPresent)
+    {
+        const float frame = millisecondsOf(now - lastPresent);
+        costs.frame += (frame - costs.frame) * (1 - std::exp(-frame / AverageMilliseconds));
+    }
+
+    lastPresent = now;
+    if (!sample) return;
+
+    // The first sample after the timing began replaces whatever was left from before.
+    const float weight = averaging ? 1 - std::exp(-millisecondsOf(now - lastSample) / AverageMilliseconds) : 1;
+    averaging = true;
+    lastSample = now;
+    costs.gpuFrame += (sample->gpuFrame - costs.gpuFrame) * weight;
+    for (std::size_t i = 0; i < costs.passes.size(); ++i) costs.passes[i] += (sample->passes[i] - costs.passes[i]) * weight;
+}
+
+// The steps from what is on now: each leaves out one more effect, the upscaler last, as the others
+// run at its render size. HDR takes a restart, so it is not measured. Returns what the first step
+// leaves out: nothing.
+std::optional<upscaler::LeftOut> startMeasurement(LONGLONG now)
+{
+    auto& m = measurement;
+    m.steps.clear();
+    m.results.clear();
+    m.step = 0;
+    m.timingStart = 0;
+
+    const auto settings = upscaler::currentSettings();
+    const bool lighting = upscaler::enhancementsOn();
+    upscaler::LeftOut leftOut;
+    m.steps.push_back({"", leftOut});
+    const auto leave = [&](bool on, std::string removed, bool upscaler::LeftOut::*effect)
+    {
+        if (!on) return;
+
+        leftOut.*effect = true;
+        m.steps.push_back({std::move(removed), leftOut});
+    };
+    leave(settings.depthOfField, "Depth of field", &upscaler::LeftOut::depthOfField);
+    leave(lighting && settings.volumetricFog, "Volumetric fog", &upscaler::LeftOut::volumetricFog);
+    leave(lighting && settings.indirectLight, "SSILVB", &upscaler::LeftOut::indirectLight);
+    leave(lighting && settings.ambientOcclusion, "GTVBAO", &upscaler::LeftOut::ambientOcclusion);
+    leave(lighting && settings.lightScreenSpaceShadows, "Lamp contact shadows", &upscaler::LeftOut::lightScreenSpaceShadows);
+    leave(lighting && settings.sunScreenSpaceShadows, "Sun contact shadows", &upscaler::LeftOut::sunScreenSpaceShadows);
+    leave(lighting && settings.softShadows, "Soft shadows", &upscaler::LeftOut::softShadows);
+    const bool upscaling = settings.mode != upscaler::Mode::Off;
+    leave(upscaling && settings.sharpness > 0, "Sharpening", &upscaler::LeftOut::sharpening);
+    leave(upscaling, std::string(upscaler::label(settings.upscaler)) + " (FXAA instead)", &upscaler::LeftOut::upscaler);
+    if (m.steps.size() < 2)
+    {
+        log("Nothing to measure: no effect is on.");
+        return std::nullopt;
+    }
+
+    m.running = true;
+    m.stepStart = now;
+    log("Measuring the real cost: " + std::to_string(m.steps.size()) + " steps.");
+
+    return m.steps.front().leftOut;
+}
+
+void finishMeasurement()
+{
+    auto& m = measurement;
+    m.running = false;
+    m.finished = m.results;
+    m.finishedAt = GetTickCount64();
+
+    auto line = std::format("Real cost (GPU frame without each, ms): everything on {:.2f}", m.results.front().gpuFrame);
+    for (std::size_t i = 1; i < m.results.size(); ++i)
+        line += std::format("; {} {:.2f} ({:+.2f})", m.results[i].removed, m.results[i].gpuFrame, m.results[i - 1].gpuFrame - m.results[i].gpuFrame);
+
+    log(line + std::format("; total {:.2f}.", m.results.front().gpuFrame - m.results.back().gpuFrame));
+}
+
+// One present into the measurement: each step settles, then its GPU frames are timed. Returns what
+// to leave out from now on, when that changes.
+std::optional<upscaler::LeftOut> advanceMeasurement(LONGLONG now, const std::optional<Sample>& sample)
+{
+    auto& m = measurement;
+    if (measurementRequested.exchange(false) && !m.running) return startMeasurement(now);
+    if (!m.running || millisecondsOf(now - m.stepStart) < SettleSeconds * 1000) return std::nullopt;
+
+    if (!m.timingStart)
+    {
+        m.timingStart = now;
+        m.gpuSum = 0;
+        m.gpuFrames = 0;
+        return std::nullopt;
+    }
+
+    if (sample && sample->gpuFrame > 0)
+    {
+        m.gpuSum += sample->gpuFrame;
+        ++m.gpuFrames;
+    }
+
+    if (millisecondsOf(now - m.timingStart) < TimedSeconds * 1000) return std::nullopt;
+
+    m.results.push_back({m.steps[m.step].removed, m.gpuFrames ? static_cast<float>(m.gpuSum / m.gpuFrames) : 0.0f});
+    m.timingStart = 0;
+    m.stepStart = now;
+    if (++m.step < m.steps.size()) return m.steps[m.step].leftOut;
+
+    finishMeasurement();
+
+    return upscaler::LeftOut{};
+}
+
+void publish()
+{
+    std::lock_guard lock(statusMutex);
+    published.overlay = overlay;
+    published.costs = costs;
+    auto& m = published.measurement;
+    m.running = measurement.running;
+    m.step = static_cast<unsigned>(measurement.step);
+    m.stepCount = static_cast<unsigned>(measurement.steps.size());
+    if (m.finishedAt == measurement.finishedAt) return;
+
+    m.steps = measurement.finished;
+    m.finishedAt = measurement.finishedAt;
+}
+
+// While the costs show over the game or are measured, PhantomFX-performance.txt holds them, rewritten
+// every second, and once more after, so it keeps a finished measurement's result. Not otherwise:
+// opening a file while presenting can hitch the game.
+void writeReport()
+{
+    static std::uint64_t written{};
+    static bool asked{};
+    const auto now = GetTickCount64();
+    if (now - written < 1000) return;
+
+    written = now;
+    const auto askedBefore = std::exchange(asked, overlay || measurement.running);
+    if ((!asked && !askedBefore) || reportPath.empty()) return;
+
+    std::ofstream(reportPath, std::ios::trunc) << report(status());
+}
+}
+
+float Costs::total() const
+{
+    float sum{};
+    for (const auto pass : passes) sum += pass;
+
+    return sum;
+}
+
+void attach(ID3D11Device* gameDevice, ID3D11DeviceContext* gameImmediate, const std::filesystem::path& report) noexcept
+{
+    std::lock_guard lock(timerMutex);
+    device = gameDevice;
+    immediate = gameImmediate;
+    reportPath = report;
+}
+
+void detach() noexcept
+{
+    timing = false;
+    if (measurement.running)
+    {
+        measurement.running = false;
+        upscaler::leaveOut({});
+    }
+
+    std::lock_guard lock(timerMutex);
+    frames = {};
+    current = 0;
+    open = false;
+    spare.clear();
+    recordedRuns.clear();
+    immediate.Reset();
+    device.Reset();
+    averaging = false;
+}
+
+Timed::Timed(ID3D11DeviceContext* context, Pass pass) noexcept : context(context)
+{
+    next(pass);
+}
+
+void Timed::next(Pass pass) noexcept
+{
+    end();
+    try
+    {
+        run = acquire(pass);
+    }
+    catch (...)
+    {
+        run.reset();
+    }
+
+    if (run) context->End(run->start.Get());
+}
+
+void Timed::end() noexcept
+{
+    if (!run) return;
+
+    context->End(run->end.Get());
+    try
+    {
+        finish(context, std::move(*run));
+    }
+    catch (...)
+    {
+    }
+
+    run.reset();
+}
+
+void recorded(std::uint64_t list, std::uint64_t context) noexcept
+{
+    try
+    {
+        std::lock_guard lock(timerMutex);
+        const auto found = recordedRuns.find(context);
+        if (found == recordedRuns.end()) return;
+
+        auto runs = std::move(found->second);
+        recordedRuns.erase(found);
+        auto& target = recordedRuns[list];
+        target.insert(target.end(), std::make_move_iterator(runs.begin()), std::make_move_iterator(runs.end()));
+    }
+    catch (...)
+    {
+    }
+}
+
+void forget(std::uint64_t list) noexcept
+{
+    try
+    {
+        std::lock_guard lock(timerMutex);
+        const auto found = recordedRuns.find(list);
+        if (found == recordedRuns.end()) return;
+
+        giveBack(found->second);
+        recordedRuns.erase(found);
+    }
+    catch (...)
+    {
+    }
+}
+
+void executing(std::uint64_t list) noexcept
+{
+    try
+    {
+        std::lock_guard lock(timerMutex);
+        if (open && !frames[current].started)
+        {
+            immediate->End(frames[current].start.Get());
+            frames[current].started = true;
+        }
+
+        const auto found = recordedRuns.find(list);
+        if (found == recordedRuns.end()) return;
+
+        auto& runs = frames[current].runs;
+        if (open) runs.insert(runs.end(), std::make_move_iterator(found->second.begin()), std::make_move_iterator(found->second.end()));
+        else giveBack(found->second);
+
+        recordedRuns.erase(found);
+    }
+    catch (...)
+    {
+    }
+}
+
+void present() noexcept
+{
+    try
+    {
+        const auto now = ticksNow();
+        const auto sample = closeAndRead();
+        average(now, sample);
+        // Not under a lock: the effects' settings take theirs.
+        if (const auto leftOut = advanceMeasurement(now, sample)) upscaler::leaveOut(*leftOut);
+
+        const bool wanted = overlay || measurement.running || GetTickCount64() - watchedAt.load() < 1000;
+        if (!wanted) averaging = false;
+        openFrame(wanted);
+        publish();
+        writeReport();
+    }
+    catch (const std::exception& error)
+    {
+        log(std::string("Costs: ") + error.what());
+    }
+}
+
+Status status()
+{
+    std::lock_guard lock(statusMutex);
+    return published;
+}
+
+void watch() noexcept
+{
+    watchedAt = GetTickCount64();
+}
+
+void showOverlay(bool show) noexcept
+{
+    overlay = show;
+}
+
+void measure() noexcept
+{
+    measurementRequested = true;
+}
+}

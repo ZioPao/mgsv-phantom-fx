@@ -3,6 +3,7 @@
 #include "depth_of_field_shaders.hpp"
 #include "hdr.hpp"
 #include "log.hpp"
+#include "performance.hpp"
 #include "photo_mode.hpp"
 #include "shader_bytecode.hpp"
 
@@ -448,6 +449,7 @@ void recordGather(ID3D11DeviceContext* context, const Parameters& parameters, ID
     context->CSSetShaderResources(5, 1, tonemap.view.GetAddressOf());
     context->CSSetSamplers(0, 1, linearSampler.GetAddressOf());
 
+    performance::Timed timed(context, performance::Pass::DofSetup);
     ID3D11ShaderResourceView* setupInputs[]{scene, depth};
     ID3D11UnorderedAccessView* setupOutputs[]{halfColor.access.Get(), tileBlur.access.Get(), lens.access.Get()};
     context->CSSetShaderResources(0, 2, setupInputs);
@@ -464,6 +466,7 @@ void recordGather(ID3D11DeviceContext* context, const Parameters& parameters, ID
     context->Dispatch(groups(tileRadius.width), groups(tileRadius.height), 1);
     context->CSSetUnorderedAccessViews(0, 1, noAccess, nullptr);
 
+    timed.next(performance::Pass::DofGather);
     ID3D11ShaderResourceView* gatherInputs[]{halfColor.view.Get(), tileRadius.view.Get()};
     ID3D11UnorderedAccessView* gatherOutputs[]{background.access.Get(), foreground.access.Get()};
     context->CSSetShaderResources(0, 2, gatherInputs);
@@ -511,6 +514,7 @@ void recordShotFrame(ID3D11DeviceContext* context, const Parameters& parameters,
 
     writeParameters(context, parameters);
     SavedComputeState saved(context);
+    const performance::Timed timed(context, performance::Pass::LensShot);
     if (shot.frames == 1)
     {
         constexpr UINT zeros[4]{};
@@ -623,6 +627,7 @@ bool composite(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call)
         context->PSSetShader(compositeShader.Get(), nullptr, 0);
     }
 
+    const performance::Timed timed(context, performance::Pass::DofComposite);
     context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
 
     return true;

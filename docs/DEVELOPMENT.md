@@ -71,6 +71,8 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/camera.cpp`, `src/camera.hpp` | Scene constants: main-view recognition, jitter, reprojection, camera cuts |
 | `src/upscaler_settings.cpp`, `src/upscaler_settings.hpp` | Upscaler, mode, custom scale, preset, texture bias, sharpening, frame rate unlock, frame generation, soft shadows, sun and lamp contact shadows, ambient occlusion, indirect lighting, volumetric fog; `PhantomFX.ini` |
 | `src/upscaler_menu.cpp`, `src/menu_style.hpp` | The "Phantom FX" overlay window: Upscaling, Visuals, Utility and Diagnostics |
+| `src/performance.cpp`, `src/performance.hpp` | The passes' GPU costs: timestamp queries, the averages, the real cost measurement, `PhantomFX-performance.txt` (see "Costs") |
+| `src/performance_menu.cpp` | The cost table in Diagnostics and over the game, and as text |
 | `src/device_check.cpp`, `src/device_check.hpp` | Lets the game start under ReShade (see below); the build check |
 | `src/motion_blur.cpp`, `src/motion_blur.hpp` | Hooks on the motion blur plugin: velocity passes every frame, no blur |
 | `src/fxaa.cpp`, `src/fxaa.hpp` | Hook on the FXAA plugin: the FXAA pass at any post processing setting |
@@ -208,6 +210,41 @@ The overlay's Diagnostics section has, for everyone: debug views of the motion v
 where the engine's object velocity was used, jitter off, the game's FXAA for comparison (DLSS stays
 ready), and the frame, fallback and reset counts. All are off by default and not saved. Every 1800
 frames with DLSS on, `PhantomFX.log` gets a status line with the same counts.
+
+### Costs
+
+Diagnostics ends with what the add-on's passes cost on the GPU (`src/performance.cpp`): one row
+per effect with a bar, its milliseconds and its share of the GPU frame, each opening to its passes,
+averaged over about half a second. The GPU frame runs from a timestamp at the frame's first
+command list to one at its present. Frames are timed only while the costs are on screen (the
+Diagnostics section open, or **Show the costs over the game**) or measured; otherwise no query is
+made.
+
+- **Timestamps.** Each pass ends a timestamp query before and after its work (`performance::Timed`),
+  on the context it records on, inside one disjoint query per frame on the immediate context. The
+  game records a frame on its deferred contexts while the immediate context executes the one
+  before, so a deferred context's queries follow it to its command list at `FinishCommandList` and
+  count for the frame that executes the list. DLSS's passes run on the immediate context and count
+  for the frame at once. The results are
+  read back up to four frames later with `DONOTFLUSH`, never waiting; a frame whose clock was
+  disjoint is left out.
+- **What a row holds.** The sun light pass is the game's own lighting drawn with the replacement
+  shaders, so it includes the game's work. The game's fog pass is timed because the add-on draws it
+  over the larger texture. Frame generation runs on Direct3D 12 and is not timed; FSR's upscale
+  shows as the Direct3D 11 time around it.
+- **Real cost.** The timed passes miss what they change in the game's work: GTVBAO leaves the
+  game's SSAO out, the gather the game's depth of field, the physical look its sky. **Measure the
+  real cost** times the GPU frame with everything on, then leaves out, one more at a time and only
+  where on: the depth of field, the volumetric fog, SSILVB, GTVBAO, the lamp and the sun contact
+  shadows, the soft shadows, the sharpening and last the upscaler (the game's FXAA at the same
+  render size, as the Diagnostics comparison). 1.5 s to settle and 2.5 s timed per step; the
+  difference between steps is what the effect left out costs. The steps run through
+  `upscaler::leaveOut`, which the settings, `PhantomFX.ini` and the overlay never see, and the
+  effects come back at the end. HDR takes a restart and is not measured. The GPU frame, not the
+  frame time, is compared, as the 60 fps cap would hide the difference.
+- **Report.** While the costs show over the game or are measured, `PhantomFX-performance.txt`
+  beside the log holds them, rewritten every second and once more after, so it keeps a finished
+  measurement. `PhantomFX.log` gets each measurement's result.
 
 ### Weather and time
 
@@ -516,6 +553,9 @@ confirmed by setting the wanted size in game.
 - Their pixel shaders read nothing from `cPSSystem` but `m_renderInfo` (`c1`) and `m_renderBuffer`
   (`c2`): the UI shaders for a screen-space mask (`blendScreen`), the filters (radial blur, blood
   and water drops, the video player) for screen coordinates.
+- 16 camera filters also read `cPSScene`'s `m_viewportSize.xy` (`c22`, slot b2), the render size.
+  `Draw2D_TppNoiseFilter`, the sandstorm's grain and vignette, places the vignette with
+  `2 x pixel / m_viewportSize.xy - 1`; at another target size its centre moves off the screen's.
 - The only `Draw2D` draws before FXAA in the records are lens flares into the half-size layer.
 - `GrPlugin2D`, `GrPlugin2DFrontmost` (vtables `0x20F2EB0`, `0x20F2F50`, Exec `0x1C0AD0`) and
   `GrPlugin2DShrink` (`0x20F2FF0`, Exec `0x1C0C70`) only queue the 2D work: a flag set around their
@@ -647,6 +687,7 @@ the shaders' disassembly.
 | `0x1A45540` | Reads the window's raw input for the game's mouse and keyboard, hooked for photo mode |
 | `0x2BD3600` | `WeatherManager` (see "Weather and time"); clock at `+0x80`, requests at `+0x58` |
 | `0x536550`, `0x551430`, `0x54F8F0` | Set the clock, request and cancel weather, called by the weather menu |
+| `0x537DD0` | `WeatherManager` update; its pause bit 8 test at `0x537FBF`, made to run in photo mode |
 
 ## What the add-on changes
 
@@ -736,8 +777,11 @@ the swap chain detour.
   - A draw with a `Draw2D` vertex shader bound (tracked per context from `bind_pipeline`) into the
     render-size scene target is made by the add-on on the output target instead, with viewports and
     scissors scaled by output / render and its own `cPSSystem` (`c1` and `c2` at the output size)
-    in slot b0, then the game's bindings are restored and the game's draw is skipped. A clear of the
-    scene target from such a context goes to the output target.
+    in slot b0, then the game's bindings are restored and the game's draw is skipped. Slot b2 gets
+    a copy of the game's `cPSScene`, made on the context before each such draw, with
+    `m_viewportSize.xy` copied over from a buffer holding the output size (a partial copy into a
+    constant buffer, which Direct3D 11.1 drivers allow). A clear of the scene target from such a
+    context goes to the output target.
   - Every clear of a render-size depth-stencil also clears the output-size one, so the 2D pass's
     stencil masks work.
   - `GammaControl` reads the output target's `_SRGB` view in place of the scene target.
@@ -1299,15 +1343,34 @@ planet's centre is the origin, in km; the game's world has y up in metres.
   `betaM`, Cornette-Shanks phase with the `g` the fog pass's Schlick `mieK` stands for (`k = 1.55 g -
   0.55 g^3`: 0.96 is 0.8; taken as `g` it drew the low sun's glow as a disc over the hills), lit by the sun and the mean light from
   all around (the sky above; below, the ground at albedo 0.3, lit by the sun and the sky; the
-  multiple scattering table also takes that ground), falling off with height over 300 m (at most 4x
+  multiple scattering table also takes that ground), falling off with height over 300 m (up to 1 km with Haze; at most 4x
   below the camera). Its extinction at the camera comes from the game's fog over a kilometre,
   `e = representativeDensity x od(1 km) / 1000` (about 1.5e-3 / m on a clear day in Afghanistan:
   `representativeDensity` 0.003, `power` 0.9, `near` 0): `e x min(e / 0.015, 1)` less the air's,
   a tenth of it on a clear day (about 26 km visibility) up to all of it in dense weather. As a
   medium the game's own density greys the whole sky: the game uses it to fade distant ground, and
-  its sky leaves most of it out. Both shadowed and integrated over the slice as in the game's look; the slices are added
+  its sky leaves most of it out. **Haze** (`atmosphere_haze`, 0 to 1, the `Fog` constants' `Haze`)
+  raises that share towards all of it in any weather and deepens the layer from 300 m to 1 km, as
+  deep as dust: at 1 the distance fades about as the game's does (on a thin-fog day in Afghanistan
+  6.3e-4 / m, about 6 km of view against the game's 8; at 0 about 120 km), and the sky pales with it. The height fog
+  also dims the sunlight that reaches the air and itself: `e^(-density x scale height / sin(elevation))`,
+  the sine at least 0.01 (a 1 km layer is about 100 km long at the horizon); without it, 100 % haze at
+  sunset glowed at the display's peak towards the sun (frame 8938: 700 nits). Both shadowed and integrated over the slice as in the game's look; the slices are added
   front to back with their transmittance. The last slice holds the height fog alone, from a second
   volume: the sky and the game's clouds read it, and the sky's light already holds the air.
+- **Overcast.** The game greys its sky by weather: `Sky_Draw_TppBaked` and `Sky_Draw_Tpp` swap
+  their Rayleigh light for a flat "cloudy" term by `cPSObject` `c10.x` (0 on a clear day, 1 in
+  rain; in rain also `betaR` grey 0.04, Mie `g` 0.08, and the fog's furthest slice laid over most of
+  the sky: `influenceOfFogVar` 1 against 0.3). Its rain sky is a flat grey of about 0.18 (40 to 60
+  nits with HDR at dusk), where the physical one stayed a clear, darker blue. Physical takes that
+  share from a GPU copy of the last sprite sky draw's `cPSObject` (0 after `Sky_Draw_TppNoSky`) as a
+  cloud deck: it takes that share of the sun from the sky, the air and the fog, its light replaces
+  it in the sky, the fog's mean light and the air's, the moon fades behind it, and the height fog
+  takes all of the game's density (rain and mist, not haze the air already makes). The deck's light
+  is what the game's fog adds up to far away, `(sunIntensity x mean phase x betaM + skyLuminance x
+  betaU) / (betaM + betaR + betaU) + selfLuminance` with the mean phase `(1 - mieRatio) / 4 pi +
+  mieRatio`: the game's own light for that weather (frame-59279, rain at dusk: 0.175, 0.184, 0.196).
+  The fill reads the last frame's sky draw, a frame late.
 - **Sky.** `Sky_Draw_TppBaked`, `Sky_Draw_Tpp` (with the sun's or moon's sprite) and
   `Sky_Draw_TppNoSky` (fog and sandstorms) draw with the add-on's pixel shader and their own vertex
   shader (all three pass the world-space view ray in `TEXCOORD0`, the sprite's place in `TEXCOORD1`
@@ -1436,6 +1499,10 @@ and then on `GrCamera`'s position led to the camera selector.
   active requests into `[manager + 8]`. Game time (`0x816A0`, on the time object
   `[0x2B641C8] + 0x228`) steps by zero while any bit is set, and 107 call sites test bits of their
   own. One session had eight requests, most of them `0x7FFFFFFE`: every bit but bit 0.
+- **Weather.** The `WeatherManager` update (`0x537DD0`, on the game thread) returns early under bit 8
+  (test at `0x537FBF`): the sky then keeps its weather and time, and the weather menu's changes
+  never show. Bit 9 only stops the clock (and is passed on to the requests' update). Besides it,
+  only `0x4939A0` tests bit 8 directly; jobs test masks from data (`0xDAF60`).
 - **Input.** The game registers raw mouse and keyboard input without `RIDEV_NOLEGACY`. Its window's
   `WM_INPUT` handler (`0x53ADF0`) keeps the cursor centred and calls `0x1A45540`, which reads the
   `RAWINPUT` and hands it to the mouse (`0x1A45860`) or the keyboard (`0x1A45790`, virtualised).
@@ -1462,7 +1529,13 @@ F2 does nothing.
 - **UI.** F3 or photo mode hides the UI: draws with a `Draw2D` vertex shader bound (see "The 2D
   pass") into a `B8G8R8A8_TYPELESS` target at the render size, the scene target, are skipped. The
   lens flares draw into the half-size layer and stay.
-- **Unload.** `AddonUninit` clears the pause request's active bit before the hooks go.
+- **Weather.** While its request is active, photo mode turns the weather update's `je` at
+  `0x537FC8` (`74 0C`) into `jmp` (`EB 0C`), so the update ignores bit 8 and the weather menu works
+  with the game frozen; bit 9 still stops the clock. It checks
+  `8B 48 08 C1 E9 08 F6 C1 01 74 0C` at `0x537FBF` first; without a match photo mode works and the
+  weather menu changes nothing in it.
+- **Unload.** `AddonUninit` clears the pause request's active bit before the hooks go, and puts the
+  weather update's `je` back.
 
 Checked in game with a Frida prototype, before the add-on code: with the request active, the scaled
 frame time stayed 0 while the selector update ran every frame (124 calls in 2 s), and the active

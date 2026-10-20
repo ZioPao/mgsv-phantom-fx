@@ -8,8 +8,8 @@
 // ambient occlusion with GTVBAO and add SSILVB's screen-space indirect lighting (indirect_light.hpp),
 // can replace the game's depth of field with a gather (depth_of_field.hpp), adds volumetric fog with
 // light shafts (atmosphere.hpp), has a photo mode with lens shots (photo_mode.hpp), can output HDR10
-// (hdr.hpp) and has an optional pipeline recorder (frame_log.hpp) and weather and time control
-// (weather.hpp) for development.
+// (hdr.hpp) and has an optional pipeline recorder (frame_log.hpp), the GPU costs of its passes
+// (performance.hpp) and weather and time control (weather.hpp) for development.
 // NGX receives ReShade's wrapped context, so other add-ons that follow DLSS evaluations see it like
 // a game's own DLSS.
 #include "atmosphere.hpp"
@@ -25,6 +25,7 @@
 #include "indirect_light.hpp"
 #include "log.hpp"
 #include "motion_blur.hpp"
+#include "performance.hpp"
 #include "photo_mode.hpp"
 #include "presenter.hpp"
 #include "render_scale.hpp"
@@ -141,6 +142,7 @@ void onInitCommandQueue(command_queue* queue)
     indirect_light::attach(device);
     atmosphere::attach(device);
     depth_of_field::attach(device);
+    performance::attach(device, context, dataDirectory() / "PhantomFX-performance.txt");
     log("Immediate context " + hex(reinterpret_cast<std::uintptr_t>(context)) + ", ReShade wrapper "
         + hex(reinterpret_cast<std::uintptr_t>(wrapper)) + ".");
 }
@@ -149,6 +151,8 @@ void onDestroyCommandQueue(command_queue* queue)
 {
     if (queue->get_immediate_command_list() != immediateList) return;
 
+    // First: a measurement running gives the effects back.
+    performance::detach();
     upscaler::detach();
     shadows::detach();
     indirect_light::detach();
@@ -410,10 +414,13 @@ void onExecuteSecondary(command_list* list, command_list* secondary)
 {
     if (list == immediateList)
     {
+        // The frame's timing starts before DLSS, which runs here.
+        performance::executing(secondary->get_native());
         upscaler::executing(native(list), secondary->get_native());
         return;
     }
 
+    performance::recorded(list->get_native(), secondary->get_native());
     upscaler::recorded(list->get_native(), secondary->get_native());
     ui_redirect::contextFinished(native(secondary));
     shadows::contextFinished(native(secondary));
@@ -422,6 +429,7 @@ void onExecuteSecondary(command_list* list, command_list* secondary)
 void onDestroyCommandList(command_list* list)
 {
     upscaler::forget(list->get_native());
+    performance::forget(list->get_native());
 }
 
 // With frame generation the game's swap chain is the presenter's stand-in, whose Present follows.
@@ -445,11 +453,18 @@ void onPresent(command_queue* queue, swapchain*, const rect*, const rect*, uint3
     indirect_light::present();
     atmosphere::present(native(queue->get_immediate_command_list()));
     depth_of_field::present();
+    performance::present();
 }
 
 void onOverlay(effect_runtime*)
 {
     upscaler::drawMenu();
+}
+
+// Every frame, with ReShade's overlay open or closed.
+void onReshadeOverlay(effect_runtime*)
+{
+    performance::drawOverlay();
 }
 
 // ReShade's overlay takes the keyboard while it is open.
@@ -525,6 +540,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     reshade::register_event<reshade::addon_event::present>(onPresent);
     reshade::register_event<reshade::addon_event::reshade_open_overlay>(onOpenOverlay);
     reshade::register_event<reshade::addon_event::reshade_present>(onReshadePresent);
+    reshade::register_event<reshade::addon_event::reshade_overlay>(onReshadeOverlay);
     reshade::register_event<reshade::addon_event::init_effect_runtime>(onInitEffectRuntime);
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(onDestroyEffectRuntime);
     reshade::register_overlay("Phantom FX", onOverlay);
@@ -555,6 +571,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
 extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshadeModule)
 {
     // ReShade unloads add-ons when its last device goes; the next load reports the game's device again.
+    performance::detach();
     upscaler::detach();
     shadows::detach();
     indirect_light::detach();

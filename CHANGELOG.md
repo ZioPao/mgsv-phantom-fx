@@ -1,5 +1,15 @@
 # Phantom FX changelog
 
+## Unreleased
+
+- Diagnostics shows what each effect costs on the GPU: a table with a bar, milliseconds and share
+  of the GPU frame for upscaling, the sun and lamp shadows, GTVBAO, SSILVB, the volumetric fog, the
+  depth of field and HDR, each opening to its passes. "Show the costs over the game" keeps it in a
+  corner with the overlay closed, and `PhantomFX-performance.txt` beside the log holds the same
+  numbers. "Measure the real cost" times the GPU frame with everything on, then leaves out one
+  effect at a time, so what the passes change in the game's own work counts too. Nothing is timed
+  while the costs are not on screen.
+
 ## 1.1.0
 
 - Rename the mod from MGSV DLSS to Phantom FX. Its files are now `PhantomFX.*`: delete

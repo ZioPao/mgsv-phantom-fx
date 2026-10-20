@@ -248,6 +248,11 @@ Settings loadSettings(const std::filesystem::path& path)
             const auto found = std::find(std::begin(AtmosphereLookKeys), std::end(AtmosphereLookKeys), value);
             if (found != std::end(AtmosphereLookKeys)) settings.atmosphereLook = static_cast<AtmosphereLook>(found - std::begin(AtmosphereLookKeys));
         }
+        else if (key == "atmosphere_haze")
+        {
+            float haze{};
+            if (number(value, haze) && std::isfinite(haze)) settings.atmosphereHaze = std::clamp(haze, 0.0f, 1.0f);
+        }
         else if (key == "indirect_light")
         {
             if (value == "0" || value == "1") settings.indirectLight = value == "1";
@@ -316,7 +321,8 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
         || !within(settings.occlusionRadius, Settings::MinOcclusionRadius, Settings::MaxOcclusionRadius)
         || !within(settings.occlusionStrength, 0, Settings::MaxOcclusionStrength)
         || !within(settings.indirectLightRadius, Settings::MinIndirectLightRadius, Settings::MaxIndirectLightRadius)
-        || !within(settings.indirectLightStrength, 0, Settings::MaxIndirectLightStrength) || !validApertureBlades(settings.apertureBlades)
+        || !within(settings.indirectLightStrength, 0, Settings::MaxIndirectLightStrength) || !within(settings.atmosphereHaze, 0, 1)
+        || !validApertureBlades(settings.apertureBlades)
         || !within(settings.fNumber, Settings::MinFNumber, Settings::MaxFNumber) || settings.lensShotFrames < Settings::MinLensShotFrames
         || settings.lensShotFrames > Settings::MaxLensShotFrames
         || (settings.peakNits != 0 && !within(settings.peakNits, Settings::MinPeakNits, Settings::MaxPeakNits))
@@ -340,7 +346,7 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
                << "\nindirect_light=" << settings.indirectLight << "\nindirect_light_radius=" << settings.indirectLightRadius
                << "\nindirect_light_strength=" << settings.indirectLightStrength << "\nvolumetric_fog=" << settings.volumetricFog
                << "\natmosphere_look=" << AtmosphereLookKeys[static_cast<std::size_t>(settings.atmosphereLook)]
-               << "\ndepth_of_field=" << settings.depthOfField
+               << "\natmosphere_haze=" << settings.atmosphereHaze << "\ndepth_of_field=" << settings.depthOfField
                << "\naperture_blades=" << settings.apertureBlades << "\nf_number=" << settings.fNumber
                << "\nlens_shot_frames=" << settings.lensShotFrames << "\nhdr=" << settings.hdr << "\nhdr_peak_nits=" << settings.peakNits
                << "\nhdr_paper_white_nits=" << settings.paperWhiteNits << '\n';

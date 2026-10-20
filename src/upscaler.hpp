@@ -92,4 +92,14 @@ bool enhancementsOn();
 void setEnhancements(bool on);
 void toggleEnhancements();
 void drawMenu();
+
+// ---- Cost measurement (performance.hpp) ----
+// Effects a measurement step runs without, while the settings, PhantomFX.ini and the overlay keep
+// them on. Leaving out the upscaler shows the game's FXAA at the same render size.
+struct LeftOut
+{
+    bool upscaler{}, sharpening{}, softShadows{}, sunScreenSpaceShadows{}, lightScreenSpaceShadows{}, ambientOcclusion{}, indirectLight{},
+        volumetricFog{}, depthOfField{};
+};
+void leaveOut(const LeftOut& effects);
 }

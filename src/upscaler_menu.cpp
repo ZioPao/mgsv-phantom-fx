@@ -7,6 +7,7 @@
 #include "hdr.hpp"
 #include "indirect_light.hpp"
 #include "menu_style.hpp"
+#include "performance.hpp"
 #include "presenter.hpp"
 #include "shadows.hpp"
 #include "upscaler.hpp"
@@ -306,6 +307,19 @@ bool drawVolumetricFog(Settings& wanted)
     tooltip("MGSV keeps the game's own sky and haze colours, with the sun shadowed in the fog.\n"
             "Physical draws the sky and the air as they are in nature (Hillaire's atmosphere, as in Unreal Engine), as\n"
             "bright as the game's sky, with height fog that gathers low, as thick as the game's weather makes its fog.");
+    if (wanted.atmosphereLook == AtmosphereLook::Physical)
+    {
+        float haze = wanted.atmosphereHaze * 100;
+        if (ImGui::SliderFloat("Haze", &haze, 0, 100, "%.0f%%", ImGuiSliderFlags_AlwaysClamp))
+        {
+            wanted.atmosphereHaze = haze / 100;
+            changed = true;
+        }
+        tooltip("Dust in the air that fades the distance. A matter of taste: no setting is more physically based or closer to\n"
+                "the game's look. 0% (the default) is clear air, about 120 km of view on a clear day; 100% is about 8 km, with a\n"
+                "paler sky. Fog, sandstorms and rain are always at full thickness.");
+        changed |= resetButton("Haze", wanted.atmosphereHaze, Defaults.atmosphereHaze);
+    }
     if (const auto problem = atmosphere::problem(); !problem.empty()) statusLine(Yellow, problem);
     endIndent();
 
@@ -553,6 +567,9 @@ void drawDiagnostics(const Status& state)
     if (!state.lastFallback.empty()) ImGui::TextWrapped("Last fallback: %s", state.lastFallback.c_str());
     ImGui::Text("Jitter %.3f, %.3f px", state.jitter[0], state.jitter[1]);
     if (frame_log::installed()) ImGui::TextUnformatted("F10 records the next frame into the PhantomFX-frame-log folder.");
+
+    ImGui::SeparatorText("Costs");
+    performance::drawDiagnostics();
 }
 }
 

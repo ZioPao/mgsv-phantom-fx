@@ -12,6 +12,7 @@
 #include "indirect_light.hpp"
 #include "log.hpp"
 #include "motion_blur.hpp"
+#include "performance.hpp"
 #include "photo_mode.hpp"
 #include "render_scale.hpp"
 #include "shader_bytecode.hpp"
@@ -181,6 +182,7 @@ std::mutex settingsMutex;
 Settings settings;
 Diagnostics diagnostics;
 bool enhancements{true}; // Off turns the lighting enhancements off whatever their settings say
+LeftOut leftOut;         // A cost measurement's step, over the settings
 std::optional<std::uint64_t> unsavedChange; // GetTickCount64 of the latest change PhantomFX.ini does not have yet
 
 // Read on every recording thread: DLSS replaces FXAA this frame, and the next frame is jittered.
@@ -285,7 +287,7 @@ void check(HRESULT result, const char* what)
 
 void updateReplacing()
 {
-    replacing = supported && !failed && settings.mode != Mode::Off && !diagnostics.gameFxaa;
+    replacing = supported && !failed && settings.mode != Mode::Off && !diagnostics.gameFxaa && !leftOut.upscaler;
     motion_blur::setVelocityOnly(replacing);
     fxaa::setForced(replacing);
 }
@@ -294,11 +296,11 @@ void updateReplacing()
 void configureShadows()
 {
     shadows::configure({
-        .soft = enhancements && settings.softShadows,
+        .soft = enhancements && settings.softShadows && !leftOut.softShadows,
         .sunSize = settings.sunSize,
         .turnPattern = replacing,
-        .screenSpaceSun = enhancements && settings.sunScreenSpaceShadows,
-        .screenSpaceLights = enhancements && settings.lightScreenSpaceShadows,
+        .screenSpaceSun = enhancements && settings.sunScreenSpaceShadows && !leftOut.sunScreenSpaceShadows,
+        .screenSpaceLights = enhancements && settings.lightScreenSpaceShadows && !leftOut.lightScreenSpaceShadows,
         .onlyScreenSpace = diagnostics.onlyScreenSpaceShadows,
     });
 }
@@ -307,10 +309,10 @@ void configureShadows()
 void configureIndirectLight()
 {
     indirect_light::configure({
-        .occlusion = supported && enhancements && settings.ambientOcclusion,
+        .occlusion = supported && enhancements && settings.ambientOcclusion && !leftOut.ambientOcclusion,
         .occlusionRadius = settings.occlusionRadius,
         .occlusionStrength = settings.occlusionStrength,
-        .light = supported && enhancements && settings.indirectLight,
+        .light = supported && enhancements && settings.indirectLight && !leftOut.indirectLight,
         .lightRadius = settings.indirectLightRadius,
         .lightStrength = settings.indirectLightStrength,
         .showOcclusion = diagnostics.showAmbientOcclusion,
@@ -322,15 +324,16 @@ void configureIndirectLight()
 void configureAtmosphere()
 {
     atmosphere::configure({
-        .volumetricFog = supported && enhancements && settings.volumetricFog,
+        .volumetricFog = supported && enhancements && settings.volumetricFog && !leftOut.volumetricFog,
         .physical = settings.atmosphereLook == AtmosphereLook::Physical,
+        .haze = settings.atmosphereHaze,
     });
 }
 
 // Call with settingsMutex held.
 void configureDepthOfField()
 {
-    depth_of_field::configure({.gather = supported && settings.depthOfField, .blades = settings.apertureBlades});
+    depth_of_field::configure({.gather = supported && settings.depthOfField && !leftOut.depthOfField, .blades = settings.apertureBlades});
     photo_mode::configure({.fNumber = settings.fNumber, .blades = settings.apertureBlades,
         .shotFrames = static_cast<std::uint32_t>(settings.lensShotFrames)});
 }
@@ -996,6 +999,7 @@ bool replaceFxaa(const FxaaPass& pass)
         std::lock_guard lock(settingsMutex);
         wanted = settings;
         options = diagnostics;
+        if (leftOut.sharpening) wanted.sharpness = 0;
     }
 
     // Each frame is recorded before it executes; a later frame's uploads would have started a new one.
@@ -1081,7 +1085,9 @@ bool replaceFxaa(const FxaaPass& pass)
 
     inOwnState([&]
     {
+        performance::Timed timed(immediate.Get(), performance::Pass::UpscalerInputs);
         runInputs(pass, current, reprojection, objectVelocity, linear);
+        timed.next(performance::Pass::Upscaler);
         if (fsr)
         {
             fsr_upscaler::Inputs inputs;
@@ -1122,6 +1128,7 @@ bool replaceFxaa(const FxaaPass& pass)
             if (NVSDK_NGX_FAILED(result)) throw std::runtime_error("DLSS evaluation failed (" + hex(static_cast<std::uint32_t>(result)) + ").");
         }
 
+        timed.next(performance::Pass::UpscalerOutput);
         runComposite(destination.Get(), objectVelocity, options, wanted.sharpness, linear);
         if (hudlessSource) immediate->CopyResource(hudlessSource->source.Get(), resourceOf(destination.Get()).Get());
     });
@@ -1770,5 +1777,16 @@ void setEnhancements(bool on)
 void toggleEnhancements()
 {
     setEnhancements(!enhancementsOn());
+}
+
+void leaveOut(const LeftOut& effects)
+{
+    std::lock_guard lock(settingsMutex);
+    leftOut = effects;
+    updateReplacing();
+    configureShadows();
+    configureIndirectLight();
+    configureAtmosphere();
+    configureDepthOfField();
 }
 }

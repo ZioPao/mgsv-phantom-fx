@@ -68,9 +68,11 @@ struct Settings
     float indirectLightRadius{DefaultIndirectLightRadius};
     float indirectLightStrength{1};
     // Volumetric fog with light shafts in place of the game's fog (atmosphere.hpp), whatever the mode,
-    // in the game's look or the physical one, which also draws the sky.
+    // in the game's look or the physical one, which also draws the sky. The physical look's haze runs
+    // from 0 (clear air) to 1 (as thick as the game's own haze).
     bool volumetricFog{};
     AtmosphereLook atmosphereLook{AtmosphereLook::Mgsv};
+    float atmosphereHaze{};
     // The depth of field's gather in place of the game's (depth_of_field.hpp), whatever the mode.
     bool depthOfField{};
     // The aperture's blades, the shape of the blur's highlights: 0 is round, otherwise 5 to 9.
