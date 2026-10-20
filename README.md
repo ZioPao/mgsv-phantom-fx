@@ -2,6 +2,10 @@
 
 AIO visual enhancement ReShade add-on for Metal Gear Solid V: The Phantom Pain.
 
+**Very experimental! features are currently being implemented. There are bound to be issues with performance and visual artifacting.**
+
+**Caution: Playing online with this mod may get you banned.**
+
 ![Vanilla](docs/images/outpost-full-vanilla.png)
 
 ![Phantom FX](docs/images/outpost-full-phantom-fx.png)
@@ -9,8 +13,6 @@ AIO visual enhancement ReShade add-on for Metal Gear Solid V: The Phantom Pain.
 ![Vanilla](docs/images/smoker-full-vanilla.png)
 
 ![Phantom FX](docs/images/smoker-full-phantom-fx.png)
-
-**Very experimental! features are currently being implemented. There are bound to be issues with performance and visual artifacting.**
 
 ## Features
 
