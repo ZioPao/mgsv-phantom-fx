@@ -1,7 +1,14 @@
 # Phantom FX changelog
 
-## Unreleased
+## 1.2.0
 
+- Add **Double shadow resolution**: the sun's shadow map at twice the width and height of the
+  game's shadow quality (16384x16384 at Extra High), for sharper shadow edges and small shadows.
+  Uses 768 MB more video memory. Off by default.
+- Add **Haze** to the volumetric fog's physical look: from clear air to as thick as the game's own
+  haze.
+- Photo mode: weather and time of day changes now show while the game is paused.
+- Fix the sandstorm's vignette sitting off-centre while upscaling.
 - Diagnostics shows what each effect costs on the GPU: a table with a bar, milliseconds and share
   of the GPU frame for upscaling, the sun and lamp shadows, GTVBAO, SSILVB, the volumetric fog, the
   depth of field and HDR, each opening to its passes. "Show the costs over the game" keeps it in a
