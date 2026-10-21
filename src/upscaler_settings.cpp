@@ -211,6 +211,10 @@ Settings loadSettings(const std::filesystem::path& path)
             float size{};
             if (number(value, size) && std::isfinite(size)) settings.sunSize = std::clamp(size, Settings::MinSunSize, Settings::MaxSunSize);
         }
+        else if (key == "double_shadow_resolution")
+        {
+            if (value == "0" || value == "1") settings.doubleShadowResolution = value == "1";
+        }
         else if (key == "sun_screen_space_shadows")
         {
             if (value == "0" || value == "1") settings.sunScreenSpaceShadows = value == "1";
@@ -340,6 +344,7 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
                << "\nsharpness=" << settings.sharpness << "\ncustom_scale=" << settings.customScale << "\nmip_bias_offset=" << settings.mipBiasOffset
                << "\nunlock_fps=" << settings.unlockFps << "\nframe_generation=" << FrameGenerationKeys[static_cast<std::size_t>(settings.frameGeneration)]
                << "\nsoft_shadows=" << settings.softShadows << "\nsun_size=" << settings.sunSize
+               << "\ndouble_shadow_resolution=" << settings.doubleShadowResolution
                << "\nsun_screen_space_shadows=" << settings.sunScreenSpaceShadows
                << "\nlight_screen_space_shadows=" << settings.lightScreenSpaceShadows << "\nambient_occlusion=" << settings.ambientOcclusion
                << "\nocclusion_radius=" << settings.occlusionRadius << "\nocclusion_strength=" << settings.occlusionStrength

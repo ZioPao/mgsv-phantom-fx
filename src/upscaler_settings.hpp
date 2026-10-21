@@ -53,6 +53,9 @@ struct Settings
     // The sun size is its angular diameter in degrees; the real sun's is 0.53.
     bool softShadows{};
     float sunSize{DefaultSunSize};
+    // Twice the sun's shadow map width and height the game's shadow quality asks for
+    // (shadow_resolution.hpp), whatever the mode.
+    bool doubleShadowResolution{};
     // Bend Studio's screen-space shadows on the sun and on every point and spot light (shadows.hpp),
     // whatever the mode. Apart because the lights' cost grows with how many are on screen.
     bool sunScreenSpaceShadows{};

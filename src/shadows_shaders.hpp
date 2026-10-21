@@ -414,6 +414,9 @@ cbuffer Parameters : register(b0)
     float BilinearThreshold;
     float ShadowContrast;
     float Padding;
+    float2 DepthBounds;     // Pixels at or beyond these depths are skipped
+    int2 BoundsMin;         // The pixels BuildDispatchList covers, for the light shadow shader
+    int2 BoundsMax;
 };
 Texture2D<float> Depth : register(t0);
 Texture2D<float4> Specular : register(t1);
@@ -428,8 +431,9 @@ void main(int3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
     parameters.SurfaceThickness = SurfaceThickness;
     parameters.BilinearThreshold = BilinearThreshold;
     parameters.ShadowContrast = ShadowContrast;
-    // Skips waves of sky, which is at the far plane.
+    // Skips the sky, which is at the far plane, and for a local light what it cannot reach.
     parameters.UseEarlyOut = true;
+    parameters.DepthBounds = DepthBounds;
     parameters.LightCoordinate = LightCoordinate;
     parameters.WaveOffset = WaveOffset;
     // Fox Engine's depth is reversed: 1 at the near plane, 0 at the far plane.
@@ -789,13 +793,25 @@ void main(float4 position : SV_Position, float4 clipPosition : TEXCOORD0, float4
 )";
 
 // A point or spot light's screen-space shadow into the alpha of both light targets, drawn with the
-// light's own volume; nothing reads that alpha after the lights.
+// light's own volume; nothing reads that alpha after the lights. The trace wrote only the pixels
+// within its bounds (BendShadow's constants, in b6); the light does not reach the others, which are
+// taken as lit.
 inline constexpr char LightShadow[] = R"(
+cbuffer Parameters : register(b6)
+{
+    float2 DepthBounds : packoffset(c3.x);
+    int2 BoundsMin : packoffset(c3.z);
+    int2 BoundsMax : packoffset(c4.x);
+};
+Texture2D<float> g_DepthTexture : register(t2);
 Texture2D<float> g_ScreenSpaceShadow : register(t7);
 
 void main(float4 position : SV_Position, out float4 diffuse : SV_Target0, out float4 specular : SV_Target1)
 {
-    diffuse = specular = g_ScreenSpaceShadow.Load(int3(position.xy, 0));
+    int2 pixel = int2(position.xy);
+    float depth = g_DepthTexture.Load(int3(pixel, 0));
+    bool traced = all(pixel >= BoundsMin) && all(pixel < BoundsMax) && depth > DepthBounds.x && depth < DepthBounds.y;
+    diffuse = specular = traced ? g_ScreenSpaceShadow.Load(int3(pixel, 0)) : 1;
 }
 )";
 }

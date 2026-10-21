@@ -135,7 +135,7 @@ configure_file(src/version.rc.in "${CMAKE_BINARY_DIR}/version.rc" @ONLY)
 # The add-on uses ReShade's ImGui through the overlay function table, so none is linked.
 add_library(phantom_fx SHARED src/upscaler_addon.cpp src/upscaler.cpp src/upscaler_menu.cpp src/upscaler_settings.cpp src/camera.cpp
     src/device_check.cpp src/motion_blur.cpp src/fxaa.cpp src/frame_rate.cpp src/render_scale.cpp src/ui_redirect.cpp src/frame_log.cpp src/resource_dump.cpp
-    src/log.cpp src/shader_bytecode.cpp src/presenter.cpp src/frame_generation.cpp src/game_loop.cpp src/shadows.cpp
+    src/log.cpp src/shader_bytecode.cpp src/presenter.cpp src/frame_generation.cpp src/game_loop.cpp src/shadows.cpp src/shadow_resolution.cpp
     src/indirect_light.cpp src/photo_mode.cpp src/focus.cpp src/depth_of_field.cpp src/hdr.cpp src/weather.cpp src/atmosphere.cpp
     src/fidelityfx.cpp src/fsr_upscaler.cpp src/fsr_frame_generation.cpp src/performance.cpp src/performance_menu.cpp
     "${CMAKE_BINARY_DIR}/version.rc")

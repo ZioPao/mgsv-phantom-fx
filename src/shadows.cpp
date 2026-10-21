@@ -16,11 +16,11 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace phantom_fx::shadows
@@ -52,57 +52,81 @@ bool reflectsSky(Sun sun)
     return sun == Sun::ShadowMap || sun == Sun::Far;
 }
 
+// How a local light's shader fades its light to zero with the distance d to the light, from the
+// disassembly. The points add cPSLight c6.x to d; the spots do not.
+// - Quartic (SSLighting2_*): 1 / d^2 - d^2 c6.w, zero at d = c6.w^(-1/4).
+// - Sixteenth (Lighting_*_NA): (1 - d^16 c6.z) / d^2, zero at d = c6.z^(-1/16).
+enum class Falloff : std::uint8_t { Quartic, Sixteenth };
+
 // The game's point and spot light pixel shaders (docs/DEVELOPMENT.md, "Local lights"), all with the
 // light's view-space position in cPSLight c3.
-constexpr const char* LocalLightChecksums[]{
-    "e61cc726c5c877555261f03dbc4aa967", // Lighting_Point_NA
-    "32bdd328651cf4f11ebcc47c0b65dfde", // Lighting_Point_NA_NShdw
-    "f037f71a002e42f0cb07ad2768f7b8ac", // Lighting_Point_NA_NoSpec
-    "259fff504d9caef06a467ff6ce9ee1bf", // Lighting_Point_NA_NoSpec_NShdw
-    "57b7365fcfb89c3f91fffcebf1a6b1e5", // Lighting_Spot_NA
-    "d53793289e8c2824800876d8525aab2c", // Lighting_Spot_NA_Mask
-    "dcc81c5f2c97e20003a27a9e7db54376", // Lighting_Spot_NA_Mask_NShdw
-    "a435549d3334a5715c165a68083ea66e", // Lighting_Spot_NA_Mask_NSpec
-    "fd570742642f09e699d193ffb02bf0df", // Lighting_Spot_NA_Mask_NSpec_NShdw
-    "dddab560572d7352181cd83f00f6dd63", // Lighting_Spot_NA_NShdw
-    "7d2ed256fcff999707444bb115321c7f", // Lighting_Spot_NA_NoSpec
-    "91bc5dd518df1368e60d53c5f065e9f4", // Lighting_Spot_NA_NoSpec_NShdw
-    "afbc12167037e4e0d653da184c7e3e82", // SSLighting2_Point
-    "4eb687f92330ee7b11ccf8e32950e4a9", // SSLighting2_Point_NoShadow
-    "a1c56a0978c706222ebeacbf6fc9ebe4", // SSLighting2_Point_NoSpec
-    "e9cd14a10e3f1df895cb6799c232f99e", // SSLighting2_Point_NoSpec_NoShadow
-    "ac0947110cb0f17f4ffe930a6a11617d", // SSLighting2_Spot
-    "9ead0f83217db6af698f860fd3233441", // SSLighting2_Spot_Mask
-    "2d985165a56e0622d42f086a28c305d0", // SSLighting2_Spot_Mask_NShdw
-    "fa6ad11cfc35a2281a22b92c1a2aa6db", // SSLighting2_Spot_Mask_NSpec
-    "74872741b699fdefa13ae71349f41ec9", // SSLighting2_Spot_Mask_NSpec_NShdw
-    "74063ef2a991625184fdf283ba58c43f", // SSLighting2_Spot_NoShadow
-    "cdc559ec2ca4d52a54697cf5ca023667", // SSLighting2_Spot_NoSpec
-    "a823ffb58661c508e6270227d4910c91", // SSLighting2_Spot_NoSpec_NoShadow
+struct LocalLightShader
+{
+    const char* checksum;
+    Falloff falloff;
+};
+constexpr LocalLightShader LocalLightShaders[]{
+    {"e61cc726c5c877555261f03dbc4aa967", Falloff::Sixteenth}, // Lighting_Point_NA
+    {"32bdd328651cf4f11ebcc47c0b65dfde", Falloff::Sixteenth}, // Lighting_Point_NA_NShdw
+    {"f037f71a002e42f0cb07ad2768f7b8ac", Falloff::Sixteenth}, // Lighting_Point_NA_NoSpec
+    {"259fff504d9caef06a467ff6ce9ee1bf", Falloff::Sixteenth}, // Lighting_Point_NA_NoSpec_NShdw
+    {"57b7365fcfb89c3f91fffcebf1a6b1e5", Falloff::Sixteenth}, // Lighting_Spot_NA
+    {"d53793289e8c2824800876d8525aab2c", Falloff::Sixteenth}, // Lighting_Spot_NA_Mask
+    {"dcc81c5f2c97e20003a27a9e7db54376", Falloff::Sixteenth}, // Lighting_Spot_NA_Mask_NShdw
+    {"a435549d3334a5715c165a68083ea66e", Falloff::Sixteenth}, // Lighting_Spot_NA_Mask_NSpec
+    {"fd570742642f09e699d193ffb02bf0df", Falloff::Sixteenth}, // Lighting_Spot_NA_Mask_NSpec_NShdw
+    {"dddab560572d7352181cd83f00f6dd63", Falloff::Sixteenth}, // Lighting_Spot_NA_NShdw
+    {"7d2ed256fcff999707444bb115321c7f", Falloff::Sixteenth}, // Lighting_Spot_NA_NoSpec
+    {"91bc5dd518df1368e60d53c5f065e9f4", Falloff::Sixteenth}, // Lighting_Spot_NA_NoSpec_NShdw
+    {"afbc12167037e4e0d653da184c7e3e82", Falloff::Quartic},   // SSLighting2_Point
+    {"4eb687f92330ee7b11ccf8e32950e4a9", Falloff::Quartic},   // SSLighting2_Point_NoShadow
+    {"a1c56a0978c706222ebeacbf6fc9ebe4", Falloff::Quartic},   // SSLighting2_Point_NoSpec
+    {"e9cd14a10e3f1df895cb6799c232f99e", Falloff::Quartic},   // SSLighting2_Point_NoSpec_NoShadow
+    {"ac0947110cb0f17f4ffe930a6a11617d", Falloff::Quartic},   // SSLighting2_Spot
+    {"9ead0f83217db6af698f860fd3233441", Falloff::Quartic},   // SSLighting2_Spot_Mask
+    {"2d985165a56e0622d42f086a28c305d0", Falloff::Quartic},   // SSLighting2_Spot_Mask_NShdw
+    {"fa6ad11cfc35a2281a22b92c1a2aa6db", Falloff::Quartic},   // SSLighting2_Spot_Mask_NSpec
+    {"74872741b699fdefa13ae71349f41ec9", Falloff::Quartic},   // SSLighting2_Spot_Mask_NSpec_NShdw
+    {"74063ef2a991625184fdf283ba58c43f", Falloff::Quartic},   // SSLighting2_Spot_NoShadow
+    {"cdc559ec2ca4d52a54697cf5ca023667", Falloff::Quartic},   // SSLighting2_Spot_NoSpec
+    {"a823ffb58661c508e6270227d4910c91", Falloff::Quartic},   // SSLighting2_Spot_NoSpec_NoShadow
 };
 
 // cPSLight (b3) and cPSScene (b2), as the light passes bind them.
 constexpr UINT LightConstantsSize = 176, SceneConstantsSize = 480;
 constexpr std::size_t LightDirection = 0;                              // c0: towards the sun, view space
 constexpr std::size_t LightPosition = 3 * 4;                           // c3: a local light's position, view space
+constexpr std::size_t LightFade = 6 * 4;                               // c6: a local light's falloff (see Falloff)
 constexpr std::size_t ProjectionParam = 21 * 4, CenterOffset = 28 * 4; // c21: 1 / P00, 1 / P11, B, A; c28: the jitter in NDC
 constexpr UINT SpecularSlot = 1;                                       // t1 of the light passes, whose z is the material
 constexpr UINT DepthSlot = 2;                                          // t2 of the light passes
 constexpr UINT ShadowSlot = 7;                                         // t7 of the add-on's pixel shaders
-constexpr UINT OptionsSlot = 6;                                        // b6 of the replacement sun shaders
+constexpr UINT OptionsSlot = 6;                                        // b6 of the add-on's pixel shaders
 constexpr int WaveSize = 64;                                           // WAVE_SIZE in shaders::BendShadow
 constexpr std::uint32_t PatternTurns = 64;                             // Frames before the soft shadows' samples repeat
 // A local light this close to the camera plane is moved off it, so its place on screen stays finite.
 constexpr float MinLightDepth = 0.01f;
 
-// BendShadow's constant buffer.
+// What a trace covers: pixels from `min` to `max` (exclusive) whose depth lies between the depth
+// bounds (exclusive). It writes no others.
+struct TraceBounds
+{
+    std::int32_t min[2], max[2];
+    float depthMin, depthMax;
+};
+
+// BendShadow's constant buffer, which the light shadow shader reads too.
 struct Parameters
 {
     float lightCoordinate[4];
     std::int32_t waveOffset[2];
     float inverseDepthSize[2];
     float surfaceThickness, bilinearThreshold, shadowContrast, padding;
+    float depthBounds[2];
+    std::int32_t boundsMin[2], boundsMax[2];
+    float padding2[2];
 };
+static_assert(sizeof(Parameters) % 16 == 0);
 
 // Bend's recommended starting values, which suit Fox Engine's reversed depth as they are.
 constexpr float SurfaceThickness = 0.005f, BilinearThreshold = 0.02f, ShadowContrast = 4;
@@ -131,7 +155,7 @@ std::array<std::array<ComPtr<IUnknown>, CopiesPerShader>, std::size(SunChecksums
 
 // Identified local light shaders, looked up on every indexed draw.
 std::shared_mutex lightShaderMutex;
-std::unordered_set<IUnknown*> lightShaders;
+std::unordered_map<IUnknown*, Falloff> lightShaders;
 std::vector<ComPtr<IUnknown>> lightShaderOwners;
 
 // What a thread last wrote to each constant buffer of the two sizes: the game writes them with
@@ -172,7 +196,8 @@ ComPtr<ID3D11RasterizerState> bothFaces;
 // The game's additive light blend, by the state it binds, and the same scaled by the target's alpha.
 std::unordered_map<ID3D11BlendState*, std::pair<ComPtr<ID3D11BlendState>, ComPtr<ID3D11BlendState>>> shadowedBlends;
 ShadowTarget sunShadow, lightShadow;
-bool tracedSunOnce{}, tracedLightOnce{};
+bool tracedSunOnce{};
+std::array<bool, 2> tracedLightOnce{}; // By falloff
 std::map<std::string, bool, std::less<>> loggedOnce;
 
 void logOnce(const std::string& message)
@@ -305,10 +330,14 @@ Sun sunOf(IUnknown* shader)
     return Sun::None;
 }
 
-bool isLocalLight(IUnknown* shader)
+// A local light shader's falloff; none for any other shader.
+std::optional<Falloff> falloffOf(IUnknown* shader)
 {
     std::shared_lock lock(lightShaderMutex);
-    return shader && lightShaders.contains(shader);
+    const auto found = shader ? lightShaders.find(shader) : lightShaders.end();
+    if (found == lightShaders.end()) return std::nullopt;
+
+    return found->second;
 }
 
 // What this thread last wrote to `buffer`, when it has the expected size.
@@ -342,24 +371,86 @@ std::array<float, 4> project(const float* scene, const float (&light)[4])
         projection[3] * light[2] + projection[2] * light[3], light[2]};
 }
 
-// Traces the screen-space shadow towards `lightProjection` from `depth` into `target` on `context`,
-// with the game's compute state saved around it; `specular` (may be null) tells foliage, which casts
-// none. Call with resourceMutex held. Returns the light's position on screen and the dispatch count,
-// for the log.
-std::string trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* specular,
-    std::array<float, 4> lightProjection, ShadowTarget& target)
+// How far a local light reaches, from its falloff in cPSLight c6; infinite or NaN where unknown.
+float rangeOf(const float* light, Falloff falloff)
+{
+    const float* fade = light + LightFade;
+    const float reach = falloff == Falloff::Quartic ? std::pow(fade[3], -1.0f / 4) : std::pow(fade[2], -1.0f / 16);
+
+    // A point adds c6.x to the distance and a spot does not; the larger range covers both.
+    return reach - std::min(fade[0], 0.0f);
+}
+
+// The width and height of the texture `view` shows.
+std::array<int, 2> sizeOf(ID3D11ShaderResourceView* view)
 {
     ComPtr<ID3D11Resource> resource;
-    depth->GetResource(resource.GetAddressOf());
-    ComPtr<ID3D11Texture2D> depthTexture;
-    check(resource.As(&depthTexture), "Reading the depth buffer");
+    view->GetResource(resource.GetAddressOf());
+    ComPtr<ID3D11Texture2D> texture;
+    check(resource.As(&texture), "Reading the depth buffer");
     D3D11_TEXTURE2D_DESC desc{};
-    depthTexture->GetDesc(&desc);
-    ensureShadowTarget(target, desc.Width, desc.Height);
+    texture->GetDesc(&desc);
 
-    int size[2]{static_cast<int>(desc.Width), static_cast<int>(desc.Height)};
-    int boundsMin[2]{}, boundsMax[2]{size[0], size[1]};
-    const auto dispatches = Bend::BuildDispatchList(lightProjection.data(), size, boundsMin, boundsMax, false, WaveSize);
+    return {static_cast<int>(desc.Width), static_cast<int>(desc.Height)};
+}
+
+// What a light at view-space `center` that reaches `range` can light on a screen of `size`: its
+// sphere's bounds on screen and in depth, the whole screen when the range is unknown. None when the
+// sphere is behind the camera or off the screen.
+std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 3>& center, float range, std::array<int, 2> size)
+{
+    // Pixels at any depth but the sky's.
+    TraceBounds bounds{{0, 0}, {size[0], size[1]}, 0, 2};
+    if (!std::isfinite(range) || range <= 0) return bounds;
+
+    const float z = center[2];
+    if (z + range <= 0) return std::nullopt;
+
+    // The light passes reconstruct the view depth as z = B / (depth - A).
+    const float* projection = scene + ProjectionParam;
+    const auto depthAt = [&](float viewZ) { return projection[2] / viewZ + projection[3]; };
+    bounds.depthMin = std::max(depthAt(z + range), 0.0f);
+
+    // With the camera plane through the sphere, it covers the whole screen.
+    if (z - range <= 0) return bounds;
+
+    bounds.depthMax = depthAt(z - range);
+
+    // On each axis, the planes through the eye that touch the sphere, at x / z (or y / z) = t, bound
+    // it on screen; pixels as Bend places the light.
+    const float* offset = scene + CenterOffset;
+    const float clearance = z * z - range * range;
+    for (int axis = 0; axis < 2; ++axis)
+    {
+        const float across = center[axis];
+        const float spread = range * std::sqrt(across * across + clearance);
+        const float scale = axis == 0 ? 0.5f : -0.5f;
+        const auto pixelAt = [&](float t) { return ((t / projection[axis] + offset[axis]) * scale + 0.5f) * static_cast<float>(size[axis]); };
+        const float first = pixelAt((across * z - spread) / clearance), second = pixelAt((across * z + spread) / clearance);
+        const auto clamped = [&](float pixel) { return static_cast<int>(std::clamp(pixel, 0.0f, static_cast<float>(size[axis]))); };
+        bounds.min[axis] = clamped(std::floor(std::min(first, second)) - 1);
+        bounds.max[axis] = clamped(std::ceil(std::max(first, second)) + 1);
+        if (bounds.min[axis] >= bounds.max[axis]) return std::nullopt;
+    }
+
+    return bounds;
+}
+
+// Traces the screen-space shadow towards `lightProjection` from `depth` into `target` on `context`,
+// with the game's compute state saved around it; `specular` (may be null) tells foliage, which casts
+// none. With `bounds`, it writes only within them, and the shadow draw takes the rest as lit;
+// without, it covers the whole screen and the sky stays lit. Call with resourceMutex held. Returns
+// Bend's dispatch list.
+Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* specular,
+    std::array<float, 4> lightProjection, const std::optional<TraceBounds>& bounds, ShadowTarget& target)
+{
+    auto size = sizeOf(depth);
+    ensureShadowTarget(target, static_cast<UINT>(size[0]), static_cast<UINT>(size[1]));
+
+    // Bend's default depth bounds skip the sky.
+    const auto covered = bounds.value_or(TraceBounds{{0, 0}, {size[0], size[1]}, 0, 1});
+    int boundsMin[2]{covered.min[0], covered.min[1]}, boundsMax[2]{covered.max[0], covered.max[1]};
+    const auto dispatches = Bend::BuildDispatchList(lightProjection.data(), size.data(), boundsMin, boundsMax, false, WaveSize);
 
     ComPtr<ID3D11ComputeShader> gameShader;
     ComPtr<ID3D11Buffer> gameBuffer;
@@ -372,9 +463,12 @@ std::string trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth,
     context->CSGetUnorderedAccessViews(0, 1, gameAccess.GetAddressOf());
     context->CSGetSamplers(0, 1, gameSampler.GetAddressOf());
 
-    // The trace skips the sky, which stays lit.
-    const float lit[4]{1, 1, 1, 1};
-    context->ClearUnorderedAccessViewFloat(target.access.Get(), lit);
+    if (!bounds)
+    {
+        const float lit[4]{1, 1, 1, 1};
+        context->ClearUnorderedAccessViewFloat(target.access.Get(), lit);
+    }
+
     context->CSSetShader(traceShader.Get(), nullptr, 0);
     ID3D11ShaderResourceView* inputs[]{depth, specular};
     context->CSSetShaderResources(0, static_cast<UINT>(std::size(inputs)), inputs);
@@ -391,11 +485,15 @@ std::string trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth,
         std::memcpy(parameters.lightCoordinate, dispatches.LightCoordinate_Shader, sizeof(parameters.lightCoordinate));
         parameters.waveOffset[0] = dispatch.WaveOffset_Shader[0];
         parameters.waveOffset[1] = dispatch.WaveOffset_Shader[1];
-        parameters.inverseDepthSize[0] = 1.0f / static_cast<float>(desc.Width);
-        parameters.inverseDepthSize[1] = 1.0f / static_cast<float>(desc.Height);
+        parameters.inverseDepthSize[0] = 1.0f / static_cast<float>(size[0]);
+        parameters.inverseDepthSize[1] = 1.0f / static_cast<float>(size[1]);
         parameters.surfaceThickness = SurfaceThickness;
         parameters.bilinearThreshold = BilinearThreshold;
         parameters.shadowContrast = ShadowContrast;
+        parameters.depthBounds[0] = covered.depthMin;
+        parameters.depthBounds[1] = covered.depthMax;
+        std::memcpy(parameters.boundsMin, covered.min, sizeof(parameters.boundsMin));
+        std::memcpy(parameters.boundsMax, covered.max, sizeof(parameters.boundsMax));
         std::memcpy(mapped.pData, &parameters, sizeof(parameters));
         context->Unmap(parameterBuffer.Get(), 0);
         context->Dispatch(static_cast<UINT>(dispatch.WaveCount[0]), static_cast<UINT>(dispatch.WaveCount[1]), static_cast<UINT>(dispatch.WaveCount[2]));
@@ -409,6 +507,12 @@ std::string trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth,
     context->CSSetUnorderedAccessViews(0, 1, gameAccess.GetAddressOf(), nullptr);
     context->CSSetSamplers(0, 1, gameSampler.GetAddressOf());
 
+    return dispatches;
+}
+
+// Where a trace's light is on screen and how many dispatches it took, for the log.
+std::string describe(const Bend::DispatchList& dispatches)
+{
     return "light at pixel " + std::to_string(dispatches.LightCoordinate_Shader[0]) + ", " + std::to_string(dispatches.LightCoordinate_Shader[1])
         + ", " + std::to_string(dispatches.DispatchCount) + " dispatches";
 }
@@ -518,7 +622,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
         {
             const performance::Timed timed(context, performance::Pass::SunTrace);
             const float* direction = light + LightDirection;
-            const auto where = trace(context, depth.Get(), specular.Get(), project(scene, {direction[0], direction[1], direction[2], 0}), sunShadow);
+            const auto where = describe(trace(context, depth.Get(), specular.Get(), project(scene, {direction[0], direction[1], direction[2], 0}), {}, sunShadow));
             noteTraced(context, depth.Get());
             if (!tracedSunOnce)
             {
@@ -552,10 +656,10 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
 }
 
 // A point or spot light's draws. At the one that marks the stencil (colour writes off), the light's
-// shadow is traced, and the light's volume drawn once more, both faces and without depth test, to
-// put the shadow in the alpha of both light targets wherever the light can reach. The lighting
-// draw that follows then scales its light by that alpha.
-bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call)
+// shadow is traced within the light's reach, and the light's volume drawn once more, both faces and
+// without depth test, to put the shadow in the alpha of both light targets wherever the light can
+// reach. The lighting draw that follows then scales its light by that alpha.
+bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Falloff falloff)
 {
     ComPtr<ID3D11BlendState> gameBlend;
     float blendFactor[4]{};
@@ -606,25 +710,37 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         return false;
     }
 
+    // A light that cannot reach the screen keeps the game's draws.
+    const float range = rangeOf(light, falloff);
+    const auto bounds = boundsOf(scene, position, range, sizeOf(depth.Get()));
+    if (!bounds) return false;
+
     float point[4]{position[0], position[1], position[2], 1};
     if (std::abs(point[2]) < MinLightDepth) point[2] = std::copysign(MinLightDepth, point[2]);
     performance::Timed timed(context, performance::Pass::LampTraces);
-    const auto where = trace(context, depth.Get(), specular.Get(), project(scene, point), lightShadow);
+    const auto dispatches = trace(context, depth.Get(), specular.Get(), project(scene, point), bounds, lightShadow);
     timed.end();
-    if (!tracedLightOnce)
+    if (dispatches.DispatchCount == 0) return false;
+
+    if (auto& once = tracedLightOnce[static_cast<std::size_t>(falloff)]; !once)
     {
-        tracedLightOnce = true;
-        log("Shadows: first local light trace, light at " + std::to_string(position[0]) + ", " + std::to_string(position[1]) + ", "
-            + std::to_string(position[2]) + " (view space), " + where + ".");
+        once = true;
+        log("Shadows: first local light trace (" + std::string(falloff == Falloff::Quartic ? "SSLighting2" : "Lighting_NA") + "), light at "
+            + std::to_string(position[0]) + ", " + std::to_string(position[1]) + ", " + std::to_string(position[2]) + " (view space), range "
+            + std::to_string(range) + " m, pixels " + std::to_string(bounds->min[0]) + ", " + std::to_string(bounds->min[1]) + " to "
+            + std::to_string(bounds->max[0]) + ", " + std::to_string(bounds->max[1]) + ", depth " + std::to_string(bounds->depthMin) + " to "
+            + std::to_string(bounds->depthMax) + ", " + describe(dispatches) + ".");
     }
 
     ComPtr<ID3D11PixelShader> gameShader;
     ComPtr<ID3D11ShaderResourceView> gameView;
+    ComPtr<ID3D11Buffer> gameOptions;
     ComPtr<ID3D11DepthStencilState> gameDepth;
     UINT stencilReference{};
     ComPtr<ID3D11RasterizerState> gameRasterizer;
     context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
     context->PSGetShaderResources(ShadowSlot, 1, gameView.GetAddressOf());
+    context->PSGetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
     context->OMGetDepthStencilState(gameDepth.GetAddressOf(), &stencilReference);
     context->RSGetState(gameRasterizer.GetAddressOf());
 
@@ -632,6 +748,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     timed.next(performance::Pass::LampShadows);
     context->PSSetShader(lightShadowShader.Get(), nullptr, 0);
     context->PSSetShaderResources(ShadowSlot, 1, lightShadow.view.GetAddressOf());
+    context->PSSetConstantBuffers(OptionsSlot, 1, parameterBuffer.GetAddressOf());
     context->OMSetBlendState(alphaOnly.Get(), blendFactor, sampleMask);
     context->OMSetDepthStencilState(noDepth.Get(), 0);
     context->RSSetState(bothFaces.Get());
@@ -639,6 +756,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     timed.end();
     context->PSSetShader(gameShader.Get(), nullptr, 0);
     context->PSSetShaderResources(ShadowSlot, 1, gameView.GetAddressOf());
+    context->PSSetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
     context->OMSetBlendState(gameBlend.Get(), blendFactor, sampleMask);
     context->OMSetDepthStencilState(gameDepth.Get(), stencilReference);
     context->RSSetState(gameRasterizer.Get());
@@ -739,12 +857,13 @@ void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcep
         }
     }
 
-    if (std::find(std::begin(LocalLightChecksums), std::end(LocalLightChecksums), text) == std::end(LocalLightChecksums)) return;
+    const auto light = std::find_if(std::begin(LocalLightShaders), std::end(LocalLightShaders), [&](const auto& known) { return text == known.checksum; });
+    if (light == std::end(LocalLightShaders)) return;
 
     try
     {
         std::unique_lock lock(lightShaderMutex);
-        lightShaders.insert(shader);
+        lightShaders.emplace(shader, light->falloff);
         lightShaderOwners.emplace_back(shader);
     }
     catch (...)
@@ -796,7 +915,8 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
         ComPtr<ID3D11PixelShader> gameShader;
         context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
         const auto sun = call.indexed ? Sun::None : sunOf(gameShader.Get());
-        if (sun == Sun::None && !(call.indexed && isLocalLight(gameShader.Get()))) return false;
+        const auto falloff = call.indexed ? falloffOf(gameShader.Get()) : std::optional<Falloff>{};
+        if (sun == Sun::None && !falloff) return false;
 
         Options options;
         {
@@ -806,7 +926,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
 
         if (sun != Sun::None) return drawSun(context, call, sun, gameShader.Get(), options);
 
-        return options.screenSpaceLights && drawLocalLight(context, call);
+        return options.screenSpaceLights && drawLocalLight(context, call, *falloff);
     }
     catch (const std::exception& error)
     {

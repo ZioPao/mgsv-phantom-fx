@@ -30,8 +30,8 @@ enum class Pass : std::size_t
 {
     UpscalerInputs, Upscaler, UpscalerOutput,
     SunTrace, SunLight, LampTraces, LampShadows,
-    OcclusionMarch, OcclusionDenoise, OcclusionApply,
-    LightMarch, LightDenoise,
+    OcclusionPrefilter, OcclusionMarch, OcclusionDenoise, OcclusionApply,
+    LightPrefilter, LightMarch, LightDenoise, LightUpsample,
     FogPass, SkyTables, FogShadow, FogScattering, FogIntegration, Sky,
     DofSetup, DofGather, DofComposite, LensShot,
     HdrEncode, HdrDecode, HdrGrade,

@@ -20,7 +20,103 @@ cbuffer Parameters : register(b0)
 };
 )"
 
-// The visibility bitmask march, once per pixel at render resolution: for each slice, 32 sectors of
+// XeGTAO's depth prefilter: the distances the march samples at the render size, and four smaller
+// copies, each a 2 x 2 reduction of the one before (XeGTAO's depth MIPs). The march reads farther
+// samples from smaller copies: across up to 15% of the render height, full-size reads missed the
+// cache on nearly every sample. Each 8 x 8 group covers 16 x 16 pixels. The sign carries the
+// foliage material, negative on foliage, so the march reads one texel a sample.
+inline constexpr char PrefilterDepths[] = PHANTOM_FX_PARAMETERS R"(
+cbuffer Scene : register(b1)
+{
+    float4 Scene[30];
+};
+
+Texture2D<float> Depth : register(t0);     // Reversed-Z, 0 on the sky
+// The G-buffer's specular target, whose z is the material; unbound until a sun pass has bound it.
+Texture2D<float4> Specular : register(t1);
+RWTexture2D<float> OutDistance0 : register(u0);
+RWTexture2D<float> OutDistance1 : register(u1);
+RWTexture2D<float> OutDistance2 : register(u2);
+RWTexture2D<float> OutDistance3 : register(u3);
+RWTexture2D<float> OutDistance4 : register(u4);
+
+// Fox Engine's material for grass, bushes and tree leaves, in 255ths.
+static const float FoliageMaterial = 43;
+// Far enough to occlude nothing, and finite, so the reduction can weigh it.
+static const float SkyDistance = 1e6;
+
+groupshared float scratch[8][8];
+
+float signedDistanceAt(uint2 pixel)
+{
+    pixel = min(pixel, Size - 1);
+    float depth = Depth[pixel];
+    float distance = depth > 0 ? Scene[21].z / (depth - Scene[21].w) : SkyDistance;
+    return round(Specular[pixel].z * 255) == FoliageMaterial ? -distance : distance;
+}
+
+// XeGTAO's DepthMIPFilter: the weighted mean of four distances, fading out those well in front of
+// the farthest, so a near edge does not pull a coarse texel forward off the surface behind it. The
+// texel is foliage where foliage has at least half the weight.
+float reduce(float4 values)
+{
+    float4 distances = abs(values);
+    float farthest = max(max(distances.x, distances.y), max(distances.z, distances.w));
+    float falloffRange = 0.615 * 0.75 * Radius, falloffFrom = 0.75 * Radius - falloffRange;
+    float4 weights = saturate(1 - (farthest - distances - falloffFrom) / falloffRange);
+    float weightSum = dot(weights, 1);
+    float distance = dot(weights, distances) / weightSum;
+    return dot(weights, float4(values < 0)) * 2 >= weightSum ? -distance : distance;
+}
+
+// Reduces the 2 x 2 values `stride` apart in scratch, from the top left at `local`.
+float reduceScratch(uint2 local, uint stride)
+{
+    return reduce(float4(scratch[local.x][local.y], scratch[local.x + stride][local.y], scratch[local.x][local.y + stride],
+        scratch[local.x + stride][local.y + stride]));
+}
+
+// Writes past the edges are dropped, and reads clamp to them.
+[numthreads(8, 8, 1)]
+void main(uint2 thread : SV_DispatchThreadID, uint2 local : SV_GroupThreadID)
+{
+    uint2 pixel = thread * 2;
+    float4 values = float4(signedDistanceAt(pixel), signedDistanceAt(pixel + uint2(1, 0)), signedDistanceAt(pixel + uint2(0, 1)),
+        signedDistanceAt(pixel + uint2(1, 1)));
+    OutDistance0[pixel] = values.x;
+    OutDistance0[pixel + uint2(1, 0)] = values.y;
+    OutDistance0[pixel + uint2(0, 1)] = values.z;
+    OutDistance0[pixel + uint2(1, 1)] = values.w;
+
+    float reduced = reduce(values);
+    OutDistance1[thread] = reduced;
+    scratch[local.x][local.y] = reduced;
+
+    // Each level, one thread in four reduces the 2 x 2 block it tops. Only that thread reads its own
+    // cell, so it may overwrite it without waiting.
+    GroupMemoryBarrierWithGroupSync();
+    if (all(local % 2 == 0))
+    {
+        reduced = reduceScratch(local, 1);
+        OutDistance2[thread / 2] = reduced;
+        scratch[local.x][local.y] = reduced;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    if (all(local % 4 == 0))
+    {
+        reduced = reduceScratch(local, 2);
+        OutDistance3[thread / 4] = reduced;
+        scratch[local.x][local.y] = reduced;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    if (all(local % 8 == 0)) OutDistance4[thread / 8] = reduceScratch(local, 4);
+}
+)";
+
+// The visibility bitmask march, once per pixel at render resolution (once per 2 x 2 for SSILVB, see
+// Scale): for each slice, 32 sectors of
 // the hemisphere around the view vector, set where a depth sample, taken as `thickness` deep,
 // covers them. The horizons go through the cosine-weighted measure's CDF first (GT-VBAO), so the
 // share of set sectors is the cosine-weighted occlusion. Also writes XeGTAO's depth edges for the
@@ -53,21 +149,36 @@ RWTexture2D<float3> OutLight : register(u0);
 #else
 RWTexture2D<unorm float> OutVisibility : register(u0);
 #endif
-// The G-buffer's specular target, whose z is the material; unbound until a sun pass has bound it.
-Texture2D<float4> Specular : register(t4);
+// shaders::PrefilterDepths' distances and their smaller copies, negative on foliage.
+Texture2D<float> Distances : register(t4);
 RWTexture2D<unorm float> OutEdges : register(u1);
 
 static const float Pi = 3.14159265;
 static const uint Sectors = 32;
 static const uint SliceCount = 2;
 static const uint StepCount = 8;
-// Fox Engine's material for grass, bushes and tree leaves, in 255ths.
-static const float FoliageMaterial = 43;
+// SSILVB marches one pixel in each 2 x 2, the top left, which its texel at half the render size
+// stands for: the bounce is soft, and the march is nearly all its cost. shaders::Upsample brings it
+// back to the render size. LightScale in indirect_light.cpp matches it.
+static const uint Scale = LIGHT ? 2 : 1;
+// The smaller copies of the distances, and XeGTAO's DepthMIPSamplingOffset: a sample 14 pixels or
+// more away reads the first, and each doubling of the distance the next.
+static const uint DistanceMipCount = 5;
+static const float DistanceMipOffset = 3.3;
 
 float distanceAt(int2 pixel)
 {
     float depth = Depth[clamp(pixel, 0, int2(Size) - 1)];
     return Scene[21].z / (depth - Scene[21].w);
+}
+
+// The distance at a sample `offset` pixels from the receiver, from a smaller copy the farther it
+// lies; negative on foliage.
+float signedDistanceAt(int2 texel, float offset)
+{
+    uint mip = uint(round(clamp(log2(offset) - DistanceMipOffset, 0, DistanceMipCount - 1)));
+    uint2 mipSize = max(Size >> mip, 1);
+    return Distances.Load(int3(min(uint2(texel) >> mip, mipSize - 1), mip));
 }
 
 float3 viewPosition(float2 pixelCentre, float distance)
@@ -156,22 +267,24 @@ float2 remapHorizons(float2 h, float d, float normalAngle, float cosN, float sin
 }
 
 [numthreads(8, 8, 1)]
-void main(uint2 pixel : SV_DispatchThreadID)
+void main(uint2 marchPixel : SV_DispatchThreadID)
 {
+    uint2 pixel = marchPixel * Scale;
     if (any(pixel >= Size)) return;
 
     int2 p = pixel;
+    int step = Scale;
     float distance = distanceAt(p);
-    OutEdges[pixel] = packEdges(calculateEdges(distance, distanceAt(p + int2(-1, 0)), distanceAt(p + int2(1, 0)), distanceAt(p + int2(0, -1)),
-        distanceAt(p + int2(0, 1))));
+    OutEdges[marchPixel] = packEdges(calculateEdges(distance, distanceAt(p + int2(-step, 0)), distanceAt(p + int2(step, 0)),
+        distanceAt(p + int2(0, -step)), distanceAt(p + int2(0, step))));
 
     // The sky, and a pass whose constants are not the main view's, stay unoccluded and unlit.
     if (Depth[pixel] <= 0 || any(Scene[7] != float4(0, 0, 1, 0)))
     {
 #if LIGHT
-        OutLight[pixel] = 0;
+        OutLight[marchPixel] = 0;
 #else
-        OutVisibility[pixel] = 1;
+        OutVisibility[marchPixel] = 1;
 #endif
         return;
     }
@@ -189,7 +302,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
     // blades reads as a solid block and blacks out the ground and the blades behind it.
     float thickness = clamp(0.12 * distance, 0.05, Radius);
     float foliageThickness = clamp(0.02 * distance, 0.02, Radius);
-    float2 noise = spatialNoise(pixel);
+    float2 noise = spatialNoise(marchPixel);
 
     // GT-VBAO spreads the slices evenly around the view vector, not in the image plane, and projects them.
     float a = 1 / (1 + viewDir.z);
@@ -218,7 +331,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
         cosN = degenerate ? 1 : cosN;
         float invNormalization = 0.25 / max(cosN + normalAngle * sinN, 1e-4);
         // Shifts both edges of every sample's sector range alike, so the occluded width stays unbiased.
-        float dither = interleavedGradientNoise(centre + normalAngle);
+        float dither = interleavedGradientNoise(marchPixel + 0.5 + normalAngle);
 
         uint occluded = 0;
         float3 sliceLight = 0;
@@ -231,11 +344,14 @@ void main(uint2 pixel : SV_DispatchThreadID)
             for (uint i = 0; i < StepCount; ++i)
             {
                 float t = (i + noise.y) / max(1, StepCount - 1);
-                float2 samplePixel = centre + pixelDirection * max(t * t * marchPixels, i + 1);
+                float offset = max(t * t * marchPixels, i + 1);
+                float2 samplePixel = centre + pixelDirection * offset;
                 if (any(samplePixel <= 0) || any(samplePixel >= float2(Size))) break;
 
                 int2 texel = int2(samplePixel);
-                float3 toSample = viewPosition(texel + 0.5, distanceAt(texel)) - position;
+                float signedDistance = signedDistanceAt(texel, offset);
+                bool foliage = signedDistance < 0;
+                float3 toSample = viewPosition(texel + 0.5, abs(signedDistance)) - position;
                 float lengthSq = dot(toSample, toSample);
                 float invLength = rsqrt(max(lengthSq, 1e-8));
                 float sampleDistance = lengthSq * invLength;
@@ -244,7 +360,6 @@ void main(uint2 pixel : SV_DispatchThreadID)
                 if (sampleDistance > Radius) continue;
 
                 float projected = dot(toSample, viewDir);
-                bool foliage = round(Specular[texel].z * 255) == FoliageMaterial;
                 float sampleThickness = min(foliage ? foliageThickness : thickness, sampleDistance * 0.8);
                 float front = projected * invLength;
                 float back = (projected - sampleThickness)
@@ -278,34 +393,29 @@ void main(uint2 pixel : SV_DispatchThreadID)
     }
 
 #if LIGHT
-    OutLight[pixel] = light / max(weightSum, 1e-4);
+    OutLight[marchPixel] = light / max(weightSum, 1e-4);
 #else
     float visibility = 1 - saturate(occlusion / max(weightSum, 1e-4));
-    OutVisibility[pixel] = OcclusionStrength > 0 ? pow(visibility, OcclusionStrength) : 1;
+    OutVisibility[marchPixel] = OcclusionStrength > 0 ? pow(visibility, OcclusionStrength) : 1;
 #endif
 }
 )";
 
-// XeGTAO's edge-aware 3 x 3 denoiser, one pixel per thread, on the visibility (LIGHT 0) or the light
-// (LIGHT 1). The passes before the last blur less (beta / 5), as XeGTAO's do. SSILVB's last pass
-// writes the game's diffuse light with the light added, for the resolve to read in its place.
-inline constexpr char Denoise[] = PHANTOM_FX_PARAMETERS R"(
+// XeGTAO's edge-aware 3 x 3 denoiser, one pixel per thread at the march's size, on the visibility
+// (LIGHT 0) or the light (LIGHT 1). The passes before the last weigh the centre less (beta / 5), so
+// they blur more, as XeGTAO's do.
+inline constexpr char Denoise[] = R"(
 #if LIGHT
 #define Value float3
+#define Stored float3
 #else
 #define Value float
+#define Stored unorm float
 #endif
 
 Texture2D<Value> Source : register(t0);
 Texture2D<float> Edges : register(t1);
-#if LIGHT && FINAL
-Texture2D<float4> Diffuse : register(t2);
-RWTexture2D<float4> OutDiffuse : register(u0);
-#elif LIGHT
-RWTexture2D<float3> Output : register(u0);
-#else
-RWTexture2D<unorm float> Output : register(u0);
-#endif
+RWTexture2D<Stored> Output : register(u0);
 
 static const float BlurAmount = FINAL ? 1.2 : 1.2 / 5;
 static const float DiagonalWeight = 0.85 * 0.5;
@@ -319,9 +429,11 @@ float4 unpackEdges(float packed)
 [numthreads(8, 8, 1)]
 void main(uint2 pixel : SV_DispatchThreadID)
 {
-    if (any(pixel >= Size)) return;
+    uint2 size;
+    Source.GetDimensions(size.x, size.y);
+    if (any(pixel >= size)) return;
 
-    int2 p = pixel, last = int2(Size) - 1;
+    int2 p = pixel, last = int2(size) - 1;
     int2 left = clamp(p + int2(-1, 0), 0, last), right = clamp(p + int2(1, 0), 0, last);
     int2 top = clamp(p + int2(0, -1), 0, last), bottom = clamp(p + int2(0, 1), 0, last);
     float4 edgesL = unpackEdges(Edges[left]), edgesR = unpackEdges(Edges[right]);
@@ -346,12 +458,63 @@ void main(uint2 pixel : SV_DispatchThreadID)
     sum += Source[clamp(p + int2(-1, 1), 0, last)] * weightBL + Source[clamp(p + int2(1, 1), 0, last)] * weightBR;
     weight += weightTL + weightTR + weightBL + weightBR;
 
-#if LIGHT && FINAL
-    float4 diffuse = Diffuse[pixel];
-    OutDiffuse[pixel] = float4(diffuse.rgb * DiffuseScale + sum / weight * LightStrength, diffuse.a);
-#else
     Output[pixel] = sum / weight;
-#endif
+}
+)";
+
+// SSILVB's light, denoised at half the render size, brought to the render size and added to the
+// game's diffuse light, for the resolve to read in its place. Each pixel blends the four nearest
+// half-size texels bilinearly, each also weighed by how close its depth is (joint bilateral
+// upsampling), so the light of one surface stays off its neighbour across an edge.
+inline constexpr char Upsample[] = PHANTOM_FX_PARAMETERS R"(
+cbuffer Scene : register(b1)
+{
+    float4 Scene[30];
+};
+
+Texture2D<float3> Light : register(t0);   // Texel h stands for pixel 2h (shaders::March's Scale)
+Texture2D<float> Depth : register(t1);    // Reversed-Z, 0 on the sky
+Texture2D<float4> Diffuse : register(t2); // The game's diffuse light, as the resolve reads it
+RWTexture2D<float4> OutDiffuse : register(u0);
+
+float distanceOf(float depth)
+{
+    return Scene[21].z / (depth - Scene[21].w);
+}
+
+[numthreads(8, 8, 1)]
+void main(uint2 pixel : SV_DispatchThreadID)
+{
+    if (any(pixel >= Size)) return;
+
+    float depth = Depth[pixel];
+    float3 light = 0;
+    if (depth > 0)
+    {
+        float distance = distanceOf(depth);
+        int2 base = pixel / 2, last = (Size - 1) / 2;
+        // A pixel on a texel's own spot takes that texel alone; one between two takes half of each.
+        float2 between = (pixel % 2) * 0.5;
+        float3 sum = 0;
+        float weightSum = 0;
+        [unroll]
+        for (uint i = 0; i < 4; ++i)
+        {
+            int2 offset = int2(i % 2, i / 2);
+            int2 texel = min(base + offset, last);
+            float2 bilinear = offset ? between : 1 - between;
+            // The relative depth difference; texels on the sky have an infinite one and drop out.
+            float gap = abs(distanceOf(Depth[texel * 2]) - distance) / distance;
+            float weight = bilinear.x * bilinear.y / (gap + 1e-3);
+            sum += Light[texel] * weight;
+            weightSum += weight;
+        }
+
+        light = sum / max(weightSum, 1e-8);
+    }
+
+    float4 diffuse = Diffuse[pixel];
+    OutDiffuse[pixel] = float4(diffuse.rgb * DiffuseScale + light * LightStrength, diffuse.a);
 }
 )";
 

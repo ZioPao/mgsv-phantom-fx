@@ -418,6 +418,10 @@ bool drawVisuals(Settings& wanted)
     ImGui::EndDisabled();
 
     ImGui::Spacing();
+    changed |= ImGui::Checkbox("Double shadow resolution", &wanted.doubleShadowResolution);
+    tooltip("The sun's shadow map at twice the width and height of the game's shadow quality: 16384x16384 at Extra High,\n"
+            "so shadow edges and small shadows get sharper. Uses 768 MB more video memory and makes the shadow pass costlier.");
+    ImGui::Spacing();
     changed |= drawDepthOfField(wanted);
     ImGui::Spacing();
     changed |= drawHdr(wanted);

@@ -75,8 +75,14 @@ constexpr UINT SceneSlot = 2;      // cPSScene, in the upscale and the resolves
 constexpr UINT AlbedoSlot = 8, DiffuseSlot = 9, ResolveDepthSlot = 11, OcclusionSlot = 13;
 constexpr UINT SceneConstantsSize = 480;
 constexpr int DenoisePasses = 2;
+// SSILVB's march and denoiser run at the render size over this, rounded up (Scale in shaders::March).
+constexpr UINT LightScale = 2;
 // The march stops at this share of the render height, for surfaces close to the camera.
 constexpr float MaxRadiusShare = 0.15f;
+// shaders::PrefilterDepths writes the distances and four smaller copies (DistanceMipCount in
+// shaders::March), each 8 x 8 group 16 x 16 pixels.
+constexpr UINT DistanceMipCount = 5;
+constexpr UINT PrefilterPixels = 16;
 
 // The compute shaders' constant buffer (PHANTOM_FX_PARAMETERS in indirect_light_shaders.hpp).
 struct Parameters
@@ -90,6 +96,15 @@ struct Target
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<ID3D11ShaderResourceView> view;
     ComPtr<ID3D11UnorderedAccessView> access;
+    UINT width{}, height{};
+};
+
+// A texture with its smaller copies: one view reads them all, one output view each writes them.
+struct MipTarget
+{
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11ShaderResourceView> view;
+    std::array<ComPtr<ID3D11UnorderedAccessView>, DistanceMipCount> access;
     UINT width{}, height{};
 };
 
@@ -123,18 +138,19 @@ ComPtr<ID3D11ShaderResourceView> lastNormals, lastSpecular;
 // ---- Direct3D, guarded by resourceMutex ----
 std::mutex resourceMutex;
 ComPtr<ID3D11Device> device;
-ComPtr<ID3D11ComputeShader> occlusionShader, denoiseShader, finalDenoiseShader;
-ComPtr<ID3D11ComputeShader> lightShader, lightDenoiseShader, finalLightDenoiseShader;
+ComPtr<ID3D11ComputeShader> prefilterShader, occlusionShader, denoiseShader, finalDenoiseShader;
+ComPtr<ID3D11ComputeShader> lightShader, lightDenoiseShader, finalLightDenoiseShader, lightUpsampleShader;
 ComPtr<ID3D11PixelShader> applyShader, showOcclusionShader, showLightShader;
 ComPtr<ID3D11BlendState> multiplyBlend;
 ComPtr<ID3D11Buffer> parameterBuffer;
 ComPtr<ID3D11ShaderResourceView> whiteView; // 1x1, the resolve's occlusion while GTVBAO is on
-// The denoise passes alternate between the two; GTVBAO's last one writes visibility[Result],
-// SSILVB's diffuseWithLight.
+// The denoise passes alternate between the two; the last one writes [Result]. SSILVB's are at
+// its march's size.
 std::array<Target, 2> visibility, gathered;
 constexpr std::size_t Result = DenoisePasses % 2;
-Target edges;            // Depth edges for the denoiser, written by each march
-Target diffuseWithLight; // The game's diffuse light with SSILVB's added, read by the resolve in its place
+Target occlusionEdges, lightEdges; // Depth edges for each denoiser, written by its march
+Target diffuseWithLight;           // The game's diffuse light with SSILVB's added, read by the resolve in its place
+MipTarget distances;               // shaders::PrefilterDepths' output, written before each march
 Progress occlusionProgress{"GTVBAO"}, lightProgress{"SSILVB"};
 std::map<std::string, bool, std::less<>> loggedOnce;
 
@@ -190,11 +206,13 @@ bool ensurePipeline()
     {
         const D3D_SHADER_MACRO occlusionPass[]{{"LIGHT", "0"}, {"FINAL", "0"}, {}}, lastOcclusionPass[]{{"LIGHT", "0"}, {"FINAL", "1"}, {}};
         const D3D_SHADER_MACRO lightPass[]{{"LIGHT", "1"}, {"FINAL", "0"}, {}}, lastLightPass[]{{"LIGHT", "1"}, {"FINAL", "1"}, {}};
+        prefilterShader = computeShader(shaders::PrefilterDepths, "depth-prefilter", nullptr);
         denoiseShader = computeShader(shaders::Denoise, "gtvbao-denoise", occlusionPass);
         finalDenoiseShader = computeShader(shaders::Denoise, "gtvbao-denoise-final", lastOcclusionPass);
         lightShader = computeShader(shaders::March, "ssilvb", lightPass);
         lightDenoiseShader = computeShader(shaders::Denoise, "ssilvb-denoise", lightPass);
         finalLightDenoiseShader = computeShader(shaders::Denoise, "ssilvb-denoise-final", lastLightPass);
+        lightUpsampleShader = computeShader(shaders::Upsample, "ssilvb-upsample", nullptr);
         applyShader = pixelShader(shaders::Apply, "gtvbao-apply");
         showOcclusionShader = pixelShader(shaders::Show, "gtvbao-show", occlusionPass);
         showLightShader = pixelShader(shaders::Show, "ssilvb-show", lightPass);
@@ -271,22 +289,59 @@ bool ensureTarget(Target& target, UINT width, UINT height, DXGI_FORMAT format, c
     return true;
 }
 
+// The prefiltered distances at the render size; call with resourceMutex held.
+void ensureDistances(UINT width, UINT height)
+{
+    if (distances.texture && distances.width == width && distances.height == height) return;
+
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = DistanceMipCount;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R32_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    MipTarget made{.width = width, .height = height};
+    check(device->CreateTexture2D(&desc, nullptr, made.texture.GetAddressOf()), "Creating the prefiltered distances");
+    check(device->CreateShaderResourceView(made.texture.Get(), nullptr, made.view.GetAddressOf()), "Creating the prefiltered distances");
+    for (UINT mip = 0; mip < DistanceMipCount; ++mip)
+    {
+        D3D11_UNORDERED_ACCESS_VIEW_DESC access{};
+        access.Format = desc.Format;
+        access.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+        access.Texture2D.MipSlice = mip;
+        check(device->CreateUnorderedAccessView(made.texture.Get(), &access, made.access[mip].GetAddressOf()),
+            "Creating the prefiltered distances");
+    }
+
+    distances = std::move(made);
+}
+
 // GTVBAO's working textures at the render size; call with resourceMutex held.
 void ensureOcclusionTargets(UINT width, UINT height)
 {
-    bool made = ensureTarget(edges, width, height, DXGI_FORMAT_R8_UNORM, "Creating the depth edges");
+    ensureDistances(width, height);
+    bool made = ensureTarget(occlusionEdges, width, height, DXGI_FORMAT_R8_UNORM, "Creating the GTVBAO depth edges");
     for (auto& target : visibility) made |= ensureTarget(target, width, height, DXGI_FORMAT_R8_UNORM, "Creating the GTVBAO visibility");
     if (made) log("GTVBAO at " + std::to_string(width) + "x" + std::to_string(height) + ".");
 }
 
-// SSILVB's working textures at the render size; call with resourceMutex held.
+// SSILVB's working textures: the march's at its size, the diffuse light at the render size; call
+// with resourceMutex held.
 void ensureLightTargets(UINT width, UINT height)
 {
-    bool made = ensureTarget(edges, width, height, DXGI_FORMAT_R8_UNORM, "Creating the depth edges");
-    for (auto& target : gathered) made |= ensureTarget(target, width, height, DXGI_FORMAT_R11G11B10_FLOAT, "Creating the SSILVB light");
+    ensureDistances(width, height);
+    const UINT marchWidth = (width + LightScale - 1) / LightScale, marchHeight = (height + LightScale - 1) / LightScale;
+    bool made = ensureTarget(lightEdges, marchWidth, marchHeight, DXGI_FORMAT_R8_UNORM, "Creating the SSILVB depth edges");
+    for (auto& target : gathered)
+        made |= ensureTarget(target, marchWidth, marchHeight, DXGI_FORMAT_R11G11B10_FLOAT, "Creating the SSILVB light");
     // The game's diffuse light's format.
     made |= ensureTarget(diffuseWithLight, width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the SSILVB diffuse light");
-    if (made) log("SSILVB at " + std::to_string(width) + "x" + std::to_string(height) + ".");
+    if (made)
+        log("SSILVB at " + std::to_string(marchWidth) + "x" + std::to_string(marchHeight) + " for " + std::to_string(width) + "x"
+            + std::to_string(height) + ".");
 }
 
 // The size of the 2D texture behind `view`; zero when there is none.
@@ -365,16 +420,32 @@ void writeParameters(ID3D11DeviceContext* context, UINT width, UINT height, floa
     context->Unmap(parameterBuffer.Get(), 0);
 }
 
-// Records the denoise passes over what a march wrote into sources[0]. The last pass writes
-// `output`; the passes before alternate between the two sources.
-void denoise(ID3D11DeviceContext* context, const std::array<Target, 2>& sources, ID3D11ComputeShader* shader, ID3D11ComputeShader* finalShader,
-    ID3D11UnorderedAccessView* output)
+// Records shaders::PrefilterDepths into `distances`, with the march's constants bound, and unbinds
+// them for the march to read.
+void prefilterDepths(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* specular)
+{
+    ID3D11ShaderResourceView* inputs[]{depth, specular};
+    ID3D11UnorderedAccessView* outputs[DistanceMipCount]{};
+    for (UINT mip = 0; mip < DistanceMipCount; ++mip) outputs[mip] = distances.access[mip].Get();
+    context->CSSetShaderResources(0, 2, inputs);
+    context->CSSetUnorderedAccessViews(0, DistanceMipCount, outputs, nullptr);
+    context->CSSetShader(prefilterShader.Get(), nullptr, 0);
+    context->Dispatch((distances.width + PrefilterPixels - 1) / PrefilterPixels, (distances.height + PrefilterPixels - 1) / PrefilterPixels, 1);
+
+    ID3D11UnorderedAccessView* none[DistanceMipCount]{};
+    context->CSSetUnorderedAccessViews(0, DistanceMipCount, none, nullptr);
+}
+
+// Records the denoise passes over what a march wrote into sources[0] and `edges`, alternating
+// between the two sources; the last pass writes sources[Result].
+void denoise(ID3D11DeviceContext* context, const std::array<Target, 2>& sources, const Target& edges, ID3D11ComputeShader* shader,
+    ID3D11ComputeShader* finalShader)
 {
     for (int pass = 0; pass < DenoisePasses; ++pass)
     {
         const bool last = pass + 1 == DenoisePasses;
         const auto& source = sources[pass % 2];
-        auto* target = last ? output : sources[1 - pass % 2].access.Get();
+        auto* target = sources[1 - pass % 2].access.Get();
         // A texture still bound as an output would be refused as an input.
         ID3D11UnorderedAccessView* none[2]{};
         ID3D11ShaderResourceView* inputs[]{source.view.Get(), edges.view.Get()};
@@ -395,41 +466,57 @@ void computeOcclusion(ID3D11DeviceContext* context, ID3D11ShaderResourceView* de
 
     SavedComputeState saved(context);
     ID3D11Buffer* buffers[]{parameterBuffer.Get(), scene};
-    // t2 and t3 are SSILVB's.
-    ID3D11ShaderResourceView* inputs[]{depth, normalView, nullptr, nullptr, specular};
-    ID3D11UnorderedAccessView* outputs[]{visibility[0].access.Get(), edges.access.Get()};
     context->CSSetConstantBuffers(0, 2, buffers);
+    performance::Timed timed(context, performance::Pass::OcclusionPrefilter);
+    prefilterDepths(context, depth, specular);
+
+    timed.next(performance::Pass::OcclusionMarch);
+    // t2 and t3 are SSILVB's.
+    ID3D11ShaderResourceView* inputs[]{depth, normalView, nullptr, nullptr, distances.view.Get()};
+    ID3D11UnorderedAccessView* outputs[]{visibility[0].access.Get(), occlusionEdges.access.Get()};
     context->CSSetShaderResources(0, 5, inputs);
     context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
     context->CSSetShader(occlusionShader.Get(), nullptr, 0);
-    performance::Timed timed(context, performance::Pass::OcclusionMarch);
     context->Dispatch(groups(width), groups(height), 1);
     timed.next(performance::Pass::OcclusionDenoise);
-    denoise(context, visibility, denoiseShader.Get(), finalDenoiseShader.Get(), visibility[Result].access.Get());
+    denoise(context, visibility, occlusionEdges, denoiseShader.Get(), finalDenoiseShader.Get());
 }
 
-// Records SSILVB's march and denoise passes on `context`; call with resourceMutex held. The last
-// pass writes diffuseWithLight.
+// Records SSILVB's march, denoise and upsample passes on `context`; call with resourceMutex held.
+// The upsample writes diffuseWithLight.
 void computeLight(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* normalView,
     ID3D11ShaderResourceView* diffuse, ID3D11ShaderResourceView* albedo, ID3D11ShaderResourceView* specular, ID3D11Buffer* scene,
     const Options& options)
 {
-    const auto width = gathered[0].width, height = gathered[0].height;
+    const auto width = diffuseWithLight.width, height = diffuseWithLight.height;
     writeParameters(context, width, height, options.lightRadius, options);
 
     SavedComputeState saved(context);
     ID3D11Buffer* buffers[]{parameterBuffer.Get(), scene};
-    // The denoise passes bind their own t0 and t1; the last one reads the diffuse light from t2.
-    ID3D11ShaderResourceView* inputs[]{depth, normalView, diffuse, albedo, specular};
-    ID3D11UnorderedAccessView* outputs[]{gathered[0].access.Get(), edges.access.Get()};
     context->CSSetConstantBuffers(0, 2, buffers);
+    performance::Timed timed(context, performance::Pass::LightPrefilter);
+    prefilterDepths(context, depth, specular);
+
+    timed.next(performance::Pass::LightMarch);
+    ID3D11ShaderResourceView* inputs[]{depth, normalView, diffuse, albedo, distances.view.Get()};
+    ID3D11UnorderedAccessView* outputs[]{gathered[0].access.Get(), lightEdges.access.Get()};
     context->CSSetShaderResources(0, 5, inputs);
     context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
     context->CSSetShader(lightShader.Get(), nullptr, 0);
-    performance::Timed timed(context, performance::Pass::LightMarch);
-    context->Dispatch(groups(width), groups(height), 1);
+    context->Dispatch(groups(gathered[0].width), groups(gathered[0].height), 1);
     timed.next(performance::Pass::LightDenoise);
-    denoise(context, gathered, lightDenoiseShader.Get(), finalLightDenoiseShader.Get(), diffuseWithLight.access.Get());
+    denoise(context, gathered, lightEdges, lightDenoiseShader.Get(), finalLightDenoiseShader.Get());
+
+    timed.next(performance::Pass::LightUpsample);
+    // The denoiser left gathered[Result] bound as an output, which would refuse it as an input.
+    ID3D11UnorderedAccessView* none[2]{};
+    ID3D11ShaderResourceView* upsampleInputs[]{gathered[Result].view.Get(), depth, diffuse};
+    auto* output = diffuseWithLight.access.Get();
+    context->CSSetUnorderedAccessViews(0, 2, none, nullptr);
+    context->CSSetShaderResources(0, 3, upsampleInputs);
+    context->CSSetUnorderedAccessViews(0, 1, &output, nullptr);
+    context->CSSetShader(lightUpsampleShader.Get(), nullptr, 0);
+    context->Dispatch(groups(width), groups(height), 1);
 }
 
 // Draws the upscale once more with shaders::Apply and the multiplying blend; call with resourceMutex held.
@@ -639,12 +726,14 @@ void detach() noexcept
     active = false;
     {
         std::lock_guard lock(resourceMutex);
+        prefilterShader.Reset();
         occlusionShader.Reset();
         denoiseShader.Reset();
         finalDenoiseShader.Reset();
         lightShader.Reset();
         lightDenoiseShader.Reset();
         finalLightDenoiseShader.Reset();
+        lightUpsampleShader.Reset();
         applyShader.Reset();
         showOcclusionShader.Reset();
         showLightShader.Reset();
@@ -653,7 +742,9 @@ void detach() noexcept
         whiteView.Reset();
         visibility = {};
         gathered = {};
-        edges = {};
+        occlusionEdges = {};
+        lightEdges = {};
+        distances = {};
         diffuseWithLight = {};
         device.Reset();
         pipelineFailed = false;

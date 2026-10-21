@@ -9,6 +9,12 @@
   numbers. "Measure the real cost" times the GPU frame with everything on, then leaves out one
   effect at a time, so what the passes change in the game's own work counts too. Nothing is timed
   while the costs are not on screen.
+- **Indirect lighting (SSILVB)** costs about a quarter of what it did: it now traces at half the
+  render size and upscales the result along depth edges.
+- **Ambient occlusion (GTVBAO)** and SSILVB read smaller copies of the depth for distant samples
+  (XeGTAO's depth mips), which keeps them cheaper up close to walls and floors.
+- **Lamp contact shadows** cost far less: each lamp now traces only the part of the screen it can
+  light, instead of the whole screen.
 
 ## 1.1.0
 

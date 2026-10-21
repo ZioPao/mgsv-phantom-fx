@@ -1125,6 +1125,15 @@ screen.
   add-on, and the game's shader, `t7` and `b6` restored. The options apply from the frame after
   the next present, so both parts of a frame's sun pass see the same. A sun pass without its depth or constants, or an error, keeps
   the game's draw and logs the reason once.
+- **Lamps trace only what they reach.** A light's range comes from its falloff in `cPSLight` `c6`
+  (from the disassembly, `d` the distance plus `c6.x` for points): `SSLighting2_*` light
+  `1 / d^2 - d^2 c6.w`, zero at `c6.w^(-1/4)`; `Lighting_*_NA` light `(1 - d^16 c6.z) / d^2`, zero
+  at `c6.z^(-1/16)`. The range's sphere around `c3` gives a screen rectangle (the planes through the
+  eye that touch it, per axis) for `BuildDispatchList`'s bounds, and a depth range for Bend's
+  early-out, so a lamp costs its share of the screen, not all of it. The lamp's trace is not
+  cleared; its shadow draw reads the trace's constants (`b6`) and the depth (`t2`) and takes pixels
+  outside both bounds as lit. A sphere behind the camera or off screen keeps the game's draws; one
+  through the camera plane, or an unknown range, traces the whole screen.
 - **Diagnostics.** "Sun contact shadows only" draws both parts with the far shader: the sun is then
   shadowed by the trace alone.
 
@@ -1157,6 +1166,16 @@ flag on each full-screen draw.
   `g_SpecularTexture`), whose `z` is the material. The sun comes after the upscale, so the march
   reads an earlier frame's binding: the same texture while the render size stays. `onDraw` calls
   GTVBAO before the sun shadows, which draw the sun pass themselves.
+- **Depth prefilter** (`shaders::PrefilterDepths`, XeGTAO's depth MIPs), first: the view distance
+  at the render size and four smaller copies in one `R32_FLOAT` texture, each 8x8 group covering
+  16x16 pixels. Each copy is XeGTAO's `DepthMIPFilter` of the 2x2 below: the weighted mean, fading
+  out distances more than `0.29 x radius` in front of the farthest, to zero at `0.75 x radius`. The
+  sign holds the foliage material (negative), taken by weight at the smaller sizes; the sky is
+  `1e6` m. The march reads each sample from the copy `round(log2(offset in pixels) - 3.3)`, so
+  samples from 14 pixels away read smaller copies, at the full-size pixel's centre. Reading the
+  `R32G8X24` depth and the specular target at full size, a close-up wall and floor (every pixel
+  marching ~200 pixels) cost 3.3 ms at 2560 x 1440 against 1.3 ms in a scene with sky and distant
+  buildings: the march was bound by cache misses.
 - **Occlusion** (`shaders::March` with `LIGHT` 0), recorded at the upscale's draw on its deferred
   context, with the game's compute bindings saved and restored: one pass at the render size, from
   the upscale's depth, the kept normals and the game's `cPSScene` as bound, so `c21` and `c28`
@@ -1222,18 +1241,25 @@ the add-on only checks a flag on each full-screen draw.
 - **March**, recorded at the resolve's draw on its deferred context, with the game's compute
   bindings saved and restored: from the resolve's depth (`t11`), diffuse light (`t9`), albedo
   (`t8`, its sRGB view, so linear) and `cPSScene`, with GTVBAO's slices, steps, thickness and noise
-  and its own radius (2 m by default). A sample lights the sectors it covers that no nearer sample
+  and its own radius (2 m by default). It runs the depth prefilter first, with its radius, into the
+  same texture GTVBAO uses. A sample lights the sectors it covers that no nearer sample
   covered, with the diffuse light its surface reflects (albedo x diffuse light) times the cosine
   between its normal and the direction to the receiver, which drops back faces (SSRT3). Equal
   sectors carry equal cosine weight (GT-VBAO's CDF), so the receiver's cosine needs no extra term
   and the sum is the irradiance over pi, the unit the resolve multiplies by the albedo. Specular
-  light is left out, being view-dependent. Into an `R11G11B10_FLOAT` target. A slice whose normal
+  light is left out, being view-dependent. At half the render size, rounded up (`Scale` 2): each
+  texel marches from the top-left pixel of its 2 x 2, with the same steps in render pixels. At full
+  size the march took 2.3 ms at 2560 x 1440, nearly all of SSILVB's cost, for a soft result. Into an
+  `R11G11B10_FLOAT` target. A slice whose normal
   faces away from the camera (normal maps on surfaces seen edge on) drops out, in both effects: its
   negative weight could cancel the other slice's, and the light divided by the near-zero sum showed
   as white specks.
-- **Denoise** (`shaders::Denoise` with `LIGHT` 1): XeGTAO's filter on the colour, two passes. The
-  last writes `diffuse + strength x light` into an `R16G16B16A16_FLOAT` copy of the diffuse light
-  (alpha kept).
+- **Denoise** (`shaders::Denoise` with `LIGHT` 1): XeGTAO's filter on the colour, two passes at
+  the march's size, with depth edges the march wrote at that size (GTVBAO keeps its own).
+- **Upsample** (`shaders::Upsample`): each render pixel blends the four nearest half-size texels
+  bilinearly, each weighed by 1 / (relative depth difference + 0.001), so light stays on its side of
+  an edge and sky texels drop out. It writes `diffuse + strength x light` into an
+  `R16G16B16A16_FLOAT` copy of the diffuse light (alpha kept).
 - **Resolve.** Drawn by the add-on with that copy in `t9` (and white in `t13` with GTVBAO on); the
   game's `t9` is restored. The game's occlusion, with GTVBAO off, multiplies the bounce like the
   rest of the light.

@@ -29,6 +29,7 @@
 #include "photo_mode.hpp"
 #include "presenter.hpp"
 #include "render_scale.hpp"
+#include "shadow_resolution.hpp"
 #include "shadows.hpp"
 #include "upscaler.hpp"
 #include "weather.hpp"
@@ -317,6 +318,10 @@ bool onCreateResource(device* device, resource_desc& desc, subresource_data*, re
     if (device->get_api() != device_api::d3d11 || desc.type != resource_type::texture_2d) return false;
 
     auto textureFormat = static_cast<DXGI_FORMAT>(desc.texture.format);
+    // TEMPORARY: shadow resolution research.
+    if (desc.texture.width >= 4096 && desc.texture.height >= 4096)
+        log("Big texture: " + std::to_string(desc.texture.width) + "x" + std::to_string(desc.texture.height) + " format " + std::to_string(textureFormat)
+            + " usage " + hex(static_cast<std::uint32_t>(desc.usage)) + ".");
     const bool renderTarget = (desc.usage & resource_usage::render_target) == resource_usage::render_target;
     if (atmosphere::upgradeTexture(desc.texture.width, desc.texture.height, textureFormat, renderTarget))
     {
@@ -504,6 +509,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     log(motion_blur::hook());
     log(fxaa::hook());
     log(frame_rate::hook());
+    log(shadow_resolution::hook());
     log(render_scale::hook());
     log(photo_mode::hook());
     log(game_loop::hook());

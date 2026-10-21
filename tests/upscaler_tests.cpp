@@ -47,12 +47,12 @@ void settingsPersist(const fs::path& root)
     expect(!fs::exists(path), "Loading defaults must not create a settings file.");
 
     const Settings chosen{.upscaler = Upscaler::Fsr, .mode = Mode::Off, .preset = Preset::J, .sharpness = 0.5f, .unlockFps = true, .frameGeneration = FrameGeneration::X3,
-        .softShadows = true, .sunSize = 1.25f, .sunScreenSpaceShadows = true, .lightScreenSpaceShadows = true, .ambientOcclusion = true, .occlusionRadius = 2,
+        .softShadows = true, .sunSize = 1.25f, .doubleShadowResolution = true, .sunScreenSpaceShadows = true, .lightScreenSpaceShadows = true, .ambientOcclusion = true, .occlusionRadius = 2,
         .occlusionStrength = 1.5f, .indirectLight = true, .indirectLightRadius = 3, .indirectLightStrength = 0.5f, .volumetricFog = true,
         .atmosphereLook = AtmosphereLook::Physical, .atmosphereHaze = 0.5f};
     saveSettings(path, chosen);
     expect(loadSettings(path) == chosen,
-        "Restart restores the upscaler, mode, preset, sharpening, frame rate unlock, frame generation, soft and screen-space shadows, GTVBAO, SSILVB "
+        "Restart restores the upscaler, mode, preset, sharpening, frame rate unlock, frame generation, soft and screen-space shadows, the shadow resolution, GTVBAO, SSILVB "
         "and the volumetric fog.");
     write(path, "frame_generation=dynamic\n");
     expect(loadSettings(path).frameGeneration == FrameGeneration::Dynamic, "Dynamic frame generation is read back.");

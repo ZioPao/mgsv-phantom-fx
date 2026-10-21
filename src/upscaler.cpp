@@ -16,6 +16,7 @@
 #include "photo_mode.hpp"
 #include "render_scale.hpp"
 #include "shader_bytecode.hpp"
+#include "shadow_resolution.hpp"
 #include "shadows.hpp"
 #include "upscaler_shaders.hpp"
 
@@ -1318,6 +1319,7 @@ void initialize(const std::filesystem::path& directory, bool supportedBuild) noe
 
     updateReplacing();
     frame_rate::setUnlocked(settings.unlockFps);
+    shadow_resolution::setDoubled(settings.doubleShadowResolution);
     configureShadows();
     configureIndirectLight();
     configureAtmosphere();
@@ -1735,6 +1737,7 @@ void applySettings(const Settings& wanted)
     unsavedChange = GetTickCount64();
     updateReplacing();
     frame_rate::setUnlocked(settings.unlockFps);
+    shadow_resolution::setDoubled(settings.doubleShadowResolution);
     configureShadows();
     configureIndirectLight();
     configureAtmosphere();
