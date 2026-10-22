@@ -19,6 +19,10 @@
 // SSILVB, screen-space indirect lighting with visibility bitmask, adds the light that nearby
 // surfaces on screen reflect onto each other: at the resolve, once the sun and the local lights are
 // in the diffuse light, the resolve reads the diffuse light with that bounce added.
+//
+// The global illumination (global_illumination.hpp) replaces the game's probe light and SSAO: the
+// upscale writes only its alpha, the SSAO passes are left out, and the resolve reads the diffuse
+// light with the traced light added and white for the occlusion. GTVBAO and SSILVB are off then.
 namespace phantom_fx::indirect_light
 {
 struct Options
@@ -29,8 +33,14 @@ struct Options
     bool light{};               // SSILVB
     float lightRadius{2};       // Metres
     float lightStrength{1};     // Multiplies the light
+    bool globalIllumination{};  // The traced light in place of the game's probes and SSAO
+    float globalIlluminationStrength{1}; // Multiplies the traced light
+    // The ray-traced scene runs, for the global illumination or the ray-traced shadows: the passes
+    // tell it what it needs (global_illumination::noteNormals and the others).
+    bool rayTracing{};
     bool showOcclusion{};       // Diagnostics: the resolve draws GTVBAO's occlusion alone
     bool showLight{};           // Diagnostics: the resolve draws SSILVB's light alone
+    bool showGlobalIllumination{}; // Diagnostics: the resolve draws the global illumination's output alone
 };
 
 void attach(ID3D11Device* device) noexcept;

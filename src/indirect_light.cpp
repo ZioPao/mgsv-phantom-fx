@@ -1,5 +1,6 @@
 #include "indirect_light.hpp"
 
+#include "global_illumination.hpp"
 #include "indirect_light_shaders.hpp"
 #include "log.hpp"
 #include "performance.hpp"
@@ -36,6 +37,7 @@ enum class Role : std::uint8_t
     Resolve,       // Multiplies all light by the game's occlusion
     GameOcclusion, // The game's SSAO, whose result only the resolve reads
     Sun,           // Binds the G-buffer's specular target, which holds the material
+    SunShadowMap,  // The same, inside the shadow map's range
 };
 
 struct GameShader
@@ -60,9 +62,9 @@ constexpr GameShader Shaders[]{
     {Role::Resolve, "DeferredRenderingFilmic_VolFog", "504b446c3e795d75e6adcd6753c11d12"},
     {Role::GameOcclusion, "SSAOLineIntegrals", "1e716301e9c644c4d59c620e9b84f7de"},
     {Role::GameOcclusion, "AmbientObscuranceSSAO", "9f963f50539aafc2ee77b888c56d3a0f"},
-    {Role::Sun, "SunLight_DL_CS_ES", "56ed4db892a7940f038146eeb0df0d30"},
+    {Role::SunShadowMap, "SunLight_DL_CS_ES", "56ed4db892a7940f038146eeb0df0d30"},
     {Role::Sun, "SunLight_DL_ES", "92726e8d231c8ed85f0db90400ef2258"},
-    {Role::Sun, "SunLight_DL_CS", "7e5c2fc99c9d84ddd32df4e789e7082a"}, // In rain
+    {Role::SunShadowMap, "SunLight_DL_CS", "7e5c2fc99c9d84ddd32df4e789e7082a"}, // In rain
     {Role::Sun, "SunLight_DL", "853f56a63e5bc66e6ee301c85ebfeaa8"},    // In rain
 };
 
@@ -96,6 +98,15 @@ struct Target
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<ID3D11ShaderResourceView> view;
     ComPtr<ID3D11UnorderedAccessView> access;
+    UINT width{}, height{};
+};
+
+// A texture one of the game's pixel shaders draws into.
+struct DrawTarget
+{
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11ShaderResourceView> view;
+    ComPtr<ID3D11RenderTargetView> target;
     UINT width{}, height{};
 };
 
@@ -139,7 +150,7 @@ ComPtr<ID3D11ShaderResourceView> lastNormals, lastSpecular;
 std::mutex resourceMutex;
 ComPtr<ID3D11Device> device;
 ComPtr<ID3D11ComputeShader> prefilterShader, occlusionShader, denoiseShader, finalDenoiseShader;
-ComPtr<ID3D11ComputeShader> lightShader, lightDenoiseShader, finalLightDenoiseShader, lightUpsampleShader;
+ComPtr<ID3D11ComputeShader> lightShader, lightDenoiseShader, finalLightDenoiseShader, lightUpsampleShader, addLightShader;
 ComPtr<ID3D11PixelShader> applyShader, showOcclusionShader, showLightShader;
 ComPtr<ID3D11BlendState> multiplyBlend;
 ComPtr<ID3D11Buffer> parameterBuffer;
@@ -149,9 +160,14 @@ ComPtr<ID3D11ShaderResourceView> whiteView; // 1x1, the resolve's occlusion whil
 std::array<Target, 2> visibility, gathered;
 constexpr std::size_t Result = DenoisePasses % 2;
 Target occlusionEdges, lightEdges; // Depth edges for each denoiser, written by its march
-Target diffuseWithLight;           // The game's diffuse light with SSILVB's added, read by the resolve in its place
+Target diffuseWithLight;           // The game's diffuse light with SSILVB's or the global illumination's added, read by the resolve in its place
+// While the global illumination runs, the game's probe light, which the upscale also draws aside:
+// the resolve takes it out of the diffuse light. The game's light target keeps it, as the game's
+// exposure (Tonemap_Lum_Lacc) measures that target: without the probe light there, the exposure
+// ran away in the shade (a white screen).
+DrawTarget gameProbeLight;
 MipTarget distances;               // shaders::PrefilterDepths' output, written before each march
-Progress occlusionProgress{"GTVBAO"}, lightProgress{"SSILVB"};
+Progress occlusionProgress{"GTVBAO"}, lightProgress{"SSILVB"}, globalProgress{"Global illumination"};
 std::map<std::string, bool, std::less<>> loggedOnce;
 
 void logOnce(const std::string& message)
@@ -213,6 +229,7 @@ bool ensurePipeline()
         lightDenoiseShader = computeShader(shaders::Denoise, "ssilvb-denoise", lightPass);
         finalLightDenoiseShader = computeShader(shaders::Denoise, "ssilvb-denoise-final", lastLightPass);
         lightUpsampleShader = computeShader(shaders::Upsample, "ssilvb-upsample", nullptr);
+        addLightShader = computeShader(shaders::AddLight, "gi-add", nullptr);
         applyShader = pixelShader(shaders::Apply, "gtvbao-apply");
         showOcclusionShader = pixelShader(shaders::Show, "gtvbao-show", occlusionPass);
         showLightShader = pixelShader(shaders::Show, "ssilvb-show", lightPass);
@@ -231,6 +248,7 @@ bool ensurePipeline()
         diffuse.BlendOpAlpha = D3D11_BLEND_OP_ADD;
         diffuse.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
         check(device->CreateBlendState(&blend, multiplyBlend.ReleaseAndGetAddressOf()), "Creating the GTVBAO blend");
+
 
         D3D11_BUFFER_DESC buffer{};
         buffer.ByteWidth = sizeof(Parameters);
@@ -287,6 +305,26 @@ bool ensureTarget(Target& target, UINT width, UINT height, DXGI_FORMAT format, c
     target = std::move(made);
 
     return true;
+}
+
+// Call with resourceMutex held.
+void ensureDrawTarget(DrawTarget& target, UINT width, UINT height, DXGI_FORMAT format, const char* what)
+{
+    if (target.texture && target.width == width && target.height == height) return;
+
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = desc.ArraySize = 1;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    DrawTarget made{.width = width, .height = height};
+    check(device->CreateTexture2D(&desc, nullptr, made.texture.GetAddressOf()), what);
+    check(device->CreateShaderResourceView(made.texture.Get(), nullptr, made.view.GetAddressOf()), what);
+    check(device->CreateRenderTargetView(made.texture.Get(), nullptr, made.target.GetAddressOf()), what);
+    target = std::move(made);
 }
 
 // The prefiltered distances at the render size; call with resourceMutex held.
@@ -414,8 +452,10 @@ void writeParameters(ID3D11DeviceContext* context, UINT width, UINT height, floa
 {
     D3D11_MAPPED_SUBRESOURCE mapped{};
     check(context->Map(parameterBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Writing the march constants");
+    const bool global = options.globalIllumination;
     const Parameters parameters{{width, height}, radius, MaxRadiusShare * static_cast<float>(height), options.occlusionStrength,
-        options.lightStrength, options.showLight ? 0.0f : 1.0f, 0};
+        global ? options.globalIlluminationStrength : options.lightStrength,
+        (global ? options.showGlobalIllumination : options.showLight) ? 0.0f : 1.0f, 0};
     std::memcpy(mapped.pData, &parameters, sizeof(parameters));
     context->Unmap(parameterBuffer.Get(), 0);
 }
@@ -697,6 +737,110 @@ bool drawResolve(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     return true;
 }
 
+// What the ray-traced scene needs from the game's passes (global_illumination.hpp): the normals, the
+// kick at the upscale, the wait at the resolve, and the sun.
+void noteForRayTracing(ID3D11DeviceContext* context, Role role)
+{
+    ComPtr<ID3D11ShaderResourceView> view;
+    switch (role)
+    {
+    case Role::SkyLight:
+        context->PSGetShaderResources(NormalSlot, 1, view.GetAddressOf());
+        global_illumination::noteNormals(context, view.Get());
+        return;
+    case Role::Upscale:
+        context->PSGetShaderResources(DepthSlot, 1, view.GetAddressOf());
+        global_illumination::noteUpscale(context, view.Get());
+        return;
+    case Role::Resolve:
+        context->PSGetShaderResources(AlbedoSlot, 1, view.GetAddressOf());
+        global_illumination::noteResolve(context, view.Get());
+        return;
+    case Role::Sun: global_illumination::noteSun(context, false); return;
+    case Role::SunShadowMap: global_illumination::noteSun(context, true); return;
+    case Role::GameOcclusion: return;
+    }
+}
+
+// The upscale while the global illumination runs: drawn aside into gameProbeLight first, then by
+// the game as always. False leaves the draw to the game, which it always does.
+bool drawUpscaleForGlobal(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call)
+{
+    if (!global_illumination::running()) return false;
+
+    std::lock_guard lock(resourceMutex);
+    if (!ensurePipeline()) return false;
+
+    ID3D11RenderTargetView* gameTargets[2]{};
+    ComPtr<ID3D11DepthStencilView> gameDepth;
+    context->OMGetRenderTargets(2, gameTargets, gameDepth.GetAddressOf());
+    std::array<ComPtr<ID3D11RenderTargetView>, 2> heldTargets;
+    for (int i = 0; i < 2; ++i) heldTargets[i].Attach(gameTargets[i]);
+
+    // The game draws it with blending off, into the light targets.
+    const auto size = sizeOf(gameTargets[0]);
+    ensureDrawTarget(gameProbeLight, size.first, size.second, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the game's probe light");
+    const performance::Timed timed(context, performance::Pass::GiProbeLight);
+    context->OMSetRenderTargets(1, gameProbeLight.target.GetAddressOf(), gameDepth.Get());
+    context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
+    context->OMSetRenderTargets(2, gameTargets, gameDepth.Get());
+
+    return false;
+}
+
+// The resolve while the global illumination runs: the diffuse light with the traced light in place
+// of the game's probe light, white in place of the game's occlusion; or, for the diagnostics, the
+// global illumination's output alone. False leaves the draw to the game.
+bool drawResolveForGlobal(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, const Options& options)
+{
+    if (!global_illumination::running()) return false;
+
+    ComPtr<ID3D11ShaderResourceView> depth, diffuse, gameOcclusion;
+    ComPtr<ID3D11PixelShader> gameShader;
+    context->PSGetShaderResources(ResolveDepthSlot, 1, depth.GetAddressOf());
+    context->PSGetShaderResources(DiffuseSlot, 1, diffuse.GetAddressOf());
+
+    const auto size = sizeOf(depth.Get());
+    auto* light = global_illumination::light(size.first, size.second);
+    std::lock_guard lock(resourceMutex);
+    if (!ensurePipeline()) return false;
+    if (!light || !size.first || sizeOf(diffuse.Get()) != size) return wait(globalProgress, "the lighting textures differ in size");
+
+    ensureTarget(diffuseWithLight, size.first, size.second, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the lit diffuse light");
+    // Before the first upscale at this size, nothing is taken out.
+    const bool hasProbeLight = gameProbeLight.width == size.first && gameProbeLight.height == size.second;
+    writeParameters(context, size.first, size.second, 0, options);
+    {
+        const performance::Timed timed(context, performance::Pass::GiCombine);
+        SavedComputeState saved(context);
+        context->CSSetConstantBuffers(0, 1, parameterBuffer.GetAddressOf());
+        ID3D11ShaderResourceView* inputs[]{diffuse.Get(), light, hasProbeLight ? gameProbeLight.view.Get() : nullptr};
+        auto* output = diffuseWithLight.access.Get();
+        context->CSSetShaderResources(0, 3, inputs);
+        context->CSSetUnorderedAccessViews(0, 1, &output, nullptr);
+        context->CSSetShader(addLightShader.Get(), nullptr, 0);
+        context->Dispatch(groups(size.first), groups(size.second), 1);
+    }
+
+    context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
+    context->PSGetShaderResources(OcclusionSlot, 1, gameOcclusion.GetAddressOf());
+    if (options.showGlobalIllumination)
+    {
+        context->PSSetShader(showLightShader.Get(), nullptr, 0);
+        context->PSSetShaderResources(DiffuseSlot, 1, &light);
+    }
+    else context->PSSetShaderResources(DiffuseSlot, 1, diffuseWithLight.view.GetAddressOf());
+
+    context->PSSetShaderResources(OcclusionSlot, 1, whiteView.GetAddressOf());
+    context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
+    context->PSSetShader(gameShader.Get(), nullptr, 0);
+    context->PSSetShaderResources(DiffuseSlot, 1, diffuse.GetAddressOf());
+    context->PSSetShaderResources(OcclusionSlot, 1, gameOcclusion.GetAddressOf());
+    ran(globalProgress);
+
+    return true;
+}
+
 // Call with resourceMutex held.
 std::string problemOf(const Progress& progress)
 {
@@ -713,7 +857,7 @@ void attach(ID3D11Device* gameDevice) noexcept
     bool enable{};
     {
         std::lock_guard lock(optionsMutex);
-        enable = wanted.occlusion || wanted.light;
+        enable = wanted.occlusion || wanted.light || wanted.globalIllumination;
     }
 
     std::lock_guard lock(resourceMutex);
@@ -734,6 +878,7 @@ void detach() noexcept
         lightDenoiseShader.Reset();
         finalLightDenoiseShader.Reset();
         lightUpsampleShader.Reset();
+        addLightShader.Reset();
         applyShader.Reset();
         showOcclusionShader.Reset();
         showLightShader.Reset();
@@ -746,6 +891,7 @@ void detach() noexcept
         lightEdges = {};
         distances = {};
         diffuseWithLight = {};
+        gameProbeLight = {};
         device.Reset();
         pipelineFailed = false;
     }
@@ -769,7 +915,7 @@ void configure(const Options& options) noexcept
         wanted = options;
     }
 
-    if (!options.occlusion && !options.light) return;
+    if (!options.occlusion && !options.light && !options.globalIllumination) return;
 
     std::lock_guard lock(resourceMutex);
     ensurePipeline();
@@ -840,13 +986,26 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
             options = current;
         }
 
+        if (options.rayTracing) noteForRayTracing(context, *role);
+        if (options.globalIllumination)
+            switch (*role)
+            {
+            case Role::Upscale: return drawUpscaleForGlobal(context, call);
+            case Role::Resolve: return drawResolveForGlobal(context, call, options);
+            case Role::GameOcclusion: return global_illumination::running();
+            case Role::SkyLight:
+            case Role::Sun:
+            case Role::SunShadowMap: return false;
+            }
+
         switch (*role)
         {
         case Role::SkyLight: noteNormals(context); return false;
         case Role::Upscale: return options.occlusion && drawUpscale(context, call, options);
         case Role::Resolve: return drawResolve(context, call, options);
         case Role::GameOcclusion: return options.occlusion;
-        case Role::Sun: noteSpecular(context); return false;
+        case Role::Sun:
+        case Role::SunShadowMap: noteSpecular(context); return false;
         }
     }
     catch (const std::exception& error)
@@ -865,6 +1024,6 @@ void present() noexcept
 {
     std::lock_guard lock(optionsMutex);
     current = wanted;
-    active = (current.occlusion || current.light) && !pipelineFailed;
+    active = (current.occlusion || current.light || current.globalIllumination || current.rayTracing) && !pipelineFailed;
 }
 }

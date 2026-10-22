@@ -452,9 +452,9 @@ void main(int3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 // range) and SunLight_DL_ES (SHADOW_MAP 0, beyond it) compute it, rebuilt from their disassembly
 // with the same bindings; in rain the game draws SunLight_DL_CS and SunLight_DL, the same without
 // the sky reflection (SKY_REFLECTION 0). Plus the add-on's options in b6: soft shadows filter the
-// shadow map, and the screen-space shadow in t7 multiplies the sun's shadow. With both off they give
-// the game's output bit for bit (checked on WARP with random inputs). Split into literals, as MSVC
-// limits each to 16 KB.
+// shadow map, the screen-space shadow in t7 multiplies the sun's shadow, and the ray-traced shadow in
+// t6 takes the place of the game's. With all off they give the game's output bit for bit (checked on
+// WARP with random inputs). Split into literals, as MSVC limits each to 16 KB.
 inline constexpr char SunLight[] = R"(
 cbuffer cPSScene : register(b2)
 {
@@ -489,6 +489,8 @@ cbuffer cSunShadows : register(b6) // The add-on's options
     float g_sunTangent;         // Tangent of the sun's angular radius, for the soft shadows
     float g_frame;              // Turns the soft shadows' samples: the frame modulo 64 while DLSS accumulates frames, else 0
     float g_screenSpaceShadows; // 1: the screen-space shadow in t7 multiplies the sun's shadow
+    float g_rayTraced;          // 1: the ray-traced shadow in t6 is the sun's shadow (see SunShadow)
+    float3 g_padding;
 };
 
 SamplerState g_samplerPoint_Wrap : register(s8);
@@ -502,6 +504,7 @@ Texture2D<float4> g_SpecularTexture : register(t1);
 Texture2D<float4> g_DepthTexture : register(t2);
 Texture2D<float> g_ShadowTexture : register(t3);
 Texture2D<float4> g_CloudTexture : register(t4);
+Texture2D<float> g_RayTracedShadow : register(t6);
 Texture2D<float> g_ScreenSpaceShadow : register(t7);
 Texture3D<float4> g_lut2 : register(t8);
 Texture2D<float4> g_lut1 : register(t9);
@@ -579,8 +582,10 @@ float SoftShadow(float2 uv, float receiverDepth, float2 tileMin, float2 tileMax,
 )" R"(
 // The four cascades share one atlas, two by two. Returns 1 where the sun reaches, after the
 // distance fade, the clouds and the height fade. `tangentX` and `tangentY` lie on the receiver, in
-// view space, for the soft shadows.
-float SunShadow(float3 viewPosition, float2 pixel, float3 tangentX, float3 tangentY)
+// view space, for the soft shadows. With ray-traced shadows, `rayTraced` is the rays' shadow, which
+// leaves out the alpha-tested meshes (leaves, grass): the shadow map gives theirs, so the darker of
+// the two counts, and the map fades to the rays alone towards the end of its range.
+float SunShadow(float3 viewPosition, float2 pixel, float3 tangentX, float3 tangentY, float rayTraced)
 {
     float4 position = float4(viewPosition, 1);
     float resolution = m_shadowMapResolutions.x;
@@ -666,7 +671,13 @@ float SunShadow(float3 viewPosition, float2 pixel, float3 tangentX, float3 tange
     float pastShadowStart = max(length(fromMaxLevel) - m_lightParams[8].y, 0);
     float inViewRange = saturate(pastShadowStart * m_lightParams[6].x) * (fromMaxLevel.z >= 0 ? 1.0 : 0.0);
     inViewRange *= inViewRange;
-    shadow = (1 - shadow) * inViewRange + shadow;
+    [branch] if (g_rayTraced)
+    {
+        shadow = min(shadow, rayTraced);
+        shadow = (rayTraced - shadow) * inViewRange + shadow;
+    }
+    else
+        shadow = (1 - shadow) * inViewRange + shadow;
     shadow = saturate(shadow - m_lightParams[6].w);
 
     float2 cloudPosition = float2(dot(m_objectParams[9], position), dot(m_objectParams[10], position));
@@ -721,6 +732,8 @@ void main(float4 position : SV_Position, float4 clipPosition : TEXCOORD0, float4
 
     float shadow = 1;
     [branch] if (g_screenSpaceShadows) shadow = g_ScreenSpaceShadow.Load(int3(position.xy, 0));
+    float rayTraced = 1;
+    [branch] if (g_rayTraced) rayTraced = g_RayTracedShadow.Load(int3(position.xy, 0));
 #if SHADOW_MAP
     // The receiver's tangents for the soft shadows, from its neighbours' depth.
     float2 pixelStep = float2(ddx(screenPosition.x), ddy(screenPosition.y));
@@ -735,10 +748,11 @@ void main(float4 position : SV_Position, float4 clipPosition : TEXCOORD0, float4
         tangentX = Tangent(viewPosition, left, right);
         tangentY = Tangent(viewPosition, above, below);
     }
-    shadow *= SunShadow(viewPosition, position.xy - 0.5, tangentX, tangentY);
+    shadow *= SunShadow(viewPosition, position.xy - 0.5, tangentX, tangentY, rayTraced);
     float specularShadow = max(shadow, m_lightParams[7].x);
 #else
-    // The game's pass beyond the shadow range has 1 here.
+    // The game's pass beyond the shadow range has 1 here; the rays give the shadow it lacks.
+    shadow *= rayTraced;
     float specularShadow = shadow < 1 ? max(shadow, m_lightParams[7].x) : 1;
 #endif
 

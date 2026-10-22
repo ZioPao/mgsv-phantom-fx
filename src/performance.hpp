@@ -34,6 +34,7 @@ enum class Pass : std::size_t
     LightPrefilter, LightMarch, LightDenoise, LightUpsample,
     FogPass, SkyTables, FogShadow, FogScattering, FogIntegration, Sky,
     DofSetup, DofGather, DofComposite, LensShot,
+    GiCapture, GiInputs, GiProbeLight, GiCombine, GiWait,
     HdrEncode, HdrDecode, HdrGrade,
     Count
 };

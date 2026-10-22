@@ -21,8 +21,11 @@ struct Diagnostics
     bool noJitter{};
     bool gameFxaa{}; // Comparison: leave the frame to the game's FXAA, keeping DLSS ready
     bool onlyScreenSpaceShadows{}; // The sun shadowed by the screen-space shadows alone
+    bool onlyRayTracedShadows{};   // The sun shadowed by the ray-traced shadows alone
     bool showAmbientOcclusion{};   // GTVBAO's occlusion alone in place of the lit scene
     bool showIndirectLight{};      // SSILVB's light alone in place of the lit scene
+    bool showGlobalIllumination{}; // The global illumination's light alone in place of the lit scene
+    bool showTracedScene{};        // The global illumination's traced scene from the camera
 };
 
 struct Status
@@ -98,8 +101,10 @@ void drawMenu();
 // them on. Leaving out the upscaler shows the game's FXAA at the same render size.
 struct LeftOut
 {
-    bool upscaler{}, sharpening{}, softShadows{}, sunScreenSpaceShadows{}, lightScreenSpaceShadows{}, ambientOcclusion{}, indirectLight{},
-        volumetricFog{}, depthOfField{};
+    bool upscaler{}, sharpening{}, softShadows{}, sunScreenSpaceShadows{}, lightScreenSpaceShadows{}, rayTracedShadows{}, ambientOcclusion{},
+        indirectLight{}, globalIllumination{}, volumetricFog{}, depthOfField{};
+    // Parts of the global illumination, left out before all of it: its light passes, then its mesh capture.
+    bool globalLight{}, globalCapture{};
 };
 void leaveOut(const LeftOut& effects);
 }

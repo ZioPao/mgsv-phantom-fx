@@ -8,6 +8,7 @@
 #include "fsr_upscaler.hpp"
 #include "fxaa.hpp"
 #include "game_loop.hpp"
+#include "global_illumination.hpp"
 #include "hdr.hpp"
 #include "indirect_light.hpp"
 #include "log.hpp"
@@ -16,7 +17,6 @@
 #include "photo_mode.hpp"
 #include "render_scale.hpp"
 #include "shader_bytecode.hpp"
-#include "shadow_resolution.hpp"
 #include "shadows.hpp"
 #include "upscaler_shaders.hpp"
 
@@ -293,32 +293,50 @@ void updateReplacing()
     fxaa::setForced(replacing);
 }
 
+// Call with settingsMutex held. The ray-traced shadows replace the soft shadows and the sun's contact shadows.
+bool rayTracedShadows()
+{
+    return supported && enhancements && settings.rayTracedShadows && !leftOut.rayTracedShadows;
+}
+
 // Call with settingsMutex held, after updateReplacing.
 void configureShadows()
 {
+    const bool rayTraced = rayTracedShadows();
     shadows::configure({
-        .soft = enhancements && settings.softShadows && !leftOut.softShadows,
+        .soft = enhancements && settings.softShadows && !leftOut.softShadows && !rayTraced,
         .sunSize = settings.sunSize,
         .turnPattern = replacing,
-        .screenSpaceSun = enhancements && settings.sunScreenSpaceShadows && !leftOut.sunScreenSpaceShadows,
+        .screenSpaceSun = enhancements && settings.sunScreenSpaceShadows && !leftOut.sunScreenSpaceShadows && !rayTraced,
         .screenSpaceLights = enhancements && settings.lightScreenSpaceShadows && !leftOut.lightScreenSpaceShadows,
+        .rayTraced = rayTraced,
         .onlyScreenSpace = diagnostics.onlyScreenSpaceShadows,
+        .onlyRayTraced = diagnostics.onlyRayTracedShadows,
     });
 }
 
-// Call with settingsMutex held.
+// Call with settingsMutex held. The global illumination replaces GTVBAO and SSILVB; its scene also
+// gives the ray-traced shadows.
 void configureIndirectLight()
 {
+    const bool global = supported && enhancements && settings.globalIllumination && !leftOut.globalIllumination;
+    const bool rayTraced = rayTracedShadows();
     indirect_light::configure({
-        .occlusion = supported && enhancements && settings.ambientOcclusion && !leftOut.ambientOcclusion,
+        .occlusion = supported && enhancements && settings.ambientOcclusion && !leftOut.ambientOcclusion && !global,
         .occlusionRadius = settings.occlusionRadius,
         .occlusionStrength = settings.occlusionStrength,
-        .light = supported && enhancements && settings.indirectLight && !leftOut.indirectLight,
+        .light = supported && enhancements && settings.indirectLight && !leftOut.indirectLight && !global,
         .lightRadius = settings.indirectLightRadius,
         .lightStrength = settings.indirectLightStrength,
+        .globalIllumination = global,
+        .globalIlluminationStrength = settings.globalIlluminationStrength,
+        .rayTracing = global || rayTraced,
         .showOcclusion = diagnostics.showAmbientOcclusion,
         .showLight = diagnostics.showIndirectLight,
+        .showGlobalIllumination = diagnostics.showGlobalIllumination || diagnostics.showTracedScene,
     });
+    global_illumination::configure({.enabled = global, .shadows = rayTraced, .sunSize = settings.sunSize, .showScene = diagnostics.showTracedScene,
+        .light = !leftOut.globalLight, .capture = !leftOut.globalCapture});
 }
 
 // Call with settingsMutex held.
@@ -1319,7 +1337,6 @@ void initialize(const std::filesystem::path& directory, bool supportedBuild) noe
 
     updateReplacing();
     frame_rate::setUnlocked(settings.unlockFps);
-    shadow_resolution::setDoubled(settings.doubleShadowResolution);
     configureShadows();
     configureIndirectLight();
     configureAtmosphere();
@@ -1737,7 +1754,6 @@ void applySettings(const Settings& wanted)
     unsavedChange = GetTickCount64();
     updateReplacing();
     frame_rate::setUnlocked(settings.unlockFps);
-    shadow_resolution::setDoubled(settings.doubleShadowResolution);
     configureShadows();
     configureIndirectLight();
     configureAtmosphere();

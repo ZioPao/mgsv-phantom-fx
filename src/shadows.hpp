@@ -14,6 +14,9 @@
 // - Screen-space shadows add Bend Studio's screen-space shadow, traced through the depth buffer, to
 //   the sun, to every point and spot light, or to both. The sun's is one trace a frame; the lights'
 //   is one trace per light, so it costs far more where many lights are on screen.
+// - Ray-traced shadows take the sun's shadow from rays through the global illumination's scene
+//   (global_illumination::sunShadow; docs/DEVELOPMENT.md, "Ray-traced shadows"), everywhere the sun
+//   lights. The shadow map keeps only what the rays leave out, the alpha-tested meshes' shadows.
 //
 // The engine lights the sun in one full-screen pass whose shaders sample the shadow map
 // themselves. While an option is on, that pass draws with replacement shaders that compute the
@@ -30,7 +33,9 @@ struct Options
     bool turnPattern{};       // DLSS accumulates frames, so the soft shadows' samples turn each frame
     bool screenSpaceSun{};    // Bend Studio's screen-space shadows on the sun
     bool screenSpaceLights{}; // Bend Studio's screen-space shadows on every point and spot light
+    bool rayTraced{};         // The sun's ray-traced shadows, with the shadow map's for alpha-tested meshes
     bool onlyScreenSpace{};   // Diagnostics: the sun is shadowed by the screen-space shadow alone
+    bool onlyRayTraced{};     // Diagnostics: the sun is shadowed by the rays alone
 };
 
 void attach(ID3D11Device* device) noexcept;

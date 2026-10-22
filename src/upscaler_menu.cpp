@@ -5,6 +5,7 @@
 #include "frame_generation.hpp"
 #include "frame_log.hpp"
 #include "fsr_frame_generation.hpp"
+#include "global_illumination.hpp"
 #include "hdr.hpp"
 #include "indirect_light.hpp"
 #include "menu_style.hpp"
@@ -229,13 +230,36 @@ bool drawSoftShadows(Settings& wanted)
     bool changed = ImGui::Checkbox("Soft shadows (PCSS)", &wanted.softShadows);
     tooltip("Contact-hardening soft shadows from the sun's shadow map: sharp where an object meets the ground, softer the\n"
             "further the shadow falls from it, as the sun's disc gives. Off keeps the game's evenly sharp shadow edges.");
-    if (!wanted.softShadows) return changed;
+    // The ray-traced shadows show the sun size while on.
+    if (!wanted.softShadows || wanted.rayTracedShadows) return changed;
 
     beginIndent();
     changed |= ImGui::SliderFloat("Sun size", &wanted.sunSize, Settings::MinSunSize, Settings::MaxSunSize, "%.2f deg", ImGuiSliderFlags_AlwaysClamp);
     tooltip("The sun's angular diameter, which sets how fast shadows soften with distance. 0.53 is the real sun.");
     changed |= resetButton("Sun size", wanted.sunSize, Defaults.sunSize);
     if (shadows::failed()) statusLine(Red, "Soft shadows are unavailable (see PhantomFX.log).");
+    endIndent();
+
+    return changed;
+}
+
+// Returns true when a setting changed.
+bool drawRayTracedShadows(Settings& wanted)
+{
+    bool changed = ImGui::Checkbox("Ray-traced shadows", &wanted.rayTracedShadows);
+    tooltip("The sun's shadows from rays traced through the scene the global illumination captures: as soft as the sun's\n"
+            "disc makes them, exact where objects meet the ground, and as far as you can see, where the game's shadows end\n"
+            "at about 90 m. Leaves and grass keep the game's shadow map near you and let half the sun through further away.\n"
+            "It replaces soft shadows and sun contact shadows while on. Needs a GPU that traces rays (DXR 1.1). Off keeps\n"
+            "the game's shadow map.");
+    if (!wanted.rayTracedShadows) return changed;
+
+    beginIndent();
+    changed |= ImGui::SliderFloat("Sun size", &wanted.sunSize, Settings::MinSunSize, Settings::MaxSunSize, "%.2f deg", ImGuiSliderFlags_AlwaysClamp);
+    tooltip("The sun's angular diameter, which sets how fast shadows soften with distance. 0.53 is the real sun.");
+    changed |= resetButton("Sun size", wanted.sunSize, Defaults.sunSize);
+    if (const auto problem = global_illumination::problem(); !problem.empty()) statusLine(Yellow, problem);
+    if (shadows::failed()) statusLine(Red, "Ray-traced shadows are unavailable (see PhantomFX.log).");
     endIndent();
 
     return changed;
@@ -283,6 +307,26 @@ bool drawIndirectLight(Settings& wanted)
     tooltip("1 is physically based; higher brightens the bounced light, 0 turns it off.");
     changed |= resetButton("Indirect light strength", wanted.indirectLightStrength, Defaults.indirectLightStrength);
     if (const auto problem = indirect_light::lightProblem(); !problem.empty()) statusLine(Yellow, problem);
+    endIndent();
+
+    return changed;
+}
+
+// Returns true when a setting changed.
+bool drawGlobalIllumination(Settings& wanted)
+{
+    bool changed = ImGui::Checkbox("Global illumination (GI-1.2)", &wanted.globalIllumination);
+    tooltip("Ray-traced indirect light after AMD's GI-1.2: sunlight and skylight bounce between surfaces, also those off\n"
+            "screen, and the sky only lights what it can reach. It replaces the game's baked probe light and SSAO, and\n"
+            "GTVBAO and SSILVB while on. Needs a GPU that traces rays (DXR 1.1). Off keeps the game's indirect light.");
+    if (!wanted.globalIllumination) return changed;
+
+    beginIndent();
+    changed |= ImGui::SliderFloat("Global illumination strength", &wanted.globalIlluminationStrength, 0, Settings::MaxGlobalIlluminationStrength,
+        "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    tooltip("1 is physically based; higher brightens the indirect light, 0 leaves only the sun and the lamps.");
+    changed |= resetButton("Global illumination strength", wanted.globalIlluminationStrength, Defaults.globalIlluminationStrength);
+    if (const auto problem = global_illumination::problem(); !problem.empty()) statusLine(Yellow, problem);
     endIndent();
 
     return changed;
@@ -398,33 +442,38 @@ bool drawVisuals(Settings& wanted)
 {
     bool enhancements = enhancementsOn();
     if (ImGui::Checkbox("Visual enhancements (F1)", &enhancements)) setEnhancements(enhancements);
-    tooltip("Soft shadows, contact shadows, GTVBAO, SSILVB and the volumetric fog together, as set below. Off shows the\n"
-            "game's own lighting for comparison; F1 toggles it at any time. Not saved: each start begins with them on.");
+    tooltip("Ray-traced shadows, soft shadows, contact shadows, global illumination, GTVBAO, SSILVB and the volumetric fog\n"
+            "together, as set below. Off shows the game's own lighting for comparison; F1 toggles it at any time. Not saved: each start begins\n"
+            "with them on.");
     if (!enhancements) statusLine(Yellow, "Visual enhancements are off. F1 turns them back on.");
 
     bool changed{};
     ImGui::BeginDisabled(!enhancements);
     beginIndent();
+    changed |= drawRayTracedShadows(wanted);
+    // The ray-traced shadows take the place of both.
+    ImGui::BeginDisabled(wanted.rayTracedShadows);
     changed |= drawSoftShadows(wanted);
     changed |= ImGui::Checkbox("Sun contact shadows", &wanted.sunScreenSpaceShadows);
     tooltip("Bend Studio's screen-space shadows for the sun: short shadows traced through the depth buffer. They add the\n"
             "contact shadows the sun's shadow map misses (feet, rocks, folds of clothing). Cheap: one trace a frame.");
+    ImGui::EndDisabled();
     changed |= ImGui::Checkbox("Lamp contact shadows", &wanted.lightScreenSpaceShadows);
     tooltip("The same for every lamp, spot light and flashlight, which gives lights that have no shadow of their own one.\n"
             "Costly: one trace per light, so the frame rate drops where many lights are on screen, as in a base at night.");
     if ((wanted.sunScreenSpaceShadows || wanted.lightScreenSpaceShadows) && shadows::failed())
         statusLine(Red, "Contact shadows are unavailable (see PhantomFX.log).");
 
+    changed |= drawGlobalIllumination(wanted);
+    // The global illumination takes the place of both.
+    ImGui::BeginDisabled(wanted.globalIllumination);
     changed |= drawAmbientOcclusion(wanted);
     changed |= drawIndirectLight(wanted);
+    ImGui::EndDisabled();
     changed |= drawVolumetricFog(wanted);
     endIndent();
     ImGui::EndDisabled();
 
-    ImGui::Spacing();
-    changed |= ImGui::Checkbox("Double shadow resolution", &wanted.doubleShadowResolution);
-    tooltip("The sun's shadow map at twice the width and height of the game's shadow quality: 16384x16384 at Extra High,\n"
-            "so shadow edges and small shadows get sharper. Uses 768 MB more video memory and makes the shadow pass costlier.");
     ImGui::Spacing();
     changed |= drawDepthOfField(wanted);
     ImGui::Spacing();
@@ -647,10 +696,19 @@ void drawDiagnostics(const Status& state)
     changed |= ImGui::Checkbox("Game FXAA (comparison)", &options.gameFxaa);
     changed |= ImGui::Checkbox("Sun contact shadows only", &options.onlyScreenSpaceShadows);
     tooltip("With sun contact shadows on, the sun is shadowed by them alone, without the shadow map.");
+    changed |= ImGui::Checkbox("Ray-traced shadows only", &options.onlyRayTracedShadows);
+    tooltip("With ray-traced shadows on, the sun is shadowed by the rays alone, without the shadow map that gives the\n"
+            "shadows of leaves and grass near you.");
     changed |= ImGui::Checkbox("GTVBAO only", &options.showAmbientOcclusion);
     tooltip("With GTVBAO on, the scene shows its occlusion alone: white where nothing occludes.");
     changed |= ImGui::Checkbox("SSILVB only", &options.showIndirectLight);
     tooltip("With SSILVB on, the scene shows the light it adds alone: black where nothing bounces.");
+    changed |= ImGui::Checkbox("Global illumination only", &options.showGlobalIllumination);
+    tooltip("With global illumination on, the scene shows its indirect light alone.");
+    changed |= ImGui::Checkbox("Global illumination scene", &options.showTracedScene);
+    tooltip("With global illumination on, the scene shows the geometry it traces, coloured by its normals: red where it\n"
+            "disagrees with the game's depth, magenta where it lacks what the game drew, yellow where it has something in the sky.");
+    if (const auto scene = global_illumination::status(); options.showTracedScene && !scene.empty()) ImGui::TextWrapped("%s", scene.c_str());
     if (changed) applyDiagnostics(options);
 
     ImGui::Spacing();

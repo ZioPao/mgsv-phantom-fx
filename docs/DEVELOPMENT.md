@@ -54,7 +54,7 @@ This produces `build/release/PhantomFX-<version>.zip` and its `.sha256` checksum
 | `sl.interposer.dll`, `sl.common.dll`, `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`, `nvngx_dlssg.dll` | NVIDIA Streamline and the frame generation model |
 | `amd_fidelityfx_loader_dx12.dll`, `amd_fidelityfx_upscaler_dx12.dll`, `amd_fidelityfx_framegeneration_dx12.dll` | AMD FSR upscaling and frame generation |
 | `PhantomFX/README.md`, `CHANGELOG.md`, `LICENSE` | Player documentation and the add-on's license |
-| `PhantomFX/*-LICENSE.txt` | NVIDIA DLSS, NVIDIA Streamline, AMD FSR SDK, MinHook, ReShade, Dear ImGui, AMD FidelityFX (RCAS), Bend Studio (screen-space shadows), three-gtvbao and Intel XeGTAO (GTVBAO) |
+| `PhantomFX/*-LICENSE.txt` | NVIDIA DLSS, NVIDIA Streamline, AMD FSR SDK, MinHook, ReShade, Dear ImGui, AMD FidelityFX (RCAS), Bend Studio (screen-space shadows), three-gtvbao and Intel XeGTAO (GTVBAO), AMD Capsaicin (global illumination) |
 
 CPack packages only the `addon` component, so SDK headers, static libraries, tests, debug symbols
 and local settings are left out. ReShade is installed separately by the player.
@@ -87,6 +87,9 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/sun_shadows.cpp`, `src/sun_shadows.hpp` | Soft shadows and Bend Studio's screen-space shadows on the sun: the trace and the sun pass's replacement draw |
 | `src/sun_shadows_shaders.hpp` | HLSL: Bend's trace ported to FXC, the game's sun light shaders rebuilt with soft shadows and the screen-space shadow |
 | `third_party/bend_sss/bend_sss_cpu.h` | Bend Studio's dispatch layout, unchanged (Apache License 2.0) |
+| `src/gi_shadow.cpp`, `src/gi_shadow.hpp` | Ray-traced shadows on the global illumination's Direct3D 12 device: the denoiser's memory and passes |
+| `src/shaders/gi_shadow.hlsl`, `gi_shadow_filter.hlsl`, `gi_shadow.hlsli` | HLSL: the sun's shadow rays, and the FidelityFX Shadow Denoiser's data access, temporal pass and filters |
+| `third_party/ffx_denoiser_shadows/` | AMD's FidelityFX Shadow Denoiser headers, unchanged (MIT; `licenses/AMD-FidelityFX-LICENSE.txt`) |
 | `src/indirect_light.cpp`, `src/indirect_light.hpp` | GTVBAO in place of the game's SSAO, on the indirect light, and SSILVB's bounce light: pass recognition, the compute passes, the multiply, the resolve's white occlusion and diffuse light |
 | `src/indirect_light_shaders.hpp` | HLSL: the visibility bitmask march (GTVBAO from three-gtvbao, SSILVB's light as SSRT3 gathers it), XeGTAO's noise and denoiser, the multiply, the diagnostics views |
 | `src/atmosphere.cpp`, `src/atmosphere.hpp` | Volumetric fog: the larger fog texture, the game's fog pass over all of it, the shadowed fill before the resolve |
@@ -1149,6 +1152,76 @@ Not handled:
   the start of their shadow is found, and at 4K it reaches half as far in the world as at 1080p.
   The shadow map gives the rest.
 - Forward and transparent objects, drawn after the sun, neither cast nor receive the trace.
+
+## Ray-traced shadows
+
+With **Ray-traced shadows** on, the sun's shadow comes from rays traced through the scene the
+global illumination captures (`src/gi_capture.cpp`, `src/gi_renderer.cpp`), in place of the game's
+shadow map, soft shadows and sun contact shadows. The scene runs for them with the global
+illumination's light on or off; `global_illumination::Options::shadows` turns them on, and the
+light passes run only with `enabled`. Lamp contact shadows stay as they are: lamps are not ray
+traced yet.
+
+- **Rays** (`TraceSunShadows` in `src/shaders/gi_shadow.hlsl`). One ray a pixel at the render
+  size, from the depth's world position towards a point on the sun's disc (uniform over the disc of
+  the sun size's angular radius, a new point each frame), up to 5 km. It leaves from the surface's
+  side facing the sun, offset by 2 cm plus 0.2% of the distance as the global illumination's rays
+  are, and skips copies of the surface just above it ("Copies of a surface" in
+  `gi_common.hlsli`). The sun's direction is the sun pass's (`cPSLight` `c0`), noted the frame
+  before, as the scene is traced before that frame's sun pass is recorded.
+- **Alpha-tested meshes.** The scene holds triangles only: a leaf card is solid, and grass, whose
+  instances the game rewrites each frame, is missing. So the rays leave alpha-tested meshes to the
+  shadow map. A mesh counts as alpha-tested once the game draws it with `ModelForward_Shadow` (the
+  shadow map's shader whose pixel shader discards; the solid casters draw with
+  `ModelForward_ShadowOpaque` and `ModelForward_ShadowOpaqueRigid`, which do not), or with a
+  G-buffer shader whose source name holds `leaf`, `wave`, `translucent` or `hair`. Every G-buffer
+  pixel shader discards, so the pixel shaders cannot tell. The tag is per captured entry
+  (`gi_capture.cpp`, kept by key, so a later shadow draw tags a mesh the G-buffer captured);
+  their instances get mask `GI_MASK_ALPHA_TESTED` and the instance flag `FORCE_NON_OPAQUE`, the
+  rest `GI_MASK_OPAQUE`, and 0 still leaves an instance out. The global illumination's rays take
+  both masks and force everything opaque, as before. Skinned alpha-tested meshes (hair) are not
+  captured: the frame's skinned meshes share one structure, so they could not be told apart.
+- **Inside and beyond the shadow map.** Each ray works out how far its pixel lies past the game's
+  shadow map range, as `SunLight_DL_CS_ES` fades its shadow to lit there (`cPSLight` `c8.x`, `c8.y`
+  and `c6.x`, noted from the shadow-mapped sun shaders): 0 inside, 1 past the fade. Inside, the
+  rays skip alpha-tested meshes; beyond, each alpha-tested mesh a ray passes blocks it with chance
+  0.5 times that share, so trees far away cast a half-transparent shadow that the denoiser
+  averages.
+- **Denoiser.** AMD's FidelityFX Shadow Denoiser (FidelityFX Denoiser 1.0, MIT,
+  `third_party/ffx_denoiser_shadows`, unchanged), with the passes and memory of FidelityFX SDK
+  1.1.4's integration: 8x4 tile masks of the ray results, the tile classification's temporal pass
+  (moments, a local-neighbourhood clamp, tiles that are all lit or all in shadow skipped), then
+  three edge-avoiding à-trous filters 1, 2 and 4 pixels apart, the first writing the next frame's
+  history; the last restores contrast (`pow(mean, max(1.2 - variance, 1))`). Deviations: the
+  trace writes the tile masks itself through groupshared memory (any wave size); the motion is
+  the camera's, reprojected from the depth (moving characters' shadows lag a little); no 16-bit
+  types; the depth similarity's sigma is 1 m plus 5% of the depth instead of 1 m, as sloping ground
+  kilometres away is metres deep per pixel.
+- **Sun pass** (`src/shadows.cpp`, `shadows_shaders.hpp`). The shared R16_FLOAT shadow goes to
+  `t6` of the replacement sun shaders, with `g_rayTraced` in `b6`. Inside the shadow map's range
+  the shadow is the darker of the shadow map's soft shadow (PCSS, whatever its checkbox) and the
+  rays', and it fades to the rays' alone where the game faded to lit; the shadow offset, clouds and
+  height fade follow as before. Beyond the range the rays' shadow is the shadow. With every option
+  off the shaders still match the game bit for bit on WARP (cascade blend on and off).
+- **Timing.** The shadow is traced in the global illumination's Direct3D 12 frame, before its
+  light passes. The sun pass and the resolve were in the same command list in every frame record
+  checked (`frame-5289`, `frame-236525`), and that list already waits for the frame's signal; the
+  sun pass's list is marked to wait as well, in case it is not. Until Direct3D 12 has traced a
+  shadow at the render size, the sun pass keeps the game's shadows.
+- **Diagnostics.** "Ray-traced shadows only" lights everything with the far shader: the sun is
+  shadowed by the rays alone, without the shadow map's leaves and grass. The cost table's
+  measurement leaves them out first, so with the global illumination on that step is their own
+  cost; the Direct3D 12 times are in the log ("shadow rays", "shadow denoiser") and the scene
+  status (Diagnostics, "Global illumination scene").
+
+Not handled:
+
+- Lamps: they keep their shadow maps or none. Their draws come right after the kick, so a ray-traced
+  lamp shadow would stall the game's GPU work for the trace.
+- What the scene lacks: meshes the game has not drawn yet (behind the camera since the area loaded),
+  forward and transparent objects, and grass beyond the shadow map.
+- Alpha-tested meshes that never draw with `ModelForward_Shadow` and whose G-buffer shader names
+  give no sign are traced as solid.
 
 ## GTVBAO
 

@@ -132,14 +132,51 @@ set_target_properties(ngx PROPERTIES
 # ReShade reads the add-on's name, author and version from its version resource.
 configure_file(src/version.rc.in "${CMAKE_BINARY_DIR}/version.rc" @ONLY)
 
+# The global illumination's Direct3D 12 kernels (src/shaders) are compiled at build time by the
+# Windows SDK's DXC into headers of DXIL, one per entry point; Direct3D 11's shaders compile at run
+# time as before.
+file(GLOB DXC_SDK_DIRS LIST_DIRECTORIES true "C:/Program Files (x86)/Windows Kits/10/bin/10.*/x64")
+list(SORT DXC_SDK_DIRS COMPARE NATURAL ORDER DESCENDING)
+find_program(DXC_EXECUTABLE dxc HINTS "$ENV{WindowsSdkVerBinPath}x64" ${DXC_SDK_DIRS} REQUIRED)
+set(GI_SHADER_DIR "${CMAKE_BINARY_DIR}/gi_shaders")
+set(GI_SHADER_INCLUDES "${CMAKE_SOURCE_DIR}/src/shaders/gi_shared.h" "${CMAKE_SOURCE_DIR}/src/shaders/gi_common.hlsli"
+    "${CMAKE_SOURCE_DIR}/src/shaders/gi_shadow.hlsli" "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_filter.h"
+    "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_tileclassification.h"
+    "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_util.h")
+set(GI_SHADER_HEADERS)
+function(add_gi_kernels source)
+    foreach(entry IN LISTS ARGN)
+        set(output "${GI_SHADER_DIR}/${entry}.h")
+        add_custom_command(OUTPUT "${output}"
+            COMMAND "${DXC_EXECUTABLE}" -nologo -T cs_6_5 -E ${entry} -HV 2021 -O3 -WX -I "${CMAKE_SOURCE_DIR}/third_party" -Fh "${output}" -Vn GI_${entry}
+                "${CMAKE_SOURCE_DIR}/src/shaders/${source}"
+            DEPENDS "${CMAKE_SOURCE_DIR}/src/shaders/${source}" ${GI_SHADER_INCLUDES}
+            COMMENT "DXC ${source}: ${entry}")
+        list(APPEND GI_SHADER_HEADERS "${output}")
+    endforeach()
+    set(GI_SHADER_HEADERS ${GI_SHADER_HEADERS} PARENT_SCOPE)
+endfunction()
+file(MAKE_DIRECTORY "${GI_SHADER_DIR}")
+add_gi_kernels(gi_scene.hlsl ClearBounds Scatter BuildInstances DebugScene ClearOutput)
+add_gi_kernels(gi_light.hlsl ClearCounters GenerateDispatch ClearBuffer ScanBlocks ScanBlockSums ScanAddOffsets ClearProbeMask FilterProbeMask
+    InitCachedTileLRU ReprojectScreenProbes CountScreenProbes ScatterScreenProbes SpawnScreenProbes CompactScreenProbes PatchScreenProbes
+    StoreSpawnCount SampleScreenProbes LearnAlbedo PopulateScreenProbes PurgeTiles PopulateMultibounceCells PopulateCells UpdateTiles
+    UpdateMultibounceCells ResolveCells BlendScreenProbes CopyProbes ReorderScreenProbes FilterScreenProbes ProjectScreenProbes
+    InterpolateScreenProbes ReprojectGI FilterGI)
+add_gi_kernels(gi_shadow.hlsl TraceSunShadows ClassifyShadowTiles)
+add_gi_kernels(gi_shadow_filter.hlsl FilterShadows)
+add_custom_target(gi_kernels DEPENDS ${GI_SHADER_HEADERS})
+
 # The add-on uses ReShade's ImGui through the overlay function table, so none is linked.
 add_library(phantom_fx SHARED src/upscaler_addon.cpp src/upscaler.cpp src/upscaler_menu.cpp src/upscaler_settings.cpp src/camera.cpp
     src/device_check.cpp src/motion_blur.cpp src/fxaa.cpp src/frame_rate.cpp src/render_scale.cpp src/ui_redirect.cpp src/frame_log.cpp src/resource_dump.cpp
-    src/log.cpp src/shader_bytecode.cpp src/presenter.cpp src/frame_generation.cpp src/game_loop.cpp src/shadows.cpp src/shadow_resolution.cpp
+    src/log.cpp src/shader_bytecode.cpp src/presenter.cpp src/frame_generation.cpp src/game_loop.cpp src/shadows.cpp
     src/indirect_light.cpp src/photo_mode.cpp src/focus.cpp src/depth_of_field.cpp src/hdr.cpp src/weather.cpp src/character.cpp src/atmosphere.cpp
     src/fidelityfx.cpp src/fsr_upscaler.cpp src/fsr_frame_generation.cpp src/performance.cpp src/performance_menu.cpp
+    src/global_illumination.cpp src/gi_capture.cpp src/gi_renderer.cpp src/gi_light.cpp src/gi_lighting.cpp src/gi_shadow.cpp
     "${CMAKE_BINARY_DIR}/version.rc")
-target_include_directories(phantom_fx PRIVATE src)
+add_dependencies(phantom_fx gi_kernels)
+target_include_directories(phantom_fx PRIVATE src "${GI_SHADER_DIR}")
 target_include_directories(phantom_fx SYSTEM PRIVATE "${RESHADE_DIR}/include" "${RESHADE_DIR}/imgui" "${STREAMLINE_DIR}/include" third_party
     "${FIDELITYFX_DIR}")
 target_link_libraries(phantom_fx PRIVATE minhook ngx d3d11 d3d12 dxgi d3dcompiler)
@@ -173,11 +210,11 @@ install(FILES "${RESHADE_DIR}/imgui/LICENSE.txt" DESTINATION PhantomFX RENAME Im
 # GTVBAO is ported from three-gtvbao, with XeGTAO's noise and denoiser; SSILVB gathers light as SSRT3 does.
 install(FILES licenses/AMD-FidelityFX-LICENSE.txt licenses/Bend-Studio-SSS-LICENSE.txt licenses/three-gtvbao-LICENSE.txt
     licenses/XeGTAO-LICENSE.txt licenses/SSRT3-LICENSE.txt licenses/RenoDX-LICENSE.txt
-    licenses/UnrealEngineSkyAtmosphere-LICENSE.txt DESTINATION PhantomFX COMPONENT addon)
+    licenses/UnrealEngineSkyAtmosphere-LICENSE.txt licenses/Capsaicin-LICENSE.txt DESTINATION PhantomFX COMPONENT addon)
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(upscaler_tests tests/upscaler_tests.cpp src/upscaler_settings.cpp src/camera.cpp src/shader_bytecode.cpp)
+    add_executable(upscaler_tests tests/upscaler_tests.cpp src/upscaler_settings.cpp src/camera.cpp src/shader_bytecode.cpp src/gi_lighting.cpp)
     target_include_directories(upscaler_tests PRIVATE src)
     target_link_libraries(upscaler_tests PRIVATE d3d11 d3dcompiler)
     target_compile_features(upscaler_tests PRIVATE cxx_std_20)

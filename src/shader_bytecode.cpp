@@ -240,4 +240,15 @@ bool draw2DSource(std::string_view code, std::string_view suffix)
 
     return false;
 }
+
+std::string_view sourceName(std::string_view code, std::string_view suffix)
+{
+    const auto at = code.find(suffix);
+    if (at == code.npos) return {};
+
+    auto start = at;
+    while (start > 0 && (std::isalnum(static_cast<unsigned char>(code[start - 1])) || code[start - 1] == '_')) --start;
+
+    return start > 0 && code[start - 1] == '\\' ? code.substr(start, at - start) : std::string_view{};
+}
 }

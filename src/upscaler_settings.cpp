@@ -211,10 +211,6 @@ Settings loadSettings(const std::filesystem::path& path)
             float size{};
             if (number(value, size) && std::isfinite(size)) settings.sunSize = std::clamp(size, Settings::MinSunSize, Settings::MaxSunSize);
         }
-        else if (key == "double_shadow_resolution")
-        {
-            if (value == "0" || value == "1") settings.doubleShadowResolution = value == "1";
-        }
         else if (key == "sun_screen_space_shadows")
         {
             if (value == "0" || value == "1") settings.sunScreenSpaceShadows = value == "1";
@@ -222,6 +218,10 @@ Settings loadSettings(const std::filesystem::path& path)
         else if (key == "light_screen_space_shadows")
         {
             if (value == "0" || value == "1") settings.lightScreenSpaceShadows = value == "1";
+        }
+        else if (key == "ray_traced_shadows")
+        {
+            if (value == "0" || value == "1") settings.rayTracedShadows = value == "1";
         }
         else if (key == "frame_generation")
         {
@@ -272,6 +272,16 @@ Settings loadSettings(const std::filesystem::path& path)
             float strength{};
             if (number(value, strength) && std::isfinite(strength))
                 settings.indirectLightStrength = std::clamp(strength, 0.0f, Settings::MaxIndirectLightStrength);
+        }
+        else if (key == "global_illumination")
+        {
+            if (value == "0" || value == "1") settings.globalIllumination = value == "1";
+        }
+        else if (key == "global_illumination_strength")
+        {
+            float strength{};
+            if (number(value, strength) && std::isfinite(strength))
+                settings.globalIlluminationStrength = std::clamp(strength, 0.0f, Settings::MaxGlobalIlluminationStrength);
         }
         else if (key == "depth_of_field")
         {
@@ -326,6 +336,7 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
         || !within(settings.occlusionStrength, 0, Settings::MaxOcclusionStrength)
         || !within(settings.indirectLightRadius, Settings::MinIndirectLightRadius, Settings::MaxIndirectLightRadius)
         || !within(settings.indirectLightStrength, 0, Settings::MaxIndirectLightStrength) || !within(settings.atmosphereHaze, 0, 1)
+        || !within(settings.globalIlluminationStrength, 0, Settings::MaxGlobalIlluminationStrength)
         || !validApertureBlades(settings.apertureBlades)
         || !within(settings.fNumber, Settings::MinFNumber, Settings::MaxFNumber) || settings.lensShotFrames < Settings::MinLensShotFrames
         || settings.lensShotFrames > Settings::MaxLensShotFrames
@@ -344,12 +355,13 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
                << "\nsharpness=" << settings.sharpness << "\ncustom_scale=" << settings.customScale << "\nmip_bias_offset=" << settings.mipBiasOffset
                << "\nunlock_fps=" << settings.unlockFps << "\nframe_generation=" << FrameGenerationKeys[static_cast<std::size_t>(settings.frameGeneration)]
                << "\nsoft_shadows=" << settings.softShadows << "\nsun_size=" << settings.sunSize
-               << "\ndouble_shadow_resolution=" << settings.doubleShadowResolution
                << "\nsun_screen_space_shadows=" << settings.sunScreenSpaceShadows
-               << "\nlight_screen_space_shadows=" << settings.lightScreenSpaceShadows << "\nambient_occlusion=" << settings.ambientOcclusion
+               << "\nlight_screen_space_shadows=" << settings.lightScreenSpaceShadows << "\nray_traced_shadows=" << settings.rayTracedShadows
+               << "\nambient_occlusion=" << settings.ambientOcclusion
                << "\nocclusion_radius=" << settings.occlusionRadius << "\nocclusion_strength=" << settings.occlusionStrength
                << "\nindirect_light=" << settings.indirectLight << "\nindirect_light_radius=" << settings.indirectLightRadius
-               << "\nindirect_light_strength=" << settings.indirectLightStrength << "\nvolumetric_fog=" << settings.volumetricFog
+               << "\nindirect_light_strength=" << settings.indirectLightStrength << "\nglobal_illumination=" << settings.globalIllumination
+               << "\nglobal_illumination_strength=" << settings.globalIlluminationStrength << "\nvolumetric_fog=" << settings.volumetricFog
                << "\natmosphere_look=" << AtmosphereLookKeys[static_cast<std::size_t>(settings.atmosphereLook)]
                << "\natmosphere_haze=" << settings.atmosphereHaze << "\ndepth_of_field=" << settings.depthOfField
                << "\naperture_blades=" << settings.apertureBlades << "\nf_number=" << settings.fNumber

@@ -45,4 +45,7 @@ std::optional<std::vector<std::uint8_t>> saturateOutput(const void* code, std::s
 // The game's shaders keep their source path in their debug data. True for a path ...\Draw2D*<suffix>,
 // such as "_vs.hlsl": the 2D pass's. Other shaders mention Draw2D only through shared headers.
 bool draw2DSource(std::string_view code, std::string_view suffix);
+// The file name before `suffix` (such as "_vs.hlsl") of the first source path in the debug data
+// that ends in it: "fox3ddf_blin" for ...\Release\fox3ddf_blin_vs.hlsl. Empty when there is none.
+std::string_view sourceName(std::string_view code, std::string_view suffix);
 }

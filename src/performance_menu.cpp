@@ -38,6 +38,9 @@ const std::vector<Group>& groups()
             {"Physical sky", Pass::Sky}}},
         {"Depth of field", Purple, {{"Setup and tile dilate", Pass::DofSetup}, {"Gather", Pass::DofGather}, {"Composite", Pass::DofComposite},
             {"Lens shot", Pass::LensShot}}},
+        {"Global illumination (the game's GPU work)", Teal, {{"Mesh capture (stream output)", Pass::GiCapture},
+            {"G-buffer pack and capture conversion", Pass::GiInputs}, {"The game's probe light, copied", Pass::GiProbeLight},
+            {"Adding the light", Pass::GiCombine}, {"Waiting for the ray tracing (Direct3D 12)", Pass::GiWait}}},
         {"HDR", Grey, {{"Encoding the scene", Pass::HdrEncode}, {"Decoding copies", Pass::HdrDecode}, {"Grading", Pass::HdrGrade}}},
     };
 

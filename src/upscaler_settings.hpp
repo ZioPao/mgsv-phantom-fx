@@ -28,6 +28,7 @@ struct Settings
     static constexpr float MaxOcclusionStrength = 3.0f;
     static constexpr float MinIndirectLightRadius = 0.25f, MaxIndirectLightRadius = 4.0f, DefaultIndirectLightRadius = 2.0f;
     static constexpr float MaxIndirectLightStrength = 3.0f;
+    static constexpr float MaxGlobalIlluminationStrength = 3.0f;
     static constexpr float MinSunSize = 0.1f, MaxSunSize = 4.0f, DefaultSunSize = 0.53f;
     static constexpr float MinFNumber = 0.7f, MaxFNumber = 32.0f, DefaultFNumber = 1.4f;
     static constexpr int MinLensShotFrames = 16, MaxLensShotFrames = 1024, DefaultLensShotFrames = 256;
@@ -53,13 +54,13 @@ struct Settings
     // The sun size is its angular diameter in degrees; the real sun's is 0.53.
     bool softShadows{};
     float sunSize{DefaultSunSize};
-    // Twice the sun's shadow map width and height the game's shadow quality asks for
-    // (shadow_resolution.hpp), whatever the mode.
-    bool doubleShadowResolution{};
     // Bend Studio's screen-space shadows on the sun and on every point and spot light (shadows.hpp),
     // whatever the mode. Apart because the lights' cost grows with how many are on screen.
     bool sunScreenSpaceShadows{};
     bool lightScreenSpaceShadows{};
+    // The sun's ray-traced shadows through the global illumination's scene (shadows.hpp), whatever
+    // the mode; soft shadows and sun contact shadows are off while it is on. Uses the sun size.
+    bool rayTracedShadows{};
     // GTVBAO on the indirect light in place of the game's SSAO (indirect_light.hpp), whatever the mode.
     // The radius is in metres; the strength is an exponent on the visibility.
     bool ambientOcclusion{};
@@ -70,6 +71,11 @@ struct Settings
     bool indirectLight{};
     float indirectLightRadius{DefaultIndirectLightRadius};
     float indirectLightStrength{1};
+    // Ray-traced global illumination after AMD's GI-1.2 in place of the game's probe light and
+    // SSAO (global_illumination.hpp), whatever the mode; GTVBAO and SSILVB are off while it is on.
+    // The strength multiplies its light.
+    bool globalIllumination{};
+    float globalIlluminationStrength{1};
     // Volumetric fog with light shafts in place of the game's fog (atmosphere.hpp), whatever the mode,
     // in the game's look or the physical one, which also draws the sky. The physical look's haze runs
     // from 0 (clear air) to 1 (as thick as the game's own haze).

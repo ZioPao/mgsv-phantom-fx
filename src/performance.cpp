@@ -294,11 +294,30 @@ std::optional<upscaler::LeftOut> startMeasurement(LONGLONG now)
     };
     leave(settings.depthOfField, "Depth of field", &upscaler::LeftOut::depthOfField);
     leave(lighting && settings.volumetricFog, "Volumetric fog", &upscaler::LeftOut::volumetricFog);
-    leave(lighting && settings.indirectLight, "SSILVB", &upscaler::LeftOut::indirectLight);
-    leave(lighting && settings.ambientOcclusion, "GTVBAO", &upscaler::LeftOut::ambientOcclusion);
+    // The ray-traced shadows first: with the global illumination on, its scene stays, so the step
+    // gives the shadows' own cost; alone, it takes the scene with it. They keep soft shadows and sun
+    // contact shadows off, so those stay off with them.
+    const bool rayTraced = lighting && settings.rayTracedShadows;
+    if (rayTraced) leftOut.softShadows = leftOut.sunScreenSpaceShadows = true;
+    leave(rayTraced, "Ray-traced shadows", &upscaler::LeftOut::rayTracedShadows);
+
+    // The global illumination in parts: its light passes, its mesh capture, then the rest (the scene's
+    // build, the wait for Direct3D 12 and its passes in the game's frame). It keeps SSILVB and GTVBAO
+    // off, so they stay off with it.
+    const bool global = lighting && settings.globalIllumination;
+    leave(global, "Global illumination's light passes", &upscaler::LeftOut::globalLight);
+    leave(global, "Global illumination's mesh capture", &upscaler::LeftOut::globalCapture);
+    if (global)
+    {
+        leftOut.ambientOcclusion = leftOut.indirectLight = true;
+        leave(global, "Global illumination (the rest)", &upscaler::LeftOut::globalIllumination);
+    }
+
+    leave(lighting && settings.indirectLight && !settings.globalIllumination, "SSILVB", &upscaler::LeftOut::indirectLight);
+    leave(lighting && settings.ambientOcclusion && !settings.globalIllumination, "GTVBAO", &upscaler::LeftOut::ambientOcclusion);
     leave(lighting && settings.lightScreenSpaceShadows, "Lamp contact shadows", &upscaler::LeftOut::lightScreenSpaceShadows);
-    leave(lighting && settings.sunScreenSpaceShadows, "Sun contact shadows", &upscaler::LeftOut::sunScreenSpaceShadows);
-    leave(lighting && settings.softShadows, "Soft shadows", &upscaler::LeftOut::softShadows);
+    leave(lighting && settings.sunScreenSpaceShadows && !rayTraced, "Sun contact shadows", &upscaler::LeftOut::sunScreenSpaceShadows);
+    leave(lighting && settings.softShadows && !rayTraced, "Soft shadows", &upscaler::LeftOut::softShadows);
     const bool upscaling = settings.mode != upscaler::Mode::Off;
     leave(upscaling && settings.sharpness > 0, "Sharpening", &upscaler::LeftOut::sharpening);
     leave(upscaling, std::string(upscaler::label(settings.upscaler)) + " (FXAA instead)", &upscaler::LeftOut::upscaler);

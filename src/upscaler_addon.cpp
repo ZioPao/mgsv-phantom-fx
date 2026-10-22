@@ -6,6 +6,7 @@
 // frame generation (presenter.hpp, game_loop.hpp, fsr_frame_generation.hpp), can give the sun soft
 // shadows and every light Bend Studio's screen-space shadows (shadows.hpp), can replace the game's
 // ambient occlusion with GTVBAO and add SSILVB's screen-space indirect lighting (indirect_light.hpp),
+// or replace the game's indirect light with ray-traced global illumination (global_illumination.hpp),
 // can replace the game's depth of field with a gather (depth_of_field.hpp), adds volumetric fog with
 // light shafts (atmosphere.hpp), has a photo mode with lens shots (photo_mode.hpp), can output HDR10
 // (hdr.hpp) and has an optional pipeline recorder (frame_log.hpp), the GPU costs of its passes
@@ -22,6 +23,7 @@
 #include "fsr_frame_generation.hpp"
 #include "fxaa.hpp"
 #include "game_loop.hpp"
+#include "global_illumination.hpp"
 #include "hdr.hpp"
 #include "indirect_light.hpp"
 #include "log.hpp"
@@ -30,7 +32,6 @@
 #include "photo_mode.hpp"
 #include "presenter.hpp"
 #include "render_scale.hpp"
-#include "shadow_resolution.hpp"
 #include "shadows.hpp"
 #include "upscaler.hpp"
 #include "weather.hpp"
@@ -142,6 +143,7 @@ void onInitCommandQueue(command_queue* queue)
     upscaler::attach(device, context, wrapper);
     shadows::attach(device);
     indirect_light::attach(device);
+    global_illumination::attach(device, context);
     atmosphere::attach(device);
     depth_of_field::attach(device);
     performance::attach(device, context, dataDirectory() / "PhantomFX-performance.txt");
@@ -158,6 +160,7 @@ void onDestroyCommandQueue(command_queue* queue)
     upscaler::detach();
     shadows::detach();
     indirect_light::detach();
+    global_illumination::detach();
     atmosphere::detach();
     depth_of_field::detach();
     focus::detach();
@@ -182,12 +185,16 @@ void onInitPipeline(device* device, pipeline_layout, uint32_t count, const pipel
             upscaler::shaderCreated(code, size, created);
             shadows::shaderCreated(code, size, created);
             indirect_light::shaderCreated(code, size, created);
+            global_illumination::pixelShaderCreated(code, size, created);
             atmosphere::shaderCreated(code, size, created);
             depth_of_field::shaderCreated(code, size, created);
             hdr::shaderCreated(code, size, created);
         }
         else if (subobjects[i].type == pipeline_subobject_type::vertex_shader)
+        {
             ui_redirect::vertexShaderCreated(shader->code, shader->code_size, reinterpret_cast<IUnknown*>(pipeline.handle));
+            global_illumination::vertexShaderCreated(shader->code, shader->code_size, reinterpret_cast<IUnknown*>(pipeline.handle));
+        }
     }
 }
 
@@ -207,6 +214,8 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
     // float copy. A draw through an sRGB view of the scene (the resolve) writes linear colour, which
     // is encoded once drawn, by whoever draws it.
     const bool encode = hdr::beforeDraw(context, call);
+    // The global illumination only notes what it needs (the sky's probe constants).
+    global_illumination::draw(context, call);
     // The fog notes the sun pass and fills its texture before the resolve, whoever draws them. The
     // depth of field reads the resolve's tonemap before SSILVB may draw the resolve itself. GTVBAO
     // notes the sun pass's G-buffer before the sun shadows may draw that pass themselves.
@@ -223,6 +232,8 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
 bool onDrawIndexed(command_list* list, uint32_t indices, uint32_t instances, uint32_t first, int32_t offset, uint32_t firstInstance)
 {
     const ui_redirect::DrawCall call{indices, instances, first, firstInstance, offset, true};
+    // The global illumination captures the game's meshes as they are drawn; it never takes a draw.
+    global_illumination::draw(native(list), call);
     return hiddenUi(list) || depth_of_field::draw(native(list), call) || shadows::draw(native(list), call) || upscaler::draw(native(list), call);
 }
 
@@ -245,7 +256,10 @@ bool onClearDepthStencil(command_list* list, resource_view view, const float* de
 void onBindPipeline(command_list* list, pipeline_stage stages, pipeline pipeline)
 {
     if ((stages & pipeline_stage::vertex_shader) == pipeline_stage::vertex_shader)
+    {
         ui_redirect::vertexShaderBound(native(list), reinterpret_cast<IUnknown*>(pipeline.handle));
+        global_illumination::vertexShaderBound(native(list), reinterpret_cast<IUnknown*>(pipeline.handle));
+    }
 }
 
 // ReShade reports bound samplers and views after binding them; rebind biased samplers, and HDR's
@@ -319,10 +333,6 @@ bool onCreateResource(device* device, resource_desc& desc, subresource_data*, re
     if (device->get_api() != device_api::d3d11 || desc.type != resource_type::texture_2d) return false;
 
     auto textureFormat = static_cast<DXGI_FORMAT>(desc.texture.format);
-    // TEMPORARY: shadow resolution research.
-    if (desc.texture.width >= 4096 && desc.texture.height >= 4096)
-        log("Big texture: " + std::to_string(desc.texture.width) + "x" + std::to_string(desc.texture.height) + " format " + std::to_string(textureFormat)
-            + " usage " + hex(static_cast<std::uint32_t>(desc.usage)) + ".");
     const bool renderTarget = (desc.usage & resource_usage::render_target) == resource_usage::render_target;
     if (atmosphere::upgradeTexture(desc.texture.width, desc.texture.height, textureFormat, renderTarget))
     {
@@ -405,13 +415,16 @@ void onMapBuffer(device*, resource buffer, uint64_t, uint64_t, map_access access
 
     upscaler::bufferMapped(reinterpret_cast<ID3D11Resource*>(buffer.handle), *data);
     shadows::bufferMapped(reinterpret_cast<ID3D11Resource*>(buffer.handle), *data);
+    global_illumination::bufferMapped(reinterpret_cast<ID3D11Resource*>(buffer.handle), *data);
 }
 
-// The upscaler adds the jitter to the scene constants first; the screen-space shadows read them as jittered.
+// The upscaler adds the jitter to the scene constants first; the screen-space shadows and the global
+// illumination read them as jittered.
 void onUnmapBuffer(device*, resource buffer)
 {
     upscaler::bufferUnmapped(reinterpret_cast<ID3D11Resource*>(buffer.handle));
     shadows::bufferUnmapped(reinterpret_cast<ID3D11Resource*>(buffer.handle));
+    global_illumination::bufferUnmapped(reinterpret_cast<ID3D11Resource*>(buffer.handle));
 }
 
 // Called before the immediate context executes a command list, and after FinishCommandList with the
@@ -423,11 +436,13 @@ void onExecuteSecondary(command_list* list, command_list* secondary)
         // The frame's timing starts before DLSS, which runs here.
         performance::executing(secondary->get_native());
         upscaler::executing(native(list), secondary->get_native());
+        global_illumination::executing(native(list), secondary->get_native());
         return;
     }
 
     performance::recorded(list->get_native(), secondary->get_native());
     upscaler::recorded(list->get_native(), secondary->get_native());
+    global_illumination::recorded(list->get_native(), secondary->get_native());
     ui_redirect::contextFinished(native(secondary));
     shadows::contextFinished(native(secondary));
 }
@@ -436,6 +451,7 @@ void onDestroyCommandList(command_list* list)
 {
     upscaler::forget(list->get_native());
     performance::forget(list->get_native());
+    global_illumination::forget(list->get_native());
 }
 
 // With frame generation the game's swap chain is the presenter's stand-in, whose Present follows.
@@ -457,6 +473,7 @@ void onPresent(command_queue* queue, swapchain*, const rect*, const rect*, uint3
     upscaler::present();
     shadows::present();
     indirect_light::present();
+    global_illumination::present();
     atmosphere::present(native(queue->get_immediate_command_list()));
     depth_of_field::present();
     performance::present();
@@ -510,7 +527,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     log(motion_blur::hook());
     log(fxaa::hook());
     log(frame_rate::hook());
-    log(shadow_resolution::hook());
     log(render_scale::hook());
     log(photo_mode::hook());
     log(game_loop::hook());
@@ -583,6 +599,7 @@ extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshade
     upscaler::detach();
     shadows::detach();
     indirect_light::detach();
+    global_illumination::detach();
     atmosphere::detach();
     depth_of_field::detach();
     focus::detach();

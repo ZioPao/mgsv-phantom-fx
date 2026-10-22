@@ -1,4 +1,6 @@
 #include "camera.hpp"
+#include "gi_lighting.hpp"
+#include "range_allocator.hpp"
 #include "shader_bytecode.hpp"
 #include "upscaler_settings.hpp"
 
@@ -47,13 +49,13 @@ void settingsPersist(const fs::path& root)
     expect(!fs::exists(path), "Loading defaults must not create a settings file.");
 
     const Settings chosen{.upscaler = Upscaler::Fsr, .mode = Mode::Off, .preset = Preset::J, .sharpness = 0.5f, .unlockFps = true, .frameGeneration = FrameGeneration::X3,
-        .softShadows = true, .sunSize = 1.25f, .doubleShadowResolution = true, .sunScreenSpaceShadows = true, .lightScreenSpaceShadows = true, .ambientOcclusion = true, .occlusionRadius = 2,
-        .occlusionStrength = 1.5f, .indirectLight = true, .indirectLightRadius = 3, .indirectLightStrength = 0.5f, .volumetricFog = true,
-        .atmosphereLook = AtmosphereLook::Physical, .atmosphereHaze = 0.5f};
+        .softShadows = true, .sunSize = 1.25f, .sunScreenSpaceShadows = true, .lightScreenSpaceShadows = true, .rayTracedShadows = true,
+        .ambientOcclusion = true, .occlusionRadius = 2, .occlusionStrength = 1.5f, .indirectLight = true, .indirectLightRadius = 3,
+        .indirectLightStrength = 0.5f, .volumetricFog = true, .atmosphereLook = AtmosphereLook::Physical, .atmosphereHaze = 0.5f};
     saveSettings(path, chosen);
     expect(loadSettings(path) == chosen,
-        "Restart restores the upscaler, mode, preset, sharpening, frame rate unlock, frame generation, soft and screen-space shadows, the shadow resolution, GTVBAO, SSILVB "
-        "and the volumetric fog.");
+        "Restart restores the upscaler, mode, preset, sharpening, frame rate unlock, frame generation, soft, screen-space and ray-traced "
+        "shadows, GTVBAO, SSILVB and the volumetric fog.");
     write(path, "frame_generation=dynamic\n");
     expect(loadSettings(path).frameGeneration == FrameGeneration::Dynamic, "Dynamic frame generation is read back.");
     write(path, "frame_generation=fsr\n");
@@ -561,6 +563,73 @@ void aperturePoints()
 }
 }
 
+void globalIlluminationSettingsPersist(const fs::path& root)
+{
+    const auto path = root / L"PhantomFX-gi.ini";
+    const Settings chosen{.globalIllumination = true, .globalIlluminationStrength = 1.5f};
+    saveSettings(path, chosen);
+    expect(loadSettings(path) == chosen, "Restart restores the global illumination and its strength.");
+    write(path, "global_illumination_strength=99\n");
+    expect(loadSettings(path).globalIlluminationStrength == Settings::MaxGlobalIlluminationStrength, "The strength is clamped.");
+}
+
+// The scene's geometry and acceleration structures live in large buffers handed out in ranges.
+void rangesComeBack()
+{
+    RangeAllocator allocator(1000);
+    const auto a = allocator.allocate(100), b = allocator.allocate(300), c = allocator.allocate(100);
+    expect(a == 0u && b == 100u && c == 400u, "Ranges are handed out first fit, one after another.");
+    allocator.release(*b, 300);
+    expect(allocator.allocate(200) == 100u, "A released range is used again.");
+    expect(allocator.allocate(64, 256) == 512u, "An aligned range starts at a multiple of the alignment.");
+    expect(!allocator.allocate(1000), "What does not fit is refused.");
+
+    allocator.release(*a, 100);
+    allocator.release(100, 200);
+    allocator.release(*c, 100);
+    allocator.release(512, 64);
+    expect(allocator.usedSize() == 0 && allocator.allocate(1000) == 0u, "Released neighbours merge into one range again.");
+}
+
+// Traced rays that reach the sky must light a surface nothing blocks as the game's sky light does.
+void skyLightMatchesTheGame()
+{
+    // f(n) = 1 + 0.5 n.y + 0.3 n.y^2 with the game's c = (-n.x, -n.z, n.y, 1): c.z is n.y.
+    std::array<std::array<float, 16>, 3> matrices{};
+    for (auto& m : matrices)
+    {
+        m[15] = 1;
+        m[11] = m[14] = 0.25f;
+        m[10] = 0.3f;
+    }
+
+    constexpr float Exposure = 2;
+    const auto radiance = gi_lighting::skyRadiance(matrices, Exposure);
+    constexpr double Pi = 3.14159265358979323846;
+    const std::array<std::array<float, 3>, 4> normals{{{0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {0.6f, 0.8f, 0}}};
+    for (const auto& n : normals)
+    {
+        // Irradiance over pi from the radiance, by brute force.
+        double sum = 0;
+        constexpr int Rings = 256, Segments = 512;
+        for (int ring = 0; ring < Rings; ++ring)
+        {
+            const double theta = (ring + 0.5) * Pi / Rings;
+            for (int segment = 0; segment < Segments; ++segment)
+            {
+                const double phi = (segment + 0.5) * 2 * Pi / Segments;
+                const std::array<float, 3> w{static_cast<float>(std::sin(theta) * std::cos(phi)), static_cast<float>(std::sin(theta) * std::sin(phi)),
+                    static_cast<float>(std::cos(theta))};
+                const double cosine = std::max(0.0, double{n[0]} * w[0] + double{n[1]} * w[1] + double{n[2]} * w[2]);
+                sum += gi_lighting::evaluate(radiance, w)[0] * cosine * std::sin(theta) * (Pi / Rings) * (2 * Pi / Segments);
+            }
+        }
+
+        const double game = Exposure * (1 + 0.5 * n[1] + 0.3 * n[1] * n[1]);
+        expect(std::abs(sum / Pi - game) < 0.01 * game, "An open surface gets the game's sky light from the traced sky.");
+    }
+}
+
 int main()
 {
     const auto root =
@@ -581,6 +650,9 @@ int main()
         outputSaturation();
         lensShotKeepsFocusStill();
         aperturePoints();
+        globalIlluminationSettingsPersist(root);
+        rangesComeBack();
+        skyLightMatchesTheGame();
         fs::remove_all(root);
         std::cout << "Upscaler tests passed.\n";
 

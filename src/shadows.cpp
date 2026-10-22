@@ -1,5 +1,6 @@
 #include "shadows.hpp"
 
+#include "global_illumination.hpp"
 #include "log.hpp"
 #include "performance.hpp"
 #include "shader_bytecode.hpp"
@@ -100,6 +101,7 @@ constexpr std::size_t LightFade = 6 * 4;                               // c6: a 
 constexpr std::size_t ProjectionParam = 21 * 4, CenterOffset = 28 * 4; // c21: 1 / P00, 1 / P11, B, A; c28: the jitter in NDC
 constexpr UINT SpecularSlot = 1;                                       // t1 of the light passes, whose z is the material
 constexpr UINT DepthSlot = 2;                                          // t2 of the light passes
+constexpr UINT RayTracedSlot = 6;                                      // t6 of the replacement sun shaders
 constexpr UINT ShadowSlot = 7;                                         // t7 of the add-on's pixel shaders
 constexpr UINT OptionsSlot = 6;                                        // b6 of the add-on's pixel shaders
 constexpr int WaveSize = 64;                                           // WAVE_SIZE in shaders::BendShadow
@@ -134,8 +136,9 @@ constexpr float SurfaceThickness = 0.005f, BilinearThreshold = 0.02f, ShadowCont
 // cSunShadows (b6) of the replacement shaders.
 struct ShaderOptions
 {
-    float soft, sunTangent, frame, screenSpace;
+    float soft, sunTangent, frame, screenSpace, rayTraced, padding[3];
 };
+static_assert(sizeof(ShaderOptions) % 16 == 0);
 
 // What the overlay asked for, and what the frame being recorded uses.
 std::mutex optionsMutex;
@@ -550,15 +553,17 @@ bool takeMarked(ID3D11DeviceContext* context, const std::array<float, 3>& positi
     return same;
 }
 
-// Writes the replacement shaders' options on `context`; call with resourceMutex held.
-void writeOptions(ID3D11DeviceContext* context, const Options& options)
+// Writes the replacement shaders' options on `context`; call with resourceMutex held. With the
+// ray-traced shadow, the shadow map's part is always soft.
+void writeOptions(ID3D11DeviceContext* context, const Options& options, bool rayTraced)
 {
     D3D11_MAPPED_SUBRESOURCE mapped{};
     check(context->Map(optionsBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Writing the sun shadow options");
 
     constexpr float DegreesToRadians = 3.14159265f / 180;
-    const ShaderOptions values{options.soft ? 1.0f : 0.0f, std::tan(options.sunSize * 0.5f * DegreesToRadians),
-        options.turnPattern ? static_cast<float>(frame.load(std::memory_order_relaxed) % PatternTurns) : 0.0f, options.screenSpaceSun ? 1.0f : 0.0f};
+    const ShaderOptions values{options.soft || rayTraced ? 1.0f : 0.0f, std::tan(options.sunSize * 0.5f * DegreesToRadians),
+        options.turnPattern ? static_cast<float>(frame.load(std::memory_order_relaxed) % PatternTurns) : 0.0f, options.screenSpaceSun ? 1.0f : 0.0f,
+        rayTraced ? 1.0f : 0.0f, {}};
     std::memcpy(mapped.pData, &values, sizeof(values));
     context->Unmap(optionsBuffer.Get(), 0);
 }
@@ -599,12 +604,22 @@ ID3D11BlendState* shadowedBlend(ID3D11BlendState* game)
 // The sun pass, drawn with the replacement shaders.
 bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Sun sun, ID3D11PixelShader* gameShader, const Options& options)
 {
-    // Beyond the shadow range there is no shadow map to soften.
-    if (!options.screenSpaceSun && !(options.soft && shadowMapped(sun))) return false;
-
     ComPtr<ID3D11ShaderResourceView> depth, specular;
     context->PSGetShaderResources(DepthSlot, 1, depth.GetAddressOf());
     context->PSGetShaderResources(SpecularSlot, 1, specular.GetAddressOf());
+
+    // The ray-traced shadow at the depth's size, once Direct3D 12 has traced one; until then the
+    // game's shadows stay.
+    ID3D11ShaderResourceView* rayTraced{};
+    if (options.rayTraced && depth)
+    {
+        const auto size = sizeOf(depth.Get());
+        rayTraced = global_illumination::sunShadow(static_cast<UINT>(size[0]), static_cast<UINT>(size[1]));
+    }
+
+    // Beyond the shadow range there is no shadow map to soften.
+    if (!options.screenSpaceSun && !(options.soft && shadowMapped(sun)) && !rayTraced) return false;
+
     const auto [scene, light] = passConstants(context);
 
     std::lock_guard lock(resourceMutex);
@@ -636,21 +651,28 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
         if (options.onlyScreenSpace) sun = reflectsSky(sun) ? Sun::Far : Sun::RainFar;
     }
 
-    writeOptions(context, options);
-    ComPtr<ID3D11ShaderResourceView> gameView;
+    // The same for the rays' shadow alone.
+    if (rayTraced && options.onlyRayTraced) sun = reflectsSky(sun) ? Sun::Far : Sun::RainFar;
+
+    writeOptions(context, options, rayTraced != nullptr);
+    ComPtr<ID3D11ShaderResourceView> gameView, gameRayTracedView;
     ComPtr<ID3D11Buffer> gameOptions;
     context->PSGetShaderResources(ShadowSlot, 1, gameView.GetAddressOf());
+    context->PSGetShaderResources(RayTracedSlot, 1, gameRayTracedView.GetAddressOf());
     context->PSGetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
     context->PSSetShader(replacements[static_cast<std::size_t>(sun)].Get(), nullptr, 0);
     context->PSSetShaderResources(ShadowSlot, 1, sunShadow.view.GetAddressOf());
+    context->PSSetShaderResources(RayTracedSlot, 1, &rayTraced);
     context->PSSetConstantBuffers(OptionsSlot, 1, optionsBuffer.GetAddressOf());
     performance::Timed timed(context, performance::Pass::SunLight);
     context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
     timed.end();
     context->PSSetShader(gameShader, nullptr, 0);
     context->PSSetShaderResources(ShadowSlot, 1, gameView.GetAddressOf());
+    context->PSSetShaderResources(RayTracedSlot, 1, gameRayTracedView.GetAddressOf());
     context->PSSetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
     if (options.soft) logOnce("the sun pass draws with soft shadows.");
+    if (rayTraced) logOnce("the sun pass draws with ray-traced shadows.");
 
     return true;
 }
@@ -771,7 +793,7 @@ void attach(ID3D11Device* gameDevice) noexcept
     bool wantedOn;
     {
         std::lock_guard lock(optionsMutex);
-        wantedOn = wanted.soft || wanted.screenSpaceSun || wanted.screenSpaceLights;
+        wantedOn = wanted.soft || wanted.screenSpaceSun || wanted.screenSpaceLights || wanted.rayTraced;
     }
 
     std::lock_guard lock(resourceMutex);
@@ -824,7 +846,7 @@ void configure(const Options& options) noexcept
         wanted = options;
     }
 
-    if (!options.soft && !options.screenSpaceSun && !options.screenSpaceLights) return;
+    if (!options.soft && !options.screenSpaceSun && !options.screenSpaceLights && !options.rayTraced) return;
 
     std::lock_guard lock(resourceMutex);
     ensurePipeline();
@@ -958,7 +980,7 @@ void present() noexcept
     frame.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard lock(optionsMutex);
     current = wanted;
-    active = (current.soft || current.screenSpaceSun || current.screenSpaceLights) && !pipelineFailed;
+    active = (current.soft || current.screenSpaceSun || current.screenSpaceLights || current.rayTraced) && !pipelineFailed;
     tracing = active && (current.screenSpaceSun || current.screenSpaceLights);
 }
 }

@@ -22,6 +22,7 @@ AIO visual enhancement ReShade add-on for Metal Gear Solid V: The Phantom Pain.
 - **FSR frame generation:** 2x, on any GPU
 - **HDR10 output**
 - **Unlock frame rate:** lifts the 60 fps cap
+- **Ray-traced shadows** for the sun (needs DXR 1.1)
 - **Soft shadows** (PCSS)
 - **Contact shadows** (Bend Studio's screen-space shadows)
 - **Ambient occlusion** (GTVBAO)
