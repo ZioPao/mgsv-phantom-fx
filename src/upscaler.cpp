@@ -336,7 +336,7 @@ void configureIndirectLight()
         .showGlobalIllumination = diagnostics.showGlobalIllumination || diagnostics.showTracedScene,
     });
     global_illumination::configure({.enabled = global, .shadows = rayTraced, .sunSize = settings.sunSize, .showScene = diagnostics.showTracedScene,
-        .light = !leftOut.globalLight, .capture = !leftOut.globalCapture});
+        .debugShadows = diagnostics.debugView == ShadowRaysView, .light = !leftOut.globalLight, .capture = !leftOut.globalCapture});
 }
 
 // Call with settingsMutex held.
@@ -975,7 +975,8 @@ void runComposite(ID3D11RenderTargetView* destination, ID3D11ShaderResourceView*
     immediate->UpdateSubresource(compositeConstants.Get(), 0, nullptr, &constants, 0, 0);
 
     const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(outputTarget.width), static_cast<float>(outputTarget.height), 0, 1};
-    ID3D11ShaderResourceView* inputs[]{outputTarget.view.Get(), motionTarget.view.Get(), objectVelocity};
+    auto* shadowRays = options.debugView == ShadowRaysView ? global_illumination::shadowDebug(colorTarget.width, colorTarget.height) : nullptr;
+    ID3D11ShaderResourceView* inputs[]{outputTarget.view.Get(), motionTarget.view.Get(), objectVelocity, shadowRays};
     immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     immediate->VSSetShader(fullScreenShader.Get(), nullptr, 0);
     immediate->PSSetShader(compositeShader.Get(), nullptr, 0);

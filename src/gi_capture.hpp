@@ -72,6 +72,7 @@ struct Work
     std::uint64_t draws{}, captures{}, skinned{}, vertices{};
 };
 Work takeWork() noexcept;
-// Diagnostics: the scene's meshes held twice within 4 cm of themselves, the same copy under two keys.
-std::uint32_t nearCopies() noexcept;
+// Diagnostics: the scene's meshes held again under another key (the same place and size, other buffers
+// or ranges), which of the draw's fields differ, and the new entries since the last call by source.
+std::string keyChanges() noexcept;
 }

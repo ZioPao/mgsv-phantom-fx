@@ -70,7 +70,7 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/upscaler_shaders.hpp` | HLSL: the upscaler's inputs and motion vectors, composite with RCAS and debug views, stretch fallback |
 | `src/camera.cpp`, `src/camera.hpp` | Scene constants: main-view recognition, jitter, reprojection, camera cuts |
 | `src/upscaler_settings.cpp`, `src/upscaler_settings.hpp` | Upscaler, mode, custom scale, preset, texture bias, sharpening, frame rate unlock, frame generation, soft shadows, sun and lamp contact shadows, ambient occlusion, indirect lighting, volumetric fog; `PhantomFX.ini` |
-| `src/upscaler_menu.cpp`, `src/menu_style.hpp` | The "Phantom FX" overlay window: Upscaling, Visuals, Utility and Diagnostics |
+| `src/upscaler_menu.cpp`, `src/menu_style.hpp` | The "Phantom FX" overlay window: Upscaling, Visuals, Ray Tracing, Utility and Diagnostics |
 | `src/performance.cpp`, `src/performance.hpp` | The passes' GPU costs: timestamp queries, the averages, the real cost measurement, `PhantomFX-performance.txt` (see "Costs") |
 | `src/performance_menu.cpp` | The cost table in Diagnostics and over the game, and as text |
 | `src/device_check.cpp`, `src/device_check.hpp` | Lets the game start under ReShade (see below); the build check |
@@ -1203,6 +1203,31 @@ traced yet.
   rays', and it fades to the rays' alone where the game faded to lit; the shadow offset, clouds and
   height fade follow as before. Beyond the range the rays' shadow is the shadow. With every option
   off the shaders still match the game bit for bit on WARP (cascade blend on and off).
+- **Meshes the scene captures again.** While the camera moves, a static mesh can get a new key,
+  and the copy under the new key waits for its acceleration structure (the builds have a budget a
+  frame). In the first test, moving showed 50 to 108 builds a frame with 600 to 2,400 waiting,
+  against none standing still, and shadows vanished while the camera turned: the old copy left the
+  scene at once (in view, not drawn). An entry the game drew in more than one frame now counts as
+  drawn for 120 frames after its last draw (`DrawnGraceFrames` in `gi_renderer.cpp`): the copy
+  from before the camera moved stays through a turn even when every key during it lasts a single
+  frame; a moving mesh, drawn once under each key, gets no grace.
+- **Terrain keys.** The second test lost a mountain's shadow until the camera faced it again. The
+  log showed the vertex pool 87 to 96% full, half of it meshes drawn in one frame only, 25,000 to
+  75,000 new terrain entries per 10 s while moving (about 90% of all new entries), and 14,187 of
+  14,206 duplicates differing only in the second vertex buffer's offset. The terrain's vertex
+  shaders read one stream (`NewTerrain_Depth`: `dcl_input v0.xy`), so slot 1 is whatever an
+  earlier draw left bound; its offset changed every frame and every patch got a new key. The copies
+  filled the pool, and eviction took the terrain out of view first. Terrain keys now leave slot 1
+  out (`gi_capture.cpp`).
+- **Culled meshes.** The third test lost a far cliff's shadow with small camera moves, back and
+  forth, also with "Ray-traced shadows only". `BuildInstances` (`gi_scene.hlsl`) left out every
+  entry wholly in view that the game did not draw, taking it as moved or removed; but the game also
+  skips what is hidden behind nearer surfaces (occlusion culling), and those still cast shadows. A
+  depth pyramid of the frame (`BuildDepthPyramid`: the farthest depth of each 2^(k+1)-pixel
+  square, levels from half the render size) now tells them apart: an entry wholly in view stays
+  when the farthest depth over its screen rectangle, read at the level where it spans about four
+  texels, is nearer than its box's nearest corner. Checked offline: a post behind a wall, not
+  drawn for 198 frames, kept its shadow; the same post with nothing in front lost it.
 - **Timing.** The shadow is traced in the global illumination's Direct3D 12 frame, before its
   light passes. The sun pass and the resolve were in the same command list in every frame record
   checked (`frame-5289`, `frame-236525`), and that list already waits for the frame's signal; the
@@ -1213,6 +1238,25 @@ traced yet.
   measurement leaves them out first, so with the global illumination on that step is their own
   cost; the Direct3D 12 times are in the log ("shadow rays", "shadow denoiser") and the scene
   status (Diagnostics, "Global illumination scene").
+- **Shadow rays debug view and probe** (Diagnostics, Debug view "Ray-traced shadow rays"; needs
+  the ray-traced shadows and an upscaler, as the upscaler's composite blends it over the image).
+  An instance `BuildInstances` leaves out keeps its place in the scene with mask
+  `GI_MASK_HIDDEN` (0x80), which no real ray takes (the global illumination's take
+  `GI_MASK_TRACED`), and each instance's reason, box depth, the farthest depth over its rectangle
+  and the pyramid level go to `g_InstanceDebug`. `DebugShadows` traces each pixel's ray as the
+  shadow rays do but towards the sun's centre, without chance, once with the shadow rays' masks
+  and once with every instance, and colours what blocks it: green drawn, cyan kept out of view,
+  blue kept behind what the game drew, yellow alpha-tested beyond the shadow map, olive
+  alpha-tested left to the shadow map, red left out (only it would block), magenta anything else
+  only the full ray finds; clear where the sun reaches. `ProbeShadows` does the same for the
+  screen's centre pixel (the cross) and adds the instances by reason, and every live entry whose
+  bounds the ray crosses with its state (no structure yet, past the instance limit, or its
+  instance's reason), from a per-entry state buffer the CPU uploads while the probe runs. The
+  probe is read back when the frame's slot comes round again, shown in the overlay with the
+  denoised shadow, this frame's ray, the vertex pool, the meshes waiting for a structure and the
+  entries evicted in the last 60 frames, and logged ("Shadow probe:") whenever what blocks its ray
+  changes, at most five times a second. Checked offline on the four harness scenes: each scene's
+  shadow takes the expected colour, and the probe names the post, its reason and its box test.
 
 Not handled:
 

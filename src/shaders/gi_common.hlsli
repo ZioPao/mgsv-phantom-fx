@@ -31,6 +31,10 @@ RWStructuredBuffer<GIInstanceDesc> g_InstanceDescs : register(u3);
 RWStructuredBuffer<uint> g_Counters : register(u4);
 RWStructuredBuffer<uint4> g_DispatchArgs : register(u5);
 RWStructuredBuffer<uint4> g_EntryAlbedo : register(u6); // Sums of linear albedo x 255 and their count, by entry
+// By instance: why it is in the scene or left out (BuildInstances): x GI_REASON_*, y asuint(its box's
+// nearest depth), z asuint(the farthest depth over its screen rectangle), w the pyramid level read |
+// 256 when all of it is in view. For the shadow debug view and probe.
+RWStructuredBuffer<uint4> g_InstanceDebug : register(u76);
 
 SamplerState g_PointSampler : register(s0);
 SamplerState g_LinearSampler : register(s1);
@@ -347,7 +351,8 @@ struct SceneHit
     float2 barycentrics;
 };
 
-// Instances whose mask shares a bit with `mask` (GI_MASK_*) take part.
+// Instances whose mask shares a bit with `mask` (GI_MASK_*) take part; the left-out (GI_MASK_HIDDEN) only
+// for the shadow debug view.
 SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float maxDistance, uint mask)
 {
     RayDesc ray;
@@ -371,7 +376,7 @@ SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float 
 
 SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float maxDistance)
 {
-    return TraceClosest(origin, direction, minDistance, maxDistance, 0xFFu);
+    return TraceClosest(origin, direction, minDistance, maxDistance, GI_MASK_TRACED);
 }
 
 SceneHit TraceClosest(float3 origin, float3 direction, float maxDistance)
@@ -388,7 +393,7 @@ bool TraceVisible(float3 origin, float3 direction, float minDistance, float maxD
     ray.TMax = maxDistance;
 
     RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> query;
-    query.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFFu, ray);
+    query.TraceRayInline(g_Scene, RAY_FLAG_NONE, GI_MASK_TRACED, ray);
     query.Proceed();
     return query.CommittedStatus() == COMMITTED_NOTHING;
 }
@@ -451,7 +456,7 @@ SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 
 
 SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance)
 {
-    return TraceFromSurface(origin, normal, tolerance, direction, maxDistance, 0xFFu);
+    return TraceFromSurface(origin, normal, tolerance, direction, maxDistance, GI_MASK_TRACED);
 }
 
 // Whether a ray leaving a surface gets away, past copies of the surface: the stretch of the ray

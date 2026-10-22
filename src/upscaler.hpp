@@ -15,9 +15,12 @@
 // native objects. Command lists are identified by their native deferred context or ID3D11CommandList.
 namespace phantom_fx::upscaler
 {
+// The debug view that blends the ray-traced shadows' debug view over the image, with their probe.
+constexpr int ShadowRaysView = 3;
+
 struct Diagnostics
 {
-    int debugView{}; // 0 final image, 1 motion vectors, 2 where the engine's velocity was used
+    int debugView{}; // 0 final image, 1 motion vectors, 2 where the engine's velocity was used, 3 the ray-traced shadows' rays (ShadowRaysView)
     bool noJitter{};
     bool gameFxaa{}; // Comparison: leave the frame to the game's FXAA, keeping DLSS ready
     bool onlyScreenSpaceShadows{}; // The sun shadowed by the screen-space shadows alone

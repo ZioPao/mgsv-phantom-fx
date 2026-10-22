@@ -22,7 +22,7 @@ using Microsoft::WRL::ComPtr;
 enum class Kernel : std::uint8_t
 {
     // gi_scene.hlsl
-    ClearBounds, Scatter, BuildInstances, DebugScene, ClearOutput,
+    ClearBounds, Scatter, BuildInstances, DebugScene, ClearOutput, BuildDepthPyramid,
     // gi_light.hlsl
     ClearCounters, GenerateDispatch, ClearBuffer, ScanBlocks, ScanBlockSums, ScanAddOffsets, ClearProbeMask, FilterProbeMask,
     InitCachedTileLRU, ReprojectScreenProbes, CountScreenProbes, ScatterScreenProbes, SpawnScreenProbes, CompactScreenProbes,
@@ -30,14 +30,14 @@ enum class Kernel : std::uint8_t
     PopulateCells, UpdateTiles, UpdateMultibounceCells, ResolveCells, BlendScreenProbes, CopyProbes, ReorderScreenProbes,
     FilterScreenProbes, ProjectScreenProbes, InterpolateScreenProbes, ReprojectGI, FilterGI,
     // gi_shadow.hlsl, gi_shadow_filter.hlsl
-    TraceSunShadows, ClassifyShadowTiles, FilterShadows,
+    TraceSunShadows, ClassifyShadowTiles, FilterShadows, DebugShadows, ProbeShadows,
     Count
 };
 
 using Pipelines = std::array<ComPtr<ID3D12PipelineState>, static_cast<std::size_t>(Kernel::Count)>;
 
 // The descriptor tables (gi_common.hlsli, gi_light.hlsl, gi_shadow.hlsli).
-constexpr UINT SrvCount = 32, UavCount = 96, TableSize = SrvCount + UavCount;
+constexpr UINT SrvCount = 32, UavCount = 112, TableSize = SrvCount + UavCount;
 
 inline void check(HRESULT result, const char* what)
 {

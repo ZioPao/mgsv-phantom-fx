@@ -442,15 +442,14 @@ bool drawVisuals(Settings& wanted)
 {
     bool enhancements = enhancementsOn();
     if (ImGui::Checkbox("Visual enhancements (F1)", &enhancements)) setEnhancements(enhancements);
-    tooltip("Ray-traced shadows, soft shadows, contact shadows, global illumination, GTVBAO, SSILVB and the volumetric fog\n"
-            "together, as set below. Off shows the game's own lighting for comparison; F1 toggles it at any time. Not saved: each start begins\n"
+    tooltip("Soft shadows, contact shadows, GTVBAO, SSILVB, the volumetric fog and the ray tracing together, as set below.\n"
+            "Off shows the game's own lighting for comparison; F1 toggles it at any time. Not saved: each start begins\n"
             "with them on.");
     if (!enhancements) statusLine(Yellow, "Visual enhancements are off. F1 turns them back on.");
 
     bool changed{};
     ImGui::BeginDisabled(!enhancements);
     beginIndent();
-    changed |= drawRayTracedShadows(wanted);
     // The ray-traced shadows take the place of both.
     ImGui::BeginDisabled(wanted.rayTracedShadows);
     changed |= drawSoftShadows(wanted);
@@ -458,18 +457,19 @@ bool drawVisuals(Settings& wanted)
     tooltip("Bend Studio's screen-space shadows for the sun: short shadows traced through the depth buffer. They add the\n"
             "contact shadows the sun's shadow map misses (feet, rocks, folds of clothing). Cheap: one trace a frame.");
     ImGui::EndDisabled();
+    if (wanted.rayTracedShadows) statusLine(Grey, "Ray-traced shadows replace these while on.");
     changed |= ImGui::Checkbox("Lamp contact shadows", &wanted.lightScreenSpaceShadows);
     tooltip("The same for every lamp, spot light and flashlight, which gives lights that have no shadow of their own one.\n"
             "Costly: one trace per light, so the frame rate drops where many lights are on screen, as in a base at night.");
     if ((wanted.sunScreenSpaceShadows || wanted.lightScreenSpaceShadows) && shadows::failed())
         statusLine(Red, "Contact shadows are unavailable (see PhantomFX.log).");
 
-    changed |= drawGlobalIllumination(wanted);
     // The global illumination takes the place of both.
     ImGui::BeginDisabled(wanted.globalIllumination);
     changed |= drawAmbientOcclusion(wanted);
     changed |= drawIndirectLight(wanted);
     ImGui::EndDisabled();
+    if (wanted.globalIllumination) statusLine(Grey, "Global illumination replaces these while on.");
     changed |= drawVolumetricFog(wanted);
     endIndent();
     ImGui::EndDisabled();
@@ -478,6 +478,20 @@ bool drawVisuals(Settings& wanted)
     changed |= drawDepthOfField(wanted);
     ImGui::Spacing();
     changed |= drawHdr(wanted);
+
+    return changed;
+}
+
+// Returns true when a setting changed. Part of the visual enhancements, so F1 turns these off too.
+bool drawRayTracing(Settings& wanted)
+{
+    const bool enhancements = enhancementsOn();
+    if (!enhancements) statusLine(Yellow, "Visual enhancements are off. F1 turns them back on.");
+
+    ImGui::BeginDisabled(!enhancements);
+    bool changed = drawRayTracedShadows(wanted);
+    changed |= drawGlobalIllumination(wanted);
+    ImGui::EndDisabled();
 
     return changed;
 }
@@ -689,8 +703,21 @@ void drawDiagnostics(const Status& state)
     ImGui::TextDisabled("For troubleshooting. Leave these at their defaults.");
     auto options = currentDiagnostics();
     bool changed{};
-    const char* views[]{"Final image", "Motion vectors", "Object motion (red)"};
+    const char* views[]{"Final image", "Motion vectors", "Object motion (red)", "Ray-traced shadow rays"};
+    static_assert(std::size(views) == ShadowRaysView + 1);
     changed |= ImGui::Combo("Debug view", &options.debugView, views, static_cast<int>(std::size(views)));
+    if (options.debugView == ShadowRaysView)
+    {
+        tooltip("With ray-traced shadows and an upscaler on: what blocks each pixel's ray to the sun's centre, over the image.\n"
+                "The cross is the probe, whose findings show below and go to PhantomFX.log whenever they change.");
+        beginIndent();
+        statusLine(Grey, "Green: drawn by the game. Cyan: kept, not all in view. Blue: kept, behind what the game drew. Yellow: "
+                         "alpha-tested, traced beyond the shadow map. Olive: alpha-tested, left to the shadow map. Red: left out of the "
+                         "scene (only it would block). Magenta: anything else only the full ray finds. Clear: the sun reaches.");
+        if (const auto probe = global_illumination::shadowProbe(); !probe.empty()) ImGui::TextWrapped("%s", probe.c_str());
+        else statusLine(Yellow, "Waiting for the ray-traced shadows (on, with an upscaler).");
+        endIndent();
+    }
     changed |= ImGui::Checkbox("Jitter off", &options.noJitter);
     tooltip("The upscaler gets the same pixel positions every frame. Edges stay aliased.");
     changed |= ImGui::Checkbox("Game FXAA (comparison)", &options.gameFxaa);
@@ -735,6 +762,8 @@ void drawMenu()
     if (ImGui::CollapsingHeader("Upscaling", ImGuiTreeNodeFlags_DefaultOpen)) changed |= drawUpscaling(state, wanted);
     ImGui::Spacing();
     if (ImGui::CollapsingHeader("Visuals", ImGuiTreeNodeFlags_DefaultOpen)) changed |= drawVisuals(wanted);
+    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Ray Tracing [EXPERIMENTAL]", ImGuiTreeNodeFlags_DefaultOpen)) changed |= drawRayTracing(wanted);
     ImGui::Spacing();
     if (ImGui::CollapsingHeader("Utility", ImGuiTreeNodeFlags_DefaultOpen)) changed |= drawUtility(wanted);
     if (changed) applySettings(wanted);

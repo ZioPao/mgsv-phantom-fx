@@ -162,8 +162,8 @@ std::atomic<std::uint64_t> kicksSinceLog{};
 // whichever thread asks first. Taken after executionMutex when both are.
 std::mutex lightMutex;
 ComPtr<ID3D11Device> lightDevice;
-SharedTexture output, shadowOutput;
-bool shadowWritten{}; // Direct3D 12 has traced into shadowOutput
+SharedTexture output, shadowOutput, shadowDebugOutput;
+bool shadowWritten{}, shadowDebugWritten{}; // Direct3D 12 has traced into shadowOutput, shadowDebugOutput
 
 void check(HRESULT result, const char* what)
 {
@@ -321,6 +321,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     pack(depth, *sceneCamera);
     ID3D11Texture2D* light{};
     ID3D11Texture2D* shadow{};
+    ID3D11Texture2D* shadowDebug{};
     {
         std::lock_guard lock(lightMutex);
         if (output.width != depthOut.width || output.height != depthOut.height)
@@ -335,6 +336,16 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
             }
 
             shadow = shadowOutput.texture.Get();
+            if (options.debugShadows)
+            {
+                if (shadowDebugOutput.width != depthOut.width || shadowDebugOutput.height != depthOut.height)
+                {
+                    shadowDebugOutput = makeShared(device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the shadow debug view");
+                    shadowDebugWritten = false;
+                }
+
+                shadowDebug = shadowDebugOutput.texture.Get();
+            }
         }
     }
 
@@ -343,7 +354,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     immediate->Flush();
 
     gi_renderer::Frame frame;
-    frame.textures = {depthOut.texture.Get(), normalOut.texture.Get(), albedoOut.texture.Get(), transfer.texture.Get(), light, shadow};
+    frame.textures = {depthOut.texture.Get(), normalOut.texture.Get(), albedoOut.texture.Get(), transfer.texture.Get(), light, shadow, shadowDebug};
     frame.width = depthOut.width;
     frame.height = depthOut.height;
     frame.viewProjection = projectionViewOf(*sceneCamera);
@@ -386,6 +397,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     frame.traceShadows = shadow && sun;
     frame.shadowRange = shadowRange;
     frame.sunTangent = std::tan(options.sunSize * 0.5f * 3.14159265f / 180);
+    frame.debugShadows = shadowDebug != nullptr;
     frame.waitValue = inputsReady;
     frame.signalValue = ++fenceValue;
     const auto result = gi_renderer::render(frame);
@@ -394,6 +406,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     {
         std::lock_guard lock(lightMutex);
         shadowWritten = shadowOutput.texture.Get() == shadow;
+        shadowDebugWritten = shadowDebug && shadowDebugOutput.texture.Get() == shadowDebug;
     }
 
     gi_capture::evicted(result.evicted);
@@ -479,8 +492,8 @@ void detach() noexcept
 
     {
         std::lock_guard lock(lightMutex);
-        output = shadowOutput = {};
-        shadowWritten = false;
+        output = shadowOutput = shadowDebugOutput = {};
+        shadowWritten = shadowDebugWritten = false;
         lightDevice.Reset();
     }
 
@@ -701,6 +714,21 @@ ID3D11ShaderResourceView* light(UINT width, UINT height) noexcept
     }
 }
 
+ID3D11ShaderResourceView* shadowDebug(UINT width, UINT height) noexcept
+{
+    const auto last = lastKick.load(std::memory_order_relaxed);
+    if (!shadowing.load(std::memory_order_relaxed) || failed || !last || GetTickCount64() - last > 1000) return nullptr;
+
+    std::lock_guard lock(lightMutex);
+    const bool fits = shadowDebugWritten && shadowDebugOutput.width == width && shadowDebugOutput.height == height;
+    return fits ? shadowDebugOutput.view.Get() : nullptr;
+}
+
+std::string shadowProbe()
+{
+    return gi_renderer::shadowProbe();
+}
+
 ID3D11ShaderResourceView* sunShadow(UINT width, UINT height) noexcept
 {
     const auto last = lastKick.load(std::memory_order_relaxed);
@@ -854,7 +882,7 @@ void present() noexcept
     if (on && now - lastStatus > 10'000)
     {
         lastStatus = now;
-        log("Global illumination: " + status() + "; " + std::to_string(gi_capture::nearCopies()) + " meshes held twice within 4 cm of themselves");
+        log("Global illumination: " + status() + "; " + gi_capture::keyChanges());
 
         const auto work = gi_capture::takeWork();
         LARGE_INTEGER frequency{};

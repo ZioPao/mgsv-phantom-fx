@@ -20,7 +20,7 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 #endif
 
 // Instance flags.
-#define GI_INSTANCE_DRAWN        1u // The game drew it this frame, so it is where the scene shows it
+#define GI_INSTANCE_DRAWN        1u // The game drew it this frame or lately (gi_renderer.cpp, DrawnGraceFrames), so it is where the scene shows it
 #define GI_INSTANCE_DYNAMIC      2u // Captured again every frame (skinned characters)
 #define GI_INSTANCE_ALPHA_TESTED 4u // Its texture cuts holes in it (leaves, grass, nets), which the scene's triangles lack
 
@@ -29,6 +29,26 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 // instance out of every ray.
 #define GI_MASK_OPAQUE       1u
 #define GI_MASK_ALPHA_TESTED 2u
+#define GI_MASK_TRACED       3u    // What the global illumination's rays take
+#define GI_MASK_HIDDEN       0x80u // Left out of the scene (BuildInstances); only the shadow debug view's rays see it
+
+// Why an instance is in the scene or left out (BuildInstances), for the shadow debug view and probe.
+#define GI_REASON_DRAWN       0u // The game drew it this frame or lately
+#define GI_REASON_OUT_OF_VIEW 1u // Not drawn, not all of it in view: kept
+#define GI_REASON_BEHIND      2u // Not drawn, all of it in view but behind what the game drew (culled): kept
+#define GI_REASON_LEFT_OUT    3u // Not drawn, all of it in view, something of it would show: left out
+#define GI_REASON_NONE        0xFFFFFFFFu
+
+// An entry's state for the shadow probe (from the CPU, each frame the probe runs): x the bits below,
+// the frames since the game last drew it in bits 8 to 19 and the frames it was drawn in bits 20 to 31;
+// y its instance this frame, or GI_REASON_NONE.
+#define GI_ENTRY_LIVE         1u
+#define GI_ENTRY_BUILT        2u
+#define GI_ENTRY_ALPHA_TESTED 4u
+#define GI_ENTRY_INSTANCED    8u
+
+// Live entries whose bounds the probe's sun ray crosses, listed at most.
+#define GI_PROBE_CROSSINGS 256u
 
 // Scatter record flags.
 #define GI_SCATTER_NEW 1u // The entry is new: what was learnt about it (its albedo) starts over
@@ -109,6 +129,23 @@ struct GIInstanceRecord
     uint flags;        // GI_INSTANCE_*
     uint2 blas;        // GPU address of its bottom-level acceleration structure
     uint2 padding;
+};
+
+// The shadow probe: the sun ray from the screen's centre pixel, as the shadow rays trace it but
+// towards the sun's centre, with everything that decides it (ProbeShadows in gi_shadow.hlsl).
+struct GIShadowProbe
+{
+    float4 receiver; // xyz: the centre pixel's surface, world space; w: its depth (0 is the sky)
+    float4 normal;   // xyz: its normal; w: its distance from the eye
+    float4 ray;      // xyz: towards the sun's centre; w: how far the pixel lies beyond the game's shadow map (0 to 1)
+    float4 segments; // x: the near segment's end; y: the copy tolerance; z: the near hit's distance; w: the far hit's distance
+    uint4 hits;      // x: copies of the surface skipped near; y: the near hit's instance + 1; z: the far hit's (shadow rays' masks) + 1; w: the far hit's (every instance, the left-out too) + 1
+    uint4 hitEntry;  // Of the far hit with every instance: x its entry, y its reason, z its flags, w its entry state (GI_ENTRY_*)
+    float4 hitBox;   // Of the same: x its box's nearest depth, y the farthest depth over its screen rectangle, z the pyramid level read, w 1 when all of it is in view
+    uint4 reasons;   // Instances by reason (GI_REASON_*)
+    float4 shadow;   // x: the denoised shadow at the centre; y: this frame's ray (1 lit, 0 blocked)
+    uint4 crossings; // x: live entries whose bounds the ray crosses; y: of them listed after the probe, each a uint4: x entry,
+                     // y asuint(where the ray enters its bounds), z its state (GI_ENTRY_*), w its instance's reason
 };
 
 // D3D12_RAYTRACING_INSTANCE_DESC.

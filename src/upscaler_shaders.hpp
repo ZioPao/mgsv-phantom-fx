@@ -86,7 +86,7 @@ float4 main(uint vertex : SV_VertexID) : SV_Position
 inline constexpr char Composite[] = PHANTOM_FX_HDR_COMMON R"(
 cbuffer CompositeParameters : register(b0)
 {
-    uint DebugView; // 1 motion vectors, 2 where the engine's velocity was used
+    uint DebugView; // 1 motion vectors, 2 where the engine's velocity was used, 3 the ray-traced shadows' rays over the image
     float Sharpness;
     uint ObjectMotion;
     uint Linear; // The upscaler made linear colour, sharpened through x / (1 + x) and encoded here
@@ -94,6 +94,7 @@ cbuffer CompositeParameters : register(b0)
 Texture2D<float4> Upscaled : register(t0);
 Texture2D<float2> Motion : register(t1);
 Texture2D<float4> Velocity : register(t2);
+Texture2D<float4> ShadowRays : register(t3); // At the render size, by its alpha (global_illumination::shadowDebug)
 
 float3 Load(int2 pixel)
 {
@@ -133,7 +134,19 @@ float4 main(float4 position : SV_Position) : SV_Target
     else if (Sharpness > 0)
         color = Rcas(Load(pixel + int2(0, -1)), Load(pixel + int2(-1, 0)), color, Load(pixel + int2(1, 0)), Load(pixel + int2(0, 1)));
 
-    if (Linear && DebugView == 0) color = LinearToSrgb(color / max(1 - color, 1.0 / HalfMax));
+    if (Linear && (DebugView == 0 || DebugView == 3)) color = LinearToSrgb(color / max(1 - color, 1.0 / HalfMax));
+
+    if (DebugView == 3)
+    {
+        uint width, height, raysWidth, raysHeight;
+        Upscaled.GetDimensions(width, height);
+        ShadowRays.GetDimensions(raysWidth, raysHeight);
+        if (raysWidth)
+        {
+            float4 rays = ShadowRays.Load(int3(position.xy * float2(raysWidth, raysHeight) / float2(width, height), 0));
+            color = lerp(color, rays.rgb, rays.a);
+        }
+    }
 
     return float4(color, 0);
 }

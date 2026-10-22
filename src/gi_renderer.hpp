@@ -21,6 +21,7 @@ struct Textures
     ID3D11Texture2D* transfer{}; // R32G32B32A32_FLOAT, captured vertices in world space
     ID3D11Texture2D* output{};   // R16G16B16A16_FLOAT, what Direct3D 11 reads back
     ID3D11Texture2D* shadow{};   // R16_FLOAT, the sun's ray-traced shadow; null while off
+    ID3D11Texture2D* shadowDebug{}; // R8G8B8A8_UNORM, the shadow debug view (DebugShadows); null while off
 };
 
 using Matrix = std::array<float, 16>; // Rows applied as dot(row, v), as the engine's
@@ -60,6 +61,9 @@ struct Frame
     bool traceShadows{};
     std::array<float, 4> shadowRange{};
     float sunTangent{};
+    // Diagnostics, with the shadows: the debug view into textures.shadowDebug, and the probe at the
+    // screen's centre (shadowProbe).
+    bool debugShadows{};
     std::uint64_t waitValue{}, signalValue{}; // On the shared fence
 };
 
@@ -86,4 +90,7 @@ constexpr std::uint32_t DynamicEntry = MaxEntries - 1;
 
 // For the overlay: entries, triangles and memory in use.
 std::string status();
+// For the overlay: the latest shadow probe as text, a few frames old; empty while the debug view is
+// off. Logged by itself whenever what blocks the probe's sun ray changes.
+std::string shadowProbe();
 }

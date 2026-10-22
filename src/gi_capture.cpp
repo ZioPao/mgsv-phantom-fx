@@ -132,10 +132,13 @@ struct Entry
     std::uint64_t key{};
     EntryState state{};
     bool alphaTested{};
-    // Diagnostics (nearCopies): a mesh's draw without its placement, and its origin in worldOf's units.
-    std::uint64_t mesh{};
-    std::array<std::int64_t, 3> origin{};
+    // Diagnostics (keyChanges): the key without the draw's buffers and ranges, and those (DrawFields).
+    std::uint64_t place{};
+    std::array<std::uint64_t, 10> draw{};
 };
+
+constexpr const char* DrawFields[]{"index buffer", "index format", "index offset", "first index", "base vertex", "vertex buffer",
+    "vertex offset", "second vertex buffer", "second vertex offset", "first instance"};
 
 std::atomic<bool> active{}, capturing{true};
 
@@ -188,6 +191,8 @@ ComPtr<ID3D11ComputeShader> convertShader;
 UINT recordCapacity{};
 
 std::atomic<std::uint64_t> captures{}, skinnedCaptures{}, missingScene{}, missingObject{}, dynamicInstances{}, ringFull{};
+// Diagnostics: new static entries since keyChanges, by where their first draw came from.
+std::atomic<std::uint64_t> newFromMainCamera{}, newFromOtherPasses{}, newTerrain{};
 
 // Diagnostics: the hooks' time in performance counter ticks, and the draws and captures, since takeWork.
 std::atomic<std::int64_t> hookTicks{};
@@ -717,7 +722,13 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
         hasher.add(call.instances);
         hasher.add(call.firstInstance);
         hasher.add(topology);
-        for (int i = 0; i < 2; ++i)
+        // A terrain patch reads one stream: its vertex shader takes a grid position alone (POSITION
+        // xy; the height comes from a texture). The second slot holds whatever an earlier draw bound,
+        // at an offset that changed every frame, so every patch got a new key each frame: copies of
+        // the terrain filled the vertex pool, and eviction took the terrain out of view (mountains
+        // behind the camera lost their ray-traced shadows).
+        const int streams = boundKind == Kind::Terrain ? 1 : 2;
+        for (int i = 0; i < streams; ++i)
         {
             hasher.add(vertices[i].Get());
             hasher.add(offsets[i]);
@@ -728,19 +739,28 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
         // (c4 to c7): it changed from frame to frame for meshes that stayed put (most of the game's
         // shaders do not read it), and every mesh got a new key each frame the camera moved. The same
         // mesh drawn for the shadows, with the light's view, gets the same key.
-        const auto mesh = boundKind == Kind::Mesh ? hasher.value : 0;
-        std::array<std::int64_t, 3> origin{};
+        Hasher placement;
         if (const auto* object = writtenTo(constants[3].Get()))
         {
-            const auto world = worldOf(scene->viewInverse, object->values.data());
-            origin = {world[3], world[7], world[11]};
-            hasher.add(world);
-            hasher.add(object->values[32]);
-            if (boundKind == Kind::Terrain) hasher.add(object->values.data() + 36, 12 * sizeof(float));
+            placement.add(worldOf(scene->viewInverse, object->values.data()));
+            placement.add(object->values[32]);
+            if (boundKind == Kind::Terrain) placement.add(object->values.data() + 36, 12 * sizeof(float));
         }
         else if (constants[3]) ++missingObject;
 
+        hasher.add(placement.value);
         const auto key = hasher.value;
+
+        // Diagnostics (keyChanges): the key without the draw's buffers and ranges, and those.
+        Hasher place;
+        place.add(boundKind);
+        place.add(call.count);
+        place.add(call.instances);
+        place.add(topology);
+        place.add(placement.value);
+        const std::array<std::uint64_t, 10> draw{reinterpret_cast<std::uint64_t>(indices.Get()), static_cast<std::uint64_t>(indexFormat), indexOffset, call.first,
+            static_cast<std::uint64_t>(static_cast<std::int64_t>(call.vertexOffset)), reinterpret_cast<std::uint64_t>(vertices[0].Get()), offsets[0],
+            reinterpret_cast<std::uint64_t>(vertices[1].Get()), offsets[1], call.firstInstance};
 
         std::uint32_t index{};
         std::uint64_t ringOffset{};
@@ -760,9 +780,10 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
             {
                 index = freeIds.back();
                 freeIds.pop_back();
-                entries[index] = {key, EntryState::Capturing, false, mesh, origin};
+                entries[index] = {key, EntryState::Capturing, false, place.value, draw};
                 byKey.emplace(key, index);
                 capture = true;
+                ++(boundKind == Kind::Terrain ? newTerrain : scene->mainCamera ? newFromMainCamera : newFromOtherPasses);
             }
             else return;
 
@@ -1000,38 +1021,36 @@ Work takeWork() noexcept
         workCaptures.exchange(0), workSkinned.exchange(0), workVertices.exchange(0)};
 }
 
-std::uint32_t nearCopies() noexcept
+std::string keyChanges() noexcept
 {
     try
     {
         std::lock_guard lock(entryMutex);
-        std::unordered_map<std::uint64_t, std::vector<const Entry*>> byMesh;
+        std::unordered_map<std::uint64_t, std::vector<const Entry*>> byPlace;
         for (const auto& entry : entries)
-            if (entry.state == EntryState::Live && entry.mesh) byMesh[entry.mesh].push_back(&entry);
+            if (entry.state == EntryState::Live) byPlace[entry.place].push_back(&entry);
 
-        // Within two of worldOf's 2 cm units on each axis.
-        const auto sameSpot = [](const Entry& a, const Entry& b) {
-            for (int axis = 0; axis < 3; ++axis)
-                if (std::abs(a.origin[axis] - b.origin[axis]) > 2) return false;
+        // Entries alike but for the draw's buffers and ranges: the fields that differ from the first of each.
+        std::uint32_t again{};
+        std::array<std::uint32_t, std::size(DrawFields)> differing{};
+        for (const auto& [place, group] : byPlace)
+            for (std::size_t i = 1; i < group.size(); ++i)
+            {
+                ++again;
+                for (std::size_t field = 0; field < differing.size(); ++field)
+                    if (group[i]->draw[field] != group[0]->draw[field]) ++differing[field];
+            }
 
-            return true;
-        };
+        std::string text = std::to_string(again) + " meshes held again at the same place and size";
+        for (std::size_t field = 0; field < differing.size(); ++field)
+            if (differing[field]) text += ", " + std::to_string(differing[field]) + " with another " + DrawFields[field];
 
-        std::uint32_t copies{};
-        for (const auto& [mesh, group] : byMesh)
-            for (std::size_t i = 0; i < group.size(); ++i)
-                for (std::size_t j = 0; j < group.size(); ++j)
-                    if (i != j && sameSpot(*group[i], *group[j]))
-                    {
-                        ++copies;
-                        break;
-                    }
-
-        return copies;
+        return text + "; new since the last line: " + std::to_string(newFromMainCamera.exchange(0)) + " from the main camera, "
+            + std::to_string(newFromOtherPasses.exchange(0)) + " from other passes, " + std::to_string(newTerrain.exchange(0)) + " terrain";
     }
     catch (...)
     {
-        return 0;
+        return {};
     }
 }
 

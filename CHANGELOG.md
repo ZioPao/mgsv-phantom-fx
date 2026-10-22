@@ -1,12 +1,20 @@
 # Phantom FX changelog
 
-## Unreleased
+## 1.3.0
 
+- Add **Global illumination (GI-1.2)**: ray-traced indirect light after AMD's GI-1.2. Sunlight and
+  skylight bounce between surfaces, also those off screen, and the sky only lights what it can
+  reach. Replaces the game's baked probe light and SSAO, and GTVBAO and SSILVB while on. Needs a
+  GPU that traces rays (DXR 1.1). Off by default.
 - Add **Ray-traced shadows**: the sun's shadows from rays traced through the game's world, in
   place of the game's shadow map, soft shadows and sun contact shadows. They soften with distance
   as the sun's disc makes them and reach as far as you can see, where the game's end at about
   90 m. Leaves and grass keep the game's shadow map near you. Needs a GPU that traces rays
   (DXR 1.1). Off by default.
+- Ray-traced shadows and global illumination move to their own overlay section, **Ray Tracing
+  [EXPERIMENTAL]**.
+- Add a **Character** swapper under Utility: play as Venom Snake, the avatar, a male or female
+  soldier, Ocelot or Quiet, in any outfit the game has a model for. Soldiers can take any face.
 - Remove **Double shadow resolution**: it cost 1.5 GB of video memory for no visible gain. The
   `double_shadow_resolution` line in `PhantomFX.ini` is now ignored.
 

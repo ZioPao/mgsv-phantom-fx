@@ -6,9 +6,7 @@ AIO visual enhancement ReShade add-on for Metal Gear Solid V: The Phantom Pain.
 
 **Caution: Playing online with this mod may get you banned.**
 
-![Vanilla](docs/images/outpost-full-vanilla.png)
-
-![Phantom FX](docs/images/outpost-full-phantom-fx.png)
+![Vanilla and Phantom FX (ray-traced), flipping](docs/images/canyon-flip-4k.webp)
 
 ![Vanilla](docs/images/smoker-full-vanilla.png)
 
@@ -23,6 +21,7 @@ AIO visual enhancement ReShade add-on for Metal Gear Solid V: The Phantom Pain.
 - **HDR10 output**
 - **Unlock frame rate:** lifts the 60 fps cap
 - **Ray-traced shadows** for the sun (needs DXR 1.1)
+- **Ray-traced global illumination** (AMD GI-1.2, needs DXR 1.1)
 - **Soft shadows** (PCSS)
 - **Contact shadows** (Bend Studio's screen-space shadows)
 - **Ambient occlusion** (GTVBAO)
@@ -31,6 +30,7 @@ AIO visual enhancement ReShade add-on for Metal Gear Solid V: The Phantom Pain.
 - **Depth of field**
 - **Photo mode**
 - **Weather and time of day controls**
+- **Character swapper:** Snake, the avatar, soldiers, Ocelot or Quiet, in any outfit
 
 ## Requirements
 

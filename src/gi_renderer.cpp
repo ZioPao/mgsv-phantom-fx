@@ -13,9 +13,12 @@
 #include <dxgi1_4.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
+#include <format>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <span>
@@ -25,6 +28,7 @@
 
 // The kernels, compiled by DXC at build time (CMakeLists.txt).
 #include "BlendScreenProbes.h"
+#include "BuildDepthPyramid.h"
 #include "BuildInstances.h"
 #include "ClearBounds.h"
 #include "ClassifyShadowTiles.h"
@@ -36,6 +40,7 @@
 #include "CopyProbes.h"
 #include "CountScreenProbes.h"
 #include "DebugScene.h"
+#include "DebugShadows.h"
 #include "FilterGI.h"
 #include "FilterProbeMask.h"
 #include "FilterScreenProbes.h"
@@ -46,6 +51,7 @@
 #include "LearnAlbedo.h"
 #include "PatchScreenProbes.h"
 #include "PopulateCells.h"
+#include "ProbeShadows.h"
 #include "PopulateMultibounceCells.h"
 #include "PopulateScreenProbes.h"
 #include "ProjectScreenProbes.h"
@@ -92,6 +98,18 @@ constexpr std::uint32_t MaxInstances = 32768;
 constexpr std::uint32_t MaxLiveEntries = MaxInstances - 1;
 // An entry the game has not drawn for this many frames leaves the scene.
 constexpr std::uint32_t RetentionFrames = 3600;
+// An entry the game drew in more than one frame counts as drawn this long after: when the camera
+// moves, a static mesh can get a new key (terrain did each frame, gi_capture.cpp, until its keys
+// left out the stale second vertex slot), and a copy under a new key waits up to about 20 frames
+// for its acceleration structure. Without this, the copy from before the camera moved left the
+// scene at once (in view, not drawn) and the mesh was missing until the camera stopped: its
+// ray-traced shadow vanished while the camera turned. Two seconds cover a turn. A moving mesh,
+// drawn once under each key, gets none.
+constexpr std::uint32_t DrawnGraceFrames = 120;
+// The depth pyramid's levels at most (GI_DEPTH_PYRAMID_LEVELS in gi_scene.hlsl), and the first of
+// their unordered access slots.
+constexpr std::size_t MaxPyramidLevels = 12;
+constexpr UINT PyramidSlot = 96;
 // Where no albedo is known yet: MGSV's materials are dark.
 constexpr float DefaultAlbedo = 0.2f;
 // Tangent of the sun's angular radius, 0.27 degrees.
@@ -108,13 +126,14 @@ constexpr std::uint32_t BuildsPerFrame = 128;
 constexpr std::uint64_t BuildTrianglesPerFrame = 300'000;
 
 // The kernels' DXIL in gi_d3d12::Kernel's order.
-constexpr std::span<const unsigned char> Bytecode[]{GI_ClearBounds, GI_Scatter, GI_BuildInstances, GI_DebugScene, GI_ClearOutput,
+constexpr std::span<const unsigned char> Bytecode[]{GI_ClearBounds, GI_Scatter, GI_BuildInstances, GI_DebugScene, GI_ClearOutput, GI_BuildDepthPyramid,
     GI_ClearCounters, GI_GenerateDispatch, GI_ClearBuffer, GI_ScanBlocks, GI_ScanBlockSums, GI_ScanAddOffsets, GI_ClearProbeMask,
     GI_FilterProbeMask, GI_InitCachedTileLRU, GI_ReprojectScreenProbes, GI_CountScreenProbes, GI_ScatterScreenProbes, GI_SpawnScreenProbes,
     GI_CompactScreenProbes, GI_PatchScreenProbes, GI_StoreSpawnCount, GI_SampleScreenProbes, GI_LearnAlbedo, GI_PopulateScreenProbes,
     GI_PurgeTiles, GI_PopulateMultibounceCells, GI_PopulateCells, GI_UpdateTiles, GI_UpdateMultibounceCells, GI_ResolveCells,
     GI_BlendScreenProbes, GI_CopyProbes, GI_ReorderScreenProbes, GI_FilterScreenProbes, GI_ProjectScreenProbes, GI_InterpolateScreenProbes,
-    GI_ReprojectGI, GI_FilterGI, GI_TraceSunShadows, GI_ClassifyShadowTiles, GI_FilterShadows};
+    GI_ReprojectGI, GI_FilterGI, GI_TraceSunShadows, GI_ClassifyShadowTiles, GI_FilterShadows,
+    GI_DebugShadows, GI_ProbeShadows};
 static_assert(std::size(Bytecode) == static_cast<std::size_t>(Kernel::Count));
 
 // One captured static mesh on the GPU side.
@@ -126,6 +145,7 @@ struct Entry
     bool hasBlas{}, built{}, needsBuild{};
     std::uint64_t blasOffset{}, blasSize{};
     std::uint32_t lastDrawn{};
+    std::uint32_t framesDrawn{}; // Diagnostics: the frames the game drew it in
     bool alphaTested{};
 };
 
@@ -187,9 +207,27 @@ struct State
     // frame, within a second, within ten seconds, before.
     std::array<std::uint32_t, 4> entriesByAge{};
     std::array<std::uint64_t, 4> trianglesByAge{};
+    // Diagnostics: the live entries the game drew in one frame only, an earlier one.
+    std::uint32_t drawnOnce{};
+    std::uint64_t drawnOnceTriangles{};
 
     std::unique_ptr<gi_light::Light> light;
     std::unique_ptr<gi_shadow::Shadows> shadows;
+    // Diagnostics (the shadow debug view and probe): why each instance is in the scene or left out,
+    // the probe and the live entries its ray crosses, read back when the frame's slot comes round
+    // again; each frame's instance by entry.
+    ComPtr<ID3D12Resource> instanceDebug, probe, probeCrossings;
+    std::array<ComPtr<ID3D12Resource>, FramesInFlight> probeReadback;
+    std::array<bool, FramesInFlight> probeWritten{};
+    std::vector<std::uint32_t> entryInstance = std::vector<std::uint32_t>(MaxEntries, GI_REASON_NONE);
+    // Diagnostics: the static meshes waiting for their structure this frame, and the entries evicted
+    // in each of the last frames.
+    std::uint32_t waitingNow{};
+    std::array<std::uint32_t, 60> evictedByFrame{};
+    // The frame's depth pyramid for BuildInstances (gi_scene.hlsl): level k is the farthest depth of
+    // each square of 2^(k+1) pixels, the first at half the render size.
+    ComPtr<ID3D12Resource> depthPyramid;
+    UINT pyramidWidth{}, pyramidHeight{}, pyramidLevels{};
 
     // Diagnostics: GPU timestamps between the named phases of each frame's list (Recorder::mark),
     // read when the frame's slot comes round again. The scene's and the light's times are averaged
@@ -212,7 +250,7 @@ struct State
     ComPtr<ID3D12Resource> statsReadback, statsCounters;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT statsFootprint{};
     std::uint64_t statsFence{}, lastStats{};
-    Shared depth, normal, albedo, transfer, output, shadow;
+    Shared depth, normal, albedo, transfer, output, shadow, shadowDebug;
 
     ~State()
     {
@@ -220,6 +258,12 @@ struct State
     }
 };
 std::unique_ptr<State> state;
+
+// The latest shadow probe as text, for the overlay (another thread) and the log; kept apart from
+// the state so stopping does not race the overlay.
+std::mutex probeMutex;
+std::string probeText, lastProbeKey;
+std::uint64_t lastProbeLog{};
 
 ComPtr<ID3D12Resource> openShared(State& s, Shared& shared, ID3D11Texture2D* texture, const char* what)
 {
@@ -312,6 +356,12 @@ void createResources(State& s)
     s.entryAlbedo = createStorage(device, std::uint64_t{MaxEntries} * 16, "Creating the entry albedo");
     s.instanceDescs = createStorage(device, std::uint64_t{MaxInstances} * sizeof(GIInstanceDesc), "Creating the instance list");
     s.counters = createStorage(device, GI_COUNTER_COUNT * 4, "Creating the counters");
+    s.instanceDebug = createStorage(device, std::uint64_t{MaxInstances} * 16, "Creating the instance diagnostics");
+    s.probe = createStorage(device, sizeof(GIShadowProbe), "Creating the shadow probe");
+    s.probeCrossings = createStorage(device, std::uint64_t{GI_PROBE_CROSSINGS} * 16, "Creating the shadow probe's crossings");
+    for (auto& readback : s.probeReadback)
+        readback = createBuffer(device, sizeof(GIShadowProbe) + std::uint64_t{GI_PROBE_CROSSINGS} * 16, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_RESOURCE_FLAG_NONE, "Creating the shadow probe's readback");
     s.dispatchArguments = createStorage(device, GI_DISPATCH_SLOTS * 16, "Creating the dispatch arguments");
 
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
@@ -697,6 +747,123 @@ void readTimes(State& s, std::uint32_t slot)
     ++s.tally.timedFrames;
 }
 
+const char* reasonName(std::uint32_t reason)
+{
+    switch (reason)
+    {
+    case GI_REASON_DRAWN: return "in the scene, drawn by the game this frame or lately";
+    case GI_REASON_OUT_OF_VIEW: return "in the scene, kept: not drawn, not all of it in view";
+    case GI_REASON_BEHIND: return "in the scene, kept: not drawn, all in view but behind what the game drew";
+    case GI_REASON_LEFT_OUT: return "LEFT OUT: not drawn, all in view, and its place on screen shows";
+    default: return "no instance";
+    }
+}
+
+std::string entryState(std::uint32_t bits)
+{
+    if (!(bits & GI_ENTRY_LIVE)) return "not live";
+
+    std::string text = !(bits & GI_ENTRY_BUILT) ? "live, no acceleration structure yet"
+        : !(bits & GI_ENTRY_INSTANCED) ? "live, built, past the instance limit" : "live, built, instanced";
+    if (bits & GI_ENTRY_ALPHA_TESTED) text += ", alpha-tested";
+
+    return text + ", last drawn " + std::to_string((bits >> 8) & 0xFFFu) + " frames ago, drawn in " + std::to_string(bits >> 20) + " frames";
+}
+
+// The probe as text, and a key that changes when what blocks its ray changes.
+std::pair<std::string, std::string> describeProbe(const State& s, const GIShadowProbe& probe, std::vector<uint4> crossings)
+{
+    const auto& r = probe.reasons;
+    const auto percent = [](const RangeAllocator& allocator) { return allocator.capacity() ? allocator.usedSize() * 100 / allocator.capacity() : 0; };
+    std::uint32_t evicted{};
+    for (const auto count : s.evictedByFrame) evicted += count;
+    const auto scene = std::format("scene: {} instances: {} drawn, {} kept out of view, {} kept behind what the game drew, {} left out; vertex pool {}%, "
+        "structures {}%, {} meshes waiting for a structure, {} entries evicted in the last {} frames",
+        r.x + r.y + r.z + r.w, r.x, r.y, r.z, r.w, percent(s.vertexAllocator), percent(s.blasAllocator), s.waitingNow, evicted, s.evictedByFrame.size());
+    if (probe.receiver.w <= 0) return {"centre pixel: the sky\n" + scene, "sky"};
+
+    std::string text = std::format("centre pixel: surface {:.1f} m away at ({:.1f} {:.1f} {:.1f}), normal ({:.2f} {:.2f} {:.2f}), {:.2f} beyond the "
+        "shadow map (0 inside, 1 past it); shadow there {:.2f}, this frame's ray {}\n",
+        probe.normal.w, probe.receiver.x, probe.receiver.y, probe.receiver.z, probe.normal.x, probe.normal.y, probe.normal.z, probe.ray.w,
+        probe.shadow.x, probe.shadow.y > 0.5f ? "lit" : "blocked");
+
+    const auto& h = probe.hits;
+    text += std::format("sun ray towards ({:.2f} {:.2f} {:.2f}): near segment to {:.2f} m (copy tolerance {:.2f} m), {} copies of the surface skipped; "
+        "the shadow rays {}\n", probe.ray.x, probe.ray.y, probe.ray.z, probe.segments.x, probe.segments.y, h.x,
+        h.y ? std::format("are blocked near, at {:.2f} m (instance {})", probe.segments.z, h.y - 1)
+            : h.z ? std::format("are blocked at {:.1f} m (instance {})", probe.segments.w, h.z - 1)
+                  : std::string("reach the sun"));
+
+    std::string key = std::format("{}|{}", h.y || h.z ? "blocked" : "lit", h.w ? std::to_string(probe.hitEntry.x) : "-");
+    if (h.w)
+    {
+        const auto& e = probe.hitEntry;
+        text += std::format("with every instance: hits entry {} ({}{}), {}", e.x, (e.z & GI_INSTANCE_ALPHA_TESTED) ? "alpha-tested" : "opaque",
+            (e.z & GI_INSTANCE_DYNAMIC) ? ", skinned" : "", reasonName(e.y));
+        if (probe.hitBox.w > 0.5f)
+            text += std::format(" (its box's nearest depth {:.6f}, the farthest drawn over its rectangle {:.6f} at pyramid level {:.0f})", probe.hitBox.x,
+                probe.hitBox.y, probe.hitBox.z);
+        text += "; entry " + entryState(e.w) + "\n";
+        key += std::format("|{}", e.y);
+    }
+    else
+        text += "with every instance: nothing in the scene blocks it\n";
+
+    // The live entries whose bounds the ray crosses, nearest first, past the receiver's own.
+    std::sort(crossings.begin(), crossings.end(), [](const uint4& a, const uint4& b) { return std::bit_cast<float>(a.y) < std::bit_cast<float>(b.y); });
+    std::uint32_t inScene{}, leftOut{}, unbuilt{}, uninstanced{};
+    for (const auto& c : crossings)
+    {
+        if (!(c.z & GI_ENTRY_BUILT)) ++unbuilt;
+        else if (!(c.z & GI_ENTRY_INSTANCED)) ++uninstanced;
+        else if (c.w == GI_REASON_LEFT_OUT) ++leftOut;
+        else ++inScene;
+    }
+
+    text += std::format("bounds crossed: {} live entries{}: {} in the scene, {} left out, {} without a structure yet, {} past the instance limit",
+        probe.crossings.x, probe.crossings.x > crossings.size() ? std::format(" ({} listed)", crossings.size()) : "", inScene, leftOut, unbuilt, uninstanced);
+    std::uint32_t shown{};
+    for (const auto& c : crossings)
+    {
+        const float enter = std::bit_cast<float>(c.y);
+        if (enter < 0.5f || shown == 8) continue;
+
+        text += std::format("{} entry {} at {:.1f} m ({})", shown++ ? ";" : "; nearest past 0.5 m:", c.x, enter,
+            !(c.z & GI_ENTRY_BUILT) ? "no structure yet" : !(c.z & GI_ENTRY_INSTANCED) ? "past the instance limit" : reasonName(c.w));
+    }
+
+    return {text + "\n" + scene, key};
+}
+
+// The probe the slot's last frame wrote, once the GPU is past it: into the overlay's text, and the
+// log when what blocks its ray changed (at most five times a second).
+void readProbe(State& s, std::uint32_t slot)
+{
+    if (!s.probeWritten[slot]) return;
+
+    s.probeWritten[slot] = false;
+    void* data{};
+    if (FAILED(s.probeReadback[slot]->Map(0, nullptr, &data))) return;
+
+    GIShadowProbe probe{};
+    std::memcpy(&probe, data, sizeof(probe));
+    std::vector<uint4> crossings(std::min(probe.crossings.y, GI_PROBE_CROSSINGS));
+    std::memcpy(crossings.data(), static_cast<const std::uint8_t*>(data) + sizeof(probe), crossings.size() * sizeof(uint4));
+    const D3D12_RANGE none{};
+    s.probeReadback[slot]->Unmap(0, &none);
+
+    auto [text, key] = describeProbe(s, probe, std::move(crossings));
+    const auto now = GetTickCount64();
+    std::lock_guard lock(probeMutex);
+    probeText = text;
+    if (key != lastProbeKey && now - lastProbeLog >= 200)
+    {
+        lastProbeKey = key;
+        lastProbeLog = now;
+        log("Shadow probe:\n" + text);
+    }
+}
+
 // Diagnostics: every ten seconds, what a frame cost on average.
 void logTally(State& s)
 {
@@ -740,6 +907,7 @@ Result render(const Frame& frame)
     collectReleases(s);
     logStats(s);
     readTimes(s, slot);
+    readProbe(s, slot);
     logTally(s);
 
     // A new render size starts the light and the shadows over. Each has memory only once traced;
@@ -766,12 +934,32 @@ Result render(const Frame& frame)
         s.shadows.reset();
     }
 
+    if (s.pyramidWidth != (frame.width + 1) / 2 || s.pyramidHeight != (frame.height + 1) / 2)
+    {
+        waitForAll();
+        s.pyramidWidth = (frame.width + 1) / 2;
+        s.pyramidHeight = (frame.height + 1) / 2;
+        s.pyramidLevels = static_cast<UINT>(std::min<std::size_t>(std::bit_width(std::max(s.pyramidWidth, s.pyramidHeight)), MaxPyramidLevels));
+        s.depthPyramid = createTexture(s.device.Get(), s.pyramidWidth, s.pyramidHeight, DXGI_FORMAT_R32_FLOAT, static_cast<UINT16>(s.pyramidLevels),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "Creating the depth pyramid");
+    }
+
     const bool traceLight = frame.traceLight && s.light;
     const bool traceShadows = frame.traceShadows && s.shadows && frame.textures.shadow;
+    const bool debugShadows = traceShadows && frame.debugShadows && frame.textures.shadowDebug;
+    if (!debugShadows)
+    {
+        std::lock_guard lock(probeMutex);
+        probeText.clear();
+    }
 
     // Entries the frame drew stay; eviction takes others first.
     for (const auto index : frame.drawn)
-        if (index < MaxEntries && s.entries[index].live) s.entries[index].lastDrawn = frame.frameIndex;
+        if (index < MaxEntries && s.entries[index].live && s.entries[index].lastDrawn != frame.frameIndex)
+        {
+            s.entries[index].lastDrawn = frame.frameIndex;
+            ++s.entries[index].framesDrawn;
+        }
 
     // ---- The frame's captures into the pool ----
     Uploads uploads{s.uploadData[slot], s.upload[slot]->GetGPUVirtualAddress()};
@@ -802,6 +990,7 @@ Result render(const Frame& frame)
         {
             entry = {};
             entry.live = true;
+            entry.framesDrawn = 1;
         }
 
         entry.lastDrawn = frame.frameIndex;
@@ -843,6 +1032,7 @@ Result render(const Frame& frame)
         auto* transfer = openShared(s, s.transfer, frame.textures.transfer, "Opening the transfer texture").Get();
         auto* output = openShared(s, s.output, frame.textures.output, "Opening the output").Get();
         auto* shadow = traceShadows ? openShared(s, s.shadow, frame.textures.shadow, "Opening the shadow").Get() : nullptr;
+        auto* shadowDebug = debugShadows ? openShared(s, s.shadowDebug, frame.textures.shadowDebug, "Opening the shadow debug view").Get() : nullptr;
 
         // ---- Bottom-level acceleration structures for the entries whose geometry changed ----
         std::uint64_t scratchUsed = s.tlasScratchSize, budgetTriangles{};
@@ -853,6 +1043,7 @@ Result render(const Frame& frame)
             D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc;
         };
         std::vector<Build> builds;
+        std::uint32_t waiting{};
         for (std::uint32_t index = 0; index < MaxEntries; ++index)
         {
             auto& entry = s.entries[index];
@@ -862,6 +1053,7 @@ Result render(const Frame& frame)
             if (builds.size() >= BuildsPerFrame || budgetTriangles >= BuildTrianglesPerFrame)
             {
                 ++s.tally.waiting;
+                ++waiting;
                 continue;
             }
 
@@ -908,6 +1100,8 @@ Result render(const Frame& frame)
             entry.needsBuild = false;
         }
 
+        s.waitingNow = waiting;
+
         // ---- The frame's instances ----
         // Past MaxLiveEntries, the entries drawn longest ago leave, an eighth of the instances more
         // than needed so the sort is rare. Left to the instance limit, whichever entries came last
@@ -931,9 +1125,13 @@ Result render(const Frame& frame)
         std::uint32_t live{};
         std::array<std::uint32_t, 4> entriesByAge{};
         std::array<std::uint64_t, 4> trianglesByAge{};
+        std::uint32_t drawnOnce{};
+        std::uint64_t drawnOnceTriangles{};
+        if (debugShadows) std::fill(s.entryInstance.begin(), s.entryInstance.end(), GI_REASON_NONE);
         if (skinnedVertices)
         {
             const auto blas = s.skinnedBlas->GetGPUVirtualAddress();
+            s.entryInstance[DynamicEntry] = instanceCount;
             instances[instanceCount++] = {DynamicEntry, static_cast<std::uint32_t>(StaticVertices), skinnedVertices / 3, GI_INSTANCE_DRAWN | GI_INSTANCE_DYNAMIC,
                 {static_cast<std::uint32_t>(blas), static_cast<std::uint32_t>(blas >> 32)}, {}};
             triangles += skinnedVertices / 3;
@@ -944,22 +1142,29 @@ Result render(const Frame& frame)
             auto& entry = s.entries[index];
             if (!entry.live) continue;
 
-            const bool drawn = entry.lastDrawn == frame.frameIndex;
-            if (frame.frameIndex - entry.lastDrawn > RetentionFrames)
+            const auto age = frame.frameIndex - entry.lastDrawn;
+            if (age > RetentionFrames)
             {
                 evict(s, index, frame.signalValue, result.evicted);
                 continue;
             }
 
             ++live;
-            const auto age = frame.frameIndex - entry.lastDrawn;
+            const bool drawn = age <= (entry.framesDrawn > 1 ? DrawnGraceFrames : 0);
             const auto bucket = age == 0 ? 0 : age <= 60 ? 1 : age <= 600 ? 2 : 3;
             ++entriesByAge[bucket];
             trianglesByAge[bucket] += entry.vertexCount / 3;
+            if (age > 0 && entry.framesDrawn == 1)
+            {
+                ++drawnOnce;
+                drawnOnceTriangles += entry.vertexCount / 3;
+            }
+
             if (!entry.built || instanceCount >= MaxInstances) continue;
 
             const auto blas = s.blasPool->GetGPUVirtualAddress() + entry.blasOffset;
             const auto flags = (drawn ? GI_INSTANCE_DRAWN : 0u) | (entry.alphaTested ? GI_INSTANCE_ALPHA_TESTED : 0u);
+            s.entryInstance[index] = instanceCount;
             instances[instanceCount++] = {index, static_cast<std::uint32_t>(entry.vertexOffset), static_cast<std::uint32_t>(entry.vertexCount / 3),
                 flags, {static_cast<std::uint32_t>(blas), static_cast<std::uint32_t>(blas >> 32)}, {}};
             triangles += entry.vertexCount / 3;
@@ -970,6 +1175,8 @@ Result render(const Frame& frame)
         s.triangles = triangles;
         s.entriesByAge = entriesByAge;
         s.trianglesByAge = trianglesByAge;
+        s.drawnOnce = drawnOnce;
+        s.drawnOnceTriangles = drawnOnceTriangles;
 
         const auto parity = frame.frameIndex & 1;
         const auto constantsOffset = uploads.reserve(256, (sizeof(GIFrameConstants) + 255) / 256);
@@ -994,6 +1201,32 @@ Result render(const Frame& frame)
         descriptors.outputBuffer(4, s.counters.Get(), 4, GI_COUNTER_COUNT);
         descriptors.outputBuffer(5, s.dispatchArguments.Get(), 16, GI_DISPATCH_SLOTS);
         descriptors.outputBuffer(6, s.entryAlbedo.Get(), 16, MaxEntries);
+        descriptors.texture(10, s.depthPyramid.Get(), DXGI_FORMAT_R32_FLOAT, s.pyramidLevels);
+        descriptors.outputBuffer(76, s.instanceDebug.Get(), 16, MaxInstances);
+        if (debugShadows)
+        {
+            // Each entry's state for the probe (GI_ENTRY_* in gi_shared.h), and its instance.
+            const auto statesOffset = uploads.reserve(8, MaxEntries);
+            auto* states = reinterpret_cast<std::uint32_t*>(uploads.data + statesOffset);
+            for (std::uint32_t index = 0; index < MaxEntries; ++index)
+            {
+                const auto& entry = s.entries[index];
+                const auto instance = s.entryInstance[index];
+                std::uint32_t bits = (entry.live ? GI_ENTRY_LIVE : 0u) | (entry.built ? GI_ENTRY_BUILT : 0u) | (entry.alphaTested ? GI_ENTRY_ALPHA_TESTED : 0u)
+                    | (instance != GI_REASON_NONE ? GI_ENTRY_INSTANCED : 0u);
+                if (index == DynamicEntry && skinnedVertices) bits = GI_ENTRY_LIVE | GI_ENTRY_BUILT | GI_ENTRY_INSTANCED;
+                const auto age = entry.live ? std::min<std::uint32_t>(frame.frameIndex - entry.lastDrawn, 0xFFF) : 0u;
+                states[2 * index] = bits | (age << 8) | (std::min<std::uint32_t>(entry.framesDrawn, 0xFFF) << 20);
+                states[2 * index + 1] = instance;
+            }
+
+            descriptors.buffer(11, s.upload[slot].Get(), statesOffset, 8, MaxEntries);
+            descriptors.outputBuffer(77, s.probe.Get(), sizeof(GIShadowProbe), 1);
+            descriptors.outputTexture(78, shadowDebug, DXGI_FORMAT_R8G8B8A8_UNORM);
+            descriptors.outputBuffer(79, s.probeCrossings.Get(), 16, GI_PROBE_CROSSINGS);
+        }
+        for (UINT level = 0; level < s.pyramidLevels; ++level)
+            descriptors.outputTexture(PyramidSlot + level, s.depthPyramid.Get(), DXGI_FORMAT_R32_FLOAT, level);
         if (traceLight) s.light->describe(descriptors, parity);
         if (traceShadows) s.shadows->describe(descriptors, parity, shadow);
 
@@ -1025,6 +1258,7 @@ Result render(const Frame& frame)
         };
         list.ResourceBarrier(static_cast<UINT>(std::size(begin)), begin);
         if (traceShadows) recorder.transition(shadow, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (debugShadows) recorder.transition(shadowDebug, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         if (scatterCount)
         {
@@ -1076,7 +1310,16 @@ Result render(const Frame& frame)
 
         // The instance list reads the bounds; the scene's build reads the bottom levels and the list.
         recorder.mark("instances and top level");
+        for (UINT level = 0; level < s.pyramidLevels; ++level)
+        {
+            recorder.dispatch(Kernel::BuildDepthPyramid, groups(std::max(s.pyramidWidth >> level, 1u), 8), groups(std::max(s.pyramidHeight >> level, 1u), 8),
+                {level});
+            recorder.barrier();
+        }
+
+        recorder.transition(s.depthPyramid.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         recorder.dispatch(Kernel::BuildInstances, groups(instanceCount, 64));
+        recorder.transition(s.depthPyramid.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         D3D12_RESOURCE_BARRIER built[]{
             uavBarrier(),
             transition(s.instanceDescs.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
@@ -1101,6 +1344,23 @@ Result render(const Frame& frame)
 
         // ---- The shadows, then the light or the debug view ----
         if (traceShadows) s.shadows->record(recorder);
+        if (debugShadows)
+        {
+            recorder.mark("debug view and probe");
+            recorder.dispatch(Kernel::DebugShadows, groups(frame.width, 8), groups(frame.height, 8));
+            recorder.dispatch(Kernel::ProbeShadows, 1, 1, {MaxEntries});
+            recorder.barrier();
+            D3D12_RESOURCE_BARRIER copy[]{
+                transition(s.probe.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                transition(s.probeCrossings.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
+            };
+            list.ResourceBarrier(static_cast<UINT>(std::size(copy)), copy);
+            list.CopyBufferRegion(s.probeReadback[slot].Get(), 0, s.probe.Get(), 0, sizeof(GIShadowProbe));
+            list.CopyBufferRegion(s.probeReadback[slot].Get(), sizeof(GIShadowProbe), s.probeCrossings.Get(), 0, std::uint64_t{GI_PROBE_CROSSINGS} * 16);
+            for (auto& barrier : copy) std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+            list.ResourceBarrier(static_cast<UINT>(std::size(copy)), copy);
+            s.probeWritten[slot] = true;
+        }
         if (frame.showScene)
         {
             recorder.mark("scene view");
@@ -1147,6 +1407,7 @@ Result render(const Frame& frame)
         };
         list.ResourceBarrier(static_cast<UINT>(std::size(end)), end);
         if (traceShadows) recorder.transition(shadow, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+        if (debugShadows) recorder.transition(shadowDebug, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
         recorder.mark(nullptr);
         list.ResolveQueryData(s.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * MaxMarks, static_cast<UINT>(marks.size()), s.timestampReadback.Get(),
             std::uint64_t{slot} * MaxMarks * 8);
@@ -1172,7 +1433,14 @@ Result render(const Frame& frame)
     s.tally.cpuMilliseconds += cpu;
     s.tally.mostCpuMilliseconds = std::max(s.tally.mostCpuMilliseconds, cpu);
 
+    s.evictedByFrame[frame.frameIndex % s.evictedByFrame.size()] = static_cast<std::uint32_t>(result.evicted.size());
     return result;
+}
+
+std::string shadowProbe()
+{
+    std::lock_guard lock(probeMutex);
+    return probeText;
 }
 
 std::string status()
@@ -1197,6 +1465,7 @@ std::string status()
         + "k triangles; vertex pool " + percent(s.vertexAllocator) + ", acceleration structures " + percent(s.blasAllocator) + "; GPU: scene "
         + milliseconds(s.sceneMilliseconds) + ", light " + milliseconds(s.lightMilliseconds) + ", shadows " + milliseconds(s.shadowMilliseconds)
         + "; entries drawn this frame " + aged(0)
-        + ", within a second " + aged(1) + ", within ten seconds " + aged(2) + ", before " + aged(3);
+        + ", within a second " + aged(1) + ", within ten seconds " + aged(2) + ", before " + aged(3) + "; drawn in one earlier frame only "
+        + std::to_string(s.drawnOnce) + " (" + std::to_string(s.drawnOnceTriangles / 1000) + "k triangles)";
 }
 }

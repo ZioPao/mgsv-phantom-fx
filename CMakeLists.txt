@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(PhantomFX VERSION 1.2.0 LANGUAGES C CXX)
+project(PhantomFX VERSION 1.3.0 LANGUAGES C CXX)
 
 if(NOT WIN32 OR NOT MSVC)
     message(FATAL_ERROR "Phantom FX requires Windows and MSVC.")
@@ -157,13 +157,13 @@ function(add_gi_kernels source)
     set(GI_SHADER_HEADERS ${GI_SHADER_HEADERS} PARENT_SCOPE)
 endfunction()
 file(MAKE_DIRECTORY "${GI_SHADER_DIR}")
-add_gi_kernels(gi_scene.hlsl ClearBounds Scatter BuildInstances DebugScene ClearOutput)
+add_gi_kernels(gi_scene.hlsl ClearBounds Scatter BuildInstances DebugScene ClearOutput BuildDepthPyramid)
 add_gi_kernels(gi_light.hlsl ClearCounters GenerateDispatch ClearBuffer ScanBlocks ScanBlockSums ScanAddOffsets ClearProbeMask FilterProbeMask
     InitCachedTileLRU ReprojectScreenProbes CountScreenProbes ScatterScreenProbes SpawnScreenProbes CompactScreenProbes PatchScreenProbes
     StoreSpawnCount SampleScreenProbes LearnAlbedo PopulateScreenProbes PurgeTiles PopulateMultibounceCells PopulateCells UpdateTiles
     UpdateMultibounceCells ResolveCells BlendScreenProbes CopyProbes ReorderScreenProbes FilterScreenProbes ProjectScreenProbes
     InterpolateScreenProbes ReprojectGI FilterGI)
-add_gi_kernels(gi_shadow.hlsl TraceSunShadows ClassifyShadowTiles)
+add_gi_kernels(gi_shadow.hlsl TraceSunShadows ClassifyShadowTiles DebugShadows ProbeShadows)
 add_gi_kernels(gi_shadow_filter.hlsl FilterShadows)
 add_custom_target(gi_kernels DEPENDS ${GI_SHADER_HEADERS})
 
