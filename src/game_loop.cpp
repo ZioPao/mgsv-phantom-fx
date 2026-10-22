@@ -1,5 +1,6 @@
 #include "game_loop.hpp"
 
+#include "character.hpp"
 #include "device_check.hpp"
 #include "frame_generation.hpp"
 #include "weather.hpp"
@@ -40,6 +41,7 @@ void frameStart(std::uint8_t* loop, void* argument)
     const auto frame = countOf(loop) + 1;
     frame_generation::beginSimulation(frame);
     weather::onFrameStart();
+    character::onFrameStart();
     originalFrameStart(loop, argument);
     current = frame;
 }
@@ -70,7 +72,7 @@ std::string hook() noexcept
 
     auto* base = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
     if (std::memcmp(base + FrameStartRva, FrameStartCode, sizeof(FrameStartCode)) || std::memcmp(base + FrameEndRva, FrameEndCode, sizeof(FrameEndCode)))
-        return "The game loop has unexpected code; Reflex marks frames at the present and the weather menu is unavailable.";
+        return "The game loop has unexpected code; Reflex marks frames at the present and the weather and character menus are unavailable.";
 
     auto status = hookAt(base + FrameStartRva, reinterpret_cast<void*>(&frameStart), originalFrameStart);
     if (status == MH_OK)
@@ -81,9 +83,9 @@ std::string hook() noexcept
 
     if (status != MH_OK)
         return std::string("Hooking the game loop failed (") + MH_StatusToString(status)
-            + "); Reflex marks frames at the present and the weather menu is unavailable.";
+            + "); Reflex marks frames at the present and the weather and character menus are unavailable.";
 
-    return "The game loop is hooked, for Reflex and the weather menu.";
+    return "The game loop is hooked, for Reflex and the weather and character menus.";
 }
 
 std::uint32_t currentFrame() noexcept

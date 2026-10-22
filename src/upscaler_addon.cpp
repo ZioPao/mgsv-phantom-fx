@@ -13,6 +13,7 @@
 // NGX receives ReShade's wrapped context, so other add-ons that follow DLSS evaluations see it like
 // a game's own DLSS.
 #include "atmosphere.hpp"
+#include "character.hpp"
 #include "depth_of_field.hpp"
 #include "device_check.hpp"
 #include "frame_log.hpp"
@@ -513,6 +514,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     log(render_scale::hook());
     log(photo_mode::hook());
     log(game_loop::hook());
+    log(character::allowFobCharacters());
     if (supportedBuild() && !weather::supported()) log("The weather manager has unexpected code; the weather menu is unavailable.");
 
     frame_log::install(directory);

@@ -1,5 +1,6 @@
 // The Phantom FX settings, drawn in ReShade's overlay.
 #include "atmosphere.hpp"
+#include "character.hpp"
 #include "depth_of_field.hpp"
 #include "frame_generation.hpp"
 #include "frame_log.hpp"
@@ -16,8 +17,11 @@
 #include <imgui.h>
 #include <reshade.hpp> // Routes ImGui calls through ReShade's overlay.
 #include <algorithm>
+#include <cctype>
 #include <format>
 #include <optional>
+#include <ranges>
+#include <span>
 #include <string>
 
 namespace phantom_fx::upscaler
@@ -530,6 +534,89 @@ void drawWeather()
     else if (now.requested != now.forced) statusLine(Yellow, std::format("The game overrides it with {} for now.", weather::label(*now.requested)));
 }
 
+// Whether `text` holds every word of `search`, in any case.
+bool matches(std::string_view text, std::string_view search)
+{
+    const auto sameLetter = [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); };
+    for (const auto word : std::views::split(search, ' '))
+        if (!word.empty() && std::ranges::search(text, word, sameLetter).empty()) return false;
+
+    return true;
+}
+
+// A combo whose list starts with a search box and shows the items whose name matches it. Returns the
+// item picked.
+template<class Item> std::optional<std::size_t> searchCombo(const char* label, const std::string& preview, std::span<const Item> items, std::optional<std::size_t> selected)
+{
+    if (!ImGui::BeginCombo(label, preview.c_str(), ImGuiComboFlags_HeightLargest)) return std::nullopt;
+
+    // One list is open at a time, and each opens with an empty search.
+    static char search[64];
+    const bool opened = ImGui::IsWindowAppearing();
+    if (opened)
+    {
+        search[0] = 0;
+        ImGui::SetKeyboardFocusHere();
+    }
+
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputTextWithHint("##search", "Search", search, sizeof(search));
+    std::optional<std::size_t> picked;
+    // The list scrolls under the search box.
+    ImGui::BeginChild("##items", ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 16));
+    for (std::size_t i = 0; i < items.size(); ++i)
+    {
+        const std::string name(items[i].name);
+        if (!matches(name, search)) continue;
+
+        const bool chosen = i == selected;
+        ImGui::PushID(static_cast<int>(i));
+        if (ImGui::Selectable(name.c_str(), chosen)) picked = i;
+        ImGui::PopID();
+        if (chosen && opened) ImGui::SetScrollHereY();
+    }
+
+    ImGui::EndChild();
+    if (picked) ImGui::CloseCurrentPopup();
+    ImGui::EndCombo();
+
+    return picked;
+}
+
+// Play as another of the game's characters.
+void drawCharacter()
+{
+    if (!character::supported())
+    {
+        statusLine(Red, "Unavailable for this game version.");
+        return;
+    }
+
+    const auto now = character::state();
+    if (!now.available)
+    {
+        statusLine(Grey, "Available in a mission or free roam.");
+        return;
+    }
+
+    const auto characters = character::characters();
+    const auto current = std::ranges::find_if(characters, [&](const character::Character& c) { return c.type == now.type && c.parts == now.parts; });
+    const auto chosen = current != characters.end() ? std::optional(static_cast<std::size_t>(current - characters.begin())) : std::nullopt;
+    const auto shown = chosen ? std::string(current->name) : std::string("Another outfit");
+    if (const auto picked = searchCombo("Character", shown, characters, chosen)) character::choose(characters[*picked]);
+    tooltip("Switches the player's character and outfit at once, as the game's scripts do for cutscenes. A checkpoint keeps it;\n"
+            "the next mission starts with the character chosen for its sortie.");
+
+    const auto faces = character::faces(now.type);
+    if (faces.empty()) return;
+
+    const auto face = std::ranges::find(faces, now.face, &character::Face::id);
+    const auto faceChosen = face != faces.end() ? std::optional(static_cast<std::size_t>(face - faces.begin())) : std::nullopt;
+    const auto faceShown = faceChosen ? face->name : std::format("Face {}", now.face);
+    if (const auto picked = searchCombo("Face", faceShown, faces, faceChosen)) character::chooseFace(faces[*picked].id);
+    tooltip("Any face of the game's soldiers. Search by number, skin (light, olive, fair, brown, dark), headgear or tattoo.");
+}
+
 // Returns true when a setting changed.
 bool drawUtility(Settings& wanted)
 {
@@ -541,6 +628,9 @@ bool drawUtility(Settings& wanted)
 
     ImGui::SeparatorText("Weather and time");
     drawWeather();
+
+    ImGui::SeparatorText("Character");
+    drawCharacter();
 
     return changed;
 }
