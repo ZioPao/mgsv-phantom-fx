@@ -21,16 +21,23 @@ Texture2D<float4> g_Normal : register(t1);  // World space as 0.5 n + 0.5; 0 whe
 Texture2D<float4> g_Albedo : register(t2);  // Linear
 Texture2D<float4> g_Transfer : register(t3); // Captured vertices, world space
 StructuredBuffer<GIScatterRecord> g_ScatterRecords : register(t4);
-StructuredBuffer<GIInstanceRecord> g_InstanceRecords : register(t5);
-StructuredBuffer<float4> g_Vertices : register(t6); // The vertex pool: three per triangle, world space
+// The frame's instances as the top level holds them, and the scene's geometry (gi_scene.hpp): the
+// pool, vertices of 16 bytes (xyz the position, object space; w the texture coordinates, two halves,
+// with GI_GEOMETRY_UV) and 16-bit indices; the table of geometries, an instance's from its first.
+StructuredBuffer<GIInstanceDesc> g_Instances : register(t5);
+ByteAddressBuffer g_GeometryPool : register(t6);
+StructuredBuffer<GIGeometry> g_Geometries : register(t16);
+// The game's textures the scene holds (gi_textures.hpp), each its levels of detail from the first no
+// larger than the scene keeps, viewed as sRGB where the game's are (GIGeometry::texture).
+Texture2D<float4> g_SceneTextures[GI_MAX_TEXTURES] : register(t0, space2);
 
 RWTexture2D<float4> g_Output : register(u0);
-RWStructuredBuffer<float4> g_VerticesOut : register(u1); // The vertex pool, while the frame's captures go in
-RWStructuredBuffer<uint> g_EntryBounds : register(u2);   // Six per entry: minimum xyz, maximum xyz, ordered
-RWStructuredBuffer<GIInstanceDesc> g_InstanceDescs : register(u3);
+RWByteAddressBuffer g_GeometryPoolOut : register(u1); // The pool, while the frame's captures and terrain go in
+RWStructuredBuffer<uint> g_EntryBounds : register(u2); // Six per captured mesh's entry: minimum xyz, maximum xyz, ordered
+RWStructuredBuffer<GIInstanceDesc> g_InstancesOut : register(u3); // The instances, while CullCaptured adjusts them
 RWStructuredBuffer<uint> g_Counters : register(u4);
 RWStructuredBuffer<uint4> g_DispatchArgs : register(u5);
-RWStructuredBuffer<uint4> g_EntryAlbedo : register(u6); // Sums of linear albedo x 255 and their count, by entry
+RWStructuredBuffer<uint4> g_GeometryAlbedo : register(u6); // Sums of linear albedo x 255 and their count, by geometry
 // By instance: why it is in the scene or left out (BuildInstances): x GI_REASON_*, y asuint(its box's
 // nearest depth), z asuint(the farthest depth over its screen rectangle), w the pyramid level read |
 // 256 when all of it is in view. For the shadow debug view and probe.
@@ -38,6 +45,7 @@ RWStructuredBuffer<uint4> g_InstanceDebug : register(u76);
 
 SamplerState g_PointSampler : register(s0);
 SamplerState g_LinearSampler : register(s1);
+SamplerState g_WrapSampler : register(s2);
 
 // ---- Constants ----
 
@@ -342,18 +350,141 @@ float3 OffsetFromTriangle(float3 position, float3 normal)
     return select(abs(position) < origin, positionF, positionI);
 }
 
+// ---- The scene's geometry ----
+
+// An instance's kind (GI_INSTANCE_*), a captured one's entry, and its first geometry's row of the table.
+uint InstanceKind(GIInstanceDesc instance)
+{
+    return instance.idAndMask & GI_INSTANCE_KINDS;
+}
+
+uint InstanceEntry(GIInstanceDesc instance)
+{
+    return (instance.idAndMask & 0xFFFFFFu) >> GI_INSTANCE_ENTRY_SHIFT;
+}
+
+uint FirstGeometry(GIInstanceDesc instance)
+{
+    return instance.hitGroupAndFlags & 0xFFFFFFu;
+}
+
+// A triangle's corners in its geometry.
+uint3 TriangleIndices(GIGeometry geometry, uint primitive)
+{
+    if (geometry.indexOffset == GI_NO_INDICES) return 3 * primitive + uint3(0, 1, 2);
+
+    // Three 16-bit indices from the four-byte word holding the first.
+    uint address = geometry.indexOffset + 6 * primitive;
+    uint2 words = g_GeometryPool.Load2(address & ~3u);
+    return (address & 2u) ? uint3(words.x >> 16, words.y & 0xFFFFu, words.y >> 16) : uint3(words.x & 0xFFFFu, words.x >> 16, words.y & 0xFFFFu);
+}
+
+float4 PoolVertex(GIGeometry geometry, uint index)
+{
+    return asfloat(g_GeometryPool.Load4(geometry.vertexOffset + 16 * index));
+}
+
+float3 ToWorld(GIInstanceDesc instance, float3 position)
+{
+    float4 p = float4(position, 1.0f);
+    return float3(dot(instance.transform[0], p), dot(instance.transform[1], p), dot(instance.transform[2], p));
+}
+
+// A triangle of an instance's geometry: its corners in world space, and the texture coordinates
+// where the ray crossed it (with GI_GEOMETRY_UV).
+struct SceneTriangle
+{
+    float3 v0, v1, v2;
+    GIGeometry geometry;
+    uint row; // The geometry's row of the table
+    uint3 indices;
+};
+
+SceneTriangle LoadTriangle(uint instanceIndex, uint geometryIndex, uint primitive)
+{
+    GIInstanceDesc instance = g_Instances[instanceIndex];
+    SceneTriangle t;
+    t.row = FirstGeometry(instance) + geometryIndex;
+    t.geometry = g_Geometries[t.row];
+    t.indices = TriangleIndices(t.geometry, primitive);
+    t.v0 = ToWorld(instance, PoolVertex(t.geometry, t.indices.x).xyz);
+    t.v1 = ToWorld(instance, PoolVertex(t.geometry, t.indices.y).xyz);
+    t.v2 = ToWorld(instance, PoolVertex(t.geometry, t.indices.z).xyz);
+    return t;
+}
+
+float2 VertexUV(GIGeometry geometry, uint index)
+{
+    uint packed = g_GeometryPool.Load(geometry.vertexOffset + 16 * index + 12);
+    return f16tof32(uint2(packed, packed >> 16));
+}
+
+float2 TriangleUV(GIGeometry geometry, uint3 indices, float2 barycentrics)
+{
+    return (1.0f - barycentrics.x - barycentrics.y) * VertexUV(geometry, indices.x) + barycentrics.x * VertexUV(geometry, indices.y)
+        + barycentrics.y * VertexUV(geometry, indices.z);
+}
+
+// The level of detail at which a ray cone `footprint` metres across meets a triangle (Akenine-Moller
+// et al., "Texture Level of Detail Strategies for Real-Time Ray Tracing", Ray Tracing Gems chapter 20):
+// the texels across the footprint, from the triangle's texels per square metre.
+float TextureLod(float3 v0, float3 v1, float3 v2, float2 uv0, float2 uv1, float2 uv2, float2 size, float footprint)
+{
+    float worldArea = length(cross(v1 - v0, v2 - v0));
+    float texelArea = abs((uv1.x - uv0.x) * (uv2.y - uv0.y) - (uv2.x - uv0.x) * (uv1.y - uv0.y)) * size.x * size.y;
+    return log2(max(footprint * sqrt(texelArea / max(worldArea, 1e-12f)), 1e-6f));
+}
+
+// Whether a cut-out geometry (the only non-opaque one) stops a ray where the ray crosses it: with its
+// texture, where the texture's alpha is at least the game's threshold at the level of detail the ray's
+// cone (`footprint` metres across there) meets; without, as `untextured` says.
+bool CutOutBlocks(uint row, uint primitive, float2 barycentrics, bool untextured, float footprint, float3x4 objectToWorld)
+{
+    GIGeometry geometry = g_Geometries[row];
+    if ((geometry.flags & GI_GEOMETRY_ALPHA_TEXTURE) == 0) return untextured;
+
+    uint3 i = TriangleIndices(geometry, primitive);
+    float2 uv0 = VertexUV(geometry, i.x), uv1 = VertexUV(geometry, i.y), uv2 = VertexUV(geometry, i.z);
+    float2 uv = (1.0f - barycentrics.x - barycentrics.y) * uv0 + barycentrics.x * uv1 + barycentrics.y * uv2;
+    Texture2D<float4> texture = g_SceneTextures[NonUniformResourceIndex(geometry.texture - 1)];
+    float lod = 0.0f;
+    if (footprint > 0.0f)
+    {
+        float3 v0 = mul(objectToWorld, float4(PoolVertex(geometry, i.x).xyz, 1.0f));
+        float3 v1 = mul(objectToWorld, float4(PoolVertex(geometry, i.y).xyz, 1.0f));
+        float3 v2 = mul(objectToWorld, float4(PoolVertex(geometry, i.z).xyz, 1.0f));
+        float2 size;
+        texture.GetDimensions(size.x, size.y);
+        lod = TextureLod(v0, v1, v2, uv0, uv1, uv2, size, footprint);
+    }
+
+    float4 texel = texture.SampleLevel(g_WrapSampler, uv, lod);
+    return ((geometry.flags & GI_GEOMETRY_MASK_IN_RED) ? texel.r : texel.a) >= geometry.alphaThreshold;
+}
+
+// Every ray's flags. The terrain is one-sided, as the game draws it: where its heightmap runs across a
+// cliff's recesses, the game shows the rock behind it from below, and so must the rays. Every other
+// instance is seen from both sides (D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE).
+#define GI_RAY_FLAGS RAY_FLAG_CULL_BACK_FACING_TRIANGLES
+
 struct SceneHit
 {
     bool hit;
     float distance;
-    uint instance;  // Into g_InstanceRecords
-    uint primitive; // Triangle within the instance
+    uint instance;  // Into g_Instances
+    uint geometry;  // Within the instance's structure
+    uint primitive; // Triangle within the geometry
     float2 barycentrics;
+    bool frontFace; // Clockwise seen from the ray's origin (DXR's front)
 };
 
 // Instances whose mask shares a bit with `mask` (GI_MASK_*) take part; the left-out (GI_MASK_HIDDEN) only
-// for the shadow debug view.
-SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float maxDistance, uint mask)
+// for the shadow debug view. With `alphaTest` (the sun's shadow rays), cut-out geometry with its
+// texture lets the ray through where it is clear, and cut-out geometry without blocks it as
+// `untextured` says; the ray's cone (`cone`: its width at the origin and its growth a metre, metres)
+// picks the texture's level of detail. Without, every triangle is opaque: testing alpha in every ray of
+// the global illumination cost its rays about five times as much, for light that hardly shows it.
+SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float maxDistance, uint mask, bool alphaTest, bool untextured, float2 cone)
 {
     RayDesc ray;
     ray.Origin = origin;
@@ -361,17 +492,51 @@ SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float 
     ray.TMin = minDistance;
     ray.TMax = maxDistance;
 
+    SceneHit result;
+    if (alphaTest)
+    {
+        RayQuery<RAY_FLAG_NONE> query;
+        query.TraceRayInline(g_Scene, GI_RAY_FLAGS, mask, ray);
+        while (query.Proceed())
+        {
+            uint row = query.CandidateInstanceContributionToHitGroupIndex() + query.CandidateGeometryIndex();
+            float footprint = cone.x + query.CandidateTriangleRayT() * cone.y;
+            if (CutOutBlocks(row, query.CandidatePrimitiveIndex(), query.CandidateTriangleBarycentrics(), untextured, footprint, query.CandidateObjectToWorld3x4()))
+                query.CommitNonOpaqueTriangleHit();
+        }
+
+        result.hit = query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+        result.distance = result.hit ? query.CommittedRayT() : FLT_MAX;
+        result.instance = result.hit ? query.CommittedInstanceIndex() : 0;
+        result.geometry = result.hit ? query.CommittedGeometryIndex() : 0;
+        result.primitive = result.hit ? query.CommittedPrimitiveIndex() : 0;
+        result.barycentrics = result.hit ? query.CommittedTriangleBarycentrics() : 0.0f;
+        result.frontFace = result.hit && query.CommittedTriangleFrontFace();
+        return result;
+    }
+
     RayQuery<RAY_FLAG_FORCE_OPAQUE> query;
-    query.TraceRayInline(g_Scene, RAY_FLAG_NONE, mask, ray);
+    query.TraceRayInline(g_Scene, GI_RAY_FLAGS, mask, ray);
     query.Proceed();
 
-    SceneHit result;
     result.hit = query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
     result.distance = result.hit ? query.CommittedRayT() : FLT_MAX;
-    result.instance = result.hit ? query.CommittedInstanceID() : 0;
+    result.instance = result.hit ? query.CommittedInstanceIndex() : 0;
+    result.geometry = result.hit ? query.CommittedGeometryIndex() : 0;
     result.primitive = result.hit ? query.CommittedPrimitiveIndex() : 0;
     result.barycentrics = result.hit ? query.CommittedTriangleBarycentrics() : 0.0f;
+    result.frontFace = result.hit && query.CommittedTriangleFrontFace();
     return result;
+}
+
+SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float maxDistance, uint mask, bool alphaTest)
+{
+    return TraceClosest(origin, direction, minDistance, maxDistance, mask, alphaTest, false, 0.0f);
+}
+
+SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float maxDistance, uint mask)
+{
+    return TraceClosest(origin, direction, minDistance, maxDistance, mask, false);
 }
 
 SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float maxDistance)
@@ -393,7 +558,7 @@ bool TraceVisible(float3 origin, float3 direction, float minDistance, float maxD
     ray.TMax = maxDistance;
 
     RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> query;
-    query.TraceRayInline(g_Scene, RAY_FLAG_NONE, GI_MASK_TRACED, ray);
+    query.TraceRayInline(g_Scene, GI_RAY_FLAGS, GI_MASK_TRACED, ray);
     query.Proceed();
     return query.CommittedStatus() == COMMITTED_NOTHING;
 }
@@ -401,10 +566,8 @@ bool TraceVisible(float3 origin, float3 direction, float minDistance, float maxD
 // The geometric normal of a hit triangle, facing the ray.
 float3 HitNormal(SceneHit hit, float3 direction)
 {
-    GIInstanceRecord instance = g_InstanceRecords[hit.instance];
-    uint first = instance.vertexOffset + 3 * hit.primitive;
-    float3 v0 = g_Vertices[first].xyz, v1 = g_Vertices[first + 1].xyz, v2 = g_Vertices[first + 2].xyz;
-    float3 normal = cross(v1 - v0, v2 - v0);
+    SceneTriangle t = LoadTriangle(hit.instance, hit.geometry, hit.primitive);
+    float3 normal = cross(t.v1 - t.v0, t.v2 - t.v0);
     float lengthSquared = dot(normal, normal);
     normal = lengthSquared > 0.0f ? normal * rsqrt(lengthSquared) : -direction;
     return dot(normal, direction) > 0.0f ? -normal : normal;
@@ -415,6 +578,14 @@ void CountDiagnostic(uint counter, bool counted)
 {
     uint count = WaveActiveCountBits(counted);
     if (WaveIsFirstLane() && count) InterlockedAdd(g_Counters[counter], count);
+}
+
+// Diagnostics: the wave's largest channel into a GI_COUNTER_MAX_* counter, one atomic a wave. Light is
+// never negative, so its bits order as its values do (a NaN as the largest of all).
+void MaxDiagnostic(uint counter, float3 value)
+{
+    float largest = WaveActiveMax(max(max(value.r, value.g), value.b));
+    if (WaveIsFirstLane() && largest > 0.0f) InterlockedMax(g_Counters[counter], asuint(largest));
 }
 
 // ---- Copies of a surface ----
@@ -434,14 +605,15 @@ bool IsCopyOfSurface(SceneHit hit, float3 normal, float3 direction, float tolera
     return height >= 0.0f && height < tolerance && abs(dot(HitNormal(hit, direction), normal)) > 0.85f;
 }
 
-// The closest hit of a ray leaving a surface of `normal` from `origin`, past copies of the surface.
-SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance, uint mask)
+// The closest hit of a ray leaving a surface of `normal` from `origin`, past copies of the surface;
+// `alphaTest` as TraceClosest.
+SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance, uint mask, bool alphaTest, float2 cone)
 {
     float start = 0.0f;
     SceneHit hit;
     for (uint attempt = 0; attempt < 4; ++attempt)
     {
-        hit = TraceClosest(origin, direction, start, maxDistance, mask);
+        hit = TraceClosest(origin, direction, start, maxDistance, mask, alphaTest, false, cone);
         bool copy = hit.hit && IsCopyOfSurface(hit, normal, direction, tolerance);
         CountDiagnostic(GI_COUNTER_COPIES, copy);
         if (!copy) return hit;
@@ -456,7 +628,14 @@ SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 
 
 SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance)
 {
-    return TraceFromSurface(origin, normal, tolerance, direction, maxDistance, GI_MASK_TRACED);
+    return TraceFromSurface(origin, normal, tolerance, direction, maxDistance, GI_MASK_TRACED, false, 0.0f);
+}
+
+// A ray leaving the surface a pixel shows: its cone starts as wide as the pixel there and spreads as
+// `spread` (radians) does.
+float2 PixelCone(float3 position, float spread)
+{
+    return float2(distance(position, g_Frame.eye.xyz) * g_Frame.rayCone.x, spread);
 }
 
 // Whether a ray leaving a surface gets away, past copies of the surface: the stretch of the ray
@@ -479,6 +658,38 @@ uint OrderedFromFloat(float value)
 float FloatFromOrdered(uint ordered)
 {
     return asfloat((ordered & 0x80000000u) ? ordered & 0x7FFFFFFFu : ~ordered);
+}
+
+// ---- The game's terrain ----
+// The game's virtual heightmap, as its terrain vertex shaders read it (NewTerrain_*: t0 the page
+// table, t1 the height atlas), for the rays: rings of cells around the camera, finer near
+// (TerrainGrid in gi_scene.hlsl).
+Texture2D<float4> g_TerrainPages : register(t14);
+Texture2D<float> g_TerrainHeights : register(t15);
+
+float2 TerrainUv(float2 xz)
+{
+    return min((xz - g_Frame.terrainOffset.xz) / g_Frame.terrainScale.xz, 0.999756f);
+}
+
+// The atlas tile (xy) and level of detail (z) resident for virtual heightmap coordinates.
+float3 TerrainTile(float2 virtualUv)
+{
+    return floor(g_TerrainPages.SampleLevel(g_PointSampler, virtualUv, 0.0f).xyz * 255.4f);
+}
+
+// The height at virtual heightmap coordinates, before the terrain's scale: the tile's texel in the atlas.
+float TerrainHeight(float2 virtualUv)
+{
+    float3 tile = TerrainTile(virtualUv);
+    float2 tileUv = frac(virtualUv * g_Frame.terrainUvConverter.xy * exp2(-tile.z)) + tile.xy;
+    float2 physicalUv = tileUv * g_Frame.terrainUvConverter.zw + g_Frame.terrainTexelCorrect.xy;
+    return g_TerrainHeights.SampleLevel(g_LinearSampler, physicalUv, 0.0f);
+}
+
+float3 TerrainPoint(float2 xz)
+{
+    return float3(xz.x, TerrainHeight(TerrainUv(xz)) * g_Frame.terrainScale.y + g_Frame.terrainOffset.y, xz.y);
 }
 
 #endif

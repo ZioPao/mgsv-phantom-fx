@@ -22,7 +22,7 @@ using Microsoft::WRL::ComPtr;
 enum class Kernel : std::uint8_t
 {
     // gi_scene.hlsl
-    ClearBounds, Scatter, BuildInstances, DebugScene, ClearOutput, BuildDepthPyramid,
+    ClearBounds, Scatter, CullCaptured, DebugScene, ClearOutput, BuildDepthPyramid, TerrainGrid,
     // gi_light.hlsl
     ClearCounters, GenerateDispatch, ClearBuffer, ScanBlocks, ScanBlockSums, ScanAddOffsets, ClearProbeMask, FilterProbeMask,
     InitCachedTileLRU, ReprojectScreenProbes, CountScreenProbes, ScatterScreenProbes, SpawnScreenProbes, CompactScreenProbes,
@@ -141,6 +141,17 @@ public:
         device->CreateShaderResourceView(resource, &desc, at(slot));
     }
 
+    void textureArray(UINT slot, ID3D12Resource* resource, DXGI_FORMAT format, UINT slices)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+        desc.Format = format;
+        desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        desc.Texture2DArray.MipLevels = 1;
+        desc.Texture2DArray.ArraySize = slices;
+        device->CreateShaderResourceView(resource, &desc, at(slot));
+    }
+
     void buffer(UINT slot, ID3D12Resource* resource, std::uint64_t offset, std::uint64_t stride, std::uint64_t count)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
@@ -149,6 +160,18 @@ public:
         desc.Buffer.FirstElement = offset / stride;
         desc.Buffer.NumElements = static_cast<UINT>(std::max<std::uint64_t>(count, 1));
         desc.Buffer.StructureByteStride = static_cast<UINT>(stride);
+        device->CreateShaderResourceView(resource, &desc, at(slot));
+    }
+
+    // A buffer as a ByteAddressBuffer.
+    void rawBuffer(UINT slot, ID3D12Resource* resource, std::uint64_t bytes)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+        desc.Format = DXGI_FORMAT_R32_TYPELESS;
+        desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        desc.Buffer.NumElements = static_cast<UINT>(bytes / 4);
+        desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
         device->CreateShaderResourceView(resource, &desc, at(slot));
     }
 
@@ -167,6 +190,17 @@ public:
         desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
         desc.Buffer.NumElements = static_cast<UINT>(std::max<std::uint64_t>(count, 1));
         desc.Buffer.StructureByteStride = static_cast<UINT>(stride);
+        device->CreateUnorderedAccessView(resource, nullptr, &desc, at(SrvCount + slot));
+    }
+
+    // A buffer as a RWByteAddressBuffer.
+    void outputRawBuffer(UINT slot, ID3D12Resource* resource, std::uint64_t bytes)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
+        desc.Format = DXGI_FORMAT_R32_TYPELESS;
+        desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        desc.Buffer.NumElements = static_cast<UINT>(bytes / 4);
+        desc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
         device->CreateUnorderedAccessView(resource, nullptr, &desc, at(SrvCount + slot));
     }
 

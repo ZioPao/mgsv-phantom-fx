@@ -2,10 +2,10 @@
 // pixel towards a point on the sun's disc, then the temporal pass of AMD's FidelityFX Shadow
 // Denoiser (gi_shadow.hlsli); gi_shadow_filter.hlsl has its spatial passes.
 //
-// The game's shadow map keeps the alpha-tested meshes' shadows (leaves, grass, nets) where it
-// reaches: the scene holds their triangles without the holes their textures cut, and grass not at
-// all. There the rays leave them out, and the sun pass takes the darker of the two shadows. Beyond
-// the shadow map, where the game has no shadow, the rays take them as letting half the sun through.
+// Cut-out geometry with the game's alpha (GI_GEOMETRY_ALPHA_TEXTURE) casts its own shadow, holes and
+// all. The game's shadow map keeps the shadows of cut-out geometry without it where it reaches: the
+// rays let the sun through it there, and the sun pass takes the darker of the two shadows. Beyond the
+// shadow map, where the game has no shadow, the rays take it as letting half the sun through.
 //
 // Where it deviates from the denoiser's sample, and why:
 // - The trace writes the denoiser's 8x4 tile masks itself, through groupshared memory, which works
@@ -48,13 +48,14 @@ float BeyondShadowMap(float3 position, float depth)
 }
 
 // Whether a ray leaving a surface reaches the sun. Near the surface, copies of it are skipped
-// (gi_common.hlsli, "Copies of a surface"); further on, each alpha-tested mesh the ray passes blocks
-// it with chance `blocking`, so the denoiser averages a partial shadow.
-bool SunVisible(float3 origin, float3 normal, float tolerance, float3 direction, float blocking, inout Random random)
+// (gi_common.hlsli, "Copies of a surface"); further on, cut-out geometry with the game's alpha blocks
+// it where its alpha does, and other cut-out geometry with chance `blocking`, so the denoiser averages
+// a partial shadow. Captured cut-out meshes take part only where `blocking` is above 0.
+bool SunVisible(float3 origin, float3 normal, float tolerance, float3 direction, float blocking, float2 cone, inout Random random)
 {
     float rayLength = g_Frame.shadowParams.z;
     float nearEnd = min(tolerance / max(dot(direction, normal), 0.1f), rayLength);
-    if (TraceFromSurface(origin, normal, tolerance, direction, nearEnd, GI_MASK_OPAQUE).hit) return false;
+    if (TraceFromSurface(origin, normal, tolerance, direction, nearEnd, GI_MASK_SCENE, true, cone).hit) return false;
     if (nearEnd >= rayLength) return true;
 
     RayDesc ray;
@@ -64,10 +65,16 @@ bool SunVisible(float3 origin, float3 normal, float tolerance, float3 direction,
     ray.TMax = rayLength;
 
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> query;
-    query.TraceRayInline(g_Scene, RAY_FLAG_NONE, blocking > 0.0f ? GI_MASK_OPAQUE | GI_MASK_ALPHA_TESTED : GI_MASK_OPAQUE, ray);
-    // Only the alpha-tested instances are non-opaque, so only they come here.
+    query.TraceRayInline(g_Scene, GI_RAY_FLAGS, blocking > 0.0f ? GI_MASK_TRACED : GI_MASK_SCENE, ray);
+    // Only cut-out geometry is non-opaque, so only it comes here.
     while (query.Proceed())
-        if (random.rand() < blocking) query.CommitNonOpaqueTriangleHit();
+    {
+        uint row = query.CandidateInstanceContributionToHitGroupIndex() + query.CandidateGeometryIndex();
+        float footprint = cone.x + query.CandidateTriangleRayT() * cone.y;
+        if (CutOutBlocks(row, query.CandidatePrimitiveIndex(), query.CandidateTriangleBarycentrics(), random.rand() < blocking, footprint,
+                query.CandidateObjectToWorld3x4()))
+            query.CommitNonOpaqueTriangleHit();
+    }
 
     return query.CommittedStatus() == COMMITTED_NOTHING;
 }
@@ -97,7 +104,10 @@ void TraceSunShadows(uint2 gtid : SV_GroupThreadID, uint2 gid : SV_GroupID, uint
             // Leaves turned away from the sun still let it through; the ray leaves from their sunlit side.
             float3 facing = dot(normal, toSun) >= 0.0f ? normal : -normal;
             float blocking = BeyondShadowMap(position, depth) * g_Frame.shadowParams.y;
-            lit = SunVisible(OffsetFromScreenSurface(position, facing), facing, CopyTolerance(position), toSun, blocking, random);
+            // Rays to the sun run parallel: each keeps its pixel's footprint. The sun's size comes from
+            // spreading the rays over its disc; a cone widened by it as well took cut-out alpha from
+            // coarse levels of detail, where a pylon's thin bars fell under the threshold.
+            lit = SunVisible(OffsetFromScreenSurface(position, facing), facing, CopyTolerance(position), toSun, blocking, PixelCone(position, 0.0f), random);
         }
     }
 
@@ -118,22 +128,21 @@ void ClassifyShadowTiles(uint index : SV_GroupIndex, uint2 gid : SV_GroupID)
 
 // ---- Diagnostics: the shadow debug view and probe ----
 // The sun ray from a pixel as the shadow rays trace it, but towards the sun's centre and without
-// chance, with every instance looked at: the left-out ones (GI_MASK_HIDDEN) and the alpha-tested
-// ones the shadow rays leave to the shadow map.
+// chance, with every instance looked at: the left-out ones (GI_MASK_HIDDEN) too.
 
 RWStructuredBuffer<GIShadowProbe> g_ShadowProbe : register(u77);
 RWStructuredBuffer<uint4> g_ShadowProbeCrossings : register(u79); // GI_PROBE_CROSSINGS (GIShadowProbe::crossings)
 RWTexture2D<float4> g_ShadowDebug : register(u78);      // The debug view, blended over the image
-StructuredBuffer<uint2> g_EntryStates : register(t11); // By entry (GI_ENTRY_*), from the CPU
+StructuredBuffer<uint2> g_EntryStates : register(t11); // By captured mesh's entry (GI_ENTRY_*), from the CPU
 
 struct DebugRay
 {
     float3 origin, normal, direction;
     float tolerance, nearEnd, beyond;
     uint copies;      // Copies of the surface skipped in the near segment
-    SceneHit nearHit; // The shadow rays' near segment: opaque instances, past copies
-    SceneHit farHit;  // The shadow rays' far segment: alpha-tested too beyond the shadow map, as opaque
-    SceneHit anyHit;  // Every instance, past copies near the surface
+    SceneHit nearHit; // The shadow rays' near segment, past copies
+    SceneHit farHit;  // The shadow rays' far segment; beyond the shadow map, cut-out geometry without the game's alpha as opaque
+    SceneHit anyHit;  // Every instance, the left-out too, past copies near the surface
 };
 
 DebugRay TraceDebugRay(float3 position, float3 normal, float depth)
@@ -152,7 +161,7 @@ DebugRay TraceDebugRay(float3 position, float3 normal, float depth)
     float start = 0.0f;
     for (uint attempt = 0; attempt < 4; ++attempt)
     {
-        r.nearHit = TraceClosest(r.origin, r.direction, start, r.nearEnd, GI_MASK_OPAQUE);
+        r.nearHit = TraceClosest(r.origin, r.direction, start, r.nearEnd, GI_MASK_SCENE, true, false, PixelCone(position, 0.0f));
         if (!r.nearHit.hit || !IsCopyOfSurface(r.nearHit, r.normal, r.direction, r.tolerance)) break;
 
         ++r.copies;
@@ -160,17 +169,18 @@ DebugRay TraceDebugRay(float3 position, float3 normal, float depth)
         r.nearHit.hit = false;
     }
 
-    uint farMask = r.beyond > 0.0f ? GI_MASK_OPAQUE | GI_MASK_ALPHA_TESTED : GI_MASK_OPAQUE;
-    r.farHit = TraceClosest(r.origin, r.direction, r.nearEnd, rayLength, farMask);
-    r.anyHit = TraceFromSurface(r.origin, r.normal, r.tolerance, r.direction, rayLength, 0xFFu);
+    // Beyond the shadow map the shadow rays take cut-out geometry without the game's alpha as blocking
+    // with chance: here always. Inside, they let the sun through it.
+    r.farHit = TraceClosest(r.origin, r.direction, r.nearEnd, rayLength, r.beyond > 0.0f ? GI_MASK_TRACED : GI_MASK_SCENE, true, r.beyond > 0.0f, PixelCone(position, 0.0f));
+    r.anyHit = TraceFromSurface(r.origin, r.normal, r.tolerance, r.direction, rayLength, 0xFFu, true, PixelCone(position, 0.0f));
     return r;
 }
 
-// The debug view: what blocks each pixel's sun ray. Green: an instance the game drew; cyan: one kept
-// though not all in view; blue: one kept behind what the game drew (culled); yellow: an alpha-tested
-// one the rays take beyond the shadow map; olive: an alpha-tested one left to the shadow map; red: a
-// left-out one (only it blocks); magenta: anything else only the full ray finds. Clear where the sun
-// reaches. A cross marks the probe's pixel.
+// The debug view: what blocks each pixel's sun ray. Lavender: one of the game's models; brown: the
+// terrain; yellow: cut-out geometry; green: a captured mesh the game drew; cyan: one kept though not
+// all in view; blue: one kept behind what the game drew (culled); red: a left-out one (only it blocks);
+// olive: cut-out geometry the rays let the sun through inside the shadow map; magenta: anything else
+// only the full ray finds. Clear where the sun reaches. A cross marks the probe's pixel.
 [numthreads(8, 8, 1)]
 void DebugShadows(uint2 did : SV_DispatchThreadID)
 {
@@ -194,19 +204,22 @@ void DebugShadows(uint2 did : SV_DispatchThreadID)
         if (r.nearHit.hit) real = r.nearHit;
         if (real.hit)
         {
-            GIInstanceRecord instance = g_InstanceRecords[real.instance];
+            uint kind = InstanceKind(g_Instances[real.instance]);
+            SceneTriangle t = LoadTriangle(real.instance, real.geometry, real.primitive);
             uint reason = g_InstanceDebug[real.instance].x;
-            if (instance.flags & GI_INSTANCE_ALPHA_TESTED) color = float4(1.0f, 0.9f, 0.0f, 0.6f);
+            if (t.geometry.flags & GI_GEOMETRY_CUT_OUT) color = float4(1.0f, 0.9f, 0.0f, 0.6f);
+            else if (kind & GI_INSTANCE_MODEL) color = float4(0.55f, 0.45f, 1.0f, 0.6f);
+            else if (kind & GI_INSTANCE_TERRAIN) color = float4(0.75f, 0.5f, 0.25f, 0.6f);
             else if (reason == GI_REASON_OUT_OF_VIEW) color = float4(0.0f, 0.9f, 0.9f, 0.6f);
             else if (reason == GI_REASON_BEHIND) color = float4(0.1f, 0.3f, 1.0f, 0.6f);
             else color = float4(0.1f, 0.85f, 0.1f, 0.6f);
         }
         else if (r.anyHit.hit)
         {
-            GIInstanceRecord instance = g_InstanceRecords[r.anyHit.instance];
+            SceneTriangle t = LoadTriangle(r.anyHit.instance, r.anyHit.geometry, r.anyHit.primitive);
             uint reason = g_InstanceDebug[r.anyHit.instance].x;
             if (reason == GI_REASON_LEFT_OUT) color = float4(1.0f, 0.0f, 0.0f, 0.75f);
-            else if (instance.flags & GI_INSTANCE_ALPHA_TESTED) color = float4(0.5f, 0.45f, 0.0f, 0.6f);
+            else if (t.geometry.flags & GI_GEOMETRY_CUT_OUT) color = float4(0.5f, 0.45f, 0.0f, 0.6f);
             else color = float4(1.0f, 0.0f, 1.0f, 0.75f);
         }
     }
@@ -214,8 +227,17 @@ void DebugShadows(uint2 did : SV_DispatchThreadID)
     g_ShadowDebug[did] = color;
 }
 
-groupshared float3 g_ProbeOrigin, g_ProbeDirection;
+groupshared float3 g_ProbeOrigin, g_ProbeDirection, g_ProbeReceiver, g_ProbeNormal;
 groupshared uint g_ProbeValid, g_ProbeListed, g_ProbeCrossing, g_ProbeReasons[4];
+groupshared uint4 g_ProbeLightHits[GI_PROBE_LIGHT_RAYS];
+
+// A hit as the probe lists it (GIShadowProbe::lightNearest); zeros for none.
+uint4 ProbeHit(SceneHit hit)
+{
+    if (!hit.hit) return 0u;
+
+    return uint4(hit.instance + 1, hit.geometry | (hit.frontFace ? 1u << 31 : 0u), InstanceKind(g_Instances[hit.instance]), asuint(hit.distance));
+}
 
 // Where a ray from `origin` along `direction` enters the box, or a negative value when it misses it
 // within `rayLength`.
@@ -228,8 +250,8 @@ float EnterBox(float3 origin, float3 direction, float3 lowest, float3 highest, f
     return enter <= leave ? enter : -1.0f;
 }
 
-// The probe, one group: the centre pixel's sun ray, then the instances by reason and the live
-// entries whose bounds the ray crosses (g_Dispatch.x entries). Needs this frame's shadow passes done.
+// The probe, one group: the centre pixel's sun ray, then the instances by reason and the captured
+// meshes whose bounds the ray crosses (g_Dispatch.x entries). Needs this frame's shadow passes done.
 [numthreads(64, 1, 1)]
 void ProbeShadows(uint index : SV_GroupIndex)
 {
@@ -241,6 +263,7 @@ void ProbeShadows(uint index : SV_GroupIndex)
         g_ProbeValid = 0;
 
         GIShadowProbe probe = (GIShadowProbe)0;
+        probe.terrain.w = float(g_Frame.dimensions.z);
         uint2 centre = g_Frame.dimensions.xy / 2;
         float depth = g_Depth.Load(int3(centre, 0));
         probe.receiver.w = depth;
@@ -258,17 +281,31 @@ void ProbeShadows(uint index : SV_GroupIndex)
                 r.anyHit.hit ? r.anyHit.instance + 1 : 0);
             if (r.anyHit.hit)
             {
-                GIInstanceRecord instance = g_InstanceRecords[r.anyHit.instance];
+                GIInstanceDesc instance = g_Instances[r.anyHit.instance];
+                SceneTriangle t = LoadTriangle(r.anyHit.instance, r.anyHit.geometry, r.anyHit.primitive);
+                uint kind = InstanceKind(instance);
+                bool captured = (kind & (GI_INSTANCE_CAPTURED | GI_INSTANCE_DYNAMIC)) != 0;
                 uint4 debug = g_InstanceDebug[r.anyHit.instance];
-                probe.hitEntry = uint4(instance.entry, debug.x, instance.flags, g_EntryStates[instance.entry].x);
+                probe.hitEntry = uint4(captured ? InstanceEntry(instance) : t.row, debug.x, kind | (t.geometry.flags << 16),
+                    captured ? g_EntryStates[InstanceEntry(instance)].x : 0u);
                 probe.hitBox = float4(asfloat(debug.y), asfloat(debug.z), float(debug.w & 255u), (debug.w & 256u) ? 1.0f : 0.0f);
+                if (kind & GI_INSTANCE_TERRAIN)
+                {
+                    float3 corner = t.v0.y >= t.v1.y && t.v0.y >= t.v2.y ? t.v0 : t.v1.y >= t.v2.y ? t.v1 : t.v2;
+                    probe.terrain.xyz = float3(corner.y, TerrainPoint(corner.xz).y, TerrainTile(TerrainUv(corner.xz)).z);
+                }
             }
 
             uint tile = FFX_DNSR_Shadows_LinearTileIndex(FFX_DNSR_Shadows_GetTileIndexFromPixelPosition(centre), g_Frame.dimensions.x);
             bool rayLit = (g_Shadow_Masks[tile] & FFX_DNSR_Shadows_GetBitMaskFromPixelPosition(centre)) != 0;
             probe.shadow = float4(g_Shadow_Output[centre], rayLit ? 1.0f : 0.0f, 0.0f, 0.0f);
+            // The camera's ray through the centre pixel, as the scene view traces it.
+            float3 farPoint = transformPointProjection(uv, 1e-6f, g_Frame.viewProjectionInverse);
+            probe.view = ProbeHit(TraceClosest(g_Frame.eye.xyz, normalize(farPoint - g_Frame.eye.xyz), 1e5f));
             g_ProbeOrigin = r.origin;
             g_ProbeDirection = r.direction;
+            g_ProbeReceiver = position;
+            g_ProbeNormal = normal;
             g_ProbeValid = 1;
         }
 
@@ -276,6 +313,21 @@ void ProbeShadows(uint index : SV_GroupIndex)
     }
 
     GroupMemoryBarrierWithGroupSync();
+
+    // The centre pixel's global illumination rays, as the probes trace theirs, spread evenly.
+    if (index < GI_PROBE_LIGHT_RAYS)
+    {
+        uint4 lightHit = 0u;
+        if (g_ProbeValid)
+        {
+            float2 spread = float2((index + 0.5f) / GI_PROBE_LIGHT_RAYS, frac(index * 0.618034f));
+            float3 direction = mapToCosineHemisphere(spread, g_ProbeNormal);
+            float3 origin = OffsetFromTriangle(g_ProbeReceiver, g_ProbeNormal);
+            lightHit = ProbeHit(TraceFromSurface(origin, g_ProbeNormal, CopyTolerance(g_ProbeReceiver), direction, 1e9f));
+        }
+
+        g_ProbeLightHits[index] = lightHit;
+    }
 
     for (uint i = index; i < g_Frame.dimensions.w; i += 64)
     {
@@ -313,5 +365,23 @@ void ProbeShadows(uint index : SV_GroupIndex)
     {
         g_ShadowProbe[0].reasons = uint4(g_ProbeReasons[0], g_ProbeReasons[1], g_ProbeReasons[2], g_ProbeReasons[3]);
         g_ShadowProbe[0].crossings = uint4(g_ProbeCrossing, g_ProbeListed, 0, 0);
+
+        uint4 lightRays = 0u, nearest = 0u;
+        for (uint ray = 0; ray < GI_PROBE_LIGHT_RAYS; ++ray)
+        {
+            uint4 hit = g_ProbeLightHits[ray];
+            if (!hit.x)
+            {
+                ++lightRays.z;
+                continue;
+            }
+
+            float hitDistance = asfloat(hit.w);
+            lightRays += uint4(hitDistance < 1.0f, hitDistance < 10.0f, 0, (hit.y >> 31) == 0);
+            if (!nearest.x || hitDistance < asfloat(nearest.w)) nearest = hit;
+        }
+
+        g_ShadowProbe[0].lightRays = lightRays;
+        g_ShadowProbe[0].lightNearest = nearest;
     }
 }

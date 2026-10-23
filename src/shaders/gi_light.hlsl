@@ -3,8 +3,9 @@
 // screen_probes.hlsl, hash_grid_cache.hlsl and gi_denoiser.hlsl (MIT; licenses/Capsaicin-LICENSE.txt).
 //
 // Where it deviates from Capsaicin, and why:
-// - The game has no materials the rays can reach, so a hit's albedo is the G-buffer's where the hit
-//   is on screen and otherwise its mesh's mean albedo, learnt from the screen (LearnAlbedo).
+// - A hit's albedo is the G-buffer's where the hit is on screen; otherwise the game's albedo texture
+//   for a model's mesh (taken from its G-buffer draw, engine_scene.hpp), and the mesh's mean albedo,
+//   learnt from the screen (LearnAlbedo), for the rest.
 // - The lights are the sun and the sky, as the game's own sky light gives them: each cell takes a
 //   shadow ray to the sun and a cosine-weighted one to the sky (PopulateCells), in place of
 //   Capsaicin's light sampler and reservoirs. Emissive surfaces and lamps are left out.
@@ -335,12 +336,13 @@ uint ProbeCellOf(float3 direction, float3 normal)
 
 // ---- Hash grid cache (Capsaicin's hash_grid_cache.hlsl) ----
 
-// A hit kept for later passes. Capsaicin's geometry index is unused here; its place holds the
-// ray's direction, which turns the triangle's normal towards where the ray came from.
+// A hit kept for later passes, with the ray's direction, which turns the triangle's normal towards
+// where the ray came from.
 struct HashGridCache_Visibility
 {
     float3 direction;
     uint instanceIndex;
+    uint geometryIndex; // Within the instance's structure
     uint primitiveIndex;
     float2 barycentrics;
 };
@@ -451,14 +453,16 @@ float4 HashGridCache_RecoverRadiance(uint4 quantized)
 
 float4 HashGridCache_PackVisibility(HashGridCache_Visibility visibility)
 {
-    return float4(asfloat(visibility.instanceIndex), asfloat(packNormal(visibility.direction)), asfloat(visibility.primitiveIndex),
+    return float4(asfloat(visibility.instanceIndex | (visibility.geometryIndex << GI_HIT_INSTANCE_BITS)), asfloat(packNormal(visibility.direction)),
+        asfloat(visibility.primitiveIndex),
         asfloat((f32tof16(visibility.barycentrics.x) << 16) | f32tof16(visibility.barycentrics.y)));
 }
 
 HashGridCache_Visibility HashGridCache_UnpackVisibility(float4 packed)
 {
     HashGridCache_Visibility visibility;
-    visibility.instanceIndex = asuint(packed.x);
+    visibility.instanceIndex = asuint(packed.x) & ((1u << GI_HIT_INSTANCE_BITS) - 1);
+    visibility.geometryIndex = asuint(packed.x) >> GI_HIT_INSTANCE_BITS;
     visibility.direction = unpackNormal(asuint(packed.y));
     visibility.primitiveIndex = asuint(packed.z);
     visibility.barycentrics.x = f16tof32(asuint(packed.w) >> 16);
@@ -541,19 +545,18 @@ void HashGridCache_QueueLight(uint visibilityIndex, uint cellIndex, bool own)
 // World position and geometric normal (facing where the ray came from) of a stored hit.
 void HitSurface(HashGridCache_Visibility visibility, out float3 world, out float3 normal)
 {
-    GIInstanceRecord instance = g_InstanceRecords[visibility.instanceIndex];
-    uint first = instance.vertexOffset + 3 * visibility.primitiveIndex;
-    float3 v0 = g_Vertices[first].xyz, v1 = g_Vertices[first + 1].xyz, v2 = g_Vertices[first + 2].xyz;
+    SceneTriangle t = LoadTriangle(visibility.instanceIndex, visibility.geometryIndex, visibility.primitiveIndex);
     float2 b = visibility.barycentrics;
-    world = (1.0f - b.x - b.y) * v0 + b.x * v1 + b.y * v2;
-    normal = cross(v1 - v0, v2 - v0);
+    world = (1.0f - b.x - b.y) * t.v0 + b.x * t.v1 + b.y * t.v2;
+    normal = cross(t.v1 - t.v0, t.v2 - t.v0);
     float lengthSquared = dot(normal, normal);
     normal = lengthSquared > 0.0f ? normal * rsqrt(lengthSquared) : -visibility.direction;
     if (dot(normal, visibility.direction) > 0.0f) normal = -normal;
 }
 
-// A hit's albedo: the G-buffer's where the camera sees the hit, its mesh's mean otherwise.
-float3 HitAlbedo(float3 world, uint instanceIndex)
+// A hit's albedo: the G-buffer's where the camera sees the hit; otherwise its mesh's albedo texture,
+// or its mesh's mean.
+float3 HitAlbedo(float3 world, HashGridCache_Visibility visibility)
 {
     float4 clip = mul(g_ViewProjection, float4(world, 1.0f));
     if (clip.w > 0.0f)
@@ -567,7 +570,17 @@ float3 HitAlbedo(float3 world, uint instanceIndex)
         }
     }
 
-    uint4 learnt = g_EntryAlbedo[g_InstanceRecords[instanceIndex].entry];
+    // The texture's mean over a few texels' patch: the cells average the light over metres.
+    SceneTriangle t = LoadTriangle(visibility.instanceIndex, visibility.geometryIndex, visibility.primitiveIndex);
+    if (t.geometry.texture && (t.geometry.flags & GI_GEOMETRY_MASK_IN_RED) == 0)
+    {
+        Texture2D<float4> texture = g_SceneTextures[NonUniformResourceIndex(t.geometry.texture - 1)];
+        uint width, height, levels;
+        texture.GetDimensions(0, width, height, levels);
+        return texture.SampleLevel(g_WrapSampler, TriangleUV(t.geometry, t.indices, visibility.barycentrics), max(float(levels) - 6.0f, 0.0f)).rgb;
+    }
+
+    uint4 learnt = g_GeometryAlbedo[t.row];
     return learnt.w ? float3(learnt.xyz) / (255.0f * learnt.w) : g_Frame.nearFar.z;
 }
 
@@ -618,6 +631,7 @@ void ClearCounters()
     g_Counters[GI_COUNTER_NEAR_HITS] = 0;
     g_Counters[GI_COUNTER_COPIES] = 0;
     g_Counters[GI_COUNTER_FULL_BUCKETS] = 0;
+    for (uint counter = GI_COUNTER_MAXIMA_FIRST; counter < GI_COUNTER_MAXIMA_FIRST + GI_COUNTER_MAXIMA; ++counter) g_Counters[counter] = 0;
 }
 
 // g_Dispatch: x counter, y threads (or tiles) a group handles, z argument slot, w a second counter to add.
@@ -1194,14 +1208,14 @@ void LearnAlbedo(uint did : SV_DispatchThreadID)
     SceneHit hit = TraceClosest(g_Eye, offset / seedDistance, 1.05f * seedDistance + 0.5f);
     if (!hit.hit || abs(hit.distance - seedDistance) > 0.03f * seedDistance + 0.05f) return;
 
-    uint entry = g_InstanceRecords[hit.instance].entry;
-    if (g_EntryAlbedo[entry].w >= 4096) return;
+    uint row = FirstGeometry(g_Instances[hit.instance]) + hit.geometry;
+    if (g_GeometryAlbedo[row].w >= 4096) return;
 
     uint3 albedo = uint3(round(saturate(g_Albedo.Load(int3(seed, 0)).rgb) * 255.0f));
-    InterlockedAdd(g_EntryAlbedo[entry].x, albedo.x);
-    InterlockedAdd(g_EntryAlbedo[entry].y, albedo.y);
-    InterlockedAdd(g_EntryAlbedo[entry].z, albedo.z);
-    InterlockedAdd(g_EntryAlbedo[entry].w, 1);
+    InterlockedAdd(g_GeometryAlbedo[row].x, albedo.x);
+    InterlockedAdd(g_GeometryAlbedo[row].y, albedo.y);
+    InterlockedAdd(g_GeometryAlbedo[row].z, albedo.z);
+    InterlockedAdd(g_GeometryAlbedo[row].w, 1);
 }
 
 // One thread per probe ray: misses take the sky's radiance, hits become first-bounce cells.
@@ -1239,6 +1253,7 @@ void PopulateScreenProbes(uint did : SV_DispatchThreadID)
             HashGridCache_Visibility visibility;
             visibility.direction = direction;
             visibility.instanceIndex = hit.instance;
+            visibility.geometryIndex = hit.geometry;
             visibility.primitiveIndex = hit.primitive;
             visibility.barycentrics = hit.barycentrics;
 
@@ -1295,7 +1310,8 @@ void PopulateMultibounceCells(uint did : SV_DispatchThreadID)
     HashGridCache_Visibility visibility = HashGridCache_UnpackVisibility(g_HashGridCache_VisibilityBuffer[did]);
     float3 world, normal;
     HitSurface(visibility, world, normal);
-    float3 albedo = HitAlbedo(world, visibility.instanceIndex);
+    float3 albedo = HitAlbedo(world, visibility);
+    MaxDiagnostic(GI_COUNTER_MAX_ALBEDO, albedo);
 
     // Cosine-weighted: the Lambert BRDF over its pdf is the albedo.
     float3 direction = mapToCosineHemisphere(random.rand2(), normal);
@@ -1314,6 +1330,7 @@ void PopulateMultibounceCells(uint did : SV_DispatchThreadID)
     HashGridCache_Visibility second;
     second.direction = direction;
     second.instanceIndex = hit.instance;
+    second.geometryIndex = hit.geometry;
     second.primitiveIndex = hit.primitive;
     second.barycentrics = hit.barycentrics;
 
@@ -1341,9 +1358,11 @@ void PopulateCells(uint did : SV_DispatchThreadID)
     HashGridCache_Visibility visibility = HashGridCache_UnpackVisibility(g_HashGridCache_VisibilityBuffer[visibilityIndex]);
     float3 world, normal;
     HitSurface(visibility, world, normal);
-    float3 albedo = HitAlbedo(world, visibility.instanceIndex);
+    float3 albedo = HitAlbedo(world, visibility);
     Random random = MakeRandom(did + 0x9E3779B9u, g_FrameIndex);
     float3 lighting = HitDirectLight(world, normal, albedo, random);
+    MaxDiagnostic(GI_COUNTER_MAX_ALBEDO, albedo);
+    MaxDiagnostic(GI_COUNTER_MAX_DIRECT, lighting);
 
     // The sample's count went in with its claim (HashGridCache_QueueLight).
     uint cellIndex = g_HashGridCache_VisibilityCellBuffer[visibilityIndex];
@@ -1395,6 +1414,9 @@ void UpdateTiles(uint groupId : SV_GroupID, uint2 threadId : SV_GroupThreadID)
         HASH_CELL_SAMPLES_PER_FRAME));
     uint2 packedIndirect = packHalf4(AccumulateCell(g_HashGridCache_ValueIndirectBuffer, g_HashGridCache_UpdateCellValueIndirectBuffer, cellIndex,
         HASH_MAX_MULTIBOUNCE_SAMPLE_COUNT, 0xFFFFFFFFu));
+    float4 storedDirect = unpackHalf4(packedDirect), storedIndirect = unpackHalf4(packedIndirect);
+    MaxDiagnostic(GI_COUNTER_MAX_CELL, storedDirect.rgb / max(storedDirect.w, 1.0f));
+    MaxDiagnostic(GI_COUNTER_MAX_INDIRECT, storedIndirect.rgb / max(storedIndirect.w, 1.0f));
     lds_UpdateTiles_ValueBuffer[threadId.x][threadId.y] = packedDirect;
     lds_UpdateTiles_ValueIndirectBuffer[threadId.x][threadId.y] = packedIndirect;
     g_HashGridCache_ValueBuffer[cellIndex] = packedDirect;
@@ -1437,6 +1459,7 @@ void UpdateMultibounceCells(uint did : SV_DispatchThreadID)
     uint baseCellIndex = g_HashGridCache_VisibilityCellBuffer[g_HashGridCache_VisibilityQueryBuffer[visibilityIndex]];
     float3 weight = unpackHalf4(g_HashGridCache_MultibounceInfoBuffer[did]).rgb;
     float3 radiance = HashGridCache_FilteredDirect(cellIndex) * weight;
+    MaxDiagnostic(GI_COUNTER_MAX_BOUNCE, radiance);
     uint4 quantized = HashGridCache_QuantizeRadiance(GIDenoiser_RemoveNaNs(radiance));
     if (dot(radiance, radiance) > 0.0f)
     {
@@ -1457,6 +1480,7 @@ void ResolveCells(uint did : SV_DispatchThreadID)
     float4 own = unpackHalf4(g_HashGridCache_VisibilityRadianceBuffer[did]);
     float3 radiance = own.w > 0.0f ? own.rgb : HashGridCache_FilteredDirect(cellIndex);
     radiance += HashGridCache_FilteredIndirect(cellIndex);
+    MaxDiagnostic(GI_COUNTER_MAX_RESOLVED, radiance);
     ScreenProbes_AccumulateRadiance(g_HashGridCache_VisibilityQueryBuffer[did], GIDenoiser_RemoveNaNs(radiance));
 }
 
@@ -1575,6 +1599,7 @@ void BlendScreenProbes(uint did : SV_DispatchThreadID, uint localId : SV_GroupTh
 
     if (cellIndex == 0) g_ScreenProbes_ProbeMaskBuffer[probe] = ScreenProbes_PackSeed(seed);
     g_ScreenProbes_ProbeBuffer[pos] = radiance;
+    MaxDiagnostic(GI_COUNTER_MAX_PROBE, radiance.xyz);
 }
 
 // Copies this frame's probes over the last frame's, which the filter reads (Capsaicin's copy).
@@ -1756,6 +1781,7 @@ void InterpolateScreenProbes(uint2 did : SV_DispatchThreadID)
     for (uint j = 0; j < 4; ++j)
         if (w[j] > 0.0f) irradiance += w[j] * ScreenProbes_CalculateSHIrradiance(normal, ScreenProbes_UnpackSeed(probes[j]) / PROBE_SIZE);
 
+    MaxDiagnostic(GI_COUNTER_MAX_INTERPOLATED, irradiance);
     g_GIDenoiser_ColorBuffers[g_Dispatch.x][did] = float4(irradiance, useBackup ? 0.0f : 1.0f);
 }
 
@@ -1883,6 +1909,10 @@ void FilterGI(uint2 did : SV_DispatchThreadID)
         lighting.xyz = color / weight * max(lighting.w, 1.0f);
     }
 
-    if (g_Dispatch.w) g_Output[did] = float4(lighting.xyz / max(lighting.w, 1.0f) * (INV_PI * g_Frame.nearFar.w), 1.0f);
+    if (g_Dispatch.w)
+    {
+        g_Output[did] = float4(lighting.xyz / max(lighting.w, 1.0f) * (INV_PI * g_Frame.nearFar.w), 1.0f);
+        MaxDiagnostic(GI_COUNTER_MAX_OUTPUT, lighting.xyz / max(lighting.w, 1.0f) * INV_PI);
+    }
     g_GIDenoiser_ColorBuffers[g_Dispatch.x][did] = lighting;
 }

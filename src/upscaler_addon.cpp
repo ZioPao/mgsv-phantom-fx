@@ -22,6 +22,7 @@
 #include "focus.hpp"
 #include "fsr_frame_generation.hpp"
 #include "fxaa.hpp"
+#include "engine_scene.hpp"
 #include "game_loop.hpp"
 #include "global_illumination.hpp"
 #include "hdr.hpp"
@@ -530,6 +531,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     log(render_scale::hook());
     log(photo_mode::hook());
     log(game_loop::hook());
+    log(engine_scene::hook());
     log(character::allowFobCharacters());
     if (supportedBuild() && !weather::supported()) log("The weather manager has unexpected code; the weather menu is unavailable.");
 

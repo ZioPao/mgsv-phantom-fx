@@ -157,7 +157,7 @@ function(add_gi_kernels source)
     set(GI_SHADER_HEADERS ${GI_SHADER_HEADERS} PARENT_SCOPE)
 endfunction()
 file(MAKE_DIRECTORY "${GI_SHADER_DIR}")
-add_gi_kernels(gi_scene.hlsl ClearBounds Scatter BuildInstances DebugScene ClearOutput BuildDepthPyramid)
+add_gi_kernels(gi_scene.hlsl ClearBounds Scatter CullCaptured DebugScene ClearOutput BuildDepthPyramid TerrainGrid)
 add_gi_kernels(gi_light.hlsl ClearCounters GenerateDispatch ClearBuffer ScanBlocks ScanBlockSums ScanAddOffsets ClearProbeMask FilterProbeMask
     InitCachedTileLRU ReprojectScreenProbes CountScreenProbes ScatterScreenProbes SpawnScreenProbes CompactScreenProbes PatchScreenProbes
     StoreSpawnCount SampleScreenProbes LearnAlbedo PopulateScreenProbes PurgeTiles PopulateMultibounceCells PopulateCells UpdateTiles
@@ -173,7 +173,7 @@ add_library(phantom_fx SHARED src/upscaler_addon.cpp src/upscaler.cpp src/upscal
     src/log.cpp src/shader_bytecode.cpp src/presenter.cpp src/frame_generation.cpp src/game_loop.cpp src/shadows.cpp
     src/indirect_light.cpp src/photo_mode.cpp src/focus.cpp src/depth_of_field.cpp src/hdr.cpp src/weather.cpp src/character.cpp src/atmosphere.cpp
     src/fidelityfx.cpp src/fsr_upscaler.cpp src/fsr_frame_generation.cpp src/performance.cpp src/performance_menu.cpp
-    src/global_illumination.cpp src/gi_capture.cpp src/gi_renderer.cpp src/gi_light.cpp src/gi_lighting.cpp src/gi_shadow.cpp
+    src/global_illumination.cpp src/engine_scene.cpp src/engine_brush.cpp src/gi_capture.cpp src/gi_renderer.cpp src/gi_scene.cpp src/gi_textures.cpp src/gi_light.cpp src/gi_lighting.cpp src/gi_shadow.cpp
     "${CMAKE_BINARY_DIR}/version.rc")
 add_dependencies(phantom_fx gi_kernels)
 target_include_directories(phantom_fx PRIVATE src "${GI_SHADER_DIR}")

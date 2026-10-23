@@ -2,9 +2,11 @@
 #include "global_illumination.hpp"
 
 #include "camera.hpp"
+#include "engine_scene.hpp"
 #include "gi_capture.hpp"
 #include "gi_lighting.hpp"
 #include "gi_renderer.hpp"
+#include "gi_textures.hpp"
 #include "log.hpp"
 #include "performance.hpp"
 #include "shader_bytecode.hpp"
@@ -19,9 +21,11 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <format>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -151,12 +155,20 @@ std::array<float, 4> shadowRange{};
 ComPtr<ID3D11ShaderResourceView> normals, albedo;
 ComPtr<ID3D11ComputeShader> packShader;
 ComPtr<ID3D11Buffer> packParameters;
+// Shared copies of the game's terrain heightmap (gi_renderer::Terrain).
+ComPtr<ID3D11Texture2D> terrainPages, terrainHeights;
 SharedTexture depthOut, normalOut, albedoOut, transfer;
 std::string failure;
 std::atomic<std::uint64_t> lastKick{}; // GetTickCount64 of the last frame lit
 // Diagnostics: the kicks' CPU time in performance counter ticks, and the kicks, since the last log.
 std::atomic<std::int64_t> kickTicks{};
 std::atomic<std::uint64_t> kicksSinceLog{};
+// And its steps' (the rest is the work after the renderer's); how often the terrain's converter
+// constants and heightmap changed, and the converter last used.
+enum KickStep { CaptureStep, ModelsStep, TexturesStep, TerrainStep, SignalStep, RenderStep, KickSteps };
+std::array<std::atomic<std::int64_t>, KickSteps> kickStepTicks{};
+std::atomic<std::uint32_t> converterChanges{}, heightmapChanges{};
+std::array<std::atomic<float>, 8> lastConverter{};
 
 // The light the resolve reads and the shadow the sun pass reads, made at the render size on
 // whichever thread asks first. Taken after executionMutex when both are.
@@ -212,7 +224,9 @@ void fail(const std::string& reason)
     failure = reason;
     log("Global illumination stopped: " + reason);
     gi_capture::setActive(false);
+    engine_scene::setActive(false);
     gi_renderer::stop();
+    gi_textures::reset();
 }
 
 // Call with executionMutex held.
@@ -284,6 +298,73 @@ void pack(ID3D11ShaderResourceView* depth, const camera::SceneConstants& scene)
     immediate->CSSetShader(nullptr, nullptr, 0);
 }
 
+// Copies the most detailed level of a view's texture into a shared copy for Direct3D 12, made again
+// when its size or format changes; the view's format for Direct3D 12's view. Call with executionMutex held.
+bool copyShared(ID3D11ShaderResourceView* view, ComPtr<ID3D11Texture2D>& copy, DXGI_FORMAT& format)
+{
+    D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
+    view->GetDesc(&viewDesc);
+    ComPtr<ID3D11Resource> resource;
+    ComPtr<ID3D11Texture2D> source;
+    view->GetResource(resource.GetAddressOf());
+    if (viewDesc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D || FAILED(resource.As(&source))) return false;
+
+    D3D11_TEXTURE2D_DESC desc{};
+    source->GetDesc(&desc);
+    const UINT mip = viewDesc.Texture2D.MostDetailedMip;
+    D3D11_TEXTURE2D_DESC made{};
+    made.Width = std::max(desc.Width >> mip, 1u);
+    made.Height = std::max(desc.Height >> mip, 1u);
+    made.MipLevels = made.ArraySize = 1;
+    made.Format = desc.Format;
+    made.SampleDesc.Count = 1;
+    made.Usage = D3D11_USAGE_DEFAULT;
+    made.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    made.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+
+    D3D11_TEXTURE2D_DESC have{};
+    if (copy) copy->GetDesc(&have);
+    if (!copy || have.Width != made.Width || have.Height != made.Height || have.Format != made.Format)
+    {
+        copy.Reset();
+        if (FAILED(device->CreateTexture2D(&made, nullptr, copy.GetAddressOf()))) return false;
+    }
+
+    immediate->CopySubresourceRegion(copy.Get(), 0, 0, 0, 0, source.Get(), D3D11CalcSubresource(mip, 0, desc.MipLevels), nullptr);
+    format = viewDesc.Format;
+    return true;
+}
+
+// The game's terrain heightmap into its shared copies, and its constants, for the frame. Call with
+// executionMutex held.
+bool copyTerrain(const engine_scene::TerrainInputs& inputs, gi_renderer::Frame& frame)
+{
+    static std::array<ID3D11ShaderResourceView*, 2> lastViews{};
+    if (const std::array views{inputs.pages.Get(), inputs.heights.Get()}; views != lastViews)
+    {
+        if (lastViews[0]) ++heightmapChanges;
+        lastViews = views;
+    }
+
+    static std::optional<std::array<float, 8>> previous;
+    if (previous && *previous != inputs.converter) ++converterChanges;
+    previous = inputs.converter;
+    for (std::size_t i = 0; i < 8; ++i) lastConverter[i] = inputs.converter[i];
+
+    gi_renderer::Terrain terrain;
+    if (!copyShared(inputs.pages.Get(), terrainPages, terrain.pagesFormat) || !copyShared(inputs.heights.Get(), terrainHeights, terrain.heightsFormat))
+        return false;
+
+    terrain.pages = terrainPages.Get();
+    terrain.heights = terrainHeights.Get();
+    std::copy_n(inputs.scaleOffset.begin(), 4, terrain.scale.begin());
+    std::copy_n(inputs.scaleOffset.begin() + 4, 4, terrain.offset.begin());
+    std::copy_n(inputs.converter.begin(), 4, terrain.uvConverter.begin());
+    std::copy_n(inputs.converter.begin() + 4, 4, terrain.texelCorrect.begin());
+    frame.terrain = terrain;
+    return true;
+}
+
 gi_renderer::Matrix projectionViewOf(const camera::SceneConstants& scene)
 {
     gi_renderer::Matrix matrix{};
@@ -296,6 +377,15 @@ gi_renderer::Matrix projectionViewOf(const camera::SceneConstants& scene)
 // The frame's kick, before the list with the probe upscale runs; call with executionMutex held.
 void kick(ID3D11ShaderResourceView* depth, const Options& options)
 {
+    LARGE_INTEGER stepStarted{};
+    QueryPerformanceCounter(&stepStarted);
+    const auto endStep = [&](KickStep step) {
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        kickStepTicks[step] += now.QuadPart - stepStarted.QuadPart;
+        stepStarted = now;
+    };
+
     ensurePipeline();
     // Direct3D 12 is done with the shared inputs of the frame before.
     performance::Timed timed(immediate.Get(), performance::Pass::GiWait);
@@ -349,11 +439,25 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
         }
     }
 
+    // The game's models, the textures their meshes use and its terrain, copied before Direct3D 12 may
+    // read them.
+    endStep(CaptureStep);
+    gi_renderer::Frame frame;
+    engine_scene::Snapshot engineScene;
+    engine_scene::take(engineScene);
+    for (const auto& model : engineScene.newModels)
+        for (const auto& part : model->parts) gi_textures::want(part.baseTexture, part.alphaTested);
+    endStep(ModelsStep);
+    gi_textures::update(device.Get(), immediate.Get(), frame.newTextures);
+    endStep(TexturesStep);
+    if (const auto terrain = engine_scene::takeTerrain(); terrain && copyTerrain(*terrain, frame)) engine_scene::setTerrainFromEngine(true);
+
+    endStep(TerrainStep);
     const auto inputsReady = ++fenceValue;
     check(immediate->Signal(fence.Get(), inputsReady), "Signalling the global illumination's inputs");
     immediate->Flush();
+    endStep(SignalStep);
 
-    gi_renderer::Frame frame;
     frame.textures = {depthOut.texture.Get(), normalOut.texture.Get(), albedoOut.texture.Get(), transfer.texture.Get(), light, shadow, shadowDebug};
     frame.width = depthOut.width;
     frame.height = depthOut.height;
@@ -390,6 +494,9 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     frame.captures = std::move(converted.captures);
     frame.drawn = std::move(converted.drawn);
     frame.alphaTested = std::move(converted.alphaTested);
+    frame.newModels = std::move(engineScene.newModels);
+    frame.modelInstances = std::move(engineScene.instances);
+    frame.modelInstancesUpdated = engineScene.instancesUpdated;
     frame.frameIndex = ++kicks;
     frame.showScene = options.showScene;
     frame.traceLight = options.enabled && options.light;
@@ -401,6 +508,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     frame.waitValue = inputsReady;
     frame.signalValue = ++fenceValue;
     const auto result = gi_renderer::render(frame);
+    endStep(RenderStep);
     lightSignalled = frame.signalValue;
     if (frame.traceShadows)
     {
@@ -410,6 +518,8 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     }
 
     gi_capture::evicted(result.evicted);
+    engine_scene::forget(result.releasedModels);
+    gi_textures::release(result.releasedTextures);
     lastKick = GetTickCount64();
 
     // Diagnostics: the light the scene gets, every ten seconds.
@@ -465,12 +575,16 @@ void detach() noexcept
 {
     enabled = false;
     gi_capture::setActive(false);
+    engine_scene::setActive(false);
     gi_capture::detach();
     {
         std::lock_guard lock(executionMutex);
         gi_renderer::stop();
         packShader.Reset();
         packParameters.Reset();
+        terrainPages.Reset();
+        terrainHeights.Reset();
+        gi_textures::reset();
         depthOut = normalOut = albedoOut = transfer = {};
         normals.Reset();
         albedo.Reset();
@@ -530,7 +644,7 @@ std::string problem()
 
 std::string status()
 {
-    std::string text = gi_capture::status();
+    std::string text = gi_capture::status() + "; " + engine_scene::status() + "; " + gi_textures::status();
     const auto scene = gi_renderer::status();
     if (!scene.empty()) text += "\n" + scene;
 
@@ -870,10 +984,12 @@ void present() noexcept
         // Off gives the GPU memory back; on starts the scene over.
         std::lock_guard lock(executionMutex);
         gi_renderer::stop();
+        gi_textures::reset();
         lightSignalled = lightWaited = 0;
     }
 
     gi_capture::setActive(on);
+    engine_scene::setActive(on);
     gi_capture::setCapturing(options.capture);
 
     // What the scene holds, and the CPU work a frame, every ten seconds while it runs.
@@ -888,11 +1004,20 @@ void present() noexcept
         LARGE_INTEGER frequency{};
         QueryPerformanceFrequency(&frequency);
         const double frames = static_cast<double>(std::max<std::uint64_t>(kicksSinceLog.exchange(0), 1));
-        const double kick = static_cast<double>(kickTicks.exchange(0)) * 1000.0 / static_cast<double>(frequency.QuadPart);
+        const auto milliseconds = [&](std::atomic<std::int64_t>& ticks) { return static_cast<double>(ticks.exchange(0)) * 1000.0 / static_cast<double>(frequency.QuadPart); };
         const auto perFrame = [&](double value) { return std::to_string(value / frames); };
+        const double kick = milliseconds(kickTicks);
+        std::string steps;
+        for (const auto [step, name] : {std::pair{CaptureStep, "captures"}, {ModelsStep, "models"}, {TexturesStep, "textures"}, {TerrainStep, "terrain"},
+                 {SignalStep, "signal"}, {RenderStep, "renderer"}})
+            steps += std::string(steps.empty() ? "" : ", ") + name + " " + perFrame(milliseconds(kickStepTicks[step]));
+        steps += "; the terrain's converter changed " + std::to_string(converterChanges.exchange(0)) + " times (now";
+        for (const auto& value : lastConverter) steps += " " + std::to_string(value.load());
+        steps += "), its heightmap textures " + std::to_string(heightmapChanges.exchange(0)) + " times";
+
         log("Global illumination's CPU time a frame: hooks " + perFrame(work.hookMilliseconds) + " ms (all threads) over " + perFrame(static_cast<double>(work.draws))
             + " mesh draws, with " + perFrame(static_cast<double>(work.captures)) + " captures (" + perFrame(static_cast<double>(work.skinned)) + " skinned, "
-            + perFrame(static_cast<double>(work.vertices) / 1000) + "k vertices); the kick " + perFrame(kick) + " ms (render thread).");
+            + perFrame(static_cast<double>(work.vertices) / 1000) + "k vertices); the kick " + perFrame(kick) + " ms (render thread: " + steps + ").");
     }
 }
 }

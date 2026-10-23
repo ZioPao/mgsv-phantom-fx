@@ -1,6 +1,8 @@
 // Captures the game's meshes for the global illumination; gi_capture.hpp describes the route.
 #include "gi_capture.hpp"
 
+#include "engine_scene.hpp"
+
 #include "log.hpp"
 #include "performance.hpp"
 #include "range_allocator.hpp"
@@ -36,12 +38,16 @@ enum class Kind : std::uint8_t
     None,
     Mesh,    // A rigid mesh, its own or instanced: captured once
     Terrain, // A terrain patch: a mesh placed by m_localParam as well
-    Skinned, // Reads the bones (b6): captured each frame, into the frame's skinned meshes
+    Skinned, // Has the bones (b6): a draw with m_useWeightCount set is captured each frame, into the
+             // frame's skinned meshes; one without is a rigid mesh
+    Clone,   // An instanced clone (the _clone shaders: clone arrays, the object brush's vegetation): left
+             // to the game's scene when it has them (engine_scene.hpp), else a rigid mesh
 };
 
 constexpr UINT SceneSlot = 2, ObjectSlot = 5, BonesSlot = 6;
-// The constant buffers whose contents are kept: scene (b2), object (b5), light (b3), probes (b7).
-constexpr UINT SceneConstantsSize = 480, ObjectConstantsSize = 208, LightConstantsSize = 176, ProbeConstantsSize = 576;
+// The constant buffers whose contents are kept: scene (b2), object (b5), light (b3), probes (b7), material
+// (b4: the terrain's page table converter).
+constexpr UINT SceneConstantsSize = 480, ObjectConstantsSize = 208, LightConstantsSize = 176, ProbeConstantsSize = 576, MaterialConstantsSize = 128;
 constexpr UINT LargestConstants = ProbeConstantsSize / 4;
 // The stream output ring, in vertices of 16 bytes (clip positions).
 constexpr std::uint32_t RingVertices = 2u << 20;
@@ -193,6 +199,11 @@ UINT recordCapacity{};
 std::atomic<std::uint64_t> captures{}, skinnedCaptures{}, missingScene{}, missingObject{}, dynamicInstances{}, ringFull{};
 // Diagnostics: new static entries since keyChanges, by where their first draw came from.
 std::atomic<std::uint64_t> newFromMainCamera{}, newFromOtherPasses{}, newTerrain{};
+// Diagnostics: of those, rigid meshes drawn by a skinning shader (m_useWeightCount 0); and the
+// shadow passes' draws of such meshes not held, which are left out.
+std::atomic<std::uint64_t> newRigidFromSkinning{}, rigidFromOtherPassesLeftOut{};
+// Diagnostics: rigid draws left to the game's own scene (engine_scene.hpp).
+std::atomic<std::uint64_t> coveredByEngineScene{}, clonesLeftToEngineScene{};
 
 // Diagnostics: the hooks' time in performance counter ticks, and the draws and captures, since takeWork.
 std::atomic<std::int64_t> hookTicks{};
@@ -225,6 +236,7 @@ Kind kindOf(std::string_view name, const void* code, std::size_t size)
         && name.find("decal") == name.npos && name.find("Paraboloid") == name.npos;
     if (!terrain && !model) return Kind::None;
     if (terrain) return Kind::Terrain;
+    if (name.find("_clone") != name.npos) return Kind::Clone;
 
     ComPtr<ID3D11ShaderReflection> reflection;
     if (FAILED(D3DReflect(code, size, IID_PPV_ARGS(&reflection)))) return Kind::Mesh;
@@ -610,7 +622,7 @@ void bufferMapped(ID3D11Resource* buffer, void* data) noexcept
     D3D11_BUFFER_DESC desc{};
     static_cast<ID3D11Buffer*>(buffer)->GetDesc(&desc);
     const bool kept = desc.ByteWidth == SceneConstantsSize || desc.ByteWidth == ObjectConstantsSize || desc.ByteWidth == LightConstantsSize
-        || desc.ByteWidth == ProbeConstantsSize;
+        || desc.ByteWidth == ProbeConstantsSize || desc.ByteWidth == MaterialConstantsSize;
     if (!kept || !(desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER)) return;
 
     mappedBuffer = buffer;
@@ -691,9 +703,53 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
             return;
         }
 
+        // The camera the global illumination traces from: the list's first main-camera draw's, taken
+        // before the draw is left to the engine's scene. Taken from captured draws only, it came from
+        // the player's model alone; with the player hidden (the camera against a wall), it stayed as
+        // an earlier frame had it, and every ray started from there.
+        if (scene->mainCamera)
+        {
+            std::lock_guard lock(recordMutex);
+            auto& list = pending[reinterpret_cast<std::uint64_t>(context)];
+            if (!list.camera)
+            {
+                list.camera.emplace();
+                std::memcpy(&*list.camera, scene->values.data(), sizeof(camera::SceneConstants));
+            }
+        }
+
+        // A skinning shader applies the bones only where m_useWeightCount (c8.x) is set; at 0 the mesh
+        // is rigid, placed by m_viewWorld alone. Most of the world's buildings and props are drawn that
+        // way (fox3ddf_blin, ModelForward_ShadowOpaqueRigid). Taken for skinned meshes, they were
+        // captured from the main camera only and left the scene, with their ray-traced shadows, as
+        // soon as they were out of view.
+        const auto* object = writtenTo(constants[3].Get());
+        const bool dynamic = boundKind == Kind::Skinned && (!object || object->values[32] != 0.0f);
+
+        // The terrain comes from the game's heightmap (engine_scene.hpp) once its inputs are known.
+        const auto* material = writtenTo(constants[2].Get());
+        if (boundKind == Kind::Terrain && object)
+        {
+            if (scene->mainCamera && material) engine_scene::noteTerrain(context, object->values.data(), material->values.data());
+            if (engine_scene::terrainFromEngine()) return;
+        }
+
+        if (boundKind == Kind::Clone && engine_scene::clonesFromEngine())
+        {
+            ++clonesLeftToEngineScene;
+            return;
+        }
+
+        // A rigid model the game has loaded is in the scene already, from the game's own list
+        // (engine_scene.hpp), out of view too: capturing its draws would double it.
+        if (boundKind == Kind::Skinned && !dynamic && engine_scene::covers(object->values.data() + 16))
+        {
+            ++coveredByEngineScene;
+            return;
+        }
+
         // Skinned meshes are captured from the main camera's pass only: the shadow passes draw them
         // again (and sometimes at another level of detail, a second copy in the scene).
-        const bool dynamic = boundKind == Kind::Skinned;
         if (dynamic && !scene->mainCamera) return;
 
         // Alpha-tested skinned meshes (hair) are left out: the frame's skinned meshes share one
@@ -740,7 +796,7 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
         // shaders do not read it), and every mesh got a new key each frame the camera moved. The same
         // mesh drawn for the shadows, with the light's view, gets the same key.
         Hasher placement;
-        if (const auto* object = writtenTo(constants[3].Get()))
+        if (object)
         {
             placement.add(worldOf(scene->viewInverse, object->values.data()));
             placement.add(object->values[32]);
@@ -776,6 +832,16 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
                 capture = true;
             }
             else if (const auto found = byKey.find(key); found != byKey.end()) index = found->second;
+            else if (boundKind == Kind::Skinned && !scene->mainCamera)
+            {
+                // Rigid meshes from skinning shaders are new from the main camera's pass only. From
+                // the shadow passes they came as 20k to 140k new entries every ten seconds while the
+                // camera moved (5k to 15k from the main camera), which filled the vertex pool and left
+                // thousands waiting for a structure. Why their keys keep changing there is not known.
+                // A shadow pass still marks and tags the ones held.
+                ++rigidFromOtherPassesLeftOut;
+                return;
+            }
             else if (!freeIds.empty() && capturing.load(std::memory_order_relaxed))
             {
                 index = freeIds.back();
@@ -784,6 +850,7 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
                 byKey.emplace(key, index);
                 capture = true;
                 ++(boundKind == Kind::Terrain ? newTerrain : scene->mainCamera ? newFromMainCamera : newFromOtherPasses);
+                if (boundKind == Kind::Skinned) ++newRigidFromSkinning;
             }
             else return;
 
@@ -851,11 +918,6 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
         if (capture) list.records.push_back(record);
         if (!dynamic) list.drawn.push_back(index);
         if (tagged) list.alphaTested.push_back(index);
-        if (!list.camera && scene->mainCamera)
-        {
-            list.camera.emplace();
-            std::memcpy(&*list.camera, scene->values.data(), sizeof(camera::SceneConstants));
-        }
     }
     catch (...)
     {
@@ -1046,7 +1108,11 @@ std::string keyChanges() noexcept
             if (differing[field]) text += ", " + std::to_string(differing[field]) + " with another " + DrawFields[field];
 
         return text + "; new since the last line: " + std::to_string(newFromMainCamera.exchange(0)) + " from the main camera, "
-            + std::to_string(newFromOtherPasses.exchange(0)) + " from other passes, " + std::to_string(newTerrain.exchange(0)) + " terrain";
+            + std::to_string(newFromOtherPasses.exchange(0)) + " from other passes, " + std::to_string(newTerrain.exchange(0)) + " terrain, "
+            + std::to_string(newRigidFromSkinning.exchange(0)) + " of them rigid meshes from skinning shaders; "
+            + std::to_string(rigidFromOtherPassesLeftOut.exchange(0)) + " draws of rigid meshes not held left out of other passes; "
+            + std::to_string(coveredByEngineScene.exchange(0)) + " draws of the game's loaded models and " + std::to_string(clonesLeftToEngineScene.exchange(0))
+            + " clone draws left to its own scene";
     }
     catch (...)
     {

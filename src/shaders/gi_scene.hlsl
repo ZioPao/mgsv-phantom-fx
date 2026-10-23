@@ -1,21 +1,23 @@
-// The ray-traced scene: captured geometry into the vertex pool, the instance list of the frame's
-// acceleration structure, and a debug view of the scene from the camera (docs/DEVELOPMENT.md,
-// "Global illumination").
+// The ray-traced scene's kernels (docs/DEVELOPMENT.md, "Ray-traced scene"): captured geometry and the
+// game's terrain into the geometry pool, the captured meshes' place in the frame's instances, and a
+// debug view of the scene from the camera.
 #include "gi_common.hlsli"
 
-// Each entry the frame captured starts its bounds over: its geometry was captured again, or for
-// the first time.
+// Each entry the frame captured starts its bounds over: its mesh was captured again, or for the first
+// time. Each new geometry starts its albedo over.
 [numthreads(64, 1, 1)]
 void ClearBounds(uint did : SV_DispatchThreadID)
 {
     if (did >= g_Frame.counts.x) return;
 
-    uint entry = g_ScatterRecords[did].entry;
-    if (g_ScatterRecords[did].flags & GI_SCATTER_NEW) g_EntryAlbedo[entry] = 0;
+    GIScatterRecord record = g_ScatterRecords[did];
+    if (record.flags & GI_SCATTER_NEW) g_GeometryAlbedo[record.geometry] = 0;
+    if (record.vertexCount == 0) return;
+
     for (uint axis = 0; axis < 3; ++axis)
     {
-        g_EntryBounds[6 * entry + axis] = OrderedFromFloat(FLT_MAX);
-        g_EntryBounds[6 * entry + 3 + axis] = OrderedFromFloat(-FLT_MAX);
+        g_EntryBounds[6 * record.entry + axis] = OrderedFromFloat(FLT_MAX);
+        g_EntryBounds[6 * record.entry + 3 + axis] = OrderedFromFloat(-FLT_MAX);
     }
 }
 
@@ -40,11 +42,13 @@ void Scatter(uint did : SV_DispatchThreadID)
     bool valid = did < g_Dispatch.x;
     uint index = valid ? FindRecord(did) : 0;
     GIScatterRecord record = g_ScatterRecords[index];
+    // A capture the renderer left out leaves a gap: its vertices are not the record's before it.
+    valid = valid && did - record.transferOffset < record.vertexCount;
     float3 position = 0.0f;
     if (valid)
     {
         position = g_Transfer.Load(int3(did % GI_TRANSFER_WIDTH, did / GI_TRANSFER_WIDTH, 0)).xyz;
-        g_VerticesOut[record.poolOffset + did - record.transferOffset] = float4(position, 1.0f);
+        g_GeometryPoolOut.Store4(record.poolOffset + 16 * (did - record.transferOffset), asuint(float4(position, 1.0f)));
     }
 
     // Most waves lie within one record: one lane updates its bounds for all.
@@ -70,7 +74,7 @@ void Scatter(uint did : SV_DispatchThreadID)
 // The depth pyramid: level k holds the farthest depth (the smallest, reversed-Z) of each square of
 // 2^(k+1) pixels, so a box can be tested against the frame's depth with a few reads.
 #define GI_DEPTH_PYRAMID_LEVELS 12
-Texture2D<float> g_DepthPyramid : register(t10);                                    // All levels, for BuildInstances
+Texture2D<float> g_DepthPyramid : register(t10);                                    // All levels, for CullCaptured
 RWTexture2D<float> g_DepthPyramidLevels[GI_DEPTH_PYRAMID_LEVELS] : register(u96); // u96 to u107: one level each
 
 // One level a dispatch, g_Dispatch.x: the farthest of the 2 x 2 texels under each texel of the
@@ -160,28 +164,31 @@ bool Hidden(float nearest, float4 pixels, out float farthest, out uint level)
     return nearest < farthest;
 }
 
-// The frame's instances. An entry the game did not draw this frame (nor lately: GI_INSTANCE_DRAWN)
-// keeps its place in the scene unless all of it is in view and something of it would show: then
-// the game would have drawn it, so it has moved, been removed or been swapped for another level of
-// detail. One hidden behind what the game drew stays: the game culled it, and it still casts a
-// shadow (in view and dropped, a cliff behind a nearer rock lost its shadow as the camera moved).
+// The captured meshes' place in the frame's instances. One the game did not draw this frame (nor
+// lately: GI_INSTANCE_DRAWN) keeps its place in the scene unless all of it is in view and something of
+// it would show: then the game would have drawn it, so it has moved, been removed or been swapped for
+// another level of detail. One hidden behind what the game drew stays: the game culled it, and it
+// still casts a shadow (in view and dropped, a cliff behind a nearer rock lost its shadow as the camera
+// moved). Every instance gets its reason for the shadow debug view and probe.
 [numthreads(64, 1, 1)]
-void BuildInstances(uint did : SV_DispatchThreadID)
+void CullCaptured(uint did : SV_DispatchThreadID)
 {
     if (did >= g_Frame.dimensions.w) return;
 
-    GIInstanceRecord record = g_InstanceRecords[did];
+    GIInstanceDesc desc = g_InstancesOut[did];
+    uint kind = InstanceKind(desc);
     uint reason = GI_REASON_DRAWN;
     float nearest = 0.0f, farthest = 0.0f;
     uint level = 0;
     bool inView = false;
-    if ((record.flags & GI_INSTANCE_DRAWN) == 0)
+    if ((kind & GI_INSTANCE_CAPTURED) && (kind & GI_INSTANCE_DRAWN) == 0)
     {
+        uint entry = InstanceEntry(desc);
         float3 lowest, highest;
         for (uint axis = 0; axis < 3; ++axis)
         {
-            lowest[axis] = FloatFromOrdered(g_EntryBounds[6 * record.entry + axis]);
-            highest[axis] = FloatFromOrdered(g_EntryBounds[6 * record.entry + 3 + axis]);
+            lowest[axis] = FloatFromOrdered(g_EntryBounds[6 * entry + axis]);
+            highest[axis] = FloatFromOrdered(g_EntryBounds[6 * entry + 3 + axis]);
         }
 
         // HLSL evaluates both sides of ?:, and Hidden must not run on a box not in view.
@@ -192,24 +199,10 @@ void BuildInstances(uint did : SV_DispatchThreadID)
         else reason = GI_REASON_LEFT_OUT;
     }
 
-    bool visible = reason != GI_REASON_LEFT_OUT;
     g_InstanceDebug[did] = uint4(reason, asuint(nearest), asuint(farthest), level | (inView ? 256u : 0u));
 
-    // Alpha-tested meshes are non-opaque, so the shadow rays can let some sun through them; the
-    // global illumination's rays force them opaque.
-    bool alphaTested = (record.flags & GI_INSTANCE_ALPHA_TESTED) != 0;
-    uint mask = alphaTested ? GI_MASK_ALPHA_TESTED : GI_MASK_OPAQUE;
-    const uint forceNonOpaque = 0x8u; // D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE
-
-    GIInstanceDesc desc;
-    desc.transform[0] = float4(1.0f, 0.0f, 0.0f, 0.0f);
-    desc.transform[1] = float4(0.0f, 1.0f, 0.0f, 0.0f);
-    desc.transform[2] = float4(0.0f, 0.0f, 1.0f, 0.0f);
     // A left-out instance stays for the shadow debug view's rays alone.
-    desc.idAndMask = (did & 0xFFFFFFu) | ((visible ? mask : GI_MASK_HIDDEN) << 24);
-    desc.hitGroupAndFlags = alphaTested ? forceNonOpaque << 24 : 0u;
-    desc.blas = record.blas;
-    g_InstanceDescs[did] = desc;
+    if (reason == GI_REASON_LEFT_OUT) g_InstancesOut[did].idAndMask = (desc.idAndMask & 0xFFFFFFu) | (GI_MASK_HIDDEN << 24);
 }
 
 // The traced scene from the camera, shaded by its normals; red where it disagrees with the game's
@@ -240,6 +233,41 @@ void DebugScene(uint2 did : SV_DispatchThreadID)
         color = float3(1.0f, 0.0f, 1.0f);
 
     g_Output[did] = float4(color, 1.0f);
+}
+
+// ---- The game's terrain (TerrainPoint in gi_common.hlsli) ----
+// Ring g_Dispatch.x, a cell a thread: its two triangles into the pool from the ring's first vertex,
+// clockwise seen from above: their front faces up, the only side the rays see (GI_RAY_FLAGS; the
+// other order hid the ground from above in the scene view and showed it from below).
+// Cells the ring inside covers are left inactive (NaN positions), so the rings do not overlap.
+[numthreads(8, 8, 1)]
+void TerrainGrid(uint2 did : SV_DispatchThreadID)
+{
+    uint ring = g_Dispatch.x;
+    float4 r = g_Frame.terrainRings[ring];
+    uint cells = uint(r.w);
+    if (any(did >= cells)) return;
+
+    float2 corner = r.xy + float2(did) * r.z;
+    bool hole = false;
+    if (ring > 0)
+    {
+        float4 inner = g_Frame.terrainRings[ring - 1];
+        float2 lowest = inner.xy, highest = inner.xy + inner.z * inner.w;
+        hole = all(corner >= lowest - 1e-3f) && all(corner + r.z <= highest + 1e-3f);
+    }
+
+    float3 p00 = TerrainPoint(corner), p10 = TerrainPoint(corner + float2(r.z, 0.0f));
+    float3 p01 = TerrainPoint(corner + float2(0.0f, r.z)), p11 = TerrainPoint(corner + r.z);
+    if (hole) p00 = p10 = p01 = p11 = asfloat(0x7FC00000u);
+
+    uint first = g_Frame.terrainRingOffsets[ring] + 16 * 6 * (did.y * cells + did.x);
+    g_GeometryPoolOut.Store4(first, asuint(float4(p00, 1.0f)));
+    g_GeometryPoolOut.Store4(first + 16, asuint(float4(p01, 1.0f)));
+    g_GeometryPoolOut.Store4(first + 32, asuint(float4(p10, 1.0f)));
+    g_GeometryPoolOut.Store4(first + 48, asuint(float4(p10, 1.0f)));
+    g_GeometryPoolOut.Store4(first + 64, asuint(float4(p01, 1.0f)));
+    g_GeometryPoolOut.Store4(first + 80, asuint(float4(p11, 1.0f)));
 }
 
 // No light yet: the resolve adds nothing.
