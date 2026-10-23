@@ -1,5 +1,17 @@
 # Phantom FX changelog
 
+## 1.4.0
+
+- **Ray-traced shadows** and **global illumination** now trace the game's own world, read from its
+  memory: every model it has loaded, with its textures, the terrain from its heightmap, and the
+  plants and props it scatters over the ground. Buildings, rocks and trees out of view keep casting
+  shadows and bouncing light, and see-through parts (fences, pylons, gratings, leaves) cast shadows
+  with their holes.
+- Fix rays going wrong everywhere when the camera got close to a wall.
+- Fix black patches in cliff hollows, from hidden rocks the game keeps there.
+- Fix terrain shadows flickering.
+- Fix tall lattices' shadows (power pylons) breaking up at the default sun size.
+
 ## 1.3.0
 
 - Add **Global illumination (GI-1.2)**: ray-traced indirect light after AMD's GI-1.2. Sunlight and
