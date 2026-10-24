@@ -21,4 +21,7 @@ namespace phantom_fx::frame_log
 void install(const std::filesystem::path& addonDirectory);
 bool installed();
 void uninstall();
+// While F10 records a frame, its dump folder (made if missing), for the add-on's own passes to save
+// what they draw from; empty otherwise.
+std::filesystem::path recordingDirectory();
 }

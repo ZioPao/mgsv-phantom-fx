@@ -15,7 +15,7 @@
 // place of their shadow maps or of none. A light's draws keep their stencil work but add no light;
 // Direct3D 12 traces its shadow, and at the sun pass's list, which waits for that, it is drawn again
 // with the game's own shader for its kind of light with specular and without a shadow map, scaled by
-// its shadow.
+// its shadow, within the volume (a box) its draws had.
 namespace phantom_fx::local_lights
 {
 struct Options

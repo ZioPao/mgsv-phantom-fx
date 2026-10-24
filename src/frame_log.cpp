@@ -8,6 +8,8 @@
 #include <Windows.h>
 #include <d3d11.h>
 #include <reshade.hpp>
+#include <wrl/client.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdio>
@@ -16,6 +18,7 @@
 #include <initializer_list>
 #include <map>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -58,11 +61,31 @@ struct Texture
     DXGI_FORMAT format{};
 };
 
+// What a dumped indexed draw drew, copied into staging buffers on the context that drew it, in its
+// order: the draw's indices, and the vertex buffer from its bound offset. The light passes' volumes
+// are clip-space vertices the engine writes each frame, so only this shows their shape.
+struct Vertices
+{
+    Microsoft::WRL::ComPtr<ID3D11Buffer> indices, vertices;
+    UINT indexSize{}, stride{}, count{};
+    INT base{};
+};
+
 struct Line
 {
     std::string text;
     std::vector<Texture> textures;
+    Vertices vertices;
 };
+
+// What dump.txt asks of a shader's next calls: their constants, and unless "constants" follows the
+// count, their textures too.
+struct DumpRequest
+{
+    int left{};
+    bool textures{};
+};
+enum class Dump { None, Constants, Everything };
 
 // Guarded by recordMutex.
 std::mutex recordMutex;
@@ -78,8 +101,9 @@ std::unordered_map<command_list*, std::vector<Line>> pending;
 // Textures of dumped calls in executed command lists, saved at the immediate context's next event,
 // when the GPU has run the list: inputs as the call read them, outputs as the list left them.
 std::vector<std::pair<std::uint64_t, Texture>> queuedTextures;
-// From dump.txt: shaders whose next calls also dump their constants and textures.
-std::unordered_map<std::string, int> dumpsLeft;
+std::vector<std::pair<std::uint64_t, Vertices>> queuedVertices;
+// From dump.txt: shaders whose next calls also dump their constants, vertices and textures.
+std::unordered_map<std::string, DumpRequest> dumpsLeft;
 // What the game last wrote to each constant buffer, per thread: each deferred context records
 // on its own thread and sees its own copy of a dynamic buffer.
 using ThreadBuffer = std::pair<DWORD, std::uint64_t>;
@@ -363,13 +387,75 @@ void save(std::uint64_t call, const Texture& texture)
     texture.resource->Release();
 }
 
+// Reads a staging buffer; waits for the GPU.
+std::vector<std::uint8_t> read(ID3D11Buffer* staging)
+{
+    D3D11_BUFFER_DESC desc{};
+    staging->GetDesc(&desc);
+    std::vector<std::uint8_t> contents;
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (SUCCEEDED(native(immediate)->Map(staging, 0, D3D11_MAP_READ, 0, &mapped)))
+    {
+        const auto* data = static_cast<const std::uint8_t*>(mapped.pData);
+        contents.assign(data, data + desc.ByteWidth);
+        native(immediate)->Unmap(staging, 0);
+    }
+
+    return contents;
+}
+
+// <call>-vertices.txt: each index's vertex as its first four floats (the light volumes' clip-space
+// position), then the bounds in normalized device coordinates of those in front of the eye.
+void save(std::uint64_t call, const Vertices& drawn)
+{
+    const auto indices = read(drawn.indices.Get()), vertices = read(drawn.vertices.Get());
+    std::error_code error;
+    std::filesystem::create_directories(dumpDirectory, error);
+    std::ofstream file(dumpDirectory / (std::to_string(call) + "-vertices.txt"), std::ios::trunc);
+    float low[2]{1e30f, 1e30f}, high[2]{-1e30f, -1e30f};
+    unsigned behind{};
+    for (UINT i = 0; i < drawn.count && (i + 1) * drawn.indexSize <= indices.size(); ++i)
+    {
+        std::uint32_t index{};
+        std::memcpy(&index, indices.data() + i * drawn.indexSize, drawn.indexSize);
+        const auto offset = (static_cast<std::int64_t>(drawn.base) + index) * drawn.stride;
+        file << i << ": index " << index;
+        if (offset < 0 || offset + 16 > static_cast<std::int64_t>(vertices.size()))
+        {
+            file << " (past the copied vertices)\n";
+            continue;
+        }
+
+        float position[4]{};
+        std::memcpy(position, vertices.data() + offset, sizeof(position));
+        file << " " << position[0] << " " << position[1] << " " << position[2] << " " << position[3] << '\n';
+        if (position[3] <= 0)
+        {
+            ++behind;
+            continue;
+        }
+
+        for (int axis = 0; axis < 2; ++axis)
+        {
+            low[axis] = std::min(low[axis], position[axis] / position[3]);
+            high[axis] = std::max(high[axis], position[axis] / position[3]);
+        }
+    }
+
+    file << "in front: x " << low[0] << " to " << high[0] << ", y " << low[1] << " to " << high[1] << "; " << behind << " behind the eye\n";
+}
+
 // Saves what executed command lists left; call with recordMutex held, on the immediate context.
-void saveQueuedTextures()
+void saveQueued()
 {
     for (const auto& [call, texture] : queuedTextures)
         save(call, texture);
 
+    for (const auto& [call, vertices] : queuedVertices)
+        save(call, vertices);
+
     queuedTextures.clear();
+    queuedVertices.clear();
 }
 
 // Writes a line in execution order: the immediate context's as they come, a command list's when
@@ -393,30 +479,73 @@ void emit(command_list* list, Line line)
     record << '#' << ++calls << ' ' << line.text << '\n';
     for (const auto& texture : line.textures)
         save(calls, texture);
+
+    if (line.vertices.indices) save(calls, line.vertices);
 }
 
 void emit(command_list* list, std::string text)
 {
-    emit(list, Line{std::move(text), {}});
+    emit(list, Line{std::move(text), {}, {}});
 }
 
-// Whether this call is one dump.txt asks for, counting it off.
-bool takeDump(std::initializer_list<const std::string*> hashes)
+// What of this call dump.txt asks for, counting it off.
+Dump takeDump(std::initializer_list<const std::string*> hashes)
 {
-    if (capture != Capture::Recording) return false;
+    if (capture != Capture::Recording) return Dump::None;
 
     std::lock_guard lock(recordMutex);
     for (const auto* hash : hashes)
     {
         const auto found = dumpsLeft.find(*hash);
-        if (found != dumpsLeft.end() && found->second > 0)
+        if (found != dumpsLeft.end() && found->second.left > 0)
         {
-            --found->second;
-            return true;
+            --found->second.left;
+            return found->second.textures ? Dump::Everything : Dump::Constants;
         }
     }
 
-    return false;
+    return Dump::None;
+}
+
+// Copies `size` bytes of `source` from `offset` into a new staging buffer, on `context` in its order.
+Microsoft::WRL::ComPtr<ID3D11Buffer> copyToStaging(ID3D11DeviceContext* context, ID3D11Buffer* source, UINT offset, UINT size)
+{
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    context->GetDevice(device.GetAddressOf());
+    const D3D11_BUFFER_DESC desc{size, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ};
+    Microsoft::WRL::ComPtr<ID3D11Buffer> staging;
+    if (!size || FAILED(device->CreateBuffer(&desc, nullptr, staging.GetAddressOf()))) return nullptr;
+
+    const D3D11_BOX box{offset, 0, 0, offset + size, 1, 1};
+    context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, source, 0, &box);
+
+    return staging;
+}
+
+// The indexed draw's indices and up to 64 KB of its vertices from where they are bound.
+Vertices copyVertices(ID3D11DeviceContext* context, UINT count, UINT first, INT base)
+{
+    constexpr UINT MostVertexBytes = 64 << 10;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> indexBuffer, vertexBuffer;
+    DXGI_FORMAT indexFormat{};
+    UINT indexOffset{}, stride{}, vertexOffset{};
+    context->IAGetIndexBuffer(indexBuffer.GetAddressOf(), &indexFormat, &indexOffset);
+    context->IAGetVertexBuffers(0, 1, vertexBuffer.GetAddressOf(), &stride, &vertexOffset);
+    if (!indexBuffer || !vertexBuffer) return {};
+
+    D3D11_BUFFER_DESC indexDesc{}, vertexDesc{};
+    indexBuffer->GetDesc(&indexDesc);
+    vertexBuffer->GetDesc(&vertexDesc);
+    const UINT indexSize = indexFormat == DXGI_FORMAT_R32_UINT ? 4 : 2;
+    const UINT indexStart = indexOffset + first * indexSize;
+    if (indexStart + count * indexSize > indexDesc.ByteWidth || vertexOffset >= vertexDesc.ByteWidth) return {};
+
+    Vertices drawn{copyToStaging(context, indexBuffer.Get(), indexStart, count * indexSize),
+        copyToStaging(context, vertexBuffer.Get(), vertexOffset, std::min(MostVertexBytes, vertexDesc.ByteWidth - vertexOffset)), indexSize, stride,
+        count, base};
+    if (!drawn.indices || !drawn.vertices) return {};
+
+    return drawn;
 }
 
 // The contents of the bound constant buffers as the game last wrote them on this thread. Buffers
@@ -481,9 +610,16 @@ template<class View, std::size_t Count> void collectTextures(std::vector<Texture
     }
 }
 
+// An indexed draw's indices: how many, the first, and the base vertex added to each.
+struct IndexRange
+{
+    UINT count{}, first{};
+    INT base{};
+};
+
 // One line per call: what it is, then the shaders and every bound input and output. Calls named
-// in dump.txt add their constants and save their textures.
-void recordCall(command_list* list, std::string line, bool compute)
+// in dump.txt add their constants and save their textures and, for an indexed draw, its vertices.
+void recordCall(command_list* list, std::string line, bool compute, const IndexRange* indexed = nullptr)
 {
     auto* context = native(list);
     Bound<ID3D11ShaderResourceView, ResourceSlots> resources;
@@ -534,10 +670,16 @@ void recordCall(command_list* list, std::string line, bool compute)
     appendBound(line, "vs cb", "b", vertexConstants);
     appendBound(line, compute ? "cs cb" : "ps cb", "b", constants);
 
-    Line entry{std::move(line), {}};
-    if (takeDump({&vertexHash, &pixelHash, &computeHash}))
+    Line entry{std::move(line), {}, {}};
+    const auto dump = takeDump({&vertexHash, &pixelHash, &computeHash});
+    if (dump != Dump::None)
     {
         entry.text += constantsOf("vs", vertexConstants, context) + constantsOf(stage, constants, context);
+        if (indexed) entry.vertices = copyVertices(context, indexed->count, indexed->first, indexed->base);
+    }
+
+    if (dump == Dump::Everything)
+    {
         collectTextures(entry.textures, compute ? "cs-t" : "ps-t", resources);
         collectTextures(entry.textures, compute ? "cs-u" : "ps-u", outputs);
         collectTextures(entry.textures, "rt", targets);
@@ -547,14 +689,22 @@ void recordCall(command_list* list, std::string line, bool compute)
     emit(list, std::move(entry));
 }
 
-std::unordered_map<std::string, int> readDumpList()
+// dump.txt: a line per shader, "<hash> <calls>", with " constants" after to leave out the textures.
+std::unordered_map<std::string, DumpRequest> readDumpList()
 {
-    std::unordered_map<std::string, int> list;
+    std::unordered_map<std::string, DumpRequest> list;
     std::ifstream file(outputDirectory / "dump.txt");
-    std::string hash;
-    int count{};
-    while (file >> hash >> count)
-        if (hash[0] != '#') list[hash] = count;
+    std::string text;
+    while (std::getline(file, text))
+    {
+        std::istringstream fields(text);
+        std::string hash, only;
+        int count{};
+        if (!(fields >> hash >> count) || hash[0] == '#') continue;
+
+        fields >> only;
+        list[hash] = {count, only != "constants"};
+    }
 
     return list;
 }
@@ -593,7 +743,7 @@ void onDestroyPipeline(device*, pipeline pipeline)
 void finishRecording()
 {
     std::lock_guard lock(recordMutex);
-    saveQueuedTextures();
+    saveQueued();
     record << '#' << ++calls << " present " << describe(backBuffer, DXGI_FORMAT_UNKNOWN) << '\n';
     record.close();
     log("Recorded " + std::to_string(calls) + " calls.");
@@ -670,8 +820,11 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
 bool onDrawIndexed(command_list* list, uint32_t indices, uint32_t instances, uint32_t first, int32_t offset, uint32_t firstInstance)
 {
     if (capture != Capture::Off)
+    {
+        const IndexRange range{indices, first, offset};
         recordCall(list, "draw_indexed " + std::to_string(indices) + " x" + std::to_string(instances) + " from " + std::to_string(first)
-            + " base " + std::to_string(offset) + (firstInstance ? " instance " + std::to_string(firstInstance) : ""), false);
+            + " base " + std::to_string(offset) + (firstInstance ? " instance " + std::to_string(firstInstance) : ""), false, &range);
+    }
 
     return false;
 }
@@ -851,7 +1004,7 @@ void onExecuteSecondary(command_list* list, command_list* secondary)
         return;
     }
 
-    saveQueuedTextures();
+    saveQueued();
     record << '#' << ++calls << " execute_command_list " << pointer(secondary) << (lines.empty() ? " (recorded before the capture)" : "")
            << '\n';
 
@@ -860,6 +1013,8 @@ void onExecuteSecondary(command_list* list, command_list* secondary)
         record << '#' << ++calls << "   " << line.text << '\n';
         for (auto& texture : line.textures)
             queuedTextures.emplace_back(calls, std::move(texture));
+
+        if (line.vertices.indices) queuedVertices.emplace_back(calls, std::move(line.vertices));
     }
 }
 
@@ -914,6 +1069,17 @@ void install(const std::filesystem::path& addonDirectory)
 bool installed()
 {
     return active;
+}
+
+std::filesystem::path recordingDirectory()
+{
+    if (capture != Capture::Recording) return {};
+
+    std::lock_guard lock(recordMutex);
+    std::error_code error;
+    std::filesystem::create_directories(dumpDirectory, error);
+
+    return dumpDirectory;
 }
 
 void uninstall()

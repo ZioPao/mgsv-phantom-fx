@@ -486,7 +486,7 @@ gi_scene::Geometry materialOf(const State& s, const ModelPart& part)
     if (texture == s.textures.end() || !texture->second.shared.resource) return geometry;
 
     geometry.texture = texture->second.index + 1;
-    if (part.maskInRed) geometry.flags |= GI_GEOMETRY_MASK_IN_RED;
+    if (part.textureIsMask) geometry.flags |= GI_GEOMETRY_MASK;
     if (part.alphaTested)
     {
         geometry.flags |= GI_GEOMETRY_ALPHA_TEXTURE;

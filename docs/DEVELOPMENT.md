@@ -243,7 +243,15 @@ reads state; the frame renders unchanged. Its files go into that folder:
   Once both are written, a "Frame captured" toast with the file name shows at the right of the screen.
 - `dump.txt` (`<checksum> <count>` per line) makes the first calls with those shaders add their
   constant buffer contents (as the game wrote them on that thread) and save their textures as DDS
-  in `frame-<n>/` once their command list has run.
+  in `frame-<n>/` once their command list has run, so a list's textures are as it left them, not as
+  each of its calls saw them. ` constants` after the count leaves the textures out. An indexed call
+  also saves `<call>-vertices.txt`: each index's vertex (its first four floats) and the bounds in NDC
+  of those in front of the eye.
+- With Ray-traced lights on, a dev build's redraw of the lights saves what it draws from into the same
+  folder, for each batch it draws: `lights-<n>-before-diffuse.dds` and `-specular` (the light targets),
+  `-after-` the same once drawn, `-share.dds` (the rays' share, R16), `-depth.dds` (64 bits a pixel, the
+  depth in the first 32) and `-lights.txt` (each light's shader, world position and way, colour, range,
+  whether traced and its volume's index count).
 
 The overlay's Diagnostics section has, for everyone: debug views of the motion vectors and of
 where the engine's object velocity was used, jitter off, the game's FXAA for comparison (DLSS stays
@@ -1419,7 +1427,9 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   instance's texture parameter named `Base_Tex_SRGB` (FMDL: mesh `+4` material instance; block 4 texture
   count `+6`, first parameter `+8`; block 7 parameters, name and texture; block 6 textures, path index;
   block 21 path hashes; block 22 name hashes); a mesh without one (a shadow-only decal) has its
-  `Mask_Tex_LIN` (`0x3ED9B75CD480`), the mask sampled in red. The names are Fox Engine's StrCode64: CityHash64 version
+  `Mask_Tex_LIN` (`0x3ED9B75CD480`), cut by its alpha as the game's shadow pass does (`ModelForward_Shadow`'s
+  pixel shader samples `t0.w`; checked 2026-10-24: a billboard tree's and a roof's stand-ins have the visible
+  mesh's own colour texture as their mask, whose red let the rays through). The names are Fox Engine's StrCode64: CityHash64 version
   1.0.3 of the name and its terminating zero, seeds `0x9AE16A3B2F90404F` and (first character << 16) +
   length, 48 bits kept (`Base_Tex_SRGB` = `0x41EA7BE81B61`). The game's loaded textures are in its
   texture manager ("Scene objects"); `gi_textures.cpp` copies each wanted one's levels of detail from the
@@ -1741,9 +1751,12 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   leaving the surface as the sun's do (see "Ray-traced shadows", where a ray leaves; cut-out geometry by
   its alpha, cut-out geometry without its texture letting light through) and ending short of the light
   by its size or 10 cm, whichever is more, as it sits inside its lamp's model. The share is the rays
-  that get through over those traced. The game gives most of its lights no size (`c4.w` 0: every
-  flashlight, the hall's spots, the point lights in the captures; the floodlights 0.24 m); those take a
-  bulb's 3 cm. Every traced light's light times the share is each light's own shadow where lights do
+  that get through over those traced. The game gives many of its lights no size (`c4.w` 0: every
+  flashlight, the hall's spots; the floodlights 0.24 m, most lamps indoors 0.42 to 0.45 m); those take a
+  bulb's 3 cm, as do the lights the game shadows with a shadow map (2026-10-24): their shader uses the
+  size only to widen the specular (`AdjustLightSizeFromDistance`, size over distance), and its shadow is
+  a fixed four-sample filter of the map, sharp whatever the size.
+  Every traced light's light times the share is each light's own shadow where lights do
   not overlap, and the right diffuse light in total where they do; specular takes the same share. Each
   blocked ray also gives the penumbra its blocker casts from the light, `2 r t / (d - t)`, in pixels.
 - **Filter** (`FilterLocalLightShadows`). Three edge-avoiding a-trous passes (Dammertz et al., 2010),
@@ -1774,11 +1787,14 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   (A-SVGF's filtered gradients). Both made dark speckles flicker everywhere once leaves let light through
   (noise alone tripped them), so it was removed; the stable light was worth more than the faster fade.
 - **Drawn again.** At the first list with a draw point, which waits for Direct3D 12, the immediate
-  context draws the frame's lights before the list runs: a full-screen triangle, cut by a scissor to the light's sphere
-  (a spot's: the bounding sphere of its cone) on screen, in the light vertex shaders' form (the clip-space
-  position twice, then where it samples the light targets). First the share (1 for a light not traced)
-  goes into both light targets' alpha; then its shader with specular, with the noted bindings and constants, adds
-  its light scaled by that alpha (`DEST_ALPHA`, `ONE`), as the lamp contact shadows do. A lig  run after it is drawn at once. A draw point is a pass after the game's lights and before anything
+  context draws the frame's lights before the list runs: each its volume as the game drew it (below), cut
+  by a scissor to the light's sphere (a spot's: the bounding sphere of its cone) on screen, in the light
+  vertex shaders' form (the clip-space position twice, then where it samples the light targets). On the
+  volume's far faces the share (1 for a light not traced) goes into both light targets' alpha, 0 where
+  the surface lies past them; on its near faces 0 where the surface lies short of them; then on the far
+  faces its shader with specular, with the noted bindings and constants, adds its light scaled by that
+  alpha (`DEST_ALPHA`, `ONE`), as the lamp contact shadows do. A light in a list run after it is drawn
+  at once. A draw point is a pass after the game's lights and before anything
   reads them: the sun pass; indoors, where no sun shines, the sky's specular alone in its place
   (`SunLight_ES`, `367e8f6128befd48f2840ab3d6ed19b4`: `cPSLight` `c2.x` and `c3`, the sky reflection at
   `t15`; its list waits as the sun pass's does, `global_illumination::noteSkySpecular`); or the
@@ -1786,7 +1802,31 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   resolve share one list; some scenes draw no sun pass at all (three captures on 2026-10-24, lamps lit
   through everything), and only the resolve is there. Until then the sun pass was the only draw point:
   in such a scene the first frame's lights were lost and the game's drew from then on. Only after a
-  frame with a draw point are the game's lights taken over, so menus and loading screens keep theirs. keep theirs.
+  frame with a draw point are the game's lights taken over, so menus and loading screens keep theirs.
+- **Within the game's volume** (2026-10-24). The game lights only inside each light's volume, however
+  far its falloff reaches: a box along the world's axes for a point light, for a spot its cone within
+  one, as if each light were bounded to its room. In a capture of a room (`frame-17555`), 96% of two red
+  lamps' 8 m spheres lay outside their 3.7 m high boxes, and a 100 m fill light's box lay wholly behind
+  the camera, so the game drew none of it. Until then the lights were drawn again over all their reach
+  and lit wherever no ray was stopped: a padded cell's upper walls in red, a lit wedge on a hall's
+  floor. As a lighting draw is noted, its indices and vertices (at most 138 and 46 in the captures) are
+  copied on its list (`CopySubresourceRegion`, into a 4 KB buffer used again once its light is drawn),
+  and a vertex shader reads them back. Their faces face out clockwise, Direct3D's front faces, so the
+  far faces are the back faces. A surface is inside where it lies short of the far faces and not short
+  of the near ones (ties inside), the test the game's two stencil draws make; the pixel shaders compare
+  against the light shaders' depth (`t2`, reversed). A volume that does not fit leaves its light drawn
+  over its reach as before; the log counts those. A spot's volume is not always along the world's axes:
+  the cells' moonlight has its cone within a box turned along the beam, which meets the floor only where
+  the light through the vent falls.
+- **Beams** (2026-10-24). A spot with a shadow map and a hard-edged cone (`c7.y`, 1 / its penumbra, at
+  least 1000) stays the game's, drawn with its shadow map, and is not traced: the padded cells'
+  moonlight through the vent (colour (16712, 23442, 41553), a 7 degree cone, `c7.y` 100000; every other
+  light in 13 captures had at most 66). Its light stands 3 m beyond the wall and 5.5 m up; in a capture
+  (`frame-125493`, the redraw's inputs saved, below) the share on the floor where the light through the
+  vent falls was 0.02, the same as where the wall stops it: something past the vent that the game's
+  shadow map leaves out blocked every ray. And at 20 to 40 times the room's lamps it drew nearly all of
+  the floor's rays across its 3.5 m wide cone, so the share there stayed near 0 and the lamps' light
+  went with it: a dark disc round a patch without slats, where the game draws the slats in a lit room.
 - **Developer.** "Log global illumination often" logs the light and each step's largest value every
   few frames (as each readback returns), to see which step holds light after a light goes away.
   Every ten seconds the log counts the lights drawn with their shadow and without it
@@ -1798,6 +1838,11 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
 Not handled:
 
 - Lights recorded after the kick are drawn without their shadow; the log tells how often.
+- The rays know only each light's reach, not its volume (that is on the GPU alone): the bounce lights
+  surfaces outside the volumes, a light whose volume is off screen can still take one of the 128, and a
+  light weighs in the share where its volume leaves it undrawn.
+- One share for all the lights: where a far brighter light is blocked, it draws most of a pixel's rays
+  and the share falls for the lights that reach it too (the beams above, until they were left out).
 - A light's specular takes the share its diffuse light gives; where lights overlap with different
   shadows, the specular's split between them is the diffuse light's.
 - Leaves lit from behind (the game's translucency) weigh nothing, so where only that light falls the

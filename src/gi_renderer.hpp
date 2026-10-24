@@ -56,7 +56,7 @@ using Vertex = std::array<float, 3>;
 // A mesh of a model: its index in the model file and its mesh group, whether its texture cuts holes
 // in it (a cut-out mesh), its material's base texture (its colour, and the alpha a cut-out mesh cuts
 // with: the path hash of its Base_Tex_SRGB, 0 without) or, for a mesh with none, its mask
-// (Mask_Tex_LIN, the mask in red), its vertices in object space and, when it has them, their texture
+// (Mask_Tex_LIN, cutting with its alpha), its vertices in object space and, when it has them, their texture
 // coordinates (two halves packed in a uint, a vertex each); its most detailed triangles, three indices
 // each. A skinned model's mesh also has each vertex's four bones (the model's bone numbers, 16 bits
 // each, the first lowest) and their weights (8-bit unorms, the first lowest).
@@ -67,7 +67,7 @@ struct ModelPart
     bool alphaTested{};
     bool leaf{}; // Leaves, which let light through (GI_GEOMETRY_LEAF)
     std::uint64_t baseTexture{};
-    bool maskInRed{};
+    bool textureIsMask{};
     std::vector<Vertex> vertices;
     std::vector<std::uint32_t> uvs;
     std::vector<std::uint16_t> indices;

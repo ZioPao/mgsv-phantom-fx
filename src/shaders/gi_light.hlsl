@@ -576,7 +576,7 @@ float3 HitAlbedo(float3 world, HashGridCache_Visibility visibility)
 
     // The texture's mean over a few texels' patch: the cells average the light over metres.
     SceneTriangle t = LoadTriangle(visibility.instanceIndex, visibility.geometryIndex, visibility.primitiveIndex);
-    if (t.geometry.texture && (t.geometry.flags & GI_GEOMETRY_MASK_IN_RED) == 0)
+    if (t.geometry.texture && (t.geometry.flags & GI_GEOMETRY_MASK) == 0)
     {
         Texture2D<float4> texture = g_SceneTextures[NonUniformResourceIndex(t.geometry.texture - 1)];
         uint width, height, levels;

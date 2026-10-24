@@ -106,9 +106,10 @@ constexpr std::uint64_t ParseBytesPerTake = 8ull << 20;
 constexpr std::uint8_t CastsNoShadow = 0x01, ShadowMapsOnly = 0x02;
 constexpr std::uint8_t CutOutAlpha = 0x20, TranslucentAlpha = 0x40, DecalAlpha = 0x80;
 // The StrCode64s of a material's texture parameters "Base_Tex_SRGB" (the colour, and a cut-out mesh's
-// alpha) and "Mask_Tex_LIN" (a shadow-only mesh's mask, its only texture): Fox Engine's string hash,
-// CityHash64 1.0.3 of the name and its terminating zero with seeds 0x9AE16A3B2F90404F and (first
-// character << 16) + length, 48 bits kept.
+// alpha) and "Mask_Tex_LIN" (a shadow-only mesh's mask, its only texture, often the visible mesh's
+// colour: the shadow pass cuts by its alpha, as ModelForward_Shadow's pixel shader samples t0.w):
+// Fox Engine's string hash, CityHash64 1.0.3 of the name and its terminating zero with seeds
+// 0x9AE16A3B2F90404F and (first character << 16) + length, 48 bits kept.
 constexpr std::uint64_t BaseTextureParameter = 0x41EA7BE81B61, MaskTextureParameter = 0x3ED9B75CD480;
 
 using VisibilityTest = void (*)(std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t,
@@ -464,7 +465,7 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
         if (!part.baseTexture)
         {
             part.baseTexture = textureOf(file, *layout, materialInstance, MaskTextureParameter);
-            part.maskInRed = part.baseTexture != 0;
+            part.textureIsMask = part.baseTexture != 0;
         }
 
         const bool textured = uvs && uvs->dataType == TwoHalves;

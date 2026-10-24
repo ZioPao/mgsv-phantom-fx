@@ -447,7 +447,7 @@ bool CutOutBlocks(uint row, uint primitive, float2 barycentrics, bool untextured
     }
 
     float4 texel = texture.SampleLevel(g_WrapSampler, uv, lod);
-    return ((geometry.flags & GI_GEOMETRY_MASK_IN_RED) ? texel.r : texel.a) >= geometry.alphaThreshold;
+    return texel.a >= geometry.alphaThreshold;
 }
 
 // Every ray's flags. The terrain is one-sided, as the game draws it: where its heightmap runs across a

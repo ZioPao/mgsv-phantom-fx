@@ -29,7 +29,7 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 #define GI_GEOMETRY_CUT_OUT       1u // Its texture cuts holes in it (leaves, nets, a pylon's lattice): non-opaque in its structure
 #define GI_GEOMETRY_UV            2u // Its vertices' fourth floats hold their texture coordinates, two halves
 #define GI_GEOMETRY_ALPHA_TEXTURE 4u // A cut-out geometry with its texture: the rays test its alpha (GIGeometry::alphaThreshold)
-#define GI_GEOMETRY_MASK_IN_RED   8u // Its texture is a mask (red), not a colour with alpha
+#define GI_GEOMETRY_MASK          8u // Its texture is a shadow-only mesh's mask: its alpha cuts, its colour is not the mesh's
 #define GI_GEOMETRY_LEAF          16u // Leaves (the object brush's bushes and grass): thin, they let light through (HitDirectLight)
 
 // The game's textures the scene holds at most (g_SceneTextures, gi_textures.hpp).
