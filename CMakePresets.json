@@ -18,10 +18,11 @@
     },
     {
       "name": "dev",
-      "displayName": "Windows x64 Release with the diagnostic log",
+      "displayName": "Windows x64 Release with the diagnostic log and the development tools",
       "inherits": "release",
       "cacheVariables": {
-        "PHANTOM_FX_DIAGNOSTIC_LOG": true
+        "PHANTOM_FX_DIAGNOSTIC_LOG": true,
+        "PHANTOM_FX_DEV_TOOLS": true
       }
     }
   ],

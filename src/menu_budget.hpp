@@ -10,8 +10,8 @@
 // the game, and PhantomFX-performance.txt.
 namespace phantom_fx::menu
 {
-// The window's sections, in the rail's order.
-enum class Section { Budget, Upscaling, Shadows, Lighting, Atmosphere, Camera, Display, World, Diagnostics };
+// The window's sections, in the rail's order. Only the dev build has Developer (dev_tools.hpp).
+enum class Section { Budget, Upscaling, Shadows, Lighting, Atmosphere, Camera, Display, World, Diagnostics, Developer };
 
 std::span<const fxui::Section> sections();
 

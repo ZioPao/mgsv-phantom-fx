@@ -3,6 +3,7 @@
 
 #include "atmosphere.hpp"
 #include "depth_of_field.hpp"
+#include "dev_tools.hpp"
 #include "global_illumination.hpp"
 #include "hdr.hpp"
 #include "indirect_light.hpp"
@@ -25,7 +26,7 @@ namespace
 using fxui::State;
 using performance::Pass;
 
-constexpr std::array<fxui::Section, 9> all{{
+constexpr std::array<fxui::Section, 10> all{{
     {"Budget", 0, true},
     {"Upscaling", fxui::hue::Teal},
     {"Shadows", fxui::hue::Straw},
@@ -35,6 +36,7 @@ constexpr std::array<fxui::Section, 9> all{{
     {"Display", fxui::hue::Sand},
     {"World"},
     {"Diagnostics", 0, false, true},
+    {"Developer"},
 }};
 
 struct Timed
@@ -84,7 +86,7 @@ int at(Section section)
 
 std::span<const fxui::Section> sections()
 {
-    return all;
+    return std::span(all).first(DevTools ? all.size() : all.size() - 1);
 }
 
 fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)

@@ -37,9 +37,12 @@ only feeds them (`DiagnosticLog` in `src/log.hpp`, tested with `if constexpr`):
 - the physical sky's parameters, copied back from the GPU every ten seconds;
 - the upscaler's frame counts every 1800 presents;
 - the shadow probe's findings, while its debug view shows;
-- Diagnostics, **Log global illumination often**, which shows only in this build.
+- Developer, **Log global illumination often**.
 
 Its log's first line says "with the diagnostic log". Builds for in-game checks use this preset.
+It also sets `PHANTOM_FX_DEV_TOOLS` (`DevTools` in `src/dev_tools.hpp`), which adds the overlay's
+**Developer** page, below Diagnostics: **Travel** (see "Travel"), the **Lua console** (see "Game
+Lua") and the log switch above.
 
 `cmake --install build/release --component addon --prefix <dir>` collects the add-on, its DLLs,
 player documentation and licenses for distribution. The DLLs are at the install root;
@@ -106,6 +109,9 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/game_loop.cpp`, `src/game_loop.hpp` | Hooks on the main loop's frame start and end, for Reflex, the weather menu and the draw distance |
 | `src/draw_distance.cpp`, `src/draw_distance.hpp` | Draw distance: wider streaming windows at a location's load, the level of detail and the models' and vegetation's cull lengths (see "Draw distance") |
 | `src/weather.cpp`, `src/weather.hpp` | The overlay's weather and time control, in Utility (see "Weather and time") |
+| `src/dev_tools.hpp` | Whether the build has the Developer page (the dev preset) |
+| `src/game_lua.cpp`, `src/game_lua.hpp` | Lua in the game's script state, and the Developer page's console (see "Game Lua") |
+| `src/travel.cpp`, `src/travel.hpp` | The Developer page's travel: free roam in another map (see "Travel") |
 | `src/sun_shadows.cpp`, `src/sun_shadows.hpp` | Soft shadows and Bend Studio's screen-space shadows on the sun: the trace and the sun pass's replacement draw |
 | `src/sun_shadows_shaders.hpp` | HLSL: Bend's trace ported to FXC, the game's sun light shaders rebuilt with soft shadows and the screen-space shadow |
 | `third_party/bend_sss/bend_sss_cpu.h` | Bend Studio's dispatch layout, unchanged (Apache License 2.0) |
@@ -312,6 +318,55 @@ the state back there for the overlay. Nothing is saved.
   (the weather system's: user hash `0x7F387469`, transition 20) to the instant one first; with its
   own transition the forced weather stayed in place. `StoreToSVars` copies every slot into the save, so a checkpoint keeps the
   override; the menu recognises its user id after a restart.
+
+### Game Lua
+
+`src/game_lua.cpp` runs Lua in the game's own script state, on the game thread at the main loop's
+frame start, the way the game's own calls into it run. The dev build's Developer page has a **Lua
+console** on it: Ctrl+Enter or Run runs the box's code at the next frame start, and the output box
+shows what it printed and returned, or its error with the stack.
+
+- **Lua.** Lua 5.1.5 is linked into the exe (its copyright string at `0x24B47A0`). The base
+  library's table at `0x24B6A70` gives `loadstring` (`0x1A2E2E0`), which calls `luaL_loadbuffer`
+  (`0x1A178E0`), and `pcall` (`0x1A2E6C0`), which calls `lua_pcall` (`0x1A116C0`);
+  `luaL_checklstring` calls `lua_tolstring` (`0x1A12150`); `tostring` pushes `"nil"` with
+  `lua_pushlstring` (`0x1A118C0`); `pcall` also calls `lua_pushboolean` (`0x1A11750`). Traced for
+  5 s in free roam, every `lua_pcall` came from the main loop's thread on one `lua_State`.
+- **Script system.** The game calls Lua inside a scope: `0x6A590(scope, restoreTop, runQueued)`
+  takes the reader lock at `0x2B64200`, runs the system's queued work when asked (`0x6AD50`; the
+  game's per-frame callers ask) and notes the stack's top; `0x6A960(scope)` restores the top when
+  asked and releases the lock. The scope holds the system (the pointer at `0x2B641F0`), the top and
+  the restore flag; the system's `lua_State` is at `+ 8`. A chunk run this way returned
+  `vars.missionCode` and the player's position in game, with the stack balanced after.
+- **Harness.** Each run loads a small Lua function and calls it with the code, a chunk name and
+  whether to try the code as an expression first (`return ` before it, as an interactive Lua does).
+  While the code runs, `print` collects lines in place of the game's; the code runs under `xpcall`
+  with `debug.traceback` when the game has the debug library. The lines and the returned values come
+  back as one string; an error is raised again with the lines before it.
+
+### Travel
+
+The dev build's Developer page has **Travel** (`src/travel.cpp`): Afghanistan, Africa or Mother
+Base free roam from any free roam, after one loading screen, without the helicopter and the sortie
+screens. It runs a chunk through Game Lua, and a toast says whether the game left or why not.
+
+- **Leaving.** The chunk calls `TppMission.ReserveMissionClear` with `FROM_HELISPACE` and the
+  destination's free roam (30010, 30020, 30050), the call free roam's own scripts make; the free
+  roam sequence then ends the mission (`MissionGameEnd`, `MissionFinalize`) and
+  `TppMission.ExecuteMissionFinalize` saves and loads the next one. It only runs in free roam
+  (elsewhere it would end a story mission), when `TppMission.CheckMissionState()` allows it, and
+  not into Mother Base while one of its cutscenes waits (`gvars.mbFreeDemoPlayNextIndex`), which
+  can stop loading with the player on foot.
+- **Arrival.** Free roam to free roam, the game's `LoadingPositionToFree` puts the player where they
+  stood, which in another map is mid-air or underground. The chunk wraps
+  `TppMain.ReservePlayerLoadingPosition` once: after the game's own, when `vars.missionCode` is the
+  destination, it sets the start on foot, clears the helicopter route, sets the initial and mission
+  start positions and points `StageBlockCurrentPositionSetter` there, so the map streams in around
+  it. The spots: in Afghanistan (1448.61, 337.787, 1466.4) and Africa (-510.73, 5.09, 1183.02),
+  where `TppPlayer.FailSafeInitialPositionForFreePlay` puts a player found off the map; at Mother
+  Base (9.12, 8.75, -42.43), the Command platform's first helipad (landing point
+  `cl00pl0_mb_fndt_plnt_heli_30050` in `mbdvc_map_mbstage_parameter.lua`, the same in every
+  layout).
 
 ## How Fox Engine renders
 
@@ -1732,7 +1787,7 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   through everything), and only the resolve is there. Until then the sun pass was the only draw point:
   in such a scene the first frame's lights were lost and the game's drew from then on. Only after a
   frame with a draw point are the game's lights taken over, so menus and loading screens keep theirs. keep theirs.
-- **Diagnostics.** "Log global illumination often" logs the light and each step's largest value every
+- **Developer.** "Log global illumination often" logs the light and each step's largest value every
   few frames (as each readback returns), to see which step holds light after a light goes away.
   Every ten seconds the log counts the lights drawn with their shadow and without it
   (recorded after the kick, or not traced), those left at the kicks for another frame's camera or over

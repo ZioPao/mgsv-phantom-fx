@@ -247,6 +247,9 @@ void endCombo();
 
 bool checkbox(const char* label, bool& value, const char* tip = nullptr);
 bool button(const char* label, const char* tip = nullptr, bool enabled = true);
+// A box of text across the item, `lines` tall: text to edit, such as code, true when Ctrl+Enter
+// submits it; or, read-only, text to select and copy, such as output.
+bool textBox(const char* id, std::span<char> text, float lines, bool readOnly = false);
 // Text under a control, in the control's column.
 void hint(std::string_view text);
 

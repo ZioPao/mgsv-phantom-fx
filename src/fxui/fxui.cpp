@@ -1338,6 +1338,24 @@ bool button(const char* label, const char* tip, bool enabled)
     return pressed;
 }
 
+bool textBox(const char* id, std::span<char> text, float lines, bool readOnly)
+{
+    if (hidden() || text.empty()) return false;
+
+    const ImVec2 padding{px(8), px(6)};
+    const ImVec2 size{std::min(px(SummaryWidth), ImGui::GetContentRegionAvail().x), std::round(ImGui::GetTextLineHeight() * lines + padding.y * 2)};
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, padding);
+    // Ctrl+Enter submits a multi-line box; Enter starts a new line.
+    const ImGuiInputTextFlags flags = readOnly ? ImGuiInputTextFlags_ReadOnly : ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AllowTabInput;
+    const bool submitted = ImGui::InputTextMultiline(id, text.data(), text.size(), size, flags, nullptr, nullptr);
+    ImGui::PopStyleVar();
+    // Submitting ends the edit; the box takes the keyboard again for the next one.
+    if (submitted) ImGui::SetKeyboardFocusHere(-1);
+    gap(6);
+
+    return submitted && !readOnly;
+}
+
 void hint(std::string_view text)
 {
     if (hidden()) return;
