@@ -241,11 +241,12 @@ void drawLighting(Settings& wanted)
 
     if (const fxui::Item item({.id = "globalIllumination",
             .name = "Global illumination",
-            .tech = "GI-1.2",
+            .tech = "NRD",
             .tag = "Experimental",
-            .tip = "Ray-traced indirect light after AMD's GI-1.2: sunlight and skylight bounce between surfaces, also those off screen, and the sky "
-                   "only lights what it can reach. It replaces the game's baked probe light and SSAO, and GTVBAO and SSILVB while on. Needs a GPU "
-                   "that traces rays (DXR 1.1). Off keeps the game's indirect light.",
+            .tip = "Ray-traced indirect light: a ray for every 2 x 2 pixels, each hit lit afresh by the sun and the lights, its bounce from a "
+                   "light cache, then NVIDIA's NRD denoiser. Sunlight, skylight and lamplight bounce between surfaces, also those off screen, and "
+                   "the sky only lights what it can reach. It replaces the game's baked probe light and SSAO, and GTVBAO and SSILVB while on. Needs "
+                   "a GPU that traces rays (DXR 1.1). Off keeps the game's indirect light.",
             .summary = "Sun and sky light bounce between surfaces, also those off screen, in place of the game's baked light.",
             .keywords = "RT DXR GI strength"});
         item)

@@ -39,7 +39,7 @@ enum class Pass : std::size_t
     DofSetup, DofGather, DofComposite,
     GiInputs, GiProbeLight, GiCombine, GiWait, LocalLights,
     // On Direct3D 12
-    RayTracedScene, SunShadowRays, SunShadowDenoiser, LightShadowRays, LightShadowFilter, GiProbes, GiResolve,
+    RayTracedScene, SunShadowRays, SunShadowDenoiser, LightShadowRays, LightShadowFilter, GiRays, GiDenoiser,
     HdrEncode, HdrDecode, HdrGrade,
     Count
 };

@@ -23,8 +23,8 @@ struct Textures
     ID3D11Texture2D* output{};   // R16G16B16A16_FLOAT, what Direct3D 11 reads back
     ID3D11Texture2D* shadow{};   // R16_FLOAT, the sun's ray-traced shadow; null while off
     ID3D11Texture2D* shadowDebug{}; // R8G8B8A8_UNORM, the shadow debug view (DebugShadows); null while off
-    // A copy of the game's velocity for its moving meshes, for the shadow denoiser (g_ObjectVelocity in
-    // gi_shadow.hlsli), as the game's view reads it; null when this frame's did not come before the kick.
+    // A copy of the game's velocity for its moving meshes, for the denoisers (g_ObjectVelocity in
+    // gi_common.hlsli), as the game's view reads it; null when this frame's did not come before the kick.
     ID3D11Texture2D* velocity{};
     DXGI_FORMAT velocityFormat{};
     ID3D11Texture2D* localLightShadow{}; // R16_FLOAT, the share of the point and spot lights' light that reaches; null without lights
@@ -46,7 +46,6 @@ struct LocalLight
     float factor{};
     float addedDistance{}, leastDistance{}; // A point's: its distance is at least the least, plus the added
     float radius{};                         // Its shadow rays spread over a disc this wide around it
-    bool flashlight{};                      // Its bounce is lit afresh at each hit, not through the cache (gi_light.hlsl, FlashlightLight)
 };
 
 using Matrix = std::array<float, 16>; // Rows applied as dot(row, v), as the engine's
@@ -147,6 +146,8 @@ struct Frame
     Textures textures;
     std::uint32_t width{}, height{};
     Matrix viewProjection{}, previousViewProjection{};
+    Matrix view{}, projection{}, previousView{}, previousProjection{}; // The engine's m_view and m_projection (cPSScene c8, c4)
+    bool cameraCut{}; // The light's denoiser drops its history (camera::cameraCut)
     std::array<float, 3> eye{}, previousEye{};
     float nearPlane{}, farPlane{};
     float verticalFov{}; // Radians

@@ -146,8 +146,8 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
     // Direct3D 12 works, so its inputs and wait, less all the Direct3D 12 passes, are the hand-over.
     const Effect tracers[]{{"globalIllumination", global}, {"rayTracedShadows", rayTracedShadows}, {"rayTracedLights", rayTracedLights}};
     float traced{};
-    for (const auto pass : {Pass::RayTracedScene, Pass::SunShadowRays, Pass::SunShadowDenoiser, Pass::LightShadowRays, Pass::LightShadowFilter, Pass::GiProbes,
-             Pass::GiResolve})
+    for (const auto pass : {Pass::RayTracedScene, Pass::SunShadowRays, Pass::SunShadowDenoiser, Pass::LightShadowRays, Pass::LightShadowFilter, Pass::GiRays,
+             Pass::GiDenoiser})
         traced += timed(pass);
 
     const float handOver = std::max(0.0f, timed(Pass::GiInputs) + timed(Pass::GiWait) - traced);
@@ -201,7 +201,7 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
         {{Pass::LampTraces, "Traces"}, {Pass::LampShadows, "Shadow draws"}});
     add({.id = "globalIllumination", .name = "Global illumination", .tech = "GI-1.2", .section = at(Section::Lighting), .state = global,
             .toggle = &wanted.globalIllumination, .message = messageFor(global, rayTracing)},
-        {{Pass::GiProbes, "Probe rays and the light cache"}, {Pass::GiResolve, "Interpolation and denoiser"},
+        {{Pass::GiRays, "Rays and the light cache"}, {Pass::GiDenoiser, "Denoiser and render size"},
             {Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}});
     add({.id = "ambientOcclusion", .name = "Ambient occlusion", .tech = "GTVBAO", .section = at(Section::Lighting), .state = occlusion,
             .toggle = &wanted.ambientOcclusion, .replacedBy = "globalIllumination", .message = messageFor(occlusion, occlusionProblem)},

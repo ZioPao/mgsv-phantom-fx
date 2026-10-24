@@ -377,13 +377,21 @@ void copyTerrain(const engine_scene::TerrainInputs& inputs, gi_renderer::Frame& 
     frame.terrain = terrain;
 }
 
-gi_renderer::Matrix projectionViewOf(const camera::SceneConstants& scene)
+// The rows of one of cPSScene's matrices from its first register: m_projectionView c0, m_projection c4, m_view c8.
+constexpr int ProjectionRows = 4, ViewRows = 8;
+
+gi_renderer::Matrix rowsOf(const camera::SceneConstants& scene, int first)
 {
     gi_renderer::Matrix matrix{};
     for (int row = 0; row < 4; ++row)
-        for (int column = 0; column < 4; ++column) matrix[row * 4 + column] = scene.c[row][column];
+        for (int column = 0; column < 4; ++column) matrix[row * 4 + column] = scene.c[first + row][column];
 
     return matrix;
+}
+
+gi_renderer::Matrix projectionViewOf(const camera::SceneConstants& scene)
+{
+    return rowsOf(scene, 0);
 }
 
 // Diagnostics: the light the scene gets, every ten seconds.
@@ -427,7 +435,7 @@ void logStatus()
 
     lastStatus = now;
     log("Global illumination: " + engine_scene::poseTiming() + ".");
-    log("Global illumination: " + status() + "; the shadow denoiser had the game's velocity for moving meshes in "
+    log("Global illumination: " + status() + "; the denoisers had the game's velocity for moving meshes in "
         + std::to_string(kicksWithObjectVelocity.exchange(0)) + " frames, not in " + std::to_string(kicksWithoutObjectVelocity.exchange(0)));
 
     const auto work = gi_inputs::takeWork();
@@ -534,12 +542,13 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     endStep(TexturesStep);
     if (const auto terrain = engine_scene::takeTerrain()) copyTerrain(*terrain, frame);
 
-    // The game's velocity for its moving meshes, for the shadow denoiser: only this frame's, drawn
-    // before this list, at the shadows' size.
+    // The game's velocity for its moving meshes, for the shadows' and the light's denoisers: only this
+    // frame's, drawn before this list, at the render size.
     DXGI_FORMAT velocityFormat{};
-    const bool velocityCopied = shadow && objectVelocityDrawn && objectVelocity && sizeOf(objectVelocity.Get()) == sizeOf(depth)
+    const bool wantsVelocity = shadow || (options.enabled && options.light);
+    const bool velocityCopied = wantsVelocity && objectVelocityDrawn && objectVelocity && sizeOf(objectVelocity.Get()) == sizeOf(depth)
         && copyShared(objectVelocity.Get(), objectVelocityCopy, velocityFormat);
-    if (shadow) ++(velocityCopied ? kicksWithObjectVelocity : kicksWithoutObjectVelocity);
+    if (wantsVelocity) ++(velocityCopied ? kicksWithObjectVelocity : kicksWithoutObjectVelocity);
 
     endStep(TerrainStep);
     const auto inputsReady = ++fenceValue;
@@ -553,6 +562,11 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     frame.height = depthOut.height;
     frame.viewProjection = projectionViewOf(*sceneCamera);
     frame.previousViewProjection = projectionViewOf(*previousCamera);
+    frame.view = rowsOf(*sceneCamera, ViewRows);
+    frame.projection = rowsOf(*sceneCamera, ProjectionRows);
+    frame.previousView = rowsOf(*previousCamera, ViewRows);
+    frame.previousProjection = rowsOf(*previousCamera, ProjectionRows);
+    frame.cameraCut = camera::cameraCut(camera::viewOf(*previousCamera), camera::viewOf(*sceneCamera));
     for (int i = 0; i < 3; ++i)
     {
         frame.eye[i] = sceneCamera->c[20][i];

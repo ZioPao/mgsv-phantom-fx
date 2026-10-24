@@ -36,6 +36,12 @@ RWStructuredBuffer<uint> g_Counters : register(u4);
 RWStructuredBuffer<uint4> g_DispatchArgs : register(u5);
 RWStructuredBuffer<uint4> g_GeometryAlbedo : register(u6); // Sums of linear albedo x 255 and their count, by geometry
 
+// The game's velocity for its moving meshes (characters, the horse, trees in the wind) as its velocity
+// passes drew it this frame, when it came in time (objectMotion.x): R 1 where one drew, B and A the
+// screen motion from the last frame to this one in pixels / 64, y down, stored as 0.5 v + 0.5 in 8 bits
+// (docs/DEVELOPMENT.md, "Velocity"). It carries the frame's jitter, as the camera's motion does here.
+Texture2D<float4> g_ObjectVelocity : register(t17);
+
 SamplerState g_PointSampler : register(s0);
 SamplerState g_LinearSampler : register(s1);
 SamplerState g_WrapSampler : register(s2);
@@ -259,6 +265,21 @@ Random MakeRandom(uint seed, uint index)
     return result;
 }
 
+// Interleaved gradient noise (Jimenez, "Next Generation Post Processing in Call of Duty: Advanced
+// Warfare", SIGGRAPH 2014): a number in [0, 1) per pixel that differs most between neighbours, moving
+// on each frame as its temporal form does.
+float InterleavedGradientNoise(uint2 pixel, uint frame)
+{
+    float2 p = float2(pixel) + 5.588238f * float(frame & 63u);
+    return frac(52.9829189f * frac(dot(p, float2(0.06711056f, 0.00583715f))));
+}
+
+// Point `index` of Roberts' R2 sequence: 2D points that fill the unit square evenly however many are taken.
+float2 R2(uint index)
+{
+    return frac(float(index) * float2(0.7548776662466927f, 0.5698402909980532f));
+}
+
 // ---- Spherical harmonics (Capsaicin) ----
 
 void SH_GetCoefficients(float3 direction, out float coefficients[9])
@@ -301,6 +322,21 @@ void SH_GetCoefficients_ClampedCosine_Cone(float3 lobe, float coneThetaMax, out 
     coefficients[6] = +0.2477079561003757f * band2 * (3.f * lobe.z * lobe.z - 1.f);
     coefficients[7] = -0.8580855308097834f * band2 * lobe.x * lobe.z;
     coefficients[8] = +0.4290427654048917f * band2 * (lobe.x * lobe.x - lobe.y * lobe.y);
+}
+
+// ---- The game's motion ----
+
+// Whether a moving mesh of the game's covers a render pixel this frame, and its screen motion from the
+// last frame to this one, in pixels, y down. The game clamps its velocity to 64 pixels; beyond that only
+// the camera's motion is known.
+bool ObjectMotion(int2 pixel, out float2 moved)
+{
+    moved = 0.0f;
+    if (g_Frame.objectMotion.x == 0u) return false;
+
+    float4 velocity = g_ObjectVelocity.Load(int3(pixel, 0));
+    moved = (velocity.ba * 2.0f - 1.0f) * 64.0f;
+    return velocity.r > 0.5f && length(moved) < 63.0f;
 }
 
 // ---- The scene ----

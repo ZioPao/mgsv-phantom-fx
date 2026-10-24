@@ -23,6 +23,21 @@ FetchContent_Declare(minhook
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 FetchContent_MakeAvailable(minhook)
 
+# NVIDIA Real-Time Denoisers v4.18.0 for the global illumination (gi_denoiser.cpp): a static library
+# with its compute shaders embedded as DXIL, which its build compiles with the Windows SDK's DXC
+# through NVIDIA's ShaderMake (both it and MathLib are fetched by NRD's own build).
+FetchContent_Declare(nrd
+    GIT_REPOSITORY https://github.com/NVIDIA-RTX/NRD.git
+    GIT_TAG e06852bd545973cb224eb28820b891205cfc1624 # v4.18.0
+)
+set(NRD_STATIC_LIBRARY ON)
+set(NRD_EMBEDS_DXIL_SHADERS ON)
+set(NRD_EMBEDS_DXBC_SHADERS OFF)
+set(NRD_EMBEDS_SPIRV_SHADERS OFF)
+set(NRD_NORMAL_ENCODING 2) # R10G10B10A2_UNORM, as shaders/gi_light.hlsl packs it
+set(NRD_ROUGHNESS_ENCODING 1) # Linear
+FetchContent_MakeAvailable(nrd)
+
 # Downloads `source|path|sha256` entries from raw.githubusercontent.com into `directory`.
 function(download_pinned directory)
     foreach(entry IN LISTS ARGN)
@@ -148,13 +163,14 @@ set(GI_SHADER_DIR "${CMAKE_BINARY_DIR}/gi_shaders")
 set(GI_SHADER_INCLUDES "${CMAKE_SOURCE_DIR}/src/shaders/gi_shared.h" "${CMAKE_SOURCE_DIR}/src/shaders/gi_common.hlsli"
     "${CMAKE_SOURCE_DIR}/src/shaders/gi_shadow.hlsli" "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_filter.h"
     "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_tileclassification.h"
-    "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_util.h")
+    "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_util.h" "${nrd_SOURCE_DIR}/Shaders/NRD.hlsli")
 set(GI_SHADER_HEADERS)
 function(add_gi_kernels source)
     foreach(entry IN LISTS ARGN)
         set(output "${GI_SHADER_DIR}/${entry}.h")
         add_custom_command(OUTPUT "${output}"
-            COMMAND "${DXC_EXECUTABLE}" -nologo -T cs_6_5 -E ${entry} -HV 2021 -O3 -WX -I "${CMAKE_SOURCE_DIR}/third_party" -Fh "${output}" -Vn GI_${entry}
+            COMMAND "${DXC_EXECUTABLE}" -nologo -T cs_6_5 -E ${entry} -HV 2021 -O3 -WX -I "${CMAKE_SOURCE_DIR}/third_party" -I "${nrd_SOURCE_DIR}/Shaders"
+                -Fh "${output}" -Vn GI_${entry}
                 "${CMAKE_SOURCE_DIR}/src/shaders/${source}"
             DEPENDS "${CMAKE_SOURCE_DIR}/src/shaders/${source}" ${GI_SHADER_INCLUDES}
             COMMENT "DXC ${source}: ${entry}")
@@ -164,11 +180,8 @@ function(add_gi_kernels source)
 endfunction()
 file(MAKE_DIRECTORY "${GI_SHADER_DIR}")
 add_gi_kernels(gi_scene.hlsl ClearNewGeometries DebugScene ClearOutput TerrainGrid Skin)
-add_gi_kernels(gi_light.hlsl ClearCounters GenerateDispatch ClearBuffer ScanBlocks ScanBlockSums ScanAddOffsets ClearProbeMask FilterProbeMask
-    InitCachedTileLRU ReprojectScreenProbes CountScreenProbes ScatterScreenProbes SpawnScreenProbes CompactScreenProbes PatchScreenProbes
-    StoreSpawnCount SampleScreenProbes LearnAlbedo PopulateScreenProbes PurgeTiles PopulateMultibounceCells PopulateCells UpdateTiles
-    UpdateMultibounceCells ResolveCells BlendScreenProbes CopyProbes ReorderScreenProbes FilterScreenProbes ProjectScreenProbes
-    InterpolateScreenProbes ReprojectGI FilterGI)
+add_gi_kernels(gi_light.hlsl ClearCounters GenerateDispatch PrepareGuides TraceLight LearnAlbedo PurgeTiles PopulateMultibounceCells PopulateCells
+    UpdateTiles UpdateMultibounceCells ResolveLight CompositeLight)
 add_gi_kernels(gi_shadow.hlsl TraceSunShadows ClassifyShadowTiles DebugShadows ProbeShadows TraceLocalLightShadows FilterLocalLightShadows)
 add_gi_kernels(gi_shadow_filter.hlsl FilterShadows)
 add_custom_target(gi_kernels DEPENDS ${GI_SHADER_HEADERS})
@@ -179,13 +192,13 @@ add_library(phantom_fx SHARED src/upscaler_addon.cpp src/upscaler.cpp src/upscal
     src/log.cpp src/shader_bytecode.cpp src/presenter.cpp src/frame_generation.cpp src/game_loop.cpp src/shadows.cpp
     src/indirect_light.cpp src/photo_mode.cpp src/focus.cpp src/depth_of_field.cpp src/draw_distance.cpp src/hdr.cpp src/weather.cpp src/character.cpp src/game_lua.cpp src/travel.cpp src/atmosphere.cpp
     src/fidelityfx.cpp src/fsr_upscaler.cpp src/fsr_frame_generation.cpp src/performance.cpp src/performance_menu.cpp
-    src/global_illumination.cpp src/engine_scene.cpp src/engine_brush.cpp src/gi_inputs.cpp src/local_lights.cpp src/gi_renderer.cpp src/gi_scene.cpp src/gi_textures.cpp src/gi_light.cpp src/gi_lighting.cpp src/gi_shadow.cpp
+    src/global_illumination.cpp src/engine_scene.cpp src/engine_brush.cpp src/gi_inputs.cpp src/local_lights.cpp src/gi_renderer.cpp src/gi_scene.cpp src/gi_textures.cpp src/gi_light.cpp src/gi_denoiser.cpp src/gi_lighting.cpp src/gi_shadow.cpp
     "${CMAKE_BINARY_DIR}/version.rc")
 add_dependencies(phantom_fx gi_kernels)
 target_include_directories(phantom_fx PRIVATE src "${GI_SHADER_DIR}")
 target_include_directories(phantom_fx SYSTEM PRIVATE "${RESHADE_DIR}/include" "${RESHADE_DIR}/imgui" "${STREAMLINE_DIR}/include" third_party
     "${FIDELITYFX_DIR}")
-target_link_libraries(phantom_fx PRIVATE minhook ngx d3d11 d3d12 dxgi d3dcompiler)
+target_link_libraries(phantom_fx PRIVATE minhook ngx NRD d3d11 d3d12 dxgi d3dcompiler)
 target_compile_features(phantom_fx PRIVATE cxx_std_20)
 target_compile_definitions(phantom_fx PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX ImTextureID=ImU64 PHANTOM_FX_VERSION="${PROJECT_VERSION}"
     PHANTOM_FX_DIAGNOSTIC_LOG=$<BOOL:${PHANTOM_FX_DIAGNOSTIC_LOG}> PHANTOM_FX_DEV_TOOLS=$<BOOL:${PHANTOM_FX_DEV_TOOLS}>)
@@ -211,6 +224,7 @@ install(FILES "${DLSS_SDK_DIR}/LICENSE.txt" DESTINATION PhantomFX RENAME NVIDIA-
 install(FILES "${STREAMLINE_DIR}/license.txt" DESTINATION PhantomFX RENAME NVIDIA-Streamline-LICENSE.txt COMPONENT addon)
 install(FILES "${FIDELITYFX_DIR}/license.md" DESTINATION PhantomFX RENAME AMD-FSR-SDK-LICENSE.txt COMPONENT addon)
 install(FILES "${minhook_SOURCE_DIR}/LICENSE.txt" DESTINATION PhantomFX RENAME MinHook-LICENSE.txt COMPONENT addon)
+install(FILES "${nrd_SOURCE_DIR}/LICENSE.txt" DESTINATION PhantomFX RENAME NVIDIA-NRD-LICENSE.txt COMPONENT addon)
 install(FILES "${RESHADE_DIR}/LICENSE.md" DESTINATION PhantomFX RENAME ReShade-LICENSE.txt COMPONENT addon)
 install(FILES "${RESHADE_DIR}/imgui/LICENSE.txt" DESTINATION PhantomFX RENAME ImGui-LICENSE.txt COMPONENT addon)
 # The sharpening shader is ported from FidelityFX FSR 1 RCAS; the screen-space shadows are Bend Studio's;

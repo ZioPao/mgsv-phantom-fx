@@ -29,47 +29,26 @@
 #include <utility>
 
 // The kernels, compiled by DXC at build time (CMakeLists.txt).
-#include "BlendScreenProbes.h"
-#include "TerrainGrid.h"
-#include "Skin.h"
-#include "ClearNewGeometries.h"
 #include "ClassifyShadowTiles.h"
-#include "ClearBuffer.h"
 #include "ClearCounters.h"
+#include "ClearNewGeometries.h"
 #include "ClearOutput.h"
-#include "ClearProbeMask.h"
-#include "CompactScreenProbes.h"
-#include "CopyProbes.h"
-#include "CountScreenProbes.h"
+#include "CompositeLight.h"
 #include "DebugScene.h"
 #include "DebugShadows.h"
-#include "FilterGI.h"
-#include "FilterProbeMask.h"
-#include "FilterScreenProbes.h"
 #include "FilterLocalLightShadows.h"
 #include "FilterShadows.h"
 #include "GenerateDispatch.h"
-#include "InitCachedTileLRU.h"
-#include "InterpolateScreenProbes.h"
 #include "LearnAlbedo.h"
-#include "PatchScreenProbes.h"
 #include "PopulateCells.h"
-#include "ProbeShadows.h"
 #include "PopulateMultibounceCells.h"
-#include "PopulateScreenProbes.h"
-#include "ProjectScreenProbes.h"
+#include "PrepareGuides.h"
+#include "ProbeShadows.h"
 #include "PurgeTiles.h"
-#include "ReorderScreenProbes.h"
-#include "ReprojectGI.h"
-#include "ReprojectScreenProbes.h"
-#include "ResolveCells.h"
-#include "SampleScreenProbes.h"
-#include "ScanAddOffsets.h"
-#include "ScanBlockSums.h"
-#include "ScanBlocks.h"
-#include "ScatterScreenProbes.h"
-#include "SpawnScreenProbes.h"
-#include "StoreSpawnCount.h"
+#include "ResolveLight.h"
+#include "Skin.h"
+#include "TerrainGrid.h"
+#include "TraceLight.h"
 #include "TraceLocalLightShadows.h"
 #include "TraceSunShadows.h"
 #include "UpdateMultibounceCells.h"
@@ -125,13 +104,9 @@ constexpr std::uint32_t TerrainRingVertices = GI_TERRAIN_CELLS * GI_TERRAIN_CELL
 
 // The kernels' DXIL in gi_d3d12::Kernel's order.
 constexpr std::span<const unsigned char> Bytecode[]{GI_ClearNewGeometries, GI_DebugScene, GI_ClearOutput, GI_TerrainGrid, GI_Skin,
-    GI_ClearCounters, GI_GenerateDispatch, GI_ClearBuffer, GI_ScanBlocks, GI_ScanBlockSums, GI_ScanAddOffsets, GI_ClearProbeMask,
-    GI_FilterProbeMask, GI_InitCachedTileLRU, GI_ReprojectScreenProbes, GI_CountScreenProbes, GI_ScatterScreenProbes, GI_SpawnScreenProbes,
-    GI_CompactScreenProbes, GI_PatchScreenProbes, GI_StoreSpawnCount, GI_SampleScreenProbes, GI_LearnAlbedo, GI_PopulateScreenProbes,
-    GI_PurgeTiles, GI_PopulateMultibounceCells, GI_PopulateCells, GI_UpdateTiles, GI_UpdateMultibounceCells, GI_ResolveCells,
-    GI_BlendScreenProbes, GI_CopyProbes, GI_ReorderScreenProbes, GI_FilterScreenProbes, GI_ProjectScreenProbes, GI_InterpolateScreenProbes,
-    GI_ReprojectGI, GI_FilterGI, GI_TraceSunShadows, GI_ClassifyShadowTiles, GI_FilterShadows,
-    GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows};
+    GI_ClearCounters, GI_GenerateDispatch, GI_PrepareGuides, GI_TraceLight, GI_LearnAlbedo, GI_PurgeTiles, GI_PopulateMultibounceCells,
+    GI_PopulateCells, GI_UpdateTiles, GI_UpdateMultibounceCells, GI_ResolveLight, GI_CompositeLight, GI_TraceSunShadows, GI_ClassifyShadowTiles,
+    GI_FilterShadows, GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows};
 static_assert(std::size(Bytecode) == static_cast<std::size_t>(Kernel::Count));
 
 // One of the game's models on the GPU side: its meshes in the pool from `poolOffset`, made once it is
@@ -965,23 +940,42 @@ GIFrameConstants constantsOf(const Frame& frame, std::uint32_t newGeometries, st
     constants.shadowRange = {frame.shadowRange[0], frame.shadowRange[1], frame.shadowRange[2], frame.shadowRange[3]};
     constants.shadowParams = {frame.sunTangent, AlphaTestedBlocking, ShadowRayLength, 0};
     constants.rayCone = {2 * std::tan(frame.verticalFov / 2) / static_cast<float>(std::max(frame.height, 1u)), 0, 0, 0};
-    // The flashlights first: the light's hits take them afresh and the cache the rest (gi_light.hlsl, FlashlightLight).
     const auto localLights = std::min<std::size_t>(frame.localLights.size(), GI_MAX_LOCAL_LIGHTS);
-    std::uint32_t slot = 0, flashlights = 0;
-    for (const bool flashlight : {true, false})
-        for (std::size_t i = 0; i < localLights; ++i)
-        {
-            const auto& light = frame.localLights[i];
-            if (light.flashlight != flashlight) continue;
-
-            if (flashlight) ++flashlights;
-            constants.localLights[slot++] = {{light.position[0], light.position[1], light.position[2], light.range},
-                {light.axis[0], light.axis[1], light.axis[2], light.cosOuter}, {light.clearance, light.penumbraScale, light.coneExponent, light.maxFalloff},
-                {light.color[0], light.color[1], light.color[2], light.factor}, {light.sixteenth ? 1.0f : 0.0f, light.addedDistance, light.leastDistance, light.radius}};
-        }
-    constants.localLightCount = {slot, frame.localLightRays, flashlights, 0};
+    for (std::size_t i = 0; i < localLights; ++i)
+    {
+        const auto& light = frame.localLights[i];
+        constants.localLights[i] = {{light.position[0], light.position[1], light.position[2], light.range},
+            {light.axis[0], light.axis[1], light.axis[2], light.cosOuter}, {light.clearance, light.penumbraScale, light.coneExponent, light.maxFalloff},
+            {light.color[0], light.color[1], light.color[2], light.factor}, {light.sixteenth ? 1.0f : 0.0f, light.addedDistance, light.leastDistance, light.radius}};
+    }
+    constants.localLightCount = {static_cast<std::uint32_t>(localLights), frame.localLightRays, 0, 0};
 
     return constants;
+}
+
+// The camera for NRD: column-vector matrices stored by columns, the engine's x mirror moved from the
+// projection into the view (gi_denoiser::Camera).
+gi_denoiser::Camera denoiserCamera(const Frame& frame)
+{
+    const auto columns = [](const Matrix& rows, bool mirrorColumn0, bool mirrorRow0) {
+        std::array<float, 16> stored{};
+        for (int row = 0; row < 4; ++row)
+            for (int column = 0; column < 4; ++column)
+            {
+                const bool mirrored = (mirrorColumn0 && column == 0) || (mirrorRow0 && row == 0);
+                stored[column * 4 + row] = mirrored ? -rows[row * 4 + column] : rows[row * 4 + column];
+            }
+
+        return stored;
+    };
+
+    gi_denoiser::Camera camera;
+    camera.viewToClip = columns(frame.projection, true, false);
+    camera.previousViewToClip = columns(frame.previousProjection, true, false);
+    camera.worldToView = columns(frame.view, false, true);
+    camera.previousWorldToView = columns(frame.previousView, false, true);
+    camera.restart = frame.cameraCut;
+    return camera;
 }
 
 std::uint32_t groups(std::uint64_t threads, std::uint32_t size)
@@ -1135,13 +1129,13 @@ void logStats(State& s)
     std::memcpy(counters, mapped, sizeof(counters));
     s.statsCounters->Unmap(0, nullptr);
     const auto value = [&](std::uint32_t counter) { return std::to_string(counters[counter]); };
-    log("Global illumination's rays: " + std::to_string(counters[GI_COUNTER_COUNT - 1] * 64) + " from " + value(GI_COUNTER_COUNT - 1) + " probes, "
-        + value(GI_COUNTER_HITS) + " hits (" + value(GI_COUNTER_NEAR_HITS) + " within 25 cm, " + value(GI_COUNTER_FULL_BUCKETS)
-        + " without room in the cache), " + value(GI_COUNTER_VISIBILITY1) + " second bounces, " + value(GI_COUNTER_LIGHTS) + " hits lit, "
+    log("Global illumination's rays: " + value(GI_COUNTER_HITS) + " hits (" + value(GI_COUNTER_NEAR_HITS) + " within 25 cm), "
+        + value(GI_COUNTER_BOUNCE_HITS) + " bounces that hit (" + value(GI_COUNTER_VISIBILITY0) + " into the cache, " + value(GI_COUNTER_FULL_BUCKETS)
+        + " without room in it), " + value(GI_COUNTER_VISIBILITY1) + " multibounce hits, " + value(GI_COUNTER_LIGHTS) + " cache hits lit, "
         + value(GI_COUNTER_COPIES) + " copies of a surface skipped, " + value(GI_COUNTER_UPDATE_TILES) + " cache tiles updated.");
 
     constexpr const char* MaximumNames[GI_COUNTER_MAXIMA]{"a hit's albedo", "a hit's direct light", "a cell's direct light", "a cell's indirect light",
-        "a second bounce", "a probe ray", "a probe cell", "a pixel from the probes", "a denoised pixel"};
+        "a multibounce", "a ray's light", "a denoised light pixel", "a render pixel"};
     std::string maxima;
     for (std::uint32_t i = 0; i < GI_COUNTER_MAXIMA; ++i)
         maxima += std::string(i ? ", " : "") + MaximumNames[i] + " " + std::to_string(std::bit_cast<float>(counters[GI_COUNTER_MAXIMA_FIRST + i]));
@@ -1183,7 +1177,7 @@ void readTimes(State& s, std::uint32_t slot)
         return total;
     };
     const double scene = sum({RayTracedScene});
-    const double light = sum({GiProbes, GiResolve});
+    const double light = sum({GiRays, GiDenoiser});
     const double shadow = sum({SunShadowRays, SunShadowDenoiser, LightShadowRays, LightShadowFilter});
     s.sceneMilliseconds += (scene - s.sceneMilliseconds) * 0.05;
     s.lightMilliseconds += (light - s.lightMilliseconds) * 0.05;
@@ -1606,7 +1600,9 @@ Result render(const Frame& frame)
         auto* output = openShared(s, s.output, frame.textures.output, "Opening the output").Get();
         auto* shadow = traceShadows ? openShared(s, s.shadow, frame.textures.shadow, "Opening the shadow").Get() : nullptr;
         auto* shadowDebug = debugShadows ? openShared(s, s.shadowDebug, frame.textures.shadowDebug, "Opening the shadow debug view").Get() : nullptr;
-        auto* velocity = traceShadows && frame.textures.velocity ? openShared(s, s.velocity, frame.textures.velocity, "Opening the velocity").Get() : nullptr;
+        auto* velocity = (traceShadows || traceLight) && frame.textures.velocity
+            ? openShared(s, s.velocity, frame.textures.velocity, "Opening the velocity").Get()
+            : nullptr;
         auto* localLightShadow = traceLocalLights
             ? openShared(s, s.localLightShadow, frame.textures.localLightShadow, "Opening the lights' shadow").Get()
             : nullptr;
@@ -1710,7 +1706,7 @@ Result render(const Frame& frame)
         }
         if (traceLight) s.light->fill(constants, frame.verticalFov, parity);
         if (traceShadows) s.shadows->fill(constants);
-        constants.shadowMotion = {velocity ? 1u : 0u, 0, 0, 0};
+        constants.objectMotion = {velocity ? 1u : 0u, 0, 0, 0};
         constants.shadowDiagnostics = {frame.shadowsFromDepth ? 1u : 0u, 0, 0, 0};
         constants.lightDiagnostics = {frame.opaqueLeaves ? 1u : 0u, 0, 0, 0};
         std::memcpy(uploads.data + constantsOffset, &constants, sizeof(constants));
@@ -1765,6 +1761,15 @@ Result render(const Frame& frame)
         Recorder recorder(list, s.pipelines, s.dispatchSignature.Get(), s.dispatchArguments.Get());
         auto& marks = s.marks[slot];
         marks.clear();
+        recorder.rebinder = [&] {
+            list.SetDescriptorHeaps(1, heaps);
+            list.SetComputeRootSignature(s.rootSignature.Get());
+            list.SetComputeRootConstantBufferView(0, uploads.address + constantsOffset);
+            list.SetComputeRootDescriptorTable(2, descriptors.srvTable());
+            list.SetComputeRootDescriptorTable(3, descriptors.uavTable());
+            list.SetComputeRootShaderResourceView(4, scene.topLevel()->GetGPUVirtualAddress());
+            list.SetComputeRootDescriptorTable(5, textureRange);
+        };
         recorder.marker = [&](const char* phase, std::optional<performance::Pass> pass) {
             if (marks.size() >= MaxMarks) return;
 
@@ -1838,7 +1843,7 @@ Result render(const Frame& frame)
             recorder.mark("scene view");
             recorder.dispatch(Kernel::DebugScene, groups(frame.width, 8), groups(frame.height, 8));
         }
-        else if (traceLight) s.light->record(recorder, parity, depth, normal);
+        else if (traceLight) s.light->record(recorder, parity, denoiserCamera(frame), slot);
 
         if constexpr (DiagnosticLog)
         {
