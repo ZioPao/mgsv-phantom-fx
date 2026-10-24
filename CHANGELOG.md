@@ -1,5 +1,18 @@
 # Phantom FX changelog
 
+## 1.5.1
+
+- Ray-traced shadows: fix characters' own shadows. Hair cast none, the bald head under it cast a
+  jagged one, and a low-detail stand-in of the outfit shadowed the neck and chest.
+- Ray-traced shadows: fix stripes along the folds of Snake's suit, and black blotches flickering on
+  faces in the helicopter.
+- Ray-traced shadows: fix shadows of the leaves of a bush the camera backs into.
+- Global illumination: leaves let light through, so bushes are no longer black inside.
+- Global illumination: a flashlight's bounce lingers about a second again after the light moves.
+  1.5.0's faster fade made dark speckles flicker.
+- The Budget page splits the ray tracing's cost per effect: its rays, its filter and its share of
+  the scene.
+
 ## 1.5.0
 
 - Add **Ray-traced lights**: every lamp, spot light and flashlight casts shadows from rays traced

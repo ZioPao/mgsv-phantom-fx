@@ -39,6 +39,7 @@ struct Options
     bool debugShadows{}; // Diagnostics: the shadow debug view and probe (shadowDebug, shadowProbe), with the shadows
     bool shadowsFromDepth{}; // Diagnostics: every shadow ray from the depth and the G-buffer's normal, as before 2026-10-24
     bool bonesFromSnapshot{}; // Diagnostics: the characters' bones as the snapshot took them (engine_scene::setBonesFromSnapshot)
+    bool opaqueLeaves{};      // Diagnostics: leaves let no light through, as before 2026-10-24
     bool logOften{};         // Diagnostics: the light's statistics logged every few frames (as each readback returns), not every ten seconds
     // A cost measurement leaves the light passes out (the output keeps its last light).
     bool light = true;

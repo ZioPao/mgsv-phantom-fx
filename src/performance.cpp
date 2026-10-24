@@ -19,11 +19,12 @@ namespace
 using Microsoft::WRL::ComPtr;
 
 // A frame on the immediate context: the disjoint query around it, timestamps at its first command
-// list and at its present, and the passes its command lists ran.
+// list and at its present, and the passes its command lists ran; with the passes Direct3D 12 timed.
 struct Frame
 {
     ComPtr<ID3D11Query> disjoint, start, end;
     std::vector<TimedRun> runs;
+    Milliseconds direct3D12{};
     bool started{}; // A command list executed, so `start` was ended
     bool pending{}; // Closed and not read yet
 };
@@ -175,7 +176,7 @@ std::optional<Sample> read(Frame& frame)
         return std::nullopt;
     }
 
-    Sample sample;
+    Sample sample{.passes = frame.direct3D12};
     if (frame.started) sample.gpuFrame = millisecondsBetween(frame.start.Get(), frame.end.Get(), disjoint.Frequency).value_or(0.0f);
     for (const auto& run : frame.runs)
         if (const auto time = millisecondsBetween(run.start.Get(), run.end.Get(), disjoint.Frequency))
@@ -245,6 +246,7 @@ void openFrame(bool wanted)
     }
 
     immediate->Begin(frame.disjoint.Get());
+    frame.direct3D12 = {};
     frame.started = false;
     open = true;
     timing = true;
@@ -416,14 +418,6 @@ void writeReport()
 }
 }
 
-float Costs::total() const
-{
-    float sum{};
-    for (const auto pass : passes) sum += pass;
-
-    return sum;
-}
-
 void attach(ID3D11Device* gameDevice, ID3D11DeviceContext* gameImmediate, const std::filesystem::path& report) noexcept
 {
     std::lock_guard lock(timerMutex);
@@ -516,6 +510,23 @@ void forget(std::uint64_t list) noexcept
 
         giveBack(found->second);
         recordedRuns.erase(found);
+    }
+    catch (...)
+    {
+    }
+}
+
+void timedOnDirect3D12(const Milliseconds& passes) noexcept
+{
+    if (!timing.load(std::memory_order_relaxed)) return;
+
+    try
+    {
+        std::lock_guard lock(timerMutex);
+        if (!open) return;
+
+        auto& frame = frames[current].direct3D12;
+        for (std::size_t i = 0; i < passes.size(); ++i) frame[i] += passes[i];
     }
     catch (...)
     {

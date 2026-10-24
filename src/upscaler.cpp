@@ -338,7 +338,7 @@ void configureIndirectLight()
     global_illumination::configure({.enabled = global, .shadows = rayTraced, .withShadowMap = settings.vanillaShadowsWithRayTracing,
         .localLights = tracedLights, .lightRays = settings.rayQuality, .sunSize = settings.sunSize, .showScene = diagnostics.showTracedScene,
         .debugShadows = diagnostics.debugView == ShadowRaysView, .shadowsFromDepth = diagnostics.shadowsFromDepth, .bonesFromSnapshot = diagnostics.bonesFromSnapshot,
-        .logOften = diagnostics.logGlobalIlluminationOften, .light = !leftOut.globalLight});
+        .opaqueLeaves = diagnostics.opaqueLeaves, .logOften = diagnostics.logGlobalIlluminationOften, .light = !leftOut.globalLight});
     local_lights::configure({.enabled = tracedLights, .flashlightBrightness = settings.flashlightBrightness});
 }
 

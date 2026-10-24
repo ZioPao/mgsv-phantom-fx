@@ -1,6 +1,7 @@
 #pragma once
 
 #include "log.hpp"
+#include "performance.hpp"
 
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -8,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -27,7 +29,7 @@ enum class Kernel : std::uint8_t
     ClearCounters, GenerateDispatch, ClearBuffer, ScanBlocks, ScanBlockSums, ScanAddOffsets, ClearProbeMask, FilterProbeMask,
     InitCachedTileLRU, ReprojectScreenProbes, CountScreenProbes, ScatterScreenProbes, SpawnScreenProbes, CompactScreenProbes,
     PatchScreenProbes, StoreSpawnCount, SampleScreenProbes, LearnAlbedo, PopulateScreenProbes, PurgeTiles, PopulateMultibounceCells,
-    PopulateCells, UpdateTiles, UpdateMultibounceCells, ResolveCells, BlendScreenProbes, PropagateProbeChange, CopyProbes, ReorderScreenProbes,
+    PopulateCells, UpdateTiles, UpdateMultibounceCells, ResolveCells, BlendScreenProbes, CopyProbes, ReorderScreenProbes,
     FilterScreenProbes, ProjectScreenProbes, InterpolateScreenProbes, ReprojectGI, FilterGI,
     // gi_shadow.hlsl, gi_shadow_filter.hlsl
     TraceSunShadows, ClassifyShadowTiles, FilterShadows, DebugShadows, ProbeShadows, TraceLocalLightShadows, FilterLocalLightShadows,
@@ -278,13 +280,14 @@ public:
 
     ID3D12GraphicsCommandList4& commands() { return list; }
 
-    // Diagnostics: ends the phase timed before and starts timing `phase`; null ends the last.
-    void mark(const char* phase)
+    // Ends the phase timed before and starts timing `phase`, for the log and, under `pass`, the
+    // settings window's costs; null ends the last.
+    void mark(const char* phase, std::optional<performance::Pass> pass = std::nullopt)
     {
-        if (marker) marker(phase);
+        if (marker) marker(phase, pass);
     }
 
-    std::function<void(const char*)> marker;
+    std::function<void(const char*, std::optional<performance::Pass>)> marker;
 
 private:
     void bind(Kernel kernel, const std::array<std::uint32_t, 4>& parameters)

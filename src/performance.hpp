@@ -19,6 +19,9 @@
 // the frame whose present follows the list's execution. They are read back a few frames later,
 // without waiting, and averaged over about half a second.
 //
+// The ray tracing runs on its own Direct3D 12 queue, which times its phases itself (gi_renderer.cpp).
+// Direct3D 11 waits for it (GiWait), so the wait holds those phases, not on top of them.
+//
 // A timed pass misses what it changes in the game's own work: GTVBAO leaves the game's SSAO out,
 // the fog makes the game's fog texture larger. A measurement therefore times the GPU frame with
 // everything on, then leaves out one effect after another; each difference is what that effect
@@ -35,6 +38,8 @@ enum class Pass : std::size_t
     FogPass, SkyTables, FogShadow, FogScattering, FogIntegration, Sky,
     DofSetup, DofGather, DofComposite,
     GiInputs, GiProbeLight, GiCombine, GiWait, LocalLights,
+    // On Direct3D 12
+    RayTracedScene, SunShadowRays, SunShadowDenoiser, LightShadowRays, LightShadowFilter, GiProbes, GiResolve,
     HdrEncode, HdrDecode, HdrGrade,
     Count
 };
@@ -47,8 +52,6 @@ struct Costs
     float frame{};    // Between presents: the whole frame, as the frame rate shows it
     float gpuFrame{}; // The GPU's work on a frame, from its first command list to its present
     Milliseconds passes{}; // 0 where a pass did not run
-
-    float total() const;
 };
 
 // The real cost of each effect: the GPU frame with everything on, then with the effects left out
@@ -104,6 +107,10 @@ private:
 // FinishCommandList: what `context` recorded now belongs to `list`.
 void recorded(std::uint64_t list, std::uint64_t context) noexcept;
 void forget(std::uint64_t list) noexcept;
+
+// ---- The ray tracing's Direct3D 12 queue (gi_renderer.cpp) ----
+// A frame's passes there, once the GPU is past them; they count for the frame being timed now.
+void timedOnDirect3D12(const Milliseconds& passes) noexcept;
 
 // ---- Immediate context ----
 // Before the immediate context executes `list`.

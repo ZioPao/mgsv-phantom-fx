@@ -30,6 +30,7 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 #define GI_GEOMETRY_UV            2u // Its vertices' fourth floats hold their texture coordinates, two halves
 #define GI_GEOMETRY_ALPHA_TEXTURE 4u // A cut-out geometry with its texture: the rays test its alpha (GIGeometry::alphaThreshold)
 #define GI_GEOMETRY_MASK_IN_RED   8u // Its texture is a mask (red), not a colour with alpha
+#define GI_GEOMETRY_LEAF          16u // Leaves (the object brush's bushes and grass): thin, they let light through (HitDirectLight)
 
 // The game's textures the scene holds at most (g_SceneTextures, gi_textures.hpp).
 #define GI_MAX_TEXTURES 4096u
@@ -138,6 +139,7 @@ struct GIFrameConstants
     float4 shadowParams; // x: tangent of the sun's angular radius; y: how much sun an alpha-tested mesh blocks; z: ray length; w: 1 on a fresh start
     uint4 shadowMotion;  // x: 1 when g_ObjectVelocity (gi_shadow.hlsli) holds this frame's velocity of the game's moving meshes
     uint4 shadowDiagnostics; // x: 1 to start every shadow ray from the depth and the G-buffer's normal, as before 2026-10-24 (ShadowSurfaceAt)
+    uint4 lightDiagnostics;  // x: 1 to keep leaves from letting light through, as before 2026-10-24 (HitDirectLight)
     // The game's terrain (TerrainGrid in gi_scene.hlsl): a world point is (u, height, v) x scale +
     // offset, u and v its virtual heightmap coordinates; the page table's converter (the terrain
     // shaders' b4 c0 and c1).
@@ -194,7 +196,8 @@ struct GIShadowProbe
     float4 segments; // x: the near segment's end; y: the copy tolerance; z: the near hit's distance; w: the far hit's distance
     uint4 hits;      // x: copies of the surface skipped near; y: the near hit's instance + 1; z: the far hit's + 1; w: the whole ray's first hit past
                      // copies of the surface, cut-outs without their texture letting it through, + 1
-    uint4 hitGeometry; // Of that last hit: x its geometry's row of the table, y its kind (GI_INSTANCE_*) | its geometry's flags << 16
+    uint4 hitGeometry; // Of that last hit: x its geometry's row of the table, y its kind (GI_INSTANCE_*) | its geometry's flags << 16,
+                       // z its geometry in its instance | 1 << 31 on a front face, w asuint(its distance)
     float4 terrain;  // Of the same on the terrain, its triangle's highest corner: x its height (as the ring was last made), y the heightmap's there
                      // now, z the level of detail resident there now; w the frame's index (GIFrameConstants::dimensions.z)
     // The centre pixel's global illumination rays (GI_PROBE_LIGHT_RAYS, cosine-weighted, traced as the probes' are):
@@ -203,6 +206,12 @@ struct GIShadowProbe
                         // instance + 1, y its geometry | 1 << 31 on a front face, z its kind (GI_INSTANCE_*), w asuint(its distance)
     uint4 view;
     float4 shadow;   // x: the denoised shadow at the centre; y: this frame's ray (1 lit, 0 blocked)
+    // Where the shadow rays start (ShadowSurfaceAt, ShadowRayStart):
+    float4 start;    // xyz: the surface's normal towards the eye; w: 1 on the scene's own surface, 0 at the depth's point
+    float4 lift;     // xyz: the start's lift off that surface, world space; w: 1 when the rays leave its far side
+    uint4 startHit;  // On the scene's own surface, its triangle: x its instance + 1, y its geometry, z its primitive; w the
+                     // primitive of the whole ray's first hit (hits.w)
+    uint4 crossed;   // The first thing between the lifted start and the surface, from the start, as lightNearest; zeros for none
 };
 
 // D3D12_RAYTRACING_INSTANCE_DESC: the frame's instances as the top level holds them, which the

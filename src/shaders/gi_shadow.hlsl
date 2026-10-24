@@ -51,8 +51,8 @@ float BeyondShadowMap(float3 position, float depth)
 
 // ---- Where a pixel's shadow rays leave its surface ----
 // The scene's own surface where a ray from the eye through the pixel meets it near the depth's point: its
-// exact point and its triangle's normal, from which a ray leaves past that very surface by Wachter and
-// Binder's offset (OffsetFromTriangle, Ray Tracing Gems chapter 6), so nothing near it needs skipping.
+// exact point and its triangle's normal, from which a ray leaves past that very surface (LiftOffTriangle),
+// so nothing near it needs skipping.
 // Where the game drew something the scene lacks or holds at another level of detail, the depth's point
 // and the G-buffer's normal, with copies of the surface skipped (gi_common.hlsli). Until 2026-10-24
 // every ray left that way: the skip took a character pressed to a wall for a copy of the wall, and
@@ -62,6 +62,7 @@ struct ShadowSurface
     float3 position;
     float3 normal; // Towards the eye: the triangle's on the scene's surface, else the G-buffer's
     bool exact;    // On the scene's own surface
+    SceneHit hit;  // Diagnostics (the probe): the eye's ray's hit on it
 };
 
 ShadowSurface ShadowSurfaceAt(float3 position, float3 gbufferNormal)
@@ -70,14 +71,21 @@ ShadowSurface ShadowSurfaceAt(float3 position, float3 gbufferNormal)
     surface.position = position;
     surface.normal = gbufferNormal;
     surface.exact = false;
+    surface.hit = (SceneHit)0;
     // Diagnostics: every ray from the depth, as before.
     if (g_Frame.shadowDiagnostics.x) return surface;
 
+    // Only the stretch around the depth's point: the game hides what comes between the camera and the player
+    // (a bush the camera backs into) and the scene keeps it. Searched from the eye, the ray stopped on its
+    // leaves and the pixels behind them left from the depth's point, inside the coarser rock behind for some:
+    // the bush's leaves showed as shadows on what lay behind (the shadow probe, 2026-10-24: the camera's ray
+    // met leaves 0.1 to 1.4 m away, the game's surface 2.4 to 5.9 m).
     float3 toSurface = position - g_Frame.eye.xyz;
     float surfaceDistance = length(toSurface);
     float3 direction = toSurface / max(surfaceDistance, 1e-6f);
     float tolerance = 0.03f + 0.02f * surfaceDistance;
-    SceneHit hit = TraceClosest(g_Frame.eye.xyz, direction, 0.0f, surfaceDistance + tolerance, GI_MASK_SCENE, true, false, float2(0.0f, g_Frame.rayCone.x));
+    SceneHit hit = TraceClosest(g_Frame.eye.xyz, direction, max(surfaceDistance - tolerance, 0.0f), surfaceDistance + tolerance, GI_MASK_SCENE, true,
+        false, float2(0.0f, g_Frame.rayCone.x));
     if (!hit.hit || abs(hit.distance - surfaceDistance) > tolerance) return surface;
 
     SceneTriangle t = LoadTriangle(hit.instance, hit.geometry, hit.primitive);
@@ -89,7 +97,27 @@ ShadowSurface ShadowSurfaceAt(float3 position, float3 gbufferNormal)
     surface.normal = dot(normal, direction) > 0.0f ? -normal : normal;
     surface.position = (1.0f - hit.barycentrics.x - hit.barycentrics.y) * t.v0 + hit.barycentrics.x * t.v1 + hit.barycentrics.y * t.v2;
     surface.exact = true;
+    surface.hit = hit;
     return surface;
+}
+
+// A shadow ray's start off a point on the scene's own surface: 16 float steps of the point's largest
+// coordinate along the normal, about 2 mm at 1,200 m from the map's origin, where the game's maps reach.
+// The point is worked out from the triangle's corners, and the ray is traced in the instance's own space,
+// each a few steps of the largest coordinate off in any direction: a character's transform turns the
+// error of a large coordinate into the others. Wächter and Binder's offset (OffsetFromTriangle, 256 steps
+// of each coordinate on its own) lifted the start about 3 cm in the field, more than the folds of a
+// character's clothes, so it sat inside the next fold and his chest was shadowed in strips; and next to
+// nothing in the helicopter, whose floor lies near the map's origin across but 1,200 m up, so a face
+// turned sideways hit its own triangle in every other frame (the shadow probe, 2026-10-24). Coordinates
+// under 128 m count as 128: a large model's own coordinates reach that far.
+float3 LiftOffTriangle(float3 position, float3 normal)
+{
+    const float steps = 16.0f;
+    const float step = 1.0f / 8388608.0f; // A float step, relative
+
+    float largest = max(max(abs(position.x), abs(position.y)), max(abs(position.z), 128.0f));
+    return position + normal * (steps * step * largest);
 }
 
 // A shadow ray's start towards `toLight`: from the surface's side facing the light, as leaves lit from
@@ -97,7 +125,7 @@ ShadowSurface ShadowSurfaceAt(float3 position, float3 gbufferNormal)
 void ShadowRayStart(ShadowSurface surface, float3 toLight, out float3 origin, out float3 facing, out float tolerance)
 {
     facing = dot(surface.normal, toLight) >= 0.0f ? surface.normal : -surface.normal;
-    origin = surface.exact ? OffsetFromTriangle(surface.position, facing) : OffsetFromScreenSurface(surface.position, facing);
+    origin = surface.exact ? LiftOffTriangle(surface.position, facing) : OffsetFromScreenSurface(surface.position, facing);
     tolerance = surface.exact ? 0.0f : CopyTolerance(surface.position);
 }
 
@@ -329,6 +357,7 @@ RWTexture2D<float4> g_ShadowDebug : register(u78); // The debug view, blended ov
 
 struct DebugRay
 {
+    ShadowSurface surface; // The surface it leaves
     float3 origin, normal, direction;
     float tolerance, nearEnd, beyond;
     uint copies;      // Copies of the surface skipped in the near segment
@@ -341,7 +370,8 @@ DebugRay TraceDebugRay(float3 position, float3 normal, float depth)
 {
     DebugRay r;
     r.direction = g_Frame.sunDirection.xyz;
-    ShadowRayStart(ShadowSurfaceAt(position, normal), r.direction, r.origin, r.normal, r.tolerance);
+    r.surface = ShadowSurfaceAt(position, normal);
+    ShadowRayStart(r.surface, r.direction, r.origin, r.normal, r.tolerance);
     r.beyond = BeyondShadowMap(position, depth);
     float rayLength = g_Frame.shadowParams.z;
     r.nearEnd = min(r.tolerance / max(dot(r.direction, r.normal), 0.1f), rayLength);
@@ -451,13 +481,26 @@ void ProbeShadows(uint index : SV_GroupIndex)
             {
                 SceneTriangle t = LoadTriangle(r.anyHit.instance, r.anyHit.geometry, r.anyHit.primitive);
                 uint kind = InstanceKind(g_Instances[r.anyHit.instance]);
-                probe.hitGeometry = uint4(t.row, kind | (t.geometry.flags << 16), 0u, 0u);
+                probe.hitGeometry = uint4(t.row, kind | (t.geometry.flags << 16), r.anyHit.geometry | (r.anyHit.frontFace ? 1u << 31 : 0u),
+                    asuint(r.anyHit.distance));
                 if (kind & GI_INSTANCE_TERRAIN)
                 {
                     float3 corner = t.v0.y >= t.v1.y && t.v0.y >= t.v2.y ? t.v0 : t.v1.y >= t.v2.y ? t.v1 : t.v2;
                     probe.terrain.xyz = float3(corner.y, TerrainPoint(corner.xz).y, TerrainTile(TerrainUv(corner.xz)).z);
                 }
             }
+
+            // Where the rays start: the surface they leave, which side, and whatever the lift off it passes
+            // through on the way (back from the start, stopping short of the surface itself).
+            float3 lift = r.origin - r.surface.position;
+            float liftLength = length(lift);
+            probe.start = float4(r.surface.normal, r.surface.exact ? 1.0f : 0.0f);
+            probe.lift = float4(lift, dot(r.normal, r.surface.normal) < 0.0f ? 1.0f : 0.0f);
+            if (r.surface.exact)
+                probe.startHit = uint4(r.surface.hit.instance + 1, r.surface.hit.geometry, r.surface.hit.primitive, r.anyHit.primitive);
+            if (liftLength > 0.0f)
+                probe.crossed = ProbeHit(TraceClosest(r.origin, -lift / liftLength, 0.0f, 0.95f * liftLength, GI_MASK_SCENE, true, false,
+                    PixelCone(position, 0.0f)));
 
             uint tile = FFX_DNSR_Shadows_LinearTileIndex(FFX_DNSR_Shadows_GetTileIndexFromPixelPosition(centre), g_Frame.dimensions.x);
             bool rayLit = (g_Shadow_Masks[tile] & FFX_DNSR_Shadows_GetBitMaskFromPixelPosition(centre)) != 0;

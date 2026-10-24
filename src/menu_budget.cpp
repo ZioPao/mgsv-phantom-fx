@@ -11,8 +11,10 @@
 #include "shadows.hpp"
 #include "upscaler.hpp"
 
+#include <algorithm>
 #include <array>
 #include <initializer_list>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -61,8 +63,10 @@ std::string messageFor(State state, std::string_view problem, std::string_view u
     return {};
 }
 
+using Effect = std::pair<std::string_view, State>; // A line's id and state
+
 // A pass several effects share counts under the first of them that works, else the first that is on.
-std::string_view owner(std::initializer_list<std::pair<std::string_view, State>> effects)
+std::string_view owner(std::span<const Effect> effects)
 {
     for (const auto& [id, state] : effects)
         if (state == State::Working) return id;
@@ -129,27 +133,49 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
         outputMessage = "HDR is off for this display in Windows, so the game shows SDR.";
     }
 
-    // The replacement sun light pass runs for every sun shadow; the ray tracing's inputs and its wait
-    // serve all the ray-traced effects at once.
-    const auto sunLight = owner({{"rayTracedShadows", rayTracedShadows}, {"softShadows", softShadows}, {"sunContactShadows", sunContact}});
-    const auto rays = owner({{"globalIllumination", global}, {"rayTracedShadows", rayTracedShadows}, {"rayTracedLights", rayTracedLights}});
+    const auto timed = [&](Pass pass) { return costs.passes[static_cast<std::size_t>(pass)]; };
+
+    // The replacement sun light pass runs for every sun shadow.
+    const Effect sunShadows[]{{"rayTracedShadows", rayTracedShadows}, {"softShadows", softShadows}, {"sunContactShadows", sunContact}};
+    const auto sunLight = owner(sunShadows);
+
+    // Each ray-traced effect has its own rays on Direct3D 12. What they share, the scene and handing the
+    // frame over to Direct3D 12 and back, splits evenly between those working. Direct3D 11 waits while
+    // Direct3D 12 works, so its inputs and wait, less all the Direct3D 12 passes, are the hand-over.
+    const Effect tracers[]{{"globalIllumination", global}, {"rayTracedShadows", rayTracedShadows}, {"rayTracedLights", rayTracedLights}};
+    float traced{};
+    for (const auto pass : {Pass::RayTracedScene, Pass::SunShadowRays, Pass::SunShadowDenoiser, Pass::LightShadowRays, Pass::LightShadowFilter, Pass::GiProbes,
+             Pass::GiResolve})
+        traced += timed(pass);
+
+    const float handOver = std::max(0.0f, timed(Pass::GiInputs) + timed(Pass::GiWait) - traced);
+    const auto working = std::ranges::count(tracers, State::Working, &Effect::second);
+    const auto rays = owner(tracers);
+    // How much of what the ray tracing shares a line carries: an even share while any of them works,
+    // else all of it on the first that is on.
+    const auto shareOf = [&](std::string_view id, State state) {
+        if (std::ranges::find(tracers, id, &Effect::first) == std::ranges::end(tracers)) return 0.0f;
+        if (working) return state == State::Working ? 1.0f / static_cast<float>(working) : 0.0f;
+
+        return id == rays ? 1.0f : 0.0f;
+    };
 
     fxui::Budget result;
     result.gpuMs = costs.gpuFrame;
     result.frameMs = costs.frame;
     result.presented = presenter::presentedPerFrame();
     const auto add = [&](fxui::Line line, std::initializer_list<Timed> passes) {
-        const auto addPass = [&](Pass pass, std::string_view name) {
-            const float ms = costs.passes[static_cast<std::size_t>(pass)];
+        const auto addPass = [&](std::string_view name, float ms) {
             line.passes.push_back({name, ms});
             line.ms += ms;
         };
-        for (const auto& [pass, name] : passes) addPass(pass, name);
-        if (line.id == sunLight) addPass(Pass::SunLight, "Sun light pass (with the game's lighting)");
-        if (line.id == rays)
+        for (const auto& [pass, name] : passes) addPass(name, timed(pass));
+        if (line.id == sunLight) addPass("Sun light pass (with the game's lighting)", timed(Pass::SunLight));
+        if (const float share = shareOf(line.id, line.state); share > 0)
         {
-            addPass(Pass::GiInputs, "G-buffer pack, for all the ray tracing");
-            addPass(Pass::GiWait, "Waiting for all the ray tracing (Direct3D 12)");
+            const bool split = share < 1;
+            addPass(split ? "Its share of the ray-traced scene" : "The ray-traced scene", timed(Pass::RayTracedScene) * share);
+            addPass(split ? "Its share of the hand-over to Direct3D 12" : "Hand-over to Direct3D 12 (G-buffer pack, waits)", handOver * share);
         }
         result.lines.push_back(std::move(line));
     };
@@ -158,7 +184,7 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
         {{Pass::UpscalerInputs, "Motion vectors and inputs"}, {Pass::Upscaler, "DLSS or FSR"}, {Pass::UpscalerOutput, "Sharpening and output"}});
     add({.id = "rayTracedShadows", .name = "Ray-traced shadows", .section = at(Section::Shadows), .state = rayTracedShadows, .toggle = &wanted.rayTracedShadows,
             .message = messageFor(rayTracedShadows, rayTracing, "Ray-traced shadows are unavailable (see PhantomFX.log).")},
-        {});
+        {{Pass::SunShadowRays, "Shadow rays"}, {Pass::SunShadowDenoiser, "Denoiser"}});
     add({.id = "softShadows", .name = "Soft shadows", .tech = "PCSS", .section = at(Section::Shadows), .state = softShadows, .toggle = &wanted.softShadows,
             .replacedBy = "rayTracedShadows", .message = messageFor(softShadows, {}, "Soft shadows are unavailable (see PhantomFX.log).")},
         {});
@@ -167,13 +193,14 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
         {{Pass::SunTrace, "Contact shadow trace"}});
     add({.id = "rayTracedLights", .name = "Ray-traced lights", .section = at(Section::Shadows), .state = rayTracedLights, .toggle = &wanted.rayTracedLights,
             .message = messageFor(rayTracedLights, lightsProblem)},
-        {{Pass::LocalLights, "Lights with their traced shadows"}});
+        {{Pass::LightShadowRays, "Shadow rays"}, {Pass::LightShadowFilter, "Shadow filter"}, {Pass::LocalLights, "Lights with their traced shadows"}});
     add({.id = "lampContactShadows", .name = "Lamp contact shadows", .section = at(Section::Shadows), .state = lampContact, .toggle = &wanted.lightScreenSpaceShadows,
             .replacedBy = "rayTracedLights", .message = messageFor(lampContact, {}, "Contact shadows are unavailable (see PhantomFX.log).")},
         {{Pass::LampTraces, "Traces"}, {Pass::LampShadows, "Shadow draws"}});
     add({.id = "globalIllumination", .name = "Global illumination", .tech = "GI-1.2", .section = at(Section::Lighting), .state = global,
             .toggle = &wanted.globalIllumination, .message = messageFor(global, rayTracing)},
-        {{Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}});
+        {{Pass::GiProbes, "Probe rays and the light cache"}, {Pass::GiResolve, "Interpolation and denoiser"},
+            {Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}});
     add({.id = "ambientOcclusion", .name = "Ambient occlusion", .tech = "GTVBAO", .section = at(Section::Lighting), .state = occlusion,
             .toggle = &wanted.ambientOcclusion, .replacedBy = "globalIllumination", .message = messageFor(occlusion, occlusionProblem)},
         {{Pass::OcclusionPrefilter, "Depth prefilter"}, {Pass::OcclusionMarch, "March"}, {Pass::OcclusionDenoise, "Denoise"},

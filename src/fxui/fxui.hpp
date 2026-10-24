@@ -295,6 +295,17 @@ private:
     int colours{}, vars{};
 };
 
+// A short message over the game for a few seconds, such as "Frame captured", with a dot in its tone
+// and a dim detail after it. A new message replaces the one showing. Any thread may call it.
+void toast(Tone tone, std::string_view text, std::string_view detail = {});
+
+// A side or corner of the screen.
+enum class Placement : std::uint8_t { TopLeft, Top, TopRight, Left, Right, BottomLeft, Bottom, BottomRight };
+
+// Draws the message at `placement`, over the game and the window, also with ReShade's overlay closed:
+// for the add-on's reshade_overlay event.
+void drawToast(Placement placement = Placement::Right);
+
 // ---- Typed conveniences ----
 
 template<class T>

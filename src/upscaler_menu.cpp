@@ -560,7 +560,8 @@ void drawDiagnostics(const Status& state)
         if (const auto scene = global_illumination::status(); options.showTracedScene && !scene.empty()) fxui::note(Tone::Dim, scene);
     }
 
-    if (const fxui::Item item({.id = "oldPaths", .name = "Old paths", .summary = "How the ray tracing worked before, to compare.", .keywords = "shadow rays depth bones snapshot log"});
+    if (const fxui::Item item({.id = "oldPaths", .name = "Old paths", .summary = "How the ray tracing worked before, to compare.",
+            .keywords = "shadow rays depth bones snapshot leaves log"});
         item)
     {
         changed |= fxui::checkbox("Shadow rays from the depth", options.shadowsFromDepth,
@@ -569,6 +570,9 @@ void drawDiagnostics(const Status& state)
         changed |= fxui::checkbox("Character bones from the snapshot", options.bonesFromSnapshot,
             "The ray-traced scene's characters take their bones from the frame's first visibility test, before the game animates them, as before: a "
             "frame behind what is drawn, so their ray-traced shadows trail their movement. Off, they take the bones the frame's draws had.");
+        changed |= fxui::checkbox("Leaves without light through them", options.opaqueLeaves,
+            "With global illumination on, the leaves of bushes and grass light what is around them only from the side the light falls on, as "
+            "before: a bush is black inside. Off, they also let through half of the light on their far side.");
         if constexpr (DiagnosticLog)
             changed |= fxui::checkbox("Log global illumination often", options.logGlobalIlluminationOften,
                 "With global illumination on, its light and each step's largest value go to the log every few frames, not every ten seconds: to see "

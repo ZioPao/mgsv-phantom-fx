@@ -58,12 +58,12 @@ void Shadows::describe(gi_d3d12::Descriptors& d, std::uint32_t parity, ID3D12Res
 
 void Shadows::record(gi_d3d12::Recorder& r)
 {
-    r.mark("shadow rays");
+    r.mark("shadow rays", performance::Pass::SunShadowRays);
     r.dispatch(Kernel::TraceSunShadows, groups(renderWidth, MaskTileWidth), groups(renderHeight, MaskTileHeight));
     r.barrier();
 
     // The temporal pass, then three spatial passes 1, 2 and 4 pixels apart.
-    r.mark("shadow denoiser");
+    r.mark("shadow denoiser", performance::Pass::SunShadowDenoiser);
     r.dispatch(Kernel::ClassifyShadowTiles, groups(renderWidth, Tile), groups(renderHeight, Tile));
     r.barrier();
     for (std::uint32_t pass = 0; pass < 3; ++pass)

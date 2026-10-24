@@ -30,7 +30,6 @@
 
 // The kernels, compiled by DXC at build time (CMakeLists.txt).
 #include "BlendScreenProbes.h"
-#include "PropagateProbeChange.h"
 #include "TerrainGrid.h"
 #include "Skin.h"
 #include "ClearNewGeometries.h"
@@ -130,7 +129,7 @@ constexpr std::span<const unsigned char> Bytecode[]{GI_ClearNewGeometries, GI_De
     GI_FilterProbeMask, GI_InitCachedTileLRU, GI_ReprojectScreenProbes, GI_CountScreenProbes, GI_ScatterScreenProbes, GI_SpawnScreenProbes,
     GI_CompactScreenProbes, GI_PatchScreenProbes, GI_StoreSpawnCount, GI_SampleScreenProbes, GI_LearnAlbedo, GI_PopulateScreenProbes,
     GI_PurgeTiles, GI_PopulateMultibounceCells, GI_PopulateCells, GI_UpdateTiles, GI_UpdateMultibounceCells, GI_ResolveCells,
-    GI_BlendScreenProbes, GI_PropagateProbeChange, GI_CopyProbes, GI_ReorderScreenProbes, GI_FilterScreenProbes, GI_ProjectScreenProbes, GI_InterpolateScreenProbes,
+    GI_BlendScreenProbes, GI_CopyProbes, GI_ReorderScreenProbes, GI_FilterScreenProbes, GI_ProjectScreenProbes, GI_InterpolateScreenProbes,
     GI_ReprojectGI, GI_FilterGI, GI_TraceSunShadows, GI_ClassifyShadowTiles, GI_FilterShadows,
     GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows};
 static_assert(std::size(Bytecode) == static_cast<std::size_t>(Kernel::Count));
@@ -171,6 +170,7 @@ struct InstancedModel
     std::uint32_t instance{};
     std::uint64_t hash{};
     std::array<float, 3> position{};
+    std::uint64_t character{}; // A character's id (CharacterInstance::id); 0 for a placed model
 };
 
 // A ring of the terrain: its vertices in the pool and its structure, kept while the renderer runs.
@@ -275,13 +275,19 @@ struct State
     std::array<bool, FramesInFlight> probeWritten{};
     std::array<std::vector<InstancedModel>, FramesInFlight> instancedModels; // Each slot's frame's, by instance
 
-    // Diagnostics: GPU timestamps between the named phases of each frame's list (Recorder::mark),
-    // read when the frame's slot comes round again. The scene's and the light's times are averaged
-    // for the overlay; each phase's are summed for the log, with the frame's builds and CPU time.
+    // GPU timestamps between the named phases of each frame's list (Recorder::mark), read when the
+    // frame's slot comes round again: into the settings window's costs, by pass. The scene's, the light's
+    // and the shadows' times are averaged for the overlay; each phase's are summed for the log, with the
+    // frame's builds and CPU time.
+    struct Mark
+    {
+        const char* phase{};
+        std::optional<performance::Pass> pass;
+    };
     ComPtr<ID3D12QueryHeap> timestamps;
     ComPtr<ID3D12Resource> timestampReadback;
     std::uint64_t timestampFrequency{};
-    std::array<std::vector<const char*>, FramesInFlight> marks;
+    std::array<std::vector<Mark>, FramesInFlight> marks;
     double sceneMilliseconds{}, lightMilliseconds{}, shadowMilliseconds{};
     struct Tally
     {
@@ -475,7 +481,7 @@ void waitFor(State& s, std::uint64_t value)
 gi_scene::Geometry materialOf(const State& s, const ModelPart& part)
 {
     gi_scene::Geometry geometry;
-    geometry.flags = (part.alphaTested ? GI_GEOMETRY_CUT_OUT : 0u) | (part.uvs.empty() ? 0u : GI_GEOMETRY_UV);
+    geometry.flags = (part.alphaTested ? GI_GEOMETRY_CUT_OUT : 0u) | (part.uvs.empty() ? 0u : GI_GEOMETRY_UV) | (part.leaf ? GI_GEOMETRY_LEAF : 0u);
     const auto texture = part.uvs.empty() ? s.textures.end() : s.textures.find(part.baseTexture);
     if (texture == s.textures.end() || !texture->second.shared.resource) return geometry;
 
@@ -1154,21 +1160,31 @@ void readTimes(State& s, std::uint32_t slot)
 
     const auto* ticks = reinterpret_cast<const std::uint64_t*>(static_cast<const std::uint8_t*>(data) + range.Begin);
     const double toMilliseconds = 1000.0 / static_cast<double>(s.timestampFrequency);
-    double scene{}, light{}, shadow{};
+    performance::Milliseconds passes{};
     for (std::size_t i = 0; i + 1 < marks.size(); ++i)
     {
         const double milliseconds = ticks[i + 1] >= ticks[i] ? static_cast<double>(ticks[i + 1] - ticks[i]) * toMilliseconds : 0.0;
-        // The scene's phases come first, up to the top level; the shadows' are named so.
-        (i < 3 ? scene : std::strncmp(marks[i], "shadow", 6) == 0 ? shadow : light) += milliseconds;
+        if (const auto pass = marks[i].pass) passes[static_cast<std::size_t>(*pass)] += static_cast<float>(milliseconds);
         auto& phases = s.tally.phases;
-        const auto found = std::find_if(phases.begin(), phases.end(), [&](const auto& phase) { return std::strcmp(phase.first, marks[i]) == 0; });
+        const auto found = std::find_if(phases.begin(), phases.end(), [&](const auto& phase) { return std::strcmp(phase.first, marks[i].phase) == 0; });
         if (found != phases.end()) found->second += milliseconds;
-        else phases.emplace_back(marks[i], milliseconds);
+        else phases.emplace_back(marks[i].phase, milliseconds);
     }
 
     const D3D12_RANGE none{};
     s.timestampReadback->Unmap(0, &none);
     marks.clear();
+    performance::timedOnDirect3D12(passes);
+
+    using enum performance::Pass;
+    const auto sum = [&](std::initializer_list<performance::Pass> of) {
+        double total{};
+        for (const auto pass : of) total += passes[static_cast<std::size_t>(pass)];
+        return total;
+    };
+    const double scene = sum({RayTracedScene});
+    const double light = sum({GiProbes, GiResolve});
+    const double shadow = sum({SunShadowRays, SunShadowDenoiser, LightShadowRays, LightShadowFilter});
     s.sceneMilliseconds += (scene - s.sceneMilliseconds) * 0.05;
     s.lightMilliseconds += (light - s.lightMilliseconds) * 0.05;
     s.shadowMilliseconds += (shadow - s.shadowMilliseconds) * 0.05;
@@ -1180,6 +1196,73 @@ std::string percentOf(std::uint64_t used, std::uint64_t capacity)
     return std::to_string(capacity ? used * 100 / capacity : 0) + "%";
 }
 
+// One of a character model's meshes (Model::parts) as its file has it: its group and that group's state,
+// its alpha and shadow bytes, whether the character shows it and whether this frame's draws posed it.
+std::string characterMesh(const ModelPart& part, const CharacterInstance& character, bool shown, std::size_t partIndex)
+{
+    const bool drawn = partIndex < character.drawnParts.size() && character.drawnParts[partIndex];
+    const auto groupState = part.group < character.groupStates.size() ? std::format("{:#04x}", character.groupStates[part.group]) : std::string("unread");
+    return std::format("file mesh {} (group {} state {}, alpha {:#04x} shadow {:#04x}, {}, {} triangles, {}, {})", part.mesh, part.group, groupState,
+        part.alphaBits, part.shadowBits, part.alphaTested ? "cut-out" : "opaque", part.indices.size() / 3, shown ? "shown" : "hidden",
+        drawn ? "drawn" : "not drawn");
+}
+
+// Diagnostics: the character `id`'s shown mesh `shownIndex` (a geometry of its structure) as its model file has it.
+std::string describeCharacterMesh(const State& s, std::uint64_t id, std::uint32_t shownIndex)
+{
+    const auto record = s.characters.find(id);
+    const auto listed = std::ranges::find(s.characterList, id, &CharacterInstance::id);
+    if (record == s.characters.end() || listed == s.characterList.end() || shownIndex >= record->second.parts.size()) return "";
+
+    const auto model = s.models.find(record->second.hash);
+    const auto partIndex = record->second.parts[shownIndex];
+    if (model == s.models.end() || partIndex >= model->second.geometry->parts.size()) return "";
+
+    return ", " + characterMesh(model->second.geometry->parts[partIndex], *listed, true, partIndex);
+}
+
+// Diagnostics: every character the game has within 2 cm of `position` (a character's parts share one
+// place), each with all its model's meshes.
+std::string charactersAt(const State& s, const std::array<float, 3>& position)
+{
+    std::string text;
+    for (const auto& character : s.characterList)
+    {
+        const auto& t = character.transform;
+        if (std::abs(t[3] - position[0]) > 0.02f || std::abs(t[7] - position[1]) > 0.02f || std::abs(t[11] - position[2]) > 0.02f) continue;
+
+        const auto model = s.models.find(character.hash);
+        const auto record = s.characters.find(character.id);
+        text += std::format("\n  character {:x} (id {:x}){}:", character.hash, character.id,
+            record == s.characters.end() ? ", not in the scene" : record->second.traced ? "" : ", not traced this frame");
+        if (model == s.models.end())
+        {
+            text += " its model not read yet";
+            continue;
+        }
+
+        const auto& parts = model->second.geometry->parts;
+        for (std::size_t i = 0; i < parts.size(); ++i)
+        {
+            const bool shown = record != s.characters.end() && std::ranges::find(record->second.parts, static_cast<std::uint32_t>(i)) != record->second.parts.end();
+            text += (i ? "; " : " ") + characterMesh(parts[i], character, shown, i);
+        }
+
+        for (const auto& mesh : model->second.geometry->leftOut)
+            text += std::format("; file mesh {} left out (alpha {:#04x} shadow {:#04x})", mesh.mesh, mesh.alphaBits, mesh.shadowBits);
+    }
+
+    return text;
+}
+
+// The frame's instance of one of the game's models, or null.
+const InstancedModel* instancedAt(std::span<const InstancedModel> instancedModels, std::uint32_t instance)
+{
+    const auto placed = std::lower_bound(instancedModels.begin(), instancedModels.end(), instance,
+        [](const InstancedModel& model, std::uint32_t value) { return model.instance < value; });
+    return placed == instancedModels.end() || placed->instance != instance ? nullptr : &*placed;
+}
+
 // A hit the probe lists (GIShadowProbe::lightNearest) as text: what it hit, which side, how far.
 std::string describeHit(const State& s, std::span<const InstancedModel> instancedModels, const uint4& hit)
 {
@@ -1189,13 +1272,12 @@ std::string describeHit(const State& s, std::span<const InstancedModel> instance
     std::string what = "the terrain";
     if (kind & GI_INSTANCE_MODEL)
     {
-        const auto placed = std::lower_bound(instancedModels.begin(), instancedModels.end(), instance,
-            [](const InstancedModel& model, std::uint32_t value) { return model.instance < value; });
-        if (placed == instancedModels.end() || placed->instance != instance) what = "one of the game's models";
+        const auto placed = instancedAt(instancedModels, instance);
+        if (!placed) what = "one of the game's models";
         else if (kind & GI_INSTANCE_CHARACTER)
             // A character's geometries are the meshes it shows, not its model's.
-            what = std::format("character {:x} at ({:.1f} {:.1f} {:.1f}), its shown mesh {}", placed->hash, placed->position[0], placed->position[1],
-                placed->position[2], geometry);
+            what = std::format("character {:x} at ({:.1f} {:.1f} {:.1f}), its shown mesh {}{}", placed->hash, placed->position[0], placed->position[1],
+                placed->position[2], geometry, describeCharacterMesh(s, placed->character, geometry));
         else
         {
             what = std::format("model {:x} placed at ({:.1f} {:.1f} {:.1f})", placed->hash, placed->position[0], placed->position[1], placed->position[2]);
@@ -1203,7 +1285,8 @@ std::string describeHit(const State& s, std::span<const InstancedModel> instance
             if (found != s.models.end() && geometry < found->second.geometry->parts.size())
             {
                 const auto& part = found->second.geometry->parts[geometry];
-                what += std::format(", mesh {} ({}, {} triangles)", part.mesh, part.alphaTested ? "cut-out" : "opaque", part.indices.size() / 3);
+                what += std::format(", mesh {} ({}, {} triangles)", part.mesh, part.leaf ? "leaves" : part.alphaTested ? "cut-out" : "opaque",
+                    part.indices.size() / 3);
             }
         }
     }
@@ -1231,13 +1314,32 @@ std::pair<std::string, std::string> describeProbe(const State& s, std::span<cons
             : h.z ? std::format("are blocked at {:.1f} m (instance {})", probe.segments.w, h.z - 1)
                   : std::string("reach the sun"));
 
-    std::string key = std::format("{}|{}", h.y || h.z ? "blocked" : "lit", h.w ? std::to_string(probe.hitGeometry.x) : "-");
+    // Where the rays start: the surface they leave, how it faces the sun, which side of it they leave
+    // and how far off it, and whatever that lift passes through.
+    const auto dot = [](const float4& a, const float4& b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
+    const auto& start = probe.start;
+    const auto& lift = probe.lift;
+    const auto& sh = probe.startHit;
+    const bool exact = start.w > 0.5f, farSide = lift.w > 0.5f;
+    text += std::format("the rays start on {}, its normal ({:.2f} {:.2f} {:.2f}) towards the eye, the sun at cosine {:.2f} to it (to the G-buffer's "
+        "normal {:.2f}); they leave its {} side, lifted {:.1f} mm ({:.1f} mm along its normal); the lift passes through {}\n",
+        exact ? std::format("the scene's own surface (instance {}, geometry {}, triangle {})", sh.x - 1, sh.y, sh.z)
+              : std::string("the depth's point (the scene's surface not found there)"),
+        start.x, start.y, start.z, dot(start, probe.ray), dot(probe.normal, probe.ray), farSide ? "far" : "sunward",
+        std::sqrt(dot(lift, lift)) * 1000.0f, dot(lift, start) * 1000.0f,
+        probe.crossed.x ? std::format("{} ({:.1f} mm from the start)", describeHit(s, instancedModels, probe.crossed), std::bit_cast<float>(probe.crossed.w) * 1000.0f)
+                        : std::string("nothing"));
+
+    std::string key = std::format("{}|{}|{}|{}", h.y || h.z ? "blocked" : "lit", h.w ? std::to_string(probe.hitGeometry.x) : "-", farSide, probe.crossed.x);
     if (h.w)
     {
         const auto& g = probe.hitGeometry;
         const auto kind = g.y & 0xFFFFu, flags = g.y >> 16;
-        text += std::format("with every instance: hits {}, geometry {} ({}{})", (kind & GI_INSTANCE_TERRAIN) ? "the terrain" : "one of the game's models", g.x,
-            (flags & GI_GEOMETRY_CUT_OUT) ? "cut-out" : "opaque", (flags & GI_GEOMETRY_ALPHA_TEXTURE) ? " with the game's alpha" : "");
+        const bool startsMesh = exact && sh.x == h.w && sh.y == (g.z & 0x7FFFFFFFu);
+        text += std::format("with every instance: hits {}, geometry {} ({}{}{}), triangle {}{}", describeHit(s, instancedModels, uint4{h.w, g.z, kind, g.w}), g.x,
+            (flags & GI_GEOMETRY_CUT_OUT) ? "cut-out" : "opaque", (flags & GI_GEOMETRY_ALPHA_TEXTURE) ? " with the game's alpha" : "",
+            (flags & GI_GEOMETRY_LEAF) ? ", leaves" : "", sh.w,
+            !startsMesh ? "" : sh.w == sh.z ? ", the start's own triangle" : ", of the start's own mesh");
         if (kind & GI_INSTANCE_TERRAIN)
             text += std::format("; its triangle's highest corner at {:.1f} m as its ring was made, the heightmap {:.1f} m there now (level of detail {:.0f})",
                 probe.terrain.x, probe.terrain.y, probe.terrain.z);
@@ -1251,6 +1353,14 @@ std::pair<std::string, std::string> describeProbe(const State& s, std::span<cons
         GI_PROBE_LIGHT_RAYS, g.x, g.y, g.z, g.w, describeHit(s, instancedModels, probe.lightNearest));
     text += std::format("the camera's ray (the scene view's): {}; the game's surface at {:.2f} m\n", describeHit(s, instancedModels, probe.view), probe.normal.w);
     key += std::format("|{}", probe.view.x);
+
+    // The characters where the sun ray's blocker is one, else where the camera's ray meets one: a
+    // character's parts are models of their own in one place.
+    const auto blocker = h.w && (probe.hitGeometry.y & GI_INSTANCE_CHARACTER) ? instancedAt(instancedModels, h.w - 1) : nullptr;
+    const auto viewed = probe.view.x && (probe.view.z & GI_INSTANCE_CHARACTER) ? instancedAt(instancedModels, probe.view.x - 1) : nullptr;
+    if (const auto character = blocker ? blocker : viewed)
+        text += std::format("the characters at {}'s place, every mesh of each:{}\n", blocker ? "the blocker" : "the camera ray's hit",
+            charactersAt(s, character->position));
 
     text += std::format("frame {}; the terrain rings last made at frames", static_cast<std::uint32_t>(probe.terrain.w));
     for (const auto& ring : s.terrain) text += " " + std::to_string(ring.refreshed);
@@ -1536,7 +1646,8 @@ Result render(const Frame& frame)
             const auto instance = scene.addInstance(character.blas, character.transform.data(), GI_INSTANCE_MODEL | GI_INSTANCE_CHARACTER);
             if (!instance) continue;
 
-            if (debugShadows) instancedModels.push_back({*instance, character.hash, {character.transform[3], character.transform[7], character.transform[11]}});
+            if (debugShadows)
+                instancedModels.push_back({*instance, character.hash, {character.transform[3], character.transform[7], character.transform[11]}, id});
 
             ++charactersTraced;
             const auto& parts = s.models.at(character.hash).parts;
@@ -1601,6 +1712,7 @@ Result render(const Frame& frame)
         if (traceShadows) s.shadows->fill(constants);
         constants.shadowMotion = {velocity ? 1u : 0u, 0, 0, 0};
         constants.shadowDiagnostics = {frame.shadowsFromDepth ? 1u : 0u, 0, 0, 0};
+        constants.lightDiagnostics = {frame.opaqueLeaves ? 1u : 0u, 0, 0, 0};
         std::memcpy(uploads.data + constantsOffset, &constants, sizeof(constants));
 
         // ---- Descriptors ----
@@ -1653,14 +1765,14 @@ Result render(const Frame& frame)
         Recorder recorder(list, s.pipelines, s.dispatchSignature.Get(), s.dispatchArguments.Get());
         auto& marks = s.marks[slot];
         marks.clear();
-        recorder.marker = [&](const char* phase) {
+        recorder.marker = [&](const char* phase, std::optional<performance::Pass> pass) {
             if (marks.size() >= MaxMarks) return;
 
             list.EndQuery(s.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * MaxMarks + static_cast<UINT>(marks.size()));
-            marks.push_back(phase ? phase : "");
+            marks.push_back({phase ? phase : "", pass});
         };
 
-        recorder.mark("scene writes");
+        recorder.mark("scene writes", performance::Pass::RayTracedScene);
         D3D12_RESOURCE_BARRIER begin[]{
             transition(depth, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
             transition(normal, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
@@ -1688,21 +1800,21 @@ Result render(const Frame& frame)
 
         if (skinCount) recorder.dispatch(Kernel::Skin, groups(skinVertices, 64), 1, {skinVertices, skinCount});
 
-        recorder.mark("bottom-level structures");
+        recorder.mark("bottom-level structures", performance::Pass::RayTracedScene);
         scene.recordBottomLevels(list);
 
         // The instances, then the top level over the bottom levels.
-        recorder.mark("instances and top level");
+        recorder.mark("instances and top level", performance::Pass::RayTracedScene);
         scene.recordInstances(list);
         scene.recordTopLevel(list);
 
         // ---- The shadows, then the light or the debug view ----
         if (traceLocalLights)
         {
-            recorder.mark("shadow rays for lights");
+            recorder.mark("shadow rays for lights", performance::Pass::LightShadowRays);
             recorder.dispatch(Kernel::TraceLocalLightShadows, groups(frame.width, 8), groups(frame.height, 8));
             recorder.barrier();
-            recorder.mark("shadow filter for lights");
+            recorder.mark("shadow filter for lights", performance::Pass::LightShadowFilter);
             for (std::uint32_t pass = 0; pass < 3; ++pass)
             {
                 recorder.dispatch(Kernel::FilterLocalLightShadows, groups(frame.width, 8), groups(frame.height, 8), {pass, 1u << pass});

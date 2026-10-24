@@ -1,5 +1,6 @@
 #include "frame_log.hpp"
 
+#include "fxui/fxui.hpp"
 #include "log.hpp"
 #include "resource_dump.hpp"
 #include "shader_bytecode.hpp"
@@ -601,6 +602,7 @@ void finishRecording()
         record << count << "x " << writer << '\n';
 
     record.close();
+    fxui::toast(fxui::Tone::Ok, "Frame captured", recordName + ".txt");
     constantWriters.clear();
     for (auto& [list, lines] : pending)
         for (auto& line : lines)

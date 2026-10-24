@@ -596,6 +596,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     frame.sunTangent = std::tan(options.sunSize * 0.5f * 3.14159265f / 180);
     frame.debugShadows = shadowDebug != nullptr;
     frame.shadowsFromDepth = options.shadowsFromDepth;
+    frame.opaqueLeaves = options.opaqueLeaves;
     // The lights' colours in the sun's units for the hits (gi_light.hlsl, LocalLightAt).
     for (auto& localLight : localLightsToTrace)
         for (auto& value : localLight.color) value *= LightScale;

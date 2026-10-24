@@ -79,6 +79,7 @@ An item and a budget line with the same `id` belong together: the line gives the
 | `hint`, `note`, `statusLine`, `fact`, `subheading`, `link` | Text in the window's styles |
 | `ledger`, `costRow` | The budget table, and rows for other cost tables |
 | `CostOverlay` | The costs in a corner over the game, for the `reshade_overlay` event |
+| `toast`, `drawToast` | A short message over the game for a few seconds, such as "Frame captured". Call `toast` from anywhere; call `drawToast` in the `reshade_overlay` event, with a side or corner of the screen (default `Right`) |
 
 ## Window sizes
 

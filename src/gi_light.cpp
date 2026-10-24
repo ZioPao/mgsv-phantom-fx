@@ -68,7 +68,6 @@ Light::Light(ID3D12Device* device, UINT width, UINT height) : renderWidth(width)
     overrideTiles = buffer(std::uint64_t{spawnCount} * 4, "Creating the override tiles");
     cachedTiles = texture(probesAcross * ProbeSize, probesDown * ProbeSize, DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "Creating the cached probes");
     cachedTileIndex = texture(probesAcross, probesDown, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, "Creating the cached probes' places");
-    probeChange = texture(probesAcross, probesDown, DXGI_FORMAT_R16_FLOAT, 1, "Creating the probes' change in light");
     lruFlags = buffer(std::uint64_t{probeCount + 1} * 4, "Creating the cached probes' flags");
     lruIndex = buffer(std::uint64_t{probeCount + 1} * 4, "Creating the cached probes' index");
     mru = buffer(std::uint64_t{probeCount} * 4, "Creating the recently used probes");
@@ -178,7 +177,6 @@ void Light::describe(gi_d3d12::Descriptors& d, std::uint32_t parity) const
     d.outputBuffer(55, scanOutput.Get(), 4, scanSize);
     d.outputBuffer(56, scanBlockSums.Get(), 4, 1024);
     d.outputBuffer(57, lights.Get(), 4, std::uint64_t{rayCount} * 2);
-    d.outputTexture(58, probeChange.Get(), DXGI_FORMAT_R16_FLOAT);
     for (UINT mip = 0; mip < maskMips; ++mip) d.outputTexture(64 + mip, masks[now].Get(), DXGI_FORMAT_R32_UINT, mip);
 }
 
@@ -208,7 +206,7 @@ void Light::record(gi_d3d12::Recorder& r, std::uint32_t parity, ID3D12Resource* 
         r.barrier();
     }
 
-    r.mark("probe reprojection and spawning");
+    r.mark("probe reprojection and spawning", performance::Pass::GiProbes);
     r.dispatch(Kernel::ClearCounters, 1);
     r.barrier();
     // Tiles nothing touched for 50 frames leave the cache.
@@ -237,28 +235,26 @@ void Light::record(gi_d3d12::Recorder& r, std::uint32_t parity, ID3D12Resource* 
     r.indirect(Kernel::PatchScreenProbes, GI_COUNTER_EMPTY_TILES, 64);
 
     // The probes' rays: guided by last frame's light, traced into the hash grid cache.
-    r.mark("probe ray guiding");
+    r.mark("probe ray guiding", performance::Pass::GiProbes);
     r.dispatch(Kernel::SampleScreenProbes, spawnCount);
     r.barrier();
     r.dispatch(Kernel::LearnAlbedo, groups(spawnCount, 64));
     r.barrier();
-    r.mark("probe rays");
+    r.mark("probe rays", performance::Pass::GiProbes);
     r.dispatch(Kernel::PopulateScreenProbes, groups(rayCount, 32));
     r.barrier();
-    r.mark("multibounce rays");
+    r.mark("multibounce rays", performance::Pass::GiProbes);
     r.indirect(Kernel::PopulateMultibounceCells, GI_COUNTER_VISIBILITY0, 32);
-    r.mark("hit lighting (shadow rays)");
+    r.mark("hit lighting (shadow rays)", performance::Pass::GiProbes);
     r.indirect(Kernel::PopulateCells, GI_COUNTER_LIGHTS, 32);
-    r.mark("cache update");
+    r.mark("cache update", performance::Pass::GiProbes);
     r.indirect(Kernel::UpdateTiles, GI_COUNTER_UPDATE_TILES, 1);
     r.indirect(Kernel::UpdateMultibounceCells, GI_COUNTER_VISIBILITY1, 32);
     r.indirect(Kernel::ResolveCells, GI_COUNTER_VISIBILITY0, 64);
 
     // Into the probes, with the cached ones kept in order of use.
-    r.mark("probe blending and filtering");
+    r.mark("probe blending and filtering", performance::Pass::GiProbes);
     r.dispatch(Kernel::BlendScreenProbes, spawnCount);
-    r.barrier();
-    r.dispatch(Kernel::PropagateProbeChange, probesAcross, probesDown);
     r.barrier();
     r.dispatch(Kernel::CopyProbes, probesAcross, probesDown);
     r.barrier();
@@ -282,18 +278,18 @@ void Light::record(gi_d3d12::Recorder& r, std::uint32_t parity, ID3D12Resource* 
     r.barrier();
     r.dispatch(Kernel::ProjectScreenProbes, spawnCount);
     r.barrier();
-    r.mark("interpolation");
+    r.mark("interpolation", performance::Pass::GiResolve);
     pixels(Kernel::InterpolateScreenProbes, {0});
     r.transition(masks[parity].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // The denoiser: this frame's light with the last, then a blur where history is short.
-    r.mark("denoiser");
+    r.mark("denoiser", performance::Pass::GiResolve);
     pixels(Kernel::ReprojectGI, {0, 1});
     pixels(Kernel::FilterGI, {1, 0, 0, 0});
     pixels(Kernel::FilterGI, {0, 1, 1, 1});
 
     // This frame's depth and normals for the next.
-    r.mark("copies for the next frame");
+    r.mark("copies for the next frame", performance::Pass::GiResolve);
     auto& commands = r.commands();
     D3D12_RESOURCE_BARRIER copy[]{
         gi_d3d12::transition(depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE),

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(PhantomFX VERSION 1.5.0 LANGUAGES C CXX)
+project(PhantomFX VERSION 1.5.1 LANGUAGES C CXX)
 
 if(NOT WIN32 OR NOT MSVC)
     message(FATAL_ERROR "Phantom FX requires Windows and MSVC.")
@@ -165,7 +165,7 @@ add_gi_kernels(gi_scene.hlsl ClearNewGeometries DebugScene ClearOutput TerrainGr
 add_gi_kernels(gi_light.hlsl ClearCounters GenerateDispatch ClearBuffer ScanBlocks ScanBlockSums ScanAddOffsets ClearProbeMask FilterProbeMask
     InitCachedTileLRU ReprojectScreenProbes CountScreenProbes ScatterScreenProbes SpawnScreenProbes CompactScreenProbes PatchScreenProbes
     StoreSpawnCount SampleScreenProbes LearnAlbedo PopulateScreenProbes PurgeTiles PopulateMultibounceCells PopulateCells UpdateTiles
-    UpdateMultibounceCells ResolveCells BlendScreenProbes PropagateProbeChange CopyProbes ReorderScreenProbes FilterScreenProbes ProjectScreenProbes
+    UpdateMultibounceCells ResolveCells BlendScreenProbes CopyProbes ReorderScreenProbes FilterScreenProbes ProjectScreenProbes
     InterpolateScreenProbes ReprojectGI FilterGI)
 add_gi_kernels(gi_shadow.hlsl TraceSunShadows ClassifyShadowTiles DebugShadows ProbeShadows TraceLocalLightShadows FilterLocalLightShadows)
 add_gi_kernels(gi_shadow_filter.hlsl FilterShadows)

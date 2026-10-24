@@ -8,8 +8,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <mutex>
 #include <numbers>
 #include <ranges>
 #include <string>
@@ -1618,5 +1620,97 @@ CostOverlay::~CostOverlay()
     ImGui::End();
     ImGui::PopStyleVar(vars);
     ImGui::PopStyleColor(colours);
+}
+
+// ---- A message over the game ----
+
+namespace
+{
+constexpr double ToastSeconds = 2.5, ToastFadeIn = 0.15, ToastFadeOut = 0.4;
+
+struct Toast
+{
+    Tone tone{};
+    std::string text, detail;
+    std::chrono::steady_clock::time_point shown;
+};
+
+// toast() may come from another thread than the overlay's.
+std::mutex toastMutex;
+std::optional<Toast> toastShowing;
+
+// Where a toast sits in the screen's free space: 0 at the left or top, 1 at the right or bottom.
+ImVec2 toastAlignment(Placement placement)
+{
+    switch (placement)
+    {
+    case Placement::TopLeft: return {0, 0};
+    case Placement::Top: return {0.5f, 0};
+    case Placement::TopRight: return {1, 0};
+    case Placement::Left: return {0, 0.5f};
+    case Placement::BottomLeft: return {0, 1};
+    case Placement::Bottom: return {0.5f, 1};
+    case Placement::BottomRight: return {1, 1};
+    case Placement::Right:
+    default: return {1, 0.5f};
+    }
+}
+}
+
+void toast(Tone tone, std::string_view text, std::string_view detail)
+{
+    std::lock_guard lock(toastMutex);
+    toastShowing = Toast{tone, std::string(text), std::string(detail), std::chrono::steady_clock::now()};
+}
+
+void drawToast(Placement placement)
+{
+    std::lock_guard lock(toastMutex);
+    if (!toastShowing) return;
+
+    const double age = std::chrono::duration<double>(std::chrono::steady_clock::now() - toastShowing->shown).count();
+    if (age >= ToastSeconds)
+    {
+        toastShowing.reset();
+        return;
+    }
+
+    frame.unit = ImGui::GetFontSize() / FontBase;
+
+    // It eases into place from the edge it sits by, holds, then fades out.
+    const float in = 1 - static_cast<float>(std::pow(1 - std::min(age / ToastFadeIn, 1.0), 3));
+    const float alpha = std::min(in, static_cast<float>((ToastSeconds - age) / ToastFadeOut));
+    const Toast& message = *toastShowing;
+
+    const float fontSize = ImGui::GetFontSize(), dot = px(5), padX = px(12), padY = px(8), spacing = px(8);
+    const float textLength = textWidth(message.text);
+    float width = padX + dot + spacing + textLength + padX;
+    if (!message.detail.empty()) width += spacing + textWidth(message.detail);
+
+    const float height = padY + fontSize + padY, margin = px(24);
+    const ImVec2 room = ImGui::GetIO().DisplaySize - ImVec2(margin * 2 + width, margin * 2 + height);
+    const ImVec2 along = toastAlignment(placement);
+    ImVec2 min{std::round(margin + room.x * along.x), std::round(margin + room.y * along.y)};
+
+    // From the side at the left and right, else from the top or bottom.
+    const float slide = std::round(px(6) * (1 - in));
+    if (placement == Placement::Left || placement == Placement::Right)
+        min.x += placement == Placement::Left ? -slide : slide;
+    else
+        min.y += along.y == 0 ? -slide : slide;
+
+    const ImVec2 max = min + ImVec2(width, height);
+    ImDrawList* draw = ImGui::GetForegroundDrawList(nullptr);
+    draw->AddRectFilled(min, max, withAlpha(colour::Ground, 0.9f * alpha));
+
+    const float textTop = min.y + padY, dotTop = textTop + std::round((fontSize - dot) / 2);
+    float x = min.x + padX;
+    draw->AddRectFilled({x, dotTop}, {x + dot, dotTop + dot}, withAlpha(toneColour(message.tone), alpha));
+    x += dot + spacing;
+    draw->AddText({x, textTop}, withAlpha(colour::Text, alpha), message.text.data(), message.text.data() + message.text.size());
+    if (message.detail.empty()) return;
+
+    x += textLength + spacing;
+    draw->AddText({x, textTop}, withAlpha(colour::TextDim, alpha), message.detail.data(), message.detail.data() + message.detail.size());
 }
 }

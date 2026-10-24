@@ -23,6 +23,7 @@
 #include "focus.hpp"
 #include "fsr_frame_generation.hpp"
 #include "fxaa.hpp"
+#include "fxui/fxui.hpp"
 #include "engine_scene.hpp"
 #include "game_loop.hpp"
 #include "global_illumination.hpp"
@@ -501,6 +502,7 @@ void onOverlay(effect_runtime*)
 void onReshadeOverlay(effect_runtime*)
 {
     performance::drawOverlay();
+    fxui::drawToast();
 }
 
 // ReShade's overlay takes the keyboard while it is open.

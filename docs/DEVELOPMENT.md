@@ -234,6 +234,7 @@ reads state; the frame renders unchanged. Its files go into that folder:
   recorded on deferred contexts appear, indented, where the immediate context executes them. Each
   call lists shaders, targets, depth, viewport, blend, depth state, shader resources, UAVs and
   constant buffers. `frame-<n>-writers.txt` lists the call stacks of constant buffer maps by size.
+  Once both are written, a "Frame captured" toast with the file name shows at the right of the screen.
 - `dump.txt` (`<checksum> <count>` per line) makes the first calls with those shaders add their
   constant buffer contents (as the game wrote them on that thread) and save their textures as DDS
   in `frame-<n>/` once their command list has run.
@@ -260,6 +261,12 @@ made.
   for the frame at once. The results are
   read back up to four frames later with `DONOTFLUSH`, never waiting; a frame whose clock was
   disjoint is left out.
+- **Ray tracing.** Its Direct3D 12 queue ends a timestamp between its phases (`Recorder::mark`,
+  each with its pass), and `gi_renderer` hands each frame's times to
+  `performance::timedOnDirect3D12` as it reads them back. Direct3D 11 waits while Direct3D 12
+  works, so the G-buffer pack and the waits, less all the Direct3D 12 passes, are the hand-over.
+  Each ray-traced effect counts its own passes; the scene's build and the hand-over split evenly
+  between those working, else count under the first that is on.
 - **What a row holds.** The sun light pass is the game's own lighting drawn with the replacement
   shaders, so it includes the game's work. The game's fog pass is timed because the add-on draws it
   over the larger texture. Frame generation runs on Direct3D 12 and is not timed; FSR's upscale
@@ -1422,6 +1429,16 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   missing until 2026-10-23, left out for their rounded matrices (see "Characters"): found by logging the
   skinned draws no character showed, while draw capture still ran. Marked soldiers' silhouettes
   (layer bit 0x20, see "Characters") are left out: the game draws them in the main view only.
+  A character's meshes are taken as the main view shows them, not as its shadow maps do (2026-10-24):
+  its meshes with shadow bit 1 (drawn into the shadow maps only: stand-ins) are left out, those with
+  shadow bit 0 (main view only) and see-through ones (alpha bit 6) taken, the see-through ones cut out
+  by their alpha. Before, the shadow probe on a woman in the sun found her hair missing (every mesh of
+  its model left out: the rays saw her bald, 1,270-triangle head, and its outline crossed her hair as a
+  jagged shadow) and a 40-triangle stand-in of her outfit lying on her skin, blocking her neck's and
+  chest's sun rays within a centimetre. Rigid models keep the shadow maps' meshes (a pylon's lattice is
+  a stand-in, its visible mesh is not cast). The shadow probe lists every model at a character's place
+  with all its meshes: each one's group and state, alpha and shadow bytes, whether it is shown and drawn
+  (posed by a draw this frame), and the meshes left out.
 - **Model files read once.** A model the renderer has not placed for 600 frames is let go and its file
   read again when the game places it again. The 600 frames count from the model's arrival: counted from
   frame 0, a model the frame's lists did not place went as it came, and the walk of the model list
@@ -1434,6 +1451,17 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   with the brush (Afghanistan, 25 blocks) the captured meshes fell from 1,800 to 167 and the geometry pool
   from 91% to 16%. Placements come grouped by model, so the renderer looks a
   model up once a run.
+- **Leaves let light through** (2026-10-24). The brush's cut-out meshes are leaves (`GI_GEOMETRY_LEAF`;
+  its props stay opaque): a thin surface that reflects and lets through light diffusely, as pbrt's
+  `DiffuseTransmissionMaterial`. Where the global illumination's rays hit one (`HitDirectLight`), it adds
+  half of what its albedo would reflect from its far side (`LeafTransmittance`; green leaves let through
+  a half to two thirds as much light as they reflect, by leaf optics measurements such as PROSPECT): the
+  sun, through a shadow ray from that side when the sun is behind it, and the sky, whose one ray goes to
+  the far side in proportion to what it gives there (a chance of 1/3), each side's ray counting 1.5.
+  Before, a bush was black inside with the global illumination on: the shadow probe found every one of
+  a bush pixel's 64 rays meeting leaves within a metre, each lit on its outer side alone. The sun's
+  shadow rays still stop at a leaf: the light it lets through is scattered, and its glow carries it to
+  what is around. Trees placed as models are not flagged yet.
 - **Draw capture (removed).** Until stage 5 (2026-10-23) what the scene lacked was captured from the
   game's draws: each draw made again through stream output into a ring, turned into world positions at
   the kick, scattered into the pool by entry, kept while the game drew it and culled against a depth
@@ -1464,9 +1492,25 @@ traced here (see "Ray-traced lights").
   pass is recorded.
 - **Where a ray leaves** (`ShadowSurfaceAt`, for the sun's rays, the lights' and the debug view's). A
   ray from the eye through the pixel looks for the scene's own surface near the depth's point (within
-  3 cm plus 2% of the distance; cut-out geometry by its alpha). Found, the shadow ray leaves its exact
-  point on the triangle, from the side facing the light, by Wachter and Binder's offset
-  (`OffsetFromTriangle`, Ray Tracing Gems chapter 6), and nothing near it is skipped. Where the game
+  3 cm plus 2% of the distance; cut-out geometry by its alpha), searching that stretch alone: the game
+  hides what comes between the camera and the player (a bush the camera backs into) and the scene keeps
+  it. Searched from the eye, the ray stopped on its leaves and those pixels left from the depth's point,
+  inside the coarser rock behind for some, so the hidden bush's leaves showed as shadows on what lay
+  behind (the shadow probe, 2026-10-24: the camera's ray met leaves 0.1 to 1.4 m away, the game's
+  surface 2.4 to 5.9 m). Found, the shadow ray leaves its exact
+  point on the triangle, from the side facing the light, lifted off it along the normal by 16 float
+  steps of the point's largest coordinate (`LiftOffTriangle`; coordinates under 128 m count as 128),
+  and nothing near it is skipped. That is about 2 mm at 1,200 m from the map's origin, where the game's
+  maps reach. The point comes from the triangle's corners and the ray is traced in the instance's own
+  space, each a few steps of the largest coordinate off in any direction, as a character's transform
+  turns the error of one large coordinate into the others. Wachter and Binder's offset
+  (`OffsetFromTriangle`, Ray Tracing Gems chapter 6: 256 steps of each coordinate on its own, which the
+  global illumination's rays keep) failed both ways, found by the shadow probe on 2026-10-24. In the
+  field it lifted the start about 3 cm: Snake's chest was shadowed in strips along the folds of his
+  suit, the start inside the next fold, 5 to 6 mm under its surface, the ray blocked at 0.00 m leaving
+  it. In the helicopter, whose floor lies near the map's origin across but 1,200 m up, it lifted next
+  to nothing off a face turned sideways (0.0 mm): the ray hit its own triangle from inside in every
+  other frame, black blotches flickering on his face. Where the game
   drew something the scene lacks, or holds at another level of detail too far off, it leaves from
   the depth's point along the G-buffer's normal, offset by 2 cm plus 0.2% of the distance, skipping
   copies of the surface just above it ("Copies of a surface" in `gi_common.hlsli`). Until 2026-10-24
@@ -1545,7 +1589,7 @@ traced here (see "Ray-traced lights").
   shadow at the render size, the sun pass keeps the game's shadows.
 - **Diagnostics.** The cost table's
   measurement leaves them out first, so with the global illumination on that step is their own
-  cost; the Direct3D 12 times are in the log ("shadow rays", "shadow denoiser") and the scene
+  cost; the Direct3D 12 times are in the cost table, the log ("shadow rays", "shadow denoiser") and the scene
   status (Diagnostics, "Global illumination scene").
 - **Shadow rays debug view and probe** (Diagnostics, Debug view "Ray-traced shadow rays"; needs
   the ray-traced shadows and an upscaler, as the upscaler's composite blends it over the image).
@@ -1563,6 +1607,12 @@ traced here (see "Ray-traced lights").
   highest corner as its ring was made, the heightmap's height there now and the level of detail resident
   there; every probe has its frame and the frames each terrain ring was last made. Checked offline on the
   four harness scenes, before the captured meshes went: each scene's shadow takes the expected colour.
+  The probe also shows where the rays start: the scene's triangle they leave (or the depth's point), its
+  normal and the sun's cosine to it and to the G-buffer's normal, which side they leave, the lift off it
+  (Wächter and Binder's offset grows with the world coordinates: about 3 cm at 1,200 m) and whatever that
+  lift passes through, and whether the blocker is the start's own triangle or mesh. Added 2026-10-24 when
+  Snake's chest was shadowed in strips along its folds, each ray blocked at 0.00 m by his own suit's mesh
+  from inside.
 - **Open: terrain blocking for one refresh** (2026-10-23, after the copy race was fixed). With the camera
   still, the probe showed a pixel's sun ray blocked by the terrain 140 m away (66 m above the pixel) for
   about 2.3 s, twice, lit otherwise: one ring made with a wrong height, the next refresh right again. The
@@ -1662,6 +1712,12 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   frame's lights (`localLightCount.z` of them) and give no second bounce. Indoors the game's probe light,
   which the global illumination replaces, held the lamps' baked bounce; without this an indoor hall lit
   by 47 lamps was dark but for their direct light (2026-10-24).
+- **Open: a flashlight's bounce lingers** about a second after it goes off or swings away: the probes not
+  traced this frame keep their light, and the denoiser's change detection takes 30 frames. An anti-lag
+  (2026-10-24, in release 1.5.0) took histories down at once where the light fell: first each probe's own
+  rays and each pixel's own fall under an eighth, then the change pooled over the probes 5 x 5 around
+  (A-SVGF's filtered gradients). Both made dark speckles flicker everywhere once leaves let light through
+  (noise alone tripped them), so it was removed; the stable light was worth more than the faster fade.
 - **Drawn again.** At the first list with a draw point, which waits for Direct3D 12, the immediate
   context draws the frame's lights before the list runs: a full-screen triangle, cut by a scissor to the light's sphere
   (a spot's: the bounding sphere of its cone) on screen, in the light vertex shaders' form (the clip-space
@@ -1680,9 +1736,8 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   few frames (as each readback returns), to see which step holds light after a light goes away.
   Every ten seconds the log counts the lights drawn with their shadow and without it
   (recorded after the kick, or not traced), those left at the kicks for another frame's camera or over
-  the 128 bits, and those lost. The cost table times the drawing ("Ray-traced lights", under the global
-  illumination) and measures the whole by leaving it out; the Direct3D 12 time is in the log ("shadow
-  rays for lights"). The flashlights alone took 0.18 ms of rays at 2560 x 1440 in their first session,
+  the 128 bits, and those lost. The cost table times the drawing and the Direct3D 12 rays ("Ray-traced
+  lights") and measures the whole by leaving it out; the log has the rays too ("shadow rays for lights"). The flashlights alone took 0.18 ms of rays at 2560 x 1440 in their first session,
   every one traced at the kick.
 
 Not handled:

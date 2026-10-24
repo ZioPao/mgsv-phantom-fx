@@ -98,8 +98,12 @@ constexpr std::uint64_t ParseBytesPerTake = 8ull << 20;
 // read, every decal is taken as a cut-out caster (the user's call, 2026-10-23: see what breaks). Alpha
 // bit 5 (32): cut out, the shadow pass testing its alpha (m_param.w 1, measured per draw), as it does
 // a shadow-only decal's; alpha 16 (glass) is drawn into the shadow maps without the test (m_param.w 0):
-// solid.
-constexpr std::uint8_t CastsNoShadow = 0x01;
+// solid. Shadow bit 1: drawn into the shadow maps only, a stand-in for what the main view shows.
+// A character (a skinned model) is taken as the main view shows it instead: its stand-ins left out
+// (2026-10-24: one of 40 triangles on a woman's outfit lay on her skin and blocked her chest's sun
+// rays at once), its meshes the shadow maps leave out taken (her hair: the rays saw her bald, low-poly
+// head's outline across it), see-through ones (alpha bit 6) cut out by their alpha.
+constexpr std::uint8_t CastsNoShadow = 0x01, ShadowMapsOnly = 0x02;
 constexpr std::uint8_t CutOutAlpha = 0x20, TranslucentAlpha = 0x40, DecalAlpha = 0x80;
 // The StrCode64s of a material's texture parameters "Base_Tex_SRGB" (the colour, and a cut-out mesh's
 // alpha) and "Mask_Tex_LIN" (a shadow-only mesh's mask, its only texture): Fox Engine's string hash,
@@ -360,11 +364,12 @@ bool readSkin(const FileReader& file, const Block& boneGroups, std::uint64_t mes
     return true;
 }
 
-// A model's meshes that the game draws into its shadow maps: each one's vertices with their texture
-// coordinates, its mesh group, and the indices of its most detailed triangles, as the game keeps them;
-// a skinned model's vertices also with their bones (readSkin). The object brush's bushes and grass
-// (`vegetation`) cast no shadow in the game (alpha 0xA0, a cut-out decal; shadow bit 0): their meshes
-// are taken as cut out all the same, for the rays' shadows.
+// A model's meshes that the game draws into its shadow maps, a character's that it draws in the main
+// view (see CastsNoShadow): each one's vertices with their texture coordinates, its mesh group, and the
+// indices of its most detailed triangles, as the game keeps them; a skinned model's vertices also with
+// their bones (readSkin). The object brush's bushes and grass (`vegetation`) cast no shadow in the game
+// (alpha 0xA0, a cut-out decal; shadow bit 0): their meshes are taken as cut out all the same, for the
+// rays' shadows, and as leaves, which let light through; the brush's props are opaque.
 std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::span<const std::uint8_t> bytes, bool vegetation)
 {
     const FileReader file{bytes};
@@ -398,9 +403,12 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
             || !file.at(meshAt + 16, firstFace) || !file.at(meshAt + 24, firstFaceInfo))
             return nullptr;
 
-        if (((shadow & CastsNoShadow) && !vegetation) || (alpha & TranslucentAlpha))
+        const bool character = model->bones != 0;
+        const bool leftOut = character ? (shadow & ShadowMapsOnly) != 0 : ((shadow & CastsNoShadow) && !vegetation) || (alpha & TranslucentAlpha);
+        if (leftOut)
         {
             ++shadowlessMeshes;
+            model->leftOut.push_back({mesh, alpha, shadow});
             continue;
         }
 
@@ -448,7 +456,10 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
         auto& part = model->parts.emplace_back();
         part.mesh = mesh;
         part.group = (*meshGroups)[mesh];
-        part.alphaTested = (alpha & (CutOutAlpha | DecalAlpha)) != 0;
+        part.alphaTested = (alpha & (CutOutAlpha | DecalAlpha)) != 0 || (character && (alpha & TranslucentAlpha));
+        part.leaf = vegetation && part.alphaTested;
+        part.alphaBits = alpha;
+        part.shadowBits = shadow;
         part.baseTexture = textureOf(file, *layout, materialInstance, BaseTextureParameter);
         if (!part.baseTexture)
         {
@@ -581,6 +592,7 @@ bool collectCharacters(std::vector<gi_renderer::CharacterInstance>& characters, 
 
         character.shownGroups.resize(*groups);
         for (std::size_t g = 0; g < groupStates.size(); ++g) character.shownGroups[g] = (groupStates[g] & HiddenGroupBits) == 0;
+        character.groupStates = std::move(groupStates);
         characters.push_back(std::move(character));
     }
 
@@ -867,6 +879,8 @@ void take(Snapshot& snapshot, const std::vector<gi_inputs::DrawnBones>& drawn)
                 if (part == parts.end()) continue;
 
                 ++drawsPlaced;
+                character.drawnParts.resize(parts.size());
+                character.drawnParts[static_cast<std::size_t>(part - parts.begin())] = true;
                 for (std::size_t slot = 0; slot < part->boneGroup.size(); ++slot)
                 {
                     const std::size_t bone = part->boneGroup[slot];
@@ -1027,6 +1041,6 @@ std::string status()
         + std::to_string(skinnedFiles.load()) + " skinned, " + std::to_string(unreadableFiles.load()) + " unreadable, "
         + std::to_string(modelsParsed.load()) + " parsed, "
         + std::to_string(parseFailures.load()) + " failed; " + std::to_string(shadowlessMeshes.load())
-        + " meshes that cast no shadow left out; " + engine_brush::status();
+        + " meshes left out (no shadow or see-through, or a character's shadow stand-in); " + engine_brush::status();
 }
 }

@@ -65,6 +65,7 @@ struct ModelPart
     std::uint32_t mesh{};
     std::uint32_t group{};
     bool alphaTested{};
+    bool leaf{}; // Leaves, which let light through (GI_GEOMETRY_LEAF)
     std::uint64_t baseTexture{};
     bool maskInRed{};
     std::vector<Vertex> vertices;
@@ -76,6 +77,15 @@ struct ModelPart
     // and a skinned mesh's palette slots, the model's bone in each (VSBones' g_vsBone, gi_inputs::DrawnBones).
     std::uint32_t firstIndex{}, indexCount{};
     std::vector<std::uint16_t> boneGroup;
+    // Diagnostics (the shadow probe): the FMDL mesh's alpha and shadow bytes.
+    std::uint8_t alphaBits{}, shadowBits{};
+};
+
+// Diagnostics (the shadow probe): a mesh of a model file the scene leaves out, with its alpha and shadow bytes.
+struct LeftOutMesh
+{
+    std::uint32_t mesh{};
+    std::uint8_t alphaBits{}, shadowBits{};
 };
 
 // A model the game has loaded (engine_scene.hpp): its meshes the scene takes; a skinned model's bones.
@@ -84,6 +94,7 @@ struct Model
     std::uint64_t hash{}; // The model file's path hash, the same for every copy of the model
     std::vector<ModelPart> parts;
     std::uint32_t bones{}; // 0: rigid, placed as a whole (ModelInstance); else posed (CharacterInstance)
+    std::vector<LeftOutMesh> leftOut;
 };
 
 // One of the game's textures for the scene, by its path hash (ModelPart::baseTexture): a shared copy
@@ -114,6 +125,11 @@ struct CharacterInstance
     Transform transform{};
     std::vector<float> palette;
     std::vector<bool> shownGroups;
+
+    // Diagnostics (the shadow probe): each mesh group's state byte as read, and which of the model's
+    // meshes (Model::parts) this frame's draws posed (engine_scene::take).
+    std::vector<std::uint8_t> groupStates;
+    std::vector<bool> drawnParts;
 };
 
 // The game's terrain heightmap as its terrain shaders read it (engine_scene::TerrainInputs), shared
@@ -159,6 +175,7 @@ struct Frame
     // screen's centre (shadowProbe).
     bool debugShadows{};
     bool shadowsFromDepth{}; // Diagnostics: every shadow ray from the depth and the G-buffer's normal, as before 2026-10-24
+    bool opaqueLeaves{};     // Diagnostics: leaves let no light through (GI_GEOMETRY_LEAF), as before 2026-10-24
     // The point and spot lights whose shadows go into textures.localLightShadow, at most GI_MAX_LOCAL_LIGHTS,
     // and the rays a pixel they take.
     std::vector<LocalLight> localLights;
