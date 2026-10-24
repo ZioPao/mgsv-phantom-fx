@@ -22,15 +22,15 @@ using Microsoft::WRL::ComPtr;
 enum class Kernel : std::uint8_t
 {
     // gi_scene.hlsl
-    ClearBounds, Scatter, CullCaptured, DebugScene, ClearOutput, BuildDepthPyramid, TerrainGrid,
+    ClearNewGeometries, DebugScene, ClearOutput, TerrainGrid, Skin,
     // gi_light.hlsl
     ClearCounters, GenerateDispatch, ClearBuffer, ScanBlocks, ScanBlockSums, ScanAddOffsets, ClearProbeMask, FilterProbeMask,
     InitCachedTileLRU, ReprojectScreenProbes, CountScreenProbes, ScatterScreenProbes, SpawnScreenProbes, CompactScreenProbes,
     PatchScreenProbes, StoreSpawnCount, SampleScreenProbes, LearnAlbedo, PopulateScreenProbes, PurgeTiles, PopulateMultibounceCells,
-    PopulateCells, UpdateTiles, UpdateMultibounceCells, ResolveCells, BlendScreenProbes, CopyProbes, ReorderScreenProbes,
+    PopulateCells, UpdateTiles, UpdateMultibounceCells, ResolveCells, BlendScreenProbes, PropagateProbeChange, CopyProbes, ReorderScreenProbes,
     FilterScreenProbes, ProjectScreenProbes, InterpolateScreenProbes, ReprojectGI, FilterGI,
     // gi_shadow.hlsl, gi_shadow_filter.hlsl
-    TraceSunShadows, ClassifyShadowTiles, FilterShadows, DebugShadows, ProbeShadows,
+    TraceSunShadows, ClassifyShadowTiles, FilterShadows, DebugShadows, ProbeShadows, TraceLocalLightShadows, FilterLocalLightShadows,
     Count
 };
 

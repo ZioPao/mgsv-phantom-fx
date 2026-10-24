@@ -64,7 +64,6 @@ constexpr float BlockSize = 128, GridOrigin = -4096, UnitsPerMetre = 256;
 using Function = std::uintptr_t (*)(std::uintptr_t, std::uintptr_t);
 std::array<Function, std::size(Functions)> originals{};
 std::uintptr_t imageBase{};
-bool hooksIn{};
 
 std::mutex liveMutex;
 std::unordered_set<std::uintptr_t> brushes, blocks;
@@ -232,7 +231,7 @@ std::string hook(std::uintptr_t base) noexcept
     imageBase = base;
     for (std::size_t i = 0; i < std::size(Functions); ++i)
         if (std::memcmp(reinterpret_cast<const void*>(base + Functions[i]), Starts[i], sizeof(Starts[i])))
-            return " The object brush's constructors have unexpected code: its vegetation is captured as drawn.";
+            return " The object brush's constructors have unexpected code: its vegetation is left out of the ray-traced scene.";
 
     for (std::size_t i = 0; i < std::size(Functions); ++i)
     {
@@ -242,17 +241,11 @@ std::string hook(std::uintptr_t base) noexcept
         if (status != MH_OK)
         {
             for (std::size_t j = 0; j <= i; ++j) MH_RemoveHook(reinterpret_cast<void*>(base + Functions[j]));
-            return std::string(" Hooking the object brush failed (") + MH_StatusToString(status) + "): its vegetation is captured as drawn.";
+            return std::string(" Hooking the object brush failed (") + MH_StatusToString(status) + "): its vegetation is left out of the ray-traced scene.";
         }
     }
 
-    hooksIn = true;
     return " The object brush's constructors are hooked: the scene takes its vegetation.";
-}
-
-bool hooked() noexcept
-{
-    return hooksIn;
 }
 
 void collect(const std::function<void(std::uintptr_t resource, std::span<const gi_renderer::Transform> transforms)>& place)

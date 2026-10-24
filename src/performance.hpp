@@ -11,8 +11,8 @@
 #include <string>
 #include <vector>
 
-// What Phantom FX's passes cost on the GPU, for the overlay's Diagnostics (docs/DEVELOPMENT.md,
-// "Costs"). While someone looks (the Diagnostics section open, the costs shown over the game, or a
+// What Phantom FX's passes cost on the GPU, for the settings window (docs/DEVELOPMENT.md, "Costs").
+// While someone looks (the settings window open, the costs shown over the game, or a
 // measurement running), each pass ends a timestamp query before and after its work, in the context
 // it records in. The game records a frame on its deferred contexts while the immediate context
 // executes the one before, so a deferred context's timestamps follow its command list and count for
@@ -25,7 +25,7 @@
 // really costs.
 namespace phantom_fx::performance
 {
-// The add-on's passes, grouped by effect in the cost table (performance_menu.cpp).
+// The add-on's passes, grouped by effect in the budget (menu_budget.cpp).
 enum class Pass : std::size_t
 {
     UpscalerInputs, Upscaler, UpscalerOutput,
@@ -33,8 +33,8 @@ enum class Pass : std::size_t
     OcclusionPrefilter, OcclusionMarch, OcclusionDenoise, OcclusionApply,
     LightPrefilter, LightMarch, LightDenoise, LightUpsample,
     FogPass, SkyTables, FogShadow, FogScattering, FogIntegration, Sky,
-    DofSetup, DofGather, DofComposite, LensShot,
-    GiCapture, GiInputs, GiProbeLight, GiCombine, GiWait,
+    DofSetup, DofGather, DofComposite,
+    GiInputs, GiProbeLight, GiCombine, GiWait, LocalLights,
     HdrEncode, HdrDecode, HdrGrade,
     Count
 };
@@ -118,8 +118,8 @@ void watch() noexcept;
 void showOverlay(bool show) noexcept;
 // Starts measuring each effect's real cost, unless a measurement is running.
 void measure() noexcept;
-// The Diagnostics section's costs, and the corner table over the game, drawn every frame.
-void drawDiagnostics();
+// The settings window's budget page, and the costs over the game, drawn every frame.
+void drawBudget();
 void drawOverlay();
 // The costs as plain text, for PhantomFX-performance.txt.
 std::string report(const Status& state);

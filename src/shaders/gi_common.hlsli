@@ -19,8 +19,7 @@ RaytracingAccelerationStructure g_Scene : register(t0, space1);
 Texture2D<float> g_Depth : register(t0);    // Reversed-Z, 0 where the sky is
 Texture2D<float4> g_Normal : register(t1);  // World space as 0.5 n + 0.5; 0 where the sky is
 Texture2D<float4> g_Albedo : register(t2);  // Linear
-Texture2D<float4> g_Transfer : register(t3); // Captured vertices, world space
-StructuredBuffer<GIScatterRecord> g_ScatterRecords : register(t4);
+StructuredBuffer<uint> g_NewGeometries : register(t4); // The frame's new geometries' rows of the table (counts.x)
 // The frame's instances as the top level holds them, and the scene's geometry (gi_scene.hpp): the
 // pool, vertices of 16 bytes (xyz the position, object space; w the texture coordinates, two halves,
 // with GI_GEOMETRY_UV) and 16-bit indices; the table of geometries, an instance's from its first.
@@ -32,16 +31,10 @@ StructuredBuffer<GIGeometry> g_Geometries : register(t16);
 Texture2D<float4> g_SceneTextures[GI_MAX_TEXTURES] : register(t0, space2);
 
 RWTexture2D<float4> g_Output : register(u0);
-RWByteAddressBuffer g_GeometryPoolOut : register(u1); // The pool, while the frame's captures and terrain go in
-RWStructuredBuffer<uint> g_EntryBounds : register(u2); // Six per captured mesh's entry: minimum xyz, maximum xyz, ordered
-RWStructuredBuffer<GIInstanceDesc> g_InstancesOut : register(u3); // The instances, while CullCaptured adjusts them
+RWByteAddressBuffer g_GeometryPoolOut : register(u1); // The pool, while the frame's terrain and characters' poses go in
 RWStructuredBuffer<uint> g_Counters : register(u4);
 RWStructuredBuffer<uint4> g_DispatchArgs : register(u5);
 RWStructuredBuffer<uint4> g_GeometryAlbedo : register(u6); // Sums of linear albedo x 255 and their count, by geometry
-// By instance: why it is in the scene or left out (BuildInstances): x GI_REASON_*, y asuint(its box's
-// nearest depth), z asuint(the farthest depth over its screen rectangle), w the pyramid level read |
-// 256 when all of it is in view. For the shadow debug view and probe.
-RWStructuredBuffer<uint4> g_InstanceDebug : register(u76);
 
 SamplerState g_PointSampler : register(s0);
 SamplerState g_LinearSampler : register(s1);
@@ -329,15 +322,15 @@ float3 DecodeNormal(float4 encoded)
     return normalize(2.0f * encoded.xyz - 1.0f);
 }
 
-// Rays leave a surface the depth buffer gave from slightly in front of it: the captured triangles
-// are not exactly where the game drew them (another level of detail, rounding).
+// Rays leave a surface the depth buffer gave from slightly in front of it: the scene's triangles are
+// not exactly where the game drew them (another level of detail, rounding).
 float3 OffsetFromScreenSurface(float3 position, float3 normal)
 {
     float distanceToEye = distance(position, g_Frame.eye.xyz);
     return position + normal * (0.02f + 0.002f * distanceToEye);
 }
 
-// Wächter and Binder's offset for a point on a captured triangle (Ray Tracing Gems, chapter 6).
+// Wächter and Binder's offset for a point on a triangle (Ray Tracing Gems, chapter 6).
 float3 OffsetFromTriangle(float3 position, float3 normal)
 {
     const float origin = 1.0f / 32.0f;
@@ -352,15 +345,10 @@ float3 OffsetFromTriangle(float3 position, float3 normal)
 
 // ---- The scene's geometry ----
 
-// An instance's kind (GI_INSTANCE_*), a captured one's entry, and its first geometry's row of the table.
+// An instance's kind (GI_INSTANCE_*), and its first geometry's row of the table.
 uint InstanceKind(GIInstanceDesc instance)
 {
     return instance.idAndMask & GI_INSTANCE_KINDS;
-}
-
-uint InstanceEntry(GIInstanceDesc instance)
-{
-    return (instance.idAndMask & 0xFFFFFFu) >> GI_INSTANCE_ENTRY_SHIFT;
 }
 
 uint FirstGeometry(GIInstanceDesc instance)
@@ -478,12 +466,26 @@ struct SceneHit
     bool frontFace; // Clockwise seen from the ray's origin (DXR's front)
 };
 
-// Instances whose mask shares a bit with `mask` (GI_MASK_*) take part; the left-out (GI_MASK_HIDDEN) only
-// for the shadow debug view. With `alphaTest` (the sun's shadow rays), cut-out geometry with its
+// A ray leaving the surface a pixel shows: its cone starts as wide as the pixel there and spreads as
+// `spread` (radians) does.
+float2 PixelCone(float3 position, float spread)
+{
+    return float2(distance(position, g_Frame.eye.xyz) * g_Frame.rayCone.x, spread);
+}
+
+// The global illumination's rays' cone: as wide as a pixel where they start, spreading as a pixel's
+// angle does (from the eye, a pixel's own cone).
+float2 LightCone(float3 origin)
+{
+    return PixelCone(origin, g_Frame.rayCone.x);
+}
+
+// Instances whose mask shares a bit with `mask` take part. With `alphaTest`, cut-out geometry with its
 // texture lets the ray through where it is clear, and cut-out geometry without blocks it as
 // `untextured` says; the ray's cone (`cone`: its width at the origin and its growth a metre, metres)
-// picks the texture's level of detail. Without, every triangle is opaque: testing alpha in every ray of
-// the global illumination cost its rays about five times as much, for light that hardly shows it.
+// picks the texture's level of detail. Without, every triangle is opaque. Every ray tests alpha: the
+// global illumination's rays once took every triangle as opaque, and a bank of grass, a heap of solid
+// cards to them, went dark (2026-10-23).
 SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float maxDistance, uint mask, bool alphaTest, bool untextured, float2 cone)
 {
     RayDesc ray;
@@ -529,19 +531,10 @@ SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float 
     return result;
 }
 
-SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float maxDistance, uint mask, bool alphaTest)
-{
-    return TraceClosest(origin, direction, minDistance, maxDistance, mask, alphaTest, false, 0.0f);
-}
-
-SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float maxDistance, uint mask)
-{
-    return TraceClosest(origin, direction, minDistance, maxDistance, mask, false);
-}
-
+// A global illumination ray (LightCone); cut-out geometry without its texture lets it through.
 SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float maxDistance)
 {
-    return TraceClosest(origin, direction, minDistance, maxDistance, GI_MASK_TRACED);
+    return TraceClosest(origin, direction, minDistance, maxDistance, GI_MASK_SCENE, true, false, LightCone(origin));
 }
 
 SceneHit TraceClosest(float3 origin, float3 direction, float maxDistance)
@@ -549,6 +542,7 @@ SceneHit TraceClosest(float3 origin, float3 direction, float maxDistance)
     return TraceClosest(origin, direction, 0.0f, maxDistance);
 }
 
+// Whether a global illumination ray gets away, any hit ending it.
 bool TraceVisible(float3 origin, float3 direction, float minDistance, float maxDistance)
 {
     RayDesc ray;
@@ -557,9 +551,17 @@ bool TraceVisible(float3 origin, float3 direction, float minDistance, float maxD
     ray.TMin = minDistance;
     ray.TMax = maxDistance;
 
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> query;
-    query.TraceRayInline(g_Scene, GI_RAY_FLAGS, GI_MASK_TRACED, ray);
-    query.Proceed();
+    float2 cone = LightCone(origin);
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> query;
+    query.TraceRayInline(g_Scene, GI_RAY_FLAGS, GI_MASK_SCENE, ray);
+    while (query.Proceed())
+    {
+        uint row = query.CandidateInstanceContributionToHitGroupIndex() + query.CandidateGeometryIndex();
+        float footprint = cone.x + query.CandidateTriangleRayT() * cone.y;
+        if (CutOutBlocks(row, query.CandidatePrimitiveIndex(), query.CandidateTriangleBarycentrics(), false, footprint, query.CandidateObjectToWorld3x4()))
+            query.CommitNonOpaqueTriangleHit();
+    }
+
     return query.CommittedStatus() == COMMITTED_NOTHING;
 }
 
@@ -586,6 +588,32 @@ void MaxDiagnostic(uint counter, float3 value)
 {
     float largest = WaveActiveMax(max(max(value.r, value.g), value.b));
     if (WaveIsFirstLane() && largest > 0.0f) InterlockedMax(g_Counters[counter], asuint(largest));
+}
+
+// ---- Point and spot lights ----
+// A point or spot light's diffuse light at a surface, without shadows, as the game's light shaders work
+// it out (Lighting_*_NA, SSLighting2_*), in the sun colour's units; its direction and distance in `toLight`
+// and `lightDistance`. A spot's mask (a flashlight's pattern) is left out.
+float3 LocalLightAt(GILocalLight light, float3 world, float3 normal, out float3 toLight, out float lightDistance)
+{
+    float3 offset = light.position.xyz - world;
+    lightDistance = length(offset);
+    toLight = offset / max(lightDistance, 1e-6f);
+    float cosine = dot(normal, toLight);
+    if (cosine <= 0.0f || lightDistance >= light.position.w) return 0.0f;
+
+    // A point's distance is at least its least, plus its added; a spot's is as it is.
+    float d = max(lightDistance, light.falloff.z) + light.falloff.y;
+    float d2 = d * d;
+    float falloff = light.falloff.x > 0.0f ? (1.0f - min(d2 * d2 * d2 * d2 * d2 * d2 * d2 * d2, FLT_MAX) * light.color.w) / d2
+                                           : 1.0f / d2 - d2 * light.color.w;
+    falloff = max(min(falloff, light.shape.w), 0.0f);
+
+    // A spot's cone: saturate((cosine - umbra) / penumbra) to its exponent; a point's "cone" is everywhere.
+    float cut = 1.0f;
+    if (light.axis.w >= -1.0f) cut = pow(saturate((dot(light.axis.xyz, -toLight) - light.axis.w) * light.shape.y), light.shape.z);
+
+    return light.color.rgb * (falloff * cut * cosine);
 }
 
 // ---- Copies of a surface ----
@@ -626,16 +654,10 @@ SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 
     return hit;
 }
 
+// A global illumination ray leaving a surface (LightCone).
 SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance)
 {
-    return TraceFromSurface(origin, normal, tolerance, direction, maxDistance, GI_MASK_TRACED, false, 0.0f);
-}
-
-// A ray leaving the surface a pixel shows: its cone starts as wide as the pixel there and spreads as
-// `spread` (radians) does.
-float2 PixelCone(float3 position, float spread)
-{
-    return float2(distance(position, g_Frame.eye.xyz) * g_Frame.rayCone.x, spread);
+    return TraceFromSurface(origin, normal, tolerance, direction, maxDistance, GI_MASK_SCENE, true, LightCone(origin));
 }
 
 // Whether a ray leaving a surface gets away, past copies of the surface: the stretch of the ray
@@ -646,18 +668,6 @@ bool VisibleFromSurface(float3 origin, float3 normal, float tolerance, float3 di
     if (TraceFromSurface(origin, normal, tolerance, direction, nearEnd).hit) return false;
 
     return nearEnd >= maxDistance || TraceVisible(origin, direction, nearEnd, maxDistance);
-}
-
-// Floats as uints whose order is the floats' order, for atomic minimum and maximum.
-uint OrderedFromFloat(float value)
-{
-    uint bits = asuint(value);
-    return (bits & 0x80000000u) ? ~bits : bits | 0x80000000u;
-}
-
-float FloatFromOrdered(uint ordered)
-{
-    return asfloat((ordered & 0x80000000u) ? ordered & 0x7FFFFFFFu : ~ordered);
 }
 
 // ---- The game's terrain ----

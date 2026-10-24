@@ -15,12 +15,24 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_EXPORT_COMPILE_COMMANDS": true
       }
+    },
+    {
+      "name": "dev",
+      "displayName": "Windows x64 Release with the diagnostic log",
+      "inherits": "release",
+      "cacheVariables": {
+        "PHANTOM_FX_DIAGNOSTIC_LOG": true
+      }
     }
   ],
   "buildPresets": [
     {
       "name": "release",
       "configurePreset": "release"
+    },
+    {
+      "name": "dev",
+      "configurePreset": "dev"
     }
   ]
 }

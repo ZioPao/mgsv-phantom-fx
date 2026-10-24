@@ -4,7 +4,6 @@
 
 #include <d3d11.h>
 #include <cstddef>
-#include <cstdint>
 #include <string>
 
 // The depth of field (docs/DEVELOPMENT.md, "Depth of field"). Fox Engine blurs with sprites: one
@@ -12,21 +11,12 @@
 // gather on, its passes are left out and, from the same inputs, a gather runs instead: the blur at
 // half size, split into what lies in front of the focus and what lies behind it, and blurs of a few
 // pixels at full size. It blurs before the game's tonemap, so lights stay bright in the blur.
-//
-// Photo mode's lens shot (photo_mode.hpp) also runs here, gather or not: frame after frame, the
-// scene at the depth of field is added up and the average shown in place of the game's blur.
 namespace phantom_fx::depth_of_field
 {
 struct Options
 {
     bool gather{}; // In place of the game's depth of field
     int blades{};  // Aperture blades; 0 is round
-};
-
-// Frames a lens shot has added up, of its total; zero outside a shot.
-struct ShotProgress
-{
-    std::uint32_t frames{}, total{};
 };
 
 void attach(ID3D11Device* device) noexcept;
@@ -36,7 +26,6 @@ void detach() noexcept;
 void configure(const Options& options) noexcept;
 // Empty while the gather is off or running; otherwise what it waits for, for the overlay.
 std::string problem();
-ShotProgress shotProgress() noexcept;
 
 // ---- Recording, on the game's render and worker threads ----
 void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;

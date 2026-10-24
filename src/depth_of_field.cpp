@@ -34,7 +34,7 @@ using Microsoft::WRL::ComPtr;
 enum class Role : std::uint8_t
 {
     Bake,      // DOF_ScatterBakeFirst: the first pass, reading the scene, the depth and the blur's constants
-    Scatter,   // The passes between, which the gather or a lens shot replaces
+    Scatter,   // The passes between, which the gather replaces
     Composite, // DOF_ScatterCompositeFinal: the blurred scene into the scene target
     Resolve,   // The deferred resolves with TppTonemap, whose curve the blur undoes
 };
@@ -71,8 +71,6 @@ constexpr float MaxRadiusShare = 0.05f;
 constexpr float GameReferenceWidth = 1920;
 // Mip levels of the half-size colour the gather reads.
 constexpr UINT HalfColorMips = 4;
-// A lens shot leaves out the frames already on their way as it starts, whose camera had not stopped yet.
-constexpr std::uint32_t ShotWarmUp = 3;
 
 // The shaders' constant buffer (Parameters in depth_of_field_shaders.hpp).
 struct Parameters
@@ -81,9 +79,9 @@ struct Parameters
     float halfTexel[2];
     float maxRadius;
     std::uint32_t blades, useLens;
-    float aperture, focusDistance, gameUnit, sampleScale;
+    float aperture, focusDistance, gameUnit;
     std::uint32_t lightInScene;
-    float padding[2];
+    float padding[3];
 };
 static_assert(sizeof(Parameters) == 64);
 
@@ -103,20 +101,11 @@ struct Buffer
     UINT count{};
 };
 
-// A lens shot as the frames being recorded add to it; guarded by resourceMutex.
-struct Shot
-{
-    std::uint32_t id{};
-    std::uint32_t warmUp{}, frames{}, total{};
-    UINT width{}, height{};
-};
-
 // What the overlay asked for, and what the frame being recorded uses.
 std::mutex optionsMutex;
 Options wanted, current;
-// The add-on looks at the game's depth of field passes: the gather is on, or photo mode is.
+// The add-on looks at the game's depth of field passes: the gather is on.
 std::atomic<bool> armed{}, pipelineFailed{};
-std::atomic<std::uint32_t> shotFrames{}, shotTotal{};
 
 // Identified game shaders, by the object the game draws with. Holding them keeps their addresses
 // from being reused.
@@ -129,20 +118,17 @@ std::vector<ComPtr<IUnknown>> shaderOwners;
 // on one thread at a time.
 thread_local ID3D11DeviceContext* replacingOn{};
 thread_local Parameters replacingWith{};
-thread_local bool showingShot{};
 
 // ---- Direct3D, guarded by resourceMutex ----
 std::mutex resourceMutex;
 ComPtr<ID3D11Device> device;
-ComPtr<ID3D11ComputeShader> setupShader, dilateShader, gatherShader, accumulateShader, captureShader;
-ComPtr<ID3D11PixelShader> compositeShader, showShotShader;
+ComPtr<ID3D11ComputeShader> setupShader, dilateShader, gatherShader, captureShader;
+ComPtr<ID3D11PixelShader> compositeShader;
 ComPtr<ID3D11SamplerState> linearSampler;
 ComPtr<ID3D11Buffer> parameterBuffer;
 Buffer lens;    // The blur's scale, focus and limits, and the depth's projection, from the setup pass
 Buffer tonemap; // The resolve's TppTonemap curve
-Buffer sum;     // A lens shot's frames added up, at the render size
 Target halfColor, tileBlur, tileRadius, background, foreground;
-Shot shot;
 std::uint64_t lastRun{}; // GetTickCount64 of the gather's last frame
 std::map<std::string, bool, std::less<>> loggedOnce;
 
@@ -217,10 +203,8 @@ bool ensurePipeline()
     {
         dilateShader = computeShader(shaders::Dilate, "dof-dilate");
         gatherShader = computeShader(shaders::Gather, "dof-gather");
-        accumulateShader = computeShader(shaders::Accumulate, "dof-accumulate");
         captureShader = computeShader(shaders::CaptureTonemap, "dof-capture-tonemap");
         compositeShader = pixelShader(shaders::Composite, "dof-composite");
-        showShotShader = pixelShader(shaders::ShowShot, "dof-show-shot");
 
         D3D11_SAMPLER_DESC sampler{};
         sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -427,7 +411,6 @@ Parameters parametersFor(UINT width, UINT height, const Options& options, const 
         .aperture = photo.aperture,
         .focusDistance = std::max(photo.focusDistance, 0.1f),
         .gameUnit = static_cast<float>(width) / GameReferenceWidth,
-        .sampleScale = 0,
         // With HDR the scene holds light, not TppTonemap's image (hdr.hpp).
         .lightInScene = hdr::active() ? 1u : 0u,
         .padding = {}};
@@ -476,63 +459,8 @@ void recordGather(ID3D11DeviceContext* context, const Parameters& parameters, ID
     context->CSSetUnorderedAccessViews(0, 2, noAccess, nullptr);
 }
 
-// Counts this frame into the lens shot; call with resourceMutex held. Returns whether the frame
-// adds to the sum.
-bool countShotFrame(const photo_mode::Lens& photo, UINT width, UINT height)
-{
-    // A new shot, or the render size changed under this one: start adding up again.
-    if (photo.shot != shot.id || width != shot.width || height != shot.height)
-        shot = {.id = photo.shot, .warmUp = ShotWarmUp, .frames = 0, .total = photo.shotFrames, .width = width, .height = height};
-
-    bool adds{};
-    if (shot.warmUp) --shot.warmUp;
-    else if (shot.frames < shot.total)
-    {
-        adds = true;
-        if (++shot.frames == shot.total)
-        {
-            photo_mode::shotFinished(shot.id);
-            log("Lens shot " + std::to_string(shot.id) + " has its " + std::to_string(shot.total) + " frames.");
-        }
-    }
-
-    shotFrames = shot.frames;
-    shotTotal = shot.total;
-
-    return adds;
-}
-
-// Adds the scene to the lens shot's sum; call with resourceMutex held.
-void recordShotFrame(ID3D11DeviceContext* context, const Parameters& parameters, ID3D11ShaderResourceView* scene)
-{
-    const UINT pixels = parameters.fullSize[0] * parameters.fullSize[1];
-    if (sum.count != pixels)
-    {
-        sum = structuredBuffer(12, pixels, "Creating the lens shot's sum");
-        log("Lens shot sum at " + std::to_string(parameters.fullSize[0]) + "x" + std::to_string(parameters.fullSize[1]) + ".");
-    }
-
-    writeParameters(context, parameters);
-    SavedComputeState saved(context);
-    const performance::Timed timed(context, performance::Pass::LensShot);
-    if (shot.frames == 1)
-    {
-        constexpr UINT zeros[4]{};
-        context->ClearUnorderedAccessViewUint(sum.access.Get(), zeros);
-    }
-
-    ID3D11UnorderedAccessView* const noAccess[1]{};
-    context->CSSetConstantBuffers(0, 1, parameterBuffer.GetAddressOf());
-    context->CSSetShaderResources(0, 1, &scene);
-    context->CSSetShaderResources(5, 1, tonemap.view.GetAddressOf());
-    context->CSSetUnorderedAccessViews(0, 1, sum.access.GetAddressOf(), nullptr);
-    context->CSSetShader(accumulateShader.Get(), nullptr, 0);
-    context->Dispatch(groups(parameters.fullSize[0]), groups(parameters.fullSize[1]), 1);
-    context->CSSetUnorderedAccessViews(0, 1, noAccess, nullptr);
-}
-
-// DOF_ScatterBakeFirst: the gather or the lens shot from its inputs. False leaves the depth of field
-// to the game this frame.
+// DOF_ScatterBakeFirst: the gather from its inputs. False leaves the depth of field to the game this
+// frame.
 bool bake(ID3D11DeviceContext* context)
 {
     replacingOn = nullptr;
@@ -557,32 +485,16 @@ bool bake(ID3D11DeviceContext* context)
         options = current;
     }
 
-    const auto photo = photo_mode::lens();
-    auto parameters = parametersFor(size.first, size.second, options, photo);
+    if (!options.gather) return false;
+
+    const auto parameters = parametersFor(size.first, size.second, options, photo_mode::lens());
 
     std::lock_guard lock(resourceMutex);
     if (!ensurePipeline()) return false;
 
-    if (photo.shooting)
-    {
-        if (countShotFrame(photo, size.first, size.second)) recordShotFrame(context, parameters, scene.Get());
-        if (shot.frames)
-        {
-            parameters.sampleScale = 1.0f / static_cast<float>(shot.frames);
-            replacingOn = context;
-            replacingWith = parameters;
-            showingShot = true;
-
-            return true;
-        }
-    }
-
-    if (!options.gather) return false;
-
     recordGather(context, parameters, scene.Get(), depth.Get(), sceneConstants.Get(), objectConstants.Get());
     replacingOn = context;
     replacingWith = parameters;
-    showingShot = false;
     lastRun = GetTickCount64();
 
     return true;
@@ -592,7 +504,6 @@ bool bake(ID3D11DeviceContext* context)
 bool composite(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call)
 {
     const auto parameters = replacingWith;
-    const bool shotResult = showingShot;
     replacingOn = nullptr;
 
     ComPtr<ID3D11ShaderResourceView> scene, depth;
@@ -613,19 +524,11 @@ bool composite(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call)
     context->PSSetConstantBuffers(0, 1, parameterBuffer.GetAddressOf());
     context->PSSetShaderResources(0, 1, scene.GetAddressOf());
     context->PSSetShaderResources(5, 1, tonemap.view.GetAddressOf());
-    if (shotResult)
-    {
-        context->PSSetShaderResources(7, 1, sum.view.GetAddressOf());
-        context->PSSetShader(showShotShader.Get(), nullptr, 0);
-    }
-    else
-    {
-        ID3D11ShaderResourceView* inputs[]{depth.Get(), background.view.Get(), foreground.view.Get(), halfColor.view.Get()};
-        context->PSSetShaderResources(1, 4, inputs);
-        context->PSSetShaderResources(6, 1, lens.view.GetAddressOf());
-        context->PSSetSamplers(0, 1, linearSampler.GetAddressOf());
-        context->PSSetShader(compositeShader.Get(), nullptr, 0);
-    }
+    ID3D11ShaderResourceView* inputs[]{depth.Get(), background.view.Get(), foreground.view.Get(), halfColor.view.Get()};
+    context->PSSetShaderResources(1, 4, inputs);
+    context->PSSetShaderResources(6, 1, lens.view.GetAddressOf());
+    context->PSSetSamplers(0, 1, linearSampler.GetAddressOf());
+    context->PSSetShader(compositeShader.Get(), nullptr, 0);
 
     const performance::Timed timed(context, performance::Pass::DofComposite);
     context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
@@ -674,21 +577,17 @@ void detach() noexcept
         setupShader.Reset();
         dilateShader.Reset();
         gatherShader.Reset();
-        accumulateShader.Reset();
         captureShader.Reset();
         compositeShader.Reset();
-        showShotShader.Reset();
         linearSampler.Reset();
         parameterBuffer.Reset();
         lens = {};
         tonemap = {};
-        sum = {};
         halfColor = {};
         tileBlur = {};
         tileRadius = {};
         background = {};
         foreground = {};
-        shot = {};
         device.Reset();
         pipelineFailed = false;
     }
@@ -723,11 +622,6 @@ std::string problem()
     if (lastRun && GetTickCount64() - lastRun < 1000) return {};
 
     return "The depth of field runs in the game's own: it needs Depth of Field on in the game's graphics settings.";
-}
-
-ShotProgress shotProgress() noexcept
-{
-    return {shotFrames, shotTotal};
 }
 
 void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
@@ -795,15 +689,8 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
 
 void present() noexcept
 {
-    const auto photo = photo_mode::lens();
-    if (!photo.shooting)
-    {
-        shotFrames = 0;
-        shotTotal = 0;
-    }
-
     std::lock_guard lock(optionsMutex);
     current = wanted;
-    armed = (current.gather || photo.active) && !pipelineFailed;
+    armed = current.gather && !pipelineFailed;
 }
 }

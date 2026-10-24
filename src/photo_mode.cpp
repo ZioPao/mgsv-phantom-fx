@@ -1,6 +1,5 @@
 #include "photo_mode.hpp"
 
-#include "camera.hpp"
 #include "device_check.hpp"
 #include "focus.hpp"
 #include "log.hpp"
@@ -12,7 +11,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <format>
 #include <mutex>
 #include <string>
 
@@ -112,23 +110,8 @@ struct CameraState
     float focalLength{};
 };
 
-// A lens shot on the game thread: each camera update takes the next point of the aperture.
-struct Shot
-{
-    std::uint32_t id{};
-    bool active{};
-    std::uint32_t next{};
-    float centre[3]{};
-    float focusDistance{};
-    float radius{}; // The aperture's, metres
-    int blades{};
-    std::uint32_t frames{};
-};
-
-std::atomic<bool> installed{}, requested{}, flying{}, hideUi{}, blur{true}, shotToggle{};
+std::atomic<bool> installed{}, requested{}, flying{}, hideUi{}, blur{true};
 std::atomic<float> fNumber{1.4f};
-std::atomic<int> blades{};
-std::atomic<std::uint32_t> shotFrames{256}, finishedShot{};
 std::atomic<std::uint8_t> heldKeys{};
 std::atomic<int> mouseX{}, mouseY{};
 std::atomic<std::uint32_t*> pauseRequest{};
@@ -136,14 +119,12 @@ std::atomic<std::uint32_t*> pauseRequest{};
 // Game thread only.
 FreeCamera freeCamera;
 LARGE_INTEGER lastStep{};
-Shot shot;
 
 // Written on the game thread, read by the frames being recorded.
 std::mutex lensMutex;
 Lens published;
 
 enum Key : std::uint8_t { Forward = 1, Back = 2, Left = 4, Right = 8, Up = 16, Down = 32, Fast = 64 };
-constexpr std::uint8_t MoveKeys = Forward | Back | Left | Right | Up | Down;
 
 std::uint8_t* activeCamera(std::uint8_t* selector)
 {
@@ -269,40 +250,17 @@ float focalLengthOf(const CameraState& game)
     return game.focalLength > 1 && game.focalLength < 5000 ? game.focalLength : FallbackFocalLength;
 }
 
-void beginShot(const CameraState& game)
-{
-    static std::uint32_t shots{};
-    const float focal = focalLengthOf(game);
-    shot = {.id = ++shots, .active = true, .focusDistance = std::max(freeCamera.focusDistance, MinFocusDistance),
-        .radius = blur ? focal / 1000 / fNumber / 2 : 0, .blades = blades, .frames = shotFrames};
-    std::memcpy(shot.centre, freeCamera.position, sizeof(shot.centre));
-    log(std::format("Lens shot {}: {:.0f} mm at f/{:.1f}, focus {:.2f} m, {} frames.", shot.id, focal, fNumber.load(), shot.focusDistance,
-        shot.frames));
-}
-
-// The shot's next point of the aperture, in the camera's own plane.
-void moveToLensPoint(CameraState& state)
-{
-    const auto point = camera::aperturePoint(shot.next++, shot.blades);
-    const float sy = std::sin(freeCamera.yaw), cy = std::cos(freeCamera.yaw);
-    const float sp = std::sin(freeCamera.pitch), cp = std::cos(freeCamera.pitch);
-    const float right[3]{-cy, 0, sy}, up[3]{-sy * sp, cp, -cy * sp};
-    for (int i = 0; i < 3; ++i) state.transform[4 + i] = shot.centre[i] + shot.radius * (point[0] * right[i] + point[1] * up[i]);
-}
-
 void publish(const CameraState& game)
 {
     std::lock_guard lock(lensMutex);
     published = {.active = flying, .aperture = blur ? focalLengthOf(game) / 1000 / fNumber : 0,
-        .focusDistance = shot.active ? shot.focusDistance : std::max(freeCamera.focusDistance, MinFocusDistance), .shot = shot.id,
-        .shooting = flying && shot.active, .shotFrames = shot.frames, .centre = {shot.centre[0], shot.centre[1], shot.centre[2]}};
+        .focusDistance = std::max(freeCamera.focusDistance, MinFocusDistance)};
 }
 
 void unpublish()
 {
     std::lock_guard lock(lensMutex);
     published.active = false;
-    published.shooting = false;
 }
 
 void selectorUpdate(std::uint8_t* selector)
@@ -326,7 +284,6 @@ void selectorUpdate(std::uint8_t* selector)
         pause(false);
         focus::setActive(false);
         flying = false;
-        shot.active = false;
         unpublish();
     }
 
@@ -340,27 +297,13 @@ void selectorUpdate(std::uint8_t* selector)
     const int turnX = mouseX.exchange(0), turnY = mouseY.exchange(0);
     const std::uint8_t keys = heldKeys;
     const auto game = stateOf(camera);
-
-    // Moving the camera ends a lens shot, as F5 does; while one lasts, the camera and focus stay.
-    if (shot.active && (turnX || turnY || (keys & MoveKeys))) shot.active = false;
-    if (shotToggle.exchange(false))
-    {
-        if (shot.active) shot.active = false;
-        else beginShot(game);
-    }
-
-    if (!shot.active)
-    {
-        fly(freeCamera, keys, turnX, turnY, seconds);
-        if (const float target = focus::distance(); target > 0)
-            freeCamera.focusDistance += (target - freeCamera.focusDistance) * (1 - std::exp(-seconds / FocusTime));
-    }
+    fly(freeCamera, keys, turnX, turnY, seconds);
+    if (const float target = focus::distance(); target > 0)
+        freeCamera.focusDistance += (target - freeCamera.focusDistance) * (1 - std::exp(-seconds / FocusTime));
 
     // Only this update sees the free camera; the game's camera keeps its own.
-    auto state = photoState(freeCamera, game);
-    if (shot.active && finishedShot != shot.id) moveToLensPoint(state);
     publish(game);
-    apply(camera, state);
+    apply(camera, photoState(freeCamera, game));
     originalSelectorUpdate(selector);
     apply(camera, game);
 }
@@ -450,24 +393,12 @@ void toggleBlur() noexcept
 void configure(const LensSettings& settings) noexcept
 {
     fNumber = settings.fNumber;
-    blades = settings.blades;
-    shotFrames = settings.shotFrames;
 }
 
 Lens lens() noexcept
 {
     std::lock_guard lock(lensMutex);
     return published;
-}
-
-void toggleShot() noexcept
-{
-    if (flying) shotToggle = true;
-}
-
-void shotFinished(std::uint32_t id) noexcept
-{
-    finishedShot = id;
 }
 
 void setControls(const Controls& controls) noexcept

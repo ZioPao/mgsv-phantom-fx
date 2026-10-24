@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(PhantomFX VERSION 1.4.0 LANGUAGES C CXX)
+project(PhantomFX VERSION 1.5.0 LANGUAGES C CXX)
 
 if(NOT WIN32 OR NOT MSVC)
     message(FATAL_ERROR "Phantom FX requires Windows and MSVC.")
@@ -8,6 +8,10 @@ endif()
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "Phantom FX must be built for 64-bit Windows.")
 endif()
+
+# The statistics logged every few seconds, and the measurements behind them, are for development
+# (the dev preset); a release logs only what happens once: startup, sizes, failures.
+option(PHANTOM_FX_DIAGNOSTIC_LOG "Log the periodic statistics used in development" OFF)
 
 include(FetchContent)
 FetchContent_Declare(minhook
@@ -157,23 +161,23 @@ function(add_gi_kernels source)
     set(GI_SHADER_HEADERS ${GI_SHADER_HEADERS} PARENT_SCOPE)
 endfunction()
 file(MAKE_DIRECTORY "${GI_SHADER_DIR}")
-add_gi_kernels(gi_scene.hlsl ClearBounds Scatter CullCaptured DebugScene ClearOutput BuildDepthPyramid TerrainGrid)
+add_gi_kernels(gi_scene.hlsl ClearNewGeometries DebugScene ClearOutput TerrainGrid Skin)
 add_gi_kernels(gi_light.hlsl ClearCounters GenerateDispatch ClearBuffer ScanBlocks ScanBlockSums ScanAddOffsets ClearProbeMask FilterProbeMask
     InitCachedTileLRU ReprojectScreenProbes CountScreenProbes ScatterScreenProbes SpawnScreenProbes CompactScreenProbes PatchScreenProbes
     StoreSpawnCount SampleScreenProbes LearnAlbedo PopulateScreenProbes PurgeTiles PopulateMultibounceCells PopulateCells UpdateTiles
-    UpdateMultibounceCells ResolveCells BlendScreenProbes CopyProbes ReorderScreenProbes FilterScreenProbes ProjectScreenProbes
+    UpdateMultibounceCells ResolveCells BlendScreenProbes PropagateProbeChange CopyProbes ReorderScreenProbes FilterScreenProbes ProjectScreenProbes
     InterpolateScreenProbes ReprojectGI FilterGI)
-add_gi_kernels(gi_shadow.hlsl TraceSunShadows ClassifyShadowTiles DebugShadows ProbeShadows)
+add_gi_kernels(gi_shadow.hlsl TraceSunShadows ClassifyShadowTiles DebugShadows ProbeShadows TraceLocalLightShadows FilterLocalLightShadows)
 add_gi_kernels(gi_shadow_filter.hlsl FilterShadows)
 add_custom_target(gi_kernels DEPENDS ${GI_SHADER_HEADERS})
 
 # The add-on uses ReShade's ImGui through the overlay function table, so none is linked.
-add_library(phantom_fx SHARED src/upscaler_addon.cpp src/upscaler.cpp src/upscaler_menu.cpp src/upscaler_settings.cpp src/camera.cpp
+add_library(phantom_fx SHARED src/upscaler_addon.cpp src/upscaler.cpp src/upscaler_menu.cpp src/menu_budget.cpp src/fxui/fxui.cpp src/upscaler_settings.cpp src/camera.cpp
     src/device_check.cpp src/motion_blur.cpp src/fxaa.cpp src/frame_rate.cpp src/render_scale.cpp src/ui_redirect.cpp src/frame_log.cpp src/resource_dump.cpp
     src/log.cpp src/shader_bytecode.cpp src/presenter.cpp src/frame_generation.cpp src/game_loop.cpp src/shadows.cpp
-    src/indirect_light.cpp src/photo_mode.cpp src/focus.cpp src/depth_of_field.cpp src/hdr.cpp src/weather.cpp src/character.cpp src/atmosphere.cpp
+    src/indirect_light.cpp src/photo_mode.cpp src/focus.cpp src/depth_of_field.cpp src/draw_distance.cpp src/hdr.cpp src/weather.cpp src/character.cpp src/atmosphere.cpp
     src/fidelityfx.cpp src/fsr_upscaler.cpp src/fsr_frame_generation.cpp src/performance.cpp src/performance_menu.cpp
-    src/global_illumination.cpp src/engine_scene.cpp src/engine_brush.cpp src/gi_capture.cpp src/gi_renderer.cpp src/gi_scene.cpp src/gi_textures.cpp src/gi_light.cpp src/gi_lighting.cpp src/gi_shadow.cpp
+    src/global_illumination.cpp src/engine_scene.cpp src/engine_brush.cpp src/gi_inputs.cpp src/local_lights.cpp src/gi_renderer.cpp src/gi_scene.cpp src/gi_textures.cpp src/gi_light.cpp src/gi_lighting.cpp src/gi_shadow.cpp
     "${CMAKE_BINARY_DIR}/version.rc")
 add_dependencies(phantom_fx gi_kernels)
 target_include_directories(phantom_fx PRIVATE src "${GI_SHADER_DIR}")
@@ -181,7 +185,8 @@ target_include_directories(phantom_fx SYSTEM PRIVATE "${RESHADE_DIR}/include" "$
     "${FIDELITYFX_DIR}")
 target_link_libraries(phantom_fx PRIVATE minhook ngx d3d11 d3d12 dxgi d3dcompiler)
 target_compile_features(phantom_fx PRIVATE cxx_std_20)
-target_compile_definitions(phantom_fx PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX ImTextureID=ImU64 PHANTOM_FX_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(phantom_fx PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX ImTextureID=ImU64 PHANTOM_FX_VERSION="${PROJECT_VERSION}"
+    PHANTOM_FX_DIAGNOSTIC_LOG=$<BOOL:${PHANTOM_FX_DIAGNOSTIC_LOG}>)
 target_compile_options(phantom_fx PRIVATE /W4 /WX /permissive- /utf-8)
 # Record only the PDB's file name, not the build machine's path.
 target_link_options(phantom_fx PRIVATE /PDBALTPATH:%_PDB%)

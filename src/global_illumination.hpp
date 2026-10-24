@@ -8,11 +8,12 @@
 #include <string>
 
 // Ray-traced global illumination after AMD's GI-1.2 in place of the game's probe lighting
-// (docs/DEVELOPMENT.md, "Global illumination"). The game's meshes are captured as it draws them
-// (gi_capture.hpp) and traced on a Direct3D 12 device beside the game's (gi_renderer.hpp).
+// (docs/DEVELOPMENT.md, "Global illumination"). The scene is the game's own, read from its memory
+// (engine_scene.hpp), and traced on a Direct3D 12 device beside the game's (gi_renderer.hpp); the
+// camera and the terrain's inputs come from its draws (gi_inputs.hpp).
 //
-// The frame: once the game's G-buffer lists have run, the immediate context packs the G-buffer and
-// the new captures into shared textures and signals a shared fence (the kick, before the list with
+// The frame: once the game's G-buffer lists have run, the immediate context packs the G-buffer into
+// shared textures and signals a shared fence (the kick, before the list with
 // the game's probe upscale). Direct3D 12 builds the scene and traces it while the game draws its
 // shadow maps. The list with the deferred resolve waits for it; there indirect_light puts the light
 // in place of the game's probe light in the diffuse light the resolve reads. The game's light target
@@ -20,19 +21,27 @@
 //
 // The same scene gives the sun's ray-traced shadows (docs/DEVELOPMENT.md, "Ray-traced shadows"),
 // with or without the light: Direct3D 12 traces them into a shared texture, which the sun pass reads
-// (shadows.hpp). The sun pass runs in the resolve's list, so it waits for them too.
+// (shadows.hpp). The sun pass runs in the resolve's list, so it waits for them too. So do the
+// point and spot lights' shadows (local_lights.hpp), a bit a light, drawn before the sun pass's list.
 namespace phantom_fx::global_illumination
 {
 struct Options
 {
     bool enabled{};   // The light, in place of the game's probe light
     bool shadows{};   // The sun's ray-traced shadows
+    // With the shadows: the game's shadow map adds its shadow near the camera, so the rays leave it cut-out
+    // geometry without its texture there. Without, they take that geometry as letting half the sun through.
+    bool withShadowMap{};
+    bool localLights{}; // The point and spot lights' ray-traced shadows (local_lights.hpp)
+    int lightRays{4};   // Their shadow rays a pixel
     float sunSize{0.53f}; // The sun's angular diameter for the shadows, in degrees
     bool showScene{}; // Diagnostics: the output shows the traced scene
     bool debugShadows{}; // Diagnostics: the shadow debug view and probe (shadowDebug, shadowProbe), with the shadows
-    // A cost measurement leaves these out: the light passes (the output keeps its last light), and
-    // the capture of meshes the scene lacks or that move (it keeps what it holds).
-    bool light = true, capture = true;
+    bool shadowsFromDepth{}; // Diagnostics: every shadow ray from the depth and the G-buffer's normal, as before 2026-10-24
+    bool bonesFromSnapshot{}; // Diagnostics: the characters' bones as the snapshot took them (engine_scene::setBonesFromSnapshot)
+    bool logOften{};         // Diagnostics: the light's statistics logged every few frames (as each readback returns), not every ten seconds
+    // A cost measurement leaves the light passes out (the output keeps its last light).
+    bool light = true;
 };
 
 void attach(ID3D11Device* device, ID3D11DeviceContext* immediate) noexcept;
@@ -51,7 +60,7 @@ void vertexShaderCreated(const void* code, std::size_t size, IUnknown* shader) n
 void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept;
 void bufferMapped(ID3D11Resource* buffer, void* data) noexcept;
 void bufferUnmapped(ID3D11Resource* buffer) noexcept;
-// Before a draw; never takes it. Notes the sky's probe constants, and captures meshes.
+// Before a draw; never takes it. Notes the sky's probe constants, the camera and the terrain's inputs.
 void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
 
 // indirect_light calls these from the game's passes it handles.
@@ -62,6 +71,9 @@ void noteUpscale(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth) 
 // A sun pass: its light and scene constants as bound. Inside the game's shadow map range
 // (`shadowMapped`), its constants also give that range.
 void noteSun(ID3D11DeviceContext* context, bool shadowMapped) noexcept;
+// Indoors, the sky's specular pass in the sun pass's place (SunLight_ES), which gives no sun: the point
+// and spot lights are drawn before its list, which waits for their shadows.
+void noteSkySpecular(ID3D11DeviceContext* context) noexcept;
 // The resolve: its list waits for the light. `albedo` is the G-buffer's albedo (sRGB view).
 void noteResolve(ID3D11DeviceContext* context, ID3D11ShaderResourceView* albedo) noexcept;
 // The light at the render size for the resolve to add: R16G16B16A16_FLOAT, in the game's diffuse
@@ -70,6 +82,9 @@ ID3D11ShaderResourceView* light(UINT width, UINT height) noexcept;
 // The sun's ray-traced shadow at the render size for the sun pass: R16_FLOAT, 1 where the sun
 // reaches. Null while off, or until Direct3D 12 has written one at this size.
 ID3D11ShaderResourceView* sunShadow(UINT width, UINT height) noexcept;
+// The point and spot lights' shadows this frame's kick traced, at the render size: R16_FLOAT, the share of
+// the lights local_lights::takeForTrace gave that reaches each pixel. Null when none were traced.
+ID3D11ShaderResourceView* localLightShadow(UINT width, UINT height) noexcept;
 // Diagnostics: the shadow debug view at the render size, R8G8B8A8_UNORM to blend over the image by
 // its alpha (DebugShadows in shaders/gi_shadow.hlsl), and the probe at the screen's centre as text.
 // Null and empty while off.

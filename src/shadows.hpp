@@ -33,9 +33,9 @@ struct Options
     bool turnPattern{};       // DLSS accumulates frames, so the soft shadows' samples turn each frame
     bool screenSpaceSun{};    // Bend Studio's screen-space shadows on the sun
     bool screenSpaceLights{}; // Bend Studio's screen-space shadows on every point and spot light
-    bool rayTraced{};         // The sun's ray-traced shadows, with the shadow map's for alpha-tested meshes
+    bool rayTraced{};         // The sun's ray-traced shadows: the rays alone shadow the sun
+    bool withShadowMap{};     // With rayTraced: the shadow map's as well, near the camera (the darker of the two)
     bool onlyScreenSpace{};   // Diagnostics: the sun is shadowed by the screen-space shadow alone
-    bool onlyRayTraced{};     // Diagnostics: the sun is shadowed by the rays alone
 };
 
 void attach(ID3D11Device* device) noexcept;

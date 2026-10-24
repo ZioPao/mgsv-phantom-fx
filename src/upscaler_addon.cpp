@@ -8,7 +8,7 @@
 // ambient occlusion with GTVBAO and add SSILVB's screen-space indirect lighting (indirect_light.hpp),
 // or replace the game's indirect light with ray-traced global illumination (global_illumination.hpp),
 // can replace the game's depth of field with a gather (depth_of_field.hpp), adds volumetric fog with
-// light shafts (atmosphere.hpp), has a photo mode with lens shots (photo_mode.hpp), can output HDR10
+// light shafts (atmosphere.hpp), has a photo mode (photo_mode.hpp), can output HDR10
 // (hdr.hpp) and has an optional pipeline recorder (frame_log.hpp), the GPU costs of its passes
 // (performance.hpp) and weather and time control (weather.hpp) for development.
 // NGX receives ReShade's wrapped context, so other add-ons that follow DLSS evaluations see it like
@@ -17,6 +17,7 @@
 #include "character.hpp"
 #include "depth_of_field.hpp"
 #include "device_check.hpp"
+#include "draw_distance.hpp"
 #include "frame_log.hpp"
 #include "frame_rate.hpp"
 #include "focus.hpp"
@@ -27,6 +28,7 @@
 #include "global_illumination.hpp"
 #include "hdr.hpp"
 #include "indirect_light.hpp"
+#include "local_lights.hpp"
 #include "log.hpp"
 #include "motion_blur.hpp"
 #include "performance.hpp"
@@ -145,6 +147,7 @@ void onInitCommandQueue(command_queue* queue)
     shadows::attach(device);
     indirect_light::attach(device);
     global_illumination::attach(device, context);
+    local_lights::attach(device, context);
     atmosphere::attach(device);
     depth_of_field::attach(device);
     performance::attach(device, context, dataDirectory() / "PhantomFX-performance.txt");
@@ -162,6 +165,7 @@ void onDestroyCommandQueue(command_queue* queue)
     shadows::detach();
     indirect_light::detach();
     global_illumination::detach();
+    local_lights::detach();
     atmosphere::detach();
     depth_of_field::detach();
     focus::detach();
@@ -187,6 +191,7 @@ void onInitPipeline(device* device, pipeline_layout, uint32_t count, const pipel
             shadows::shaderCreated(code, size, created);
             indirect_light::shaderCreated(code, size, created);
             global_illumination::pixelShaderCreated(code, size, created);
+            local_lights::pixelShaderCreated(code, size, created);
             atmosphere::shaderCreated(code, size, created);
             depth_of_field::shaderCreated(code, size, created);
             hdr::shaderCreated(code, size, created);
@@ -233,9 +238,11 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
 bool onDrawIndexed(command_list* list, uint32_t indices, uint32_t instances, uint32_t first, int32_t offset, uint32_t firstInstance)
 {
     const ui_redirect::DrawCall call{indices, instances, first, firstInstance, offset, true};
-    // The global illumination captures the game's meshes as they are drawn; it never takes a draw.
+    // The global illumination notes the camera and the terrain's inputs from the draws; it never takes one.
     global_illumination::draw(native(list), call);
-    return hiddenUi(list) || depth_of_field::draw(native(list), call) || shadows::draw(native(list), call) || upscaler::draw(native(list), call);
+    // The point and spot lights' draws before the lamps' contact shadows, which leave a light the rays shadow alone.
+    return hiddenUi(list) || depth_of_field::draw(native(list), call) || local_lights::draw(native(list), call) || shadows::draw(native(list), call)
+        || upscaler::draw(native(list), call);
 }
 
 bool onClearRenderTarget(command_list* list, resource_view view, const float color[4], uint32_t rects, const rect*)
@@ -438,12 +445,15 @@ void onExecuteSecondary(command_list* list, command_list* secondary)
         performance::executing(secondary->get_native());
         upscaler::executing(native(list), secondary->get_native());
         global_illumination::executing(native(list), secondary->get_native());
+        // After the global illumination's wait: the point and spot lights read their shadows.
+        local_lights::executing(native(list), secondary->get_native());
         return;
     }
 
     performance::recorded(list->get_native(), secondary->get_native());
     upscaler::recorded(list->get_native(), secondary->get_native());
     global_illumination::recorded(list->get_native(), secondary->get_native());
+    local_lights::recorded(list->get_native(), secondary->get_native());
     ui_redirect::contextFinished(native(secondary));
     shadows::contextFinished(native(secondary));
 }
@@ -453,6 +463,7 @@ void onDestroyCommandList(command_list* list)
     upscaler::forget(list->get_native());
     performance::forget(list->get_native());
     global_illumination::forget(list->get_native());
+    local_lights::forget(list->get_native());
 }
 
 // With frame generation the game's swap chain is the presenter's stand-in, whose Present follows.
@@ -475,6 +486,7 @@ void onPresent(command_queue* queue, swapchain*, const rect*, const rect*, uint3
     shadows::present();
     indirect_light::present();
     global_illumination::present();
+    local_lights::present();
     atmosphere::present(native(queue->get_immediate_command_list()));
     depth_of_field::present();
     performance::present();
@@ -505,7 +517,6 @@ void onReshadePresent(effect_runtime* runtime)
     if (runtime->is_key_pressed(VK_F2)) photo_mode::toggle();
     if (runtime->is_key_pressed(VK_F3)) photo_mode::toggleUi();
     if (runtime->is_key_pressed(VK_F4)) photo_mode::toggleBlur();
-    if (runtime->is_key_pressed(VK_F5)) photo_mode::toggleShot();
 
     const auto down = [runtime](uint32_t key) { return !overlayOpen && runtime->is_key_down(key); };
     photo_mode::setControls({down('W'), down('S'), down('A'), down('D'), down(VK_SPACE), down(VK_CONTROL), down(VK_SHIFT)});
@@ -519,7 +530,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     self = addon;
     const auto directory = dataDirectory();
     openLog(directory / "PhantomFX.log");
-    log("Phantom FX " PHANTOM_FX_VERSION ".");
+    log(DiagnosticLog ? "Phantom FX " PHANTOM_FX_VERSION ", with the diagnostic log." : "Phantom FX " PHANTOM_FX_VERSION ".");
     logGameBuild();
     log(passDeviceCheck());
 
@@ -531,6 +542,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     log(render_scale::hook());
     log(photo_mode::hook());
     log(game_loop::hook());
+    log(draw_distance::hook());
     log(engine_scene::hook());
     log(character::allowFobCharacters());
     if (supportedBuild() && !weather::supported()) log("The weather manager has unexpected code; the weather menu is unavailable.");
@@ -602,6 +614,7 @@ extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshade
     shadows::detach();
     indirect_light::detach();
     global_illumination::detach();
+    local_lights::detach();
     atmosphere::detach();
     depth_of_field::detach();
     focus::detach();

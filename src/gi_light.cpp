@@ -68,6 +68,7 @@ Light::Light(ID3D12Device* device, UINT width, UINT height) : renderWidth(width)
     overrideTiles = buffer(std::uint64_t{spawnCount} * 4, "Creating the override tiles");
     cachedTiles = texture(probesAcross * ProbeSize, probesDown * ProbeSize, DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "Creating the cached probes");
     cachedTileIndex = texture(probesAcross, probesDown, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, "Creating the cached probes' places");
+    probeChange = texture(probesAcross, probesDown, DXGI_FORMAT_R16_FLOAT, 1, "Creating the probes' change in light");
     lruFlags = buffer(std::uint64_t{probeCount + 1} * 4, "Creating the cached probes' flags");
     lruIndex = buffer(std::uint64_t{probeCount + 1} * 4, "Creating the cached probes' index");
     mru = buffer(std::uint64_t{probeCount} * 4, "Creating the recently used probes");
@@ -177,6 +178,7 @@ void Light::describe(gi_d3d12::Descriptors& d, std::uint32_t parity) const
     d.outputBuffer(55, scanOutput.Get(), 4, scanSize);
     d.outputBuffer(56, scanBlockSums.Get(), 4, 1024);
     d.outputBuffer(57, lights.Get(), 4, std::uint64_t{rayCount} * 2);
+    d.outputTexture(58, probeChange.Get(), DXGI_FORMAT_R16_FLOAT);
     for (UINT mip = 0; mip < maskMips; ++mip) d.outputTexture(64 + mip, masks[now].Get(), DXGI_FORMAT_R32_UINT, mip);
 }
 
@@ -255,6 +257,8 @@ void Light::record(gi_d3d12::Recorder& r, std::uint32_t parity, ID3D12Resource* 
     // Into the probes, with the cached ones kept in order of use.
     r.mark("probe blending and filtering");
     r.dispatch(Kernel::BlendScreenProbes, spawnCount);
+    r.barrier();
+    r.dispatch(Kernel::PropagateProbeChange, probesAcross, probesDown);
     r.barrier();
     r.dispatch(Kernel::CopyProbes, probesAcross, probesDown);
     r.barrier();

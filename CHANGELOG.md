@@ -1,5 +1,26 @@
 # Phantom FX changelog
 
+## 1.5.0
+
+- Add **Ray-traced lights**: every lamp, spot light and flashlight casts shadows from rays traced
+  through the game's own scene, where most of the game's lights shone through walls and characters.
+  With global illumination on, their light bounces too. **Ray quality** (1 to 8 rays a pixel) and
+  **Flashlight brightness** (1x to 16x, 8x by default) in the overlay. Needs DXR 1.1. Off by default.
+- Add **Draw distance**: Vanilla, Extended or Far. Extended loads full detail out to about 450 m
+  instead of 320 m and the distant world to about 1.8 km, keeps more detail at a distance and draws
+  models and vegetation farther. Far loads the distant world to about 2.3 km. Loading farther takes
+  effect when a location loads. Costs memory and CPU time.
+- Ray-traced shadows: **Show the game's shadows too, near you** adds the game's shadow map within
+  about 90 m.
+- Ray tracing now includes characters and what they hold, posed as the game draws them, and reads
+  the scene only from the game's memory.
+- Global illumination lights rays that reach the sky with the game's sky light, or its baked light
+  where it has none, so Mother Base is no longer dark red.
+- New overlay: pages for Shadows, Lighting, Atmosphere, Camera, Display and World, and a Budget page
+  with each effect's GPU cost and its switch.
+- Remove the photo mode lens shot (F5) and its `lens_shot_frames` setting.
+- `PhantomFX.log` now logs only start-up, sizes and failures, not periodic statistics.
+
 ## 1.4.0
 
 - **Ray-traced shadows** and **global illumination** now trace the game's own world, read from its

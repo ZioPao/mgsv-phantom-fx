@@ -39,4 +39,6 @@ void stop() noexcept;
 void select(bool on) noexcept;
 // One line for the overlay: generating, or why not.
 std::string status();
+// Frames presented per rendered frame: 2 while it generates, else 1.
+unsigned presentedPerFrame() noexcept;
 }

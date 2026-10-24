@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gi_inputs.hpp"
 #include "gi_renderer.hpp"
 
 #include <d3d11.h>
@@ -13,39 +14,33 @@
 // The game's own scene for the ray tracing (docs/DEVELOPMENT.md, "Scene objects"): every rigid model
 // the game has loaded, on screen or not, where it is and its triangles, read from the model
 // visibility manager while the game's visibility tests run (nothing changes in it then), once a game
-// frame. Draw capture (gi_capture.hpp) keeps what this leaves out: skinned and animated meshes,
-// terrain, the instanced vegetation and rocks.
+// frame; the object brush's vegetation and props; and the characters, every skinned model the game
+// shows, in its pose, from the object registry's model list; the terrain from its heightmap.
 namespace phantom_fx::engine_scene
 {
 // Hooks the visibility tests on the supported build, with MinHook initialised; returns what was
-// done, for the log. Without the hooks every mesh is captured as it is drawn.
+// done, for the log. Without the hooks the scene has none of the game's models.
 std::string hook() noexcept;
 // Snapshots are taken only while on.
 void setActive(bool active) noexcept;
 
 struct Snapshot
 {
-    bool instancesUpdated{}; // A newer list came: `instances` replaces the last, even when empty
+    bool instancesUpdated{}; // A newer list came: `instances` and `characters` replace the last, even when empty
     std::vector<gi_renderer::ModelInstance> instances;
+    std::vector<gi_renderer::CharacterInstance> characters;
     // Models first seen since the last take, read from their files.
     std::vector<std::shared_ptr<const gi_renderer::Model>> newModels;
 };
 
-// On the render thread: the latest snapshot's instances, when one came since the last call, and the
-// new models, a few megabytes of model files a call at most.
-void take(Snapshot& snapshot);
+// On the render thread: the latest snapshot's instances and characters, when one came since the last
+// call, and the new models, a few megabytes of model files a call at most.
+// The characters take their bones as the frame's draws had them (`drawn`), where a draw found its
+// character and mesh; the rest as they are now, at the kick (Diagnostics: setBonesFromSnapshot).
+void take(Snapshot& snapshot, const std::vector<gi_inputs::DrawnBones>& drawn);
 
 // The renderer let these models go: their files are read again when the game places them again.
 void forget(const std::vector<std::uint64_t>& hashes);
-
-// Whether a rigid draw with this world matrix (b5's m_world, c4 to c6 as twelve floats) is one of the
-// last snapshot's instances: then the scene has it already.
-bool covers(const float* worldRows) noexcept;
-
-// Whether the scene takes the object brush's vegetation (its hooks are in and the scene is on); the
-// clone arrays' placements are the visibility manager's instance groups. Their instanced draws (the
-// _clone shaders) are not captured then.
-bool clonesFromEngine() noexcept;
 
 // The game's terrain as its terrain shaders draw it (NewTerrain_*; docs/DEVELOPMENT.md, "Scene
 // objects"): the virtual heightmap's page table and height atlas (vertex shader t0, t1), the page
@@ -64,10 +59,6 @@ void noteTerrain(ID3D11DeviceContext* context, const float* objectConstants, con
 // On the render thread: the inputs last noted, once each.
 std::optional<TerrainInputs> takeTerrain();
 
-// Whether the scene makes the terrain from the game's heightmap; its draws are not captured then.
-bool terrainFromEngine() noexcept;
-void setTerrainFromEngine(bool on) noexcept;
-
 // The game's loaded textures with these path hashes (docs/DEVELOPMENT.md, "Scene objects", the
 // texture manager), each held so it outlives the game's own release; those not loaded are left out.
 // On the render thread.
@@ -80,4 +71,8 @@ std::vector<LoadedTexture> loadedTextures(const std::vector<std::uint64_t>& path
 
 // For the log.
 std::string status();
+// Diagnostics: the characters' bones as the snapshot took them at the frame's first visibility test, a
+// frame behind those drawn, as before 2026-10-24; and since the last call, where the bones came from.
+void setBonesFromSnapshot(bool on) noexcept;
+std::string poseTiming();
 }

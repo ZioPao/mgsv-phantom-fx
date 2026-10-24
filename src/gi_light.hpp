@@ -36,7 +36,7 @@ private:
 
     gi_d3d12::ComPtr<ID3D12Resource> probes[2], masks[2], probeSH[2], spawns[2], spawnScan, spawnIndex, spawnProbe, spawnSample,
         spawnRadiance, emptyTiles, overrideTiles, cachedTiles, cachedTileIndex, lru[2], lruFlags, lruIndex, mru, list, listCount,
-        listIndex, listElements;
+        listIndex, listElements, probeChange;
     gi_d3d12::ComPtr<ID3D12Resource> hash, decay, values, indirectValues, updateTiles, updateValues, updateIndirectValues, visibility,
         visibilityCells, visibilityQueries, visibilityRadiance, multibounce, lights, packedTiles[2];
     gi_d3d12::ComPtr<ID3D12Resource> blurMask, colors[2], colorDeltas[2], previousDepth, previousNormal;

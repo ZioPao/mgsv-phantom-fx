@@ -61,6 +61,7 @@ std::atomic<unsigned> wantedMultiplier{2};
 std::atomic<bool> wantedDynamic{};
 std::atomic<unsigned> maxMultiplier{};
 std::atomic<bool> dynamicSupported{};
+std::atomic<unsigned> presentedPerRendered{1};
 struct Mode
 {
     bool on{}, dynamic{};
@@ -232,6 +233,8 @@ void updateStatus()
 
     maxMultiplier = state.numFramesToGenerateMax + 1;
     dynamicSupported = state.bIsDynamicMFGSupported == sl::Boolean::eTrue;
+    const bool generating = state.status == sl::DLSSGStatus::eOk && (wantedDynamic || wantedMultiplier >= 2) && applied.on;
+    presentedPerRendered = generating ? std::max(1u, static_cast<unsigned>(state.numFramesActuallyPresented)) : 1u;
     if (state.status != sl::DLSSGStatus::eOk)
     {
         std::string reasons;
@@ -454,6 +457,11 @@ void select(unsigned multiplier, bool dynamic) noexcept
 {
     wantedMultiplier = multiplier;
     wantedDynamic = dynamic;
+}
+
+unsigned presentedPerFrame() noexcept
+{
+    return presentedPerRendered;
 }
 
 Capabilities capabilities() noexcept

@@ -1,0 +1,197 @@
+// Phantom FX's effects as fxui budget lines (menu_budget.hpp).
+#include "menu_budget.hpp"
+
+#include "atmosphere.hpp"
+#include "depth_of_field.hpp"
+#include "global_illumination.hpp"
+#include "hdr.hpp"
+#include "indirect_light.hpp"
+#include "local_lights.hpp"
+#include "presenter.hpp"
+#include "shadows.hpp"
+#include "upscaler.hpp"
+
+#include <array>
+#include <initializer_list>
+#include <string>
+#include <utility>
+
+namespace phantom_fx::menu
+{
+namespace
+{
+using fxui::State;
+using performance::Pass;
+
+constexpr std::array<fxui::Section, 9> all{{
+    {"Budget", 0, true},
+    {"Upscaling", fxui::hue::Teal},
+    {"Shadows", fxui::hue::Straw},
+    {"Lighting", fxui::hue::Blue},
+    {"Atmosphere", fxui::hue::Violet},
+    {"Camera", fxui::hue::Pink},
+    {"Display", fxui::hue::Sand},
+    {"World"},
+    {"Diagnostics", 0, false, true},
+}};
+
+struct Timed
+{
+    Pass pass;
+    std::string_view name;
+};
+
+// An effect's state from its setting, the F1 switch, what replaces it, and its module.
+State stateOf(bool on, bool held, bool replaced, bool failed, std::string_view problem)
+{
+    if (!on) return State::Off;
+    if (held) return State::Held;
+    if (replaced) return State::Replaced;
+    if (failed) return State::Unavailable;
+    if (!problem.empty()) return State::NotRunning;
+
+    return State::Working;
+}
+
+std::string messageFor(State state, std::string_view problem, std::string_view unavailable = {})
+{
+    if (state == State::NotRunning) return std::string(problem);
+    if (state == State::Unavailable) return std::string(unavailable);
+
+    return {};
+}
+
+// A pass several effects share counts under the first of them that works, else the first that is on.
+std::string_view owner(std::initializer_list<std::pair<std::string_view, State>> effects)
+{
+    for (const auto& [id, state] : effects)
+        if (state == State::Working) return id;
+    for (const auto& [id, state] : effects)
+        if (state != State::Off) return id;
+
+    return effects.begin()->first;
+}
+
+int at(Section section)
+{
+    return static_cast<int>(section);
+}
+}
+
+std::span<const fxui::Section> sections()
+{
+    return all;
+}
+
+fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
+{
+    const bool held = !upscaler::enhancementsOn();
+    const bool shadowsFailed = shadows::failed();
+    const auto rayTracing = global_illumination::problem();
+    const auto lightsProblem = local_lights::problem();
+    const auto occlusionProblem = indirect_light::occlusionProblem();
+    const auto lightProblem = indirect_light::lightProblem();
+    const auto fogProblem = atmosphere::problem();
+    const auto focusProblem = depth_of_field::problem();
+
+    const auto status = upscaler::status();
+    const State upscaling = wanted.mode == upscaler::Mode::Off ? State::Off
+        : !status.supportedBuild || status.failed                ? State::Unavailable
+        : status.running                                          ? State::Working
+                                                                  : State::NotRunning;
+    const State rayTracedShadows = stateOf(wanted.rayTracedShadows, held, false, shadowsFailed, rayTracing);
+    const State softShadows = stateOf(wanted.softShadows, held, wanted.rayTracedShadows, shadowsFailed, {});
+    const State sunContact = stateOf(wanted.sunScreenSpaceShadows, held, wanted.rayTracedShadows, shadowsFailed, {});
+    const State rayTracedLights = stateOf(wanted.rayTracedLights, held, false, false, lightsProblem);
+    const State lampContact = stateOf(wanted.lightScreenSpaceShadows, held, wanted.rayTracedLights, shadowsFailed, {});
+    const State global = stateOf(wanted.globalIllumination, held, false, false, rayTracing);
+    const State occlusion = stateOf(wanted.ambientOcclusion, held, wanted.globalIllumination, false, occlusionProblem);
+    const State indirect = stateOf(wanted.indirectLight, held, wanted.globalIllumination, false, lightProblem);
+    const State fog = stateOf(wanted.volumetricFog, held, false, false, fogProblem);
+    const State focus = stateOf(wanted.depthOfField, false, false, false, focusProblem);
+
+    State output = State::Working;
+    std::string outputMessage;
+    if (wanted.hdr != hdr::active())
+    {
+        output = State::Restart;
+        outputMessage = wanted.hdr ? "Restart the game to turn HDR on." : "Restart the game to turn HDR off.";
+    }
+    else if (!wanted.hdr) output = State::Off;
+    else if (hdr::output() == hdr::Output::Unavailable)
+    {
+        output = State::Unavailable;
+        outputMessage = "HDR output is unavailable (see PhantomFX.log).";
+    }
+    else if (hdr::output() == hdr::Output::Sdr)
+    {
+        output = State::NotRunning;
+        outputMessage = "HDR is off for this display in Windows, so the game shows SDR.";
+    }
+
+    // The replacement sun light pass runs for every sun shadow; the ray tracing's inputs and its wait
+    // serve all the ray-traced effects at once.
+    const auto sunLight = owner({{"rayTracedShadows", rayTracedShadows}, {"softShadows", softShadows}, {"sunContactShadows", sunContact}});
+    const auto rays = owner({{"globalIllumination", global}, {"rayTracedShadows", rayTracedShadows}, {"rayTracedLights", rayTracedLights}});
+
+    fxui::Budget result;
+    result.gpuMs = costs.gpuFrame;
+    result.frameMs = costs.frame;
+    result.presented = presenter::presentedPerFrame();
+    const auto add = [&](fxui::Line line, std::initializer_list<Timed> passes) {
+        const auto addPass = [&](Pass pass, std::string_view name) {
+            const float ms = costs.passes[static_cast<std::size_t>(pass)];
+            line.passes.push_back({name, ms});
+            line.ms += ms;
+        };
+        for (const auto& [pass, name] : passes) addPass(pass, name);
+        if (line.id == sunLight) addPass(Pass::SunLight, "Sun light pass (with the game's lighting)");
+        if (line.id == rays)
+        {
+            addPass(Pass::GiInputs, "G-buffer pack, for all the ray tracing");
+            addPass(Pass::GiWait, "Waiting for all the ray tracing (Direct3D 12)");
+        }
+        result.lines.push_back(std::move(line));
+    };
+
+    add({.id = "upscaler", .name = "Upscaler", .tech = upscaler::label(wanted.upscaler), .section = at(Section::Upscaling), .state = upscaling},
+        {{Pass::UpscalerInputs, "Motion vectors and inputs"}, {Pass::Upscaler, "DLSS or FSR"}, {Pass::UpscalerOutput, "Sharpening and output"}});
+    add({.id = "rayTracedShadows", .name = "Ray-traced shadows", .section = at(Section::Shadows), .state = rayTracedShadows, .toggle = &wanted.rayTracedShadows,
+            .message = messageFor(rayTracedShadows, rayTracing, "Ray-traced shadows are unavailable (see PhantomFX.log).")},
+        {});
+    add({.id = "softShadows", .name = "Soft shadows", .tech = "PCSS", .section = at(Section::Shadows), .state = softShadows, .toggle = &wanted.softShadows,
+            .replacedBy = "rayTracedShadows", .message = messageFor(softShadows, {}, "Soft shadows are unavailable (see PhantomFX.log).")},
+        {});
+    add({.id = "sunContactShadows", .name = "Sun contact shadows", .section = at(Section::Shadows), .state = sunContact, .toggle = &wanted.sunScreenSpaceShadows,
+            .replacedBy = "rayTracedShadows", .message = messageFor(sunContact, {}, "Contact shadows are unavailable (see PhantomFX.log).")},
+        {{Pass::SunTrace, "Contact shadow trace"}});
+    add({.id = "rayTracedLights", .name = "Ray-traced lights", .section = at(Section::Shadows), .state = rayTracedLights, .toggle = &wanted.rayTracedLights,
+            .message = messageFor(rayTracedLights, lightsProblem)},
+        {{Pass::LocalLights, "Lights with their traced shadows"}});
+    add({.id = "lampContactShadows", .name = "Lamp contact shadows", .section = at(Section::Shadows), .state = lampContact, .toggle = &wanted.lightScreenSpaceShadows,
+            .replacedBy = "rayTracedLights", .message = messageFor(lampContact, {}, "Contact shadows are unavailable (see PhantomFX.log).")},
+        {{Pass::LampTraces, "Traces"}, {Pass::LampShadows, "Shadow draws"}});
+    add({.id = "globalIllumination", .name = "Global illumination", .tech = "GI-1.2", .section = at(Section::Lighting), .state = global,
+            .toggle = &wanted.globalIllumination, .message = messageFor(global, rayTracing)},
+        {{Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}});
+    add({.id = "ambientOcclusion", .name = "Ambient occlusion", .tech = "GTVBAO", .section = at(Section::Lighting), .state = occlusion,
+            .toggle = &wanted.ambientOcclusion, .replacedBy = "globalIllumination", .message = messageFor(occlusion, occlusionProblem)},
+        {{Pass::OcclusionPrefilter, "Depth prefilter"}, {Pass::OcclusionMarch, "March"}, {Pass::OcclusionDenoise, "Denoise"},
+            {Pass::OcclusionApply, "Applying to the indirect light"}});
+    add({.id = "indirectLight", .name = "Indirect lighting", .tech = "SSILVB", .section = at(Section::Lighting), .state = indirect,
+            .toggle = &wanted.indirectLight, .replacedBy = "globalIllumination", .message = messageFor(indirect, lightProblem)},
+        {{Pass::LightPrefilter, "Depth prefilter"}, {Pass::LightMarch, "March (half size)"}, {Pass::LightDenoise, "Denoise"},
+            {Pass::LightUpsample, "Upscaling to the render size"}});
+    add({.id = "volumetricFog", .name = "Volumetric fog", .section = at(Section::Atmosphere), .state = fog, .toggle = &wanted.volumetricFog,
+            .message = messageFor(fog, fogProblem)},
+        {{Pass::FogPass, "The game's fog pass, larger"}, {Pass::SkyTables, "Sky tables (physical look)"}, {Pass::FogShadow, "Sun shadow in the fog"},
+            {Pass::FogScattering, "Scattering"}, {Pass::FogIntegration, "Integration"}, {Pass::Sky, "Physical sky"}});
+    add({.id = "depthOfField", .name = "Depth of field", .section = at(Section::Camera), .state = focus, .toggle = &wanted.depthOfField,
+            .message = messageFor(focus, focusProblem)},
+        {{Pass::DofSetup, "Setup and tile dilate"}, {Pass::DofGather, "Gather"}, {Pass::DofComposite, "Composite"}});
+    add({.id = "hdr", .name = "HDR output", .tech = "HDR10", .section = at(Section::Display), .state = output, .toggle = &wanted.hdr, .message = outputMessage},
+        {{Pass::HdrEncode, "Encoding the scene"}, {Pass::HdrDecode, "Decoding copies"}, {Pass::HdrGrade, "Grading"}});
+
+    return result;
+}
+}

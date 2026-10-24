@@ -300,13 +300,14 @@ std::optional<upscaler::LeftOut> startMeasurement(LONGLONG now)
     const bool rayTraced = lighting && settings.rayTracedShadows;
     if (rayTraced) leftOut.softShadows = leftOut.sunScreenSpaceShadows = true;
     leave(rayTraced, "Ray-traced shadows", &upscaler::LeftOut::rayTracedShadows);
+    // The lights' own cost with another use of the scene on; alone, the scene's as well.
+    leave(lighting && settings.rayTracedLights, "Ray-traced lights", &upscaler::LeftOut::rayTracedLights);
 
-    // The global illumination in parts: its light passes, its mesh capture, then the rest (the scene's
-    // build, the wait for Direct3D 12 and its passes in the game's frame). It keeps SSILVB and GTVBAO
+    // The global illumination in parts: its light passes, then the rest (the scene's build, the wait
+    // for Direct3D 12 and its passes in the game's frame). It keeps SSILVB and GTVBAO
     // off, so they stay off with it.
     const bool global = lighting && settings.globalIllumination;
     leave(global, "Global illumination's light passes", &upscaler::LeftOut::globalLight);
-    leave(global, "Global illumination's mesh capture", &upscaler::LeftOut::globalCapture);
     if (global)
     {
         leftOut.ambientOcclusion = leftOut.indirectLight = true;

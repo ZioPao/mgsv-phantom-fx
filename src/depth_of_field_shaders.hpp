@@ -20,14 +20,13 @@ cbuffer Parameters : register(b0)
     float Aperture;      // Photo mode: the aperture's diameter, metres
     float FocusDistance; // Photo mode: metres
     float GameUnit;      // Render pixels per unit of the game's blur radius
-    float SampleScale;   // Lens shot: 1 / the frames added up
     uint LightInScene;   // HDR: the scene holds light, which needs no undoing of the tonemap
-    float2 Padding;
+    float3 Padding;
 };
 
 static const float Pi = 3.14159265;
 static const float GoldenAngle = 2.39996323;
-// The aperture's corners point this way, as photo_mode.cpp's lens points do.
+// One of the aperture's corners points straight up.
 static const float BladeRotation = Pi / 2;
 
 // TppTonemap, the deferred resolve's tonemap: x up to b, then b + c - 1 / (a (x - b + c)), which
@@ -379,34 +378,6 @@ float4 main(float4 position : SV_Position) : SV_Target
 
     colour = colour * (1 - foreground.a) + foreground.rgb;
     return float4(LinearToSrgb(FromHdr(colour)), scene.a);
-}
-)";
-
-// Lens shot: the frame, through the inverse tonemap, added to the running sum.
-inline constexpr char Accumulate[] = PHANTOM_FX_COMMON R"(
-Texture2D<float4> Scene : register(t0);
-RWStructuredBuffer<float3> Sum : register(u0);
-
-[numthreads(8, 8, 1)]
-void main(uint2 id : SV_DispatchThreadID)
-{
-    if (any(id >= FullSize)) return;
-
-    const uint index = id.y * FullSize.x + id.x;
-    Sum[index] += ToHdr(SrgbToLinear(Scene.Load(int3(id, 0)).rgb));
-}
-)";
-
-// Lens shot, in place of DOF_ScatterCompositeFinal: the average so far, back through the tonemap.
-inline constexpr char ShowShot[] = PHANTOM_FX_COMMON R"(
-Texture2D<float4> Scene : register(t0); // For its alpha
-StructuredBuffer<float3> Sum : register(t7);
-
-float4 main(float4 position : SV_Position) : SV_Target
-{
-    const uint2 p = uint2(position.xy);
-    const float3 average = Sum[p.y * FullSize.x + p.x] * SampleScale;
-    return float4(LinearToSrgb(FromHdr(average)), Scene.Load(int3(p, 0)).a);
 }
 )";
 

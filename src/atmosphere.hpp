@@ -49,6 +49,6 @@ void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcep
 // Before a draw. Returns true when the add-on made the draw itself, so the game's draw must be skipped.
 bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
 // Each present, with the immediate context. The game records a whole frame between presents. While
-// the physical look runs, the sky's parameters go to the log every ten seconds.
+// the physical look runs, the diagnostic log gets the sky's parameters every ten seconds.
 void present(ID3D11DeviceContext* immediate) noexcept;
 }

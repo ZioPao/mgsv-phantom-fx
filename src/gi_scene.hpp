@@ -34,7 +34,7 @@ constexpr std::uint64_t GeometryUploadBytes = 16ull << 20;
 struct Geometry
 {
     std::uint64_t vertexOffset{}; // Bytes into the pool, 16 a vertex
-    std::uint32_t vertexCount{};  // Of a structure built every frame: the most it takes
+    std::uint32_t vertexCount{};
     std::uint64_t indexOffset{};  // Bytes into the pool, 16-bit indices
     std::uint32_t indexCount{};   // 0: three vertices a triangle
     std::uint32_t flags{};        // GI_GEOMETRY_*; GI_GEOMETRY_CUT_OUT makes it non-opaque
@@ -42,13 +42,12 @@ struct Geometry
     float alphaThreshold{};
 };
 
-// How a bottom-level structure is built: once, then compacted (Static); in place, again or refitted,
-// as its vertices move (Refit); or from scratch every frame it is traced (PerFrame).
+// How a bottom-level structure is built: once, then compacted (Static); or in place, again or refitted,
+// as its vertices move (Refit).
 enum class Use : std::uint8_t
 {
     Static,
-    Refit,
-    PerFrame
+    Refit
 };
 
 using BlasId = std::uint32_t;
@@ -93,8 +92,6 @@ public:
     // false when the frame's scratch has no room: not built again, it is not traced until it is.
     bool rebuild(BlasId id);
     bool refit(BlasId id);
-    // A structure built every frame: built this frame from the first `vertexCount` vertices.
-    void buildFrame(BlasId id, std::uint32_t vertexCount);
     // A geometry's material: its flags but GI_GEOMETRY_CUT_OUT (its structure has it), texture and threshold.
     void setMaterial(BlasId id, std::uint32_t geometry, std::uint32_t flags, std::uint32_t texture, float alphaThreshold);
 
@@ -109,7 +106,7 @@ public:
     // ---- The frame's instances ----
     // Under `transform` (object to world rows; null for identity), its InstanceID `kind` (GI_INSTANCE_*):
     // its index in the frame's instances, or nullopt past MaxInstances or when not ready.
-    std::optional<std::uint32_t> addInstance(BlasId id, const float* transform, std::uint32_t kind, std::uint32_t mask = GI_MASK_SCENE);
+    std::optional<std::uint32_t> addInstance(BlasId id, const float* transform, std::uint32_t kind);
     std::uint32_t instanceCount() const { return static_cast<std::uint32_t>(instances.size()); }
 
     // ---- For the kernels ----
@@ -141,9 +138,7 @@ private:
         std::uint32_t firstGeometry{}, triangles{};
         std::uint64_t offset{}, size{}; // In the structure pool
         std::uint64_t scratch{}, updateScratch{}; // Bytes a build and a refit need
-        ComPtr<ID3D12Resource> ownScratch; // A structure built every frame keeps its own
         bool built{}, compacted{}, queued{};
-        std::uint64_t builtFrame{}; // A structure built every frame: the frame (its signal value) it was last
     };
 
     // What the GPU may still use: given back once it is past the frame that signalled `fenceValue`.
@@ -166,9 +161,8 @@ private:
         BlasId id{};
         std::uint32_t generation{};
         bool update{};
-        std::uint64_t scratch{}; // Offset into the frame's scratch, or of the structure's own
+        std::uint64_t scratch{}; // Offset into the frame's scratch
         std::uint32_t postbuild{}; // Its compacted size's place in the slot's readback, or NoPostbuild
-        std::uint32_t vertexCount{}; // A structure built every frame
     };
     struct Compaction
     {
@@ -208,7 +202,6 @@ private:
 
     RangeAllocator poolAllocator{PoolBytes}, blasAllocator, rowAllocator{MaxGeometries};
     std::vector<Release> releases;
-    std::vector<std::pair<std::uint64_t, ComPtr<ID3D12Resource>>> retired; // Buffers held until the GPU is past the frame
     std::vector<Blas> structures;
     std::vector<BlasId> freeIds, buildQueue;
     std::vector<Due> compactionsDue;

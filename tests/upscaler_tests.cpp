@@ -50,12 +50,13 @@ void settingsPersist(const fs::path& root)
 
     const Settings chosen{.upscaler = Upscaler::Fsr, .mode = Mode::Off, .preset = Preset::J, .sharpness = 0.5f, .unlockFps = true, .frameGeneration = FrameGeneration::X3,
         .softShadows = true, .sunSize = 1.25f, .sunScreenSpaceShadows = true, .lightScreenSpaceShadows = true, .rayTracedShadows = true,
-        .ambientOcclusion = true, .occlusionRadius = 2, .occlusionStrength = 1.5f, .indirectLight = true, .indirectLightRadius = 3,
-        .indirectLightStrength = 0.5f, .volumetricFog = true, .atmosphereLook = AtmosphereLook::Physical, .atmosphereHaze = 0.5f};
+        .vanillaShadowsWithRayTracing = true, .rayTracedLights = true, .rayQuality = 8, .flashlightBrightness = 3.5f, .ambientOcclusion = true, .occlusionRadius = 2, .occlusionStrength = 1.5f, .indirectLight = true, .indirectLightRadius = 3,
+        .indirectLightStrength = 0.5f, .volumetricFog = true, .atmosphereLook = AtmosphereLook::Physical, .atmosphereHaze = 0.5f,
+        .drawDistance = DrawDistance::Far};
     saveSettings(path, chosen);
     expect(loadSettings(path) == chosen,
         "Restart restores the upscaler, mode, preset, sharpening, frame rate unlock, frame generation, soft, screen-space and ray-traced "
-        "shadows, GTVBAO, SSILVB and the volumetric fog.");
+        "shadows, GTVBAO, SSILVB, the volumetric fog and the draw distance.");
     write(path, "frame_generation=dynamic\n");
     expect(loadSettings(path).frameGeneration == FrameGeneration::Dynamic, "Dynamic frame generation is read back.");
     write(path, "frame_generation=fsr\n");
@@ -365,17 +366,16 @@ void jitterSequence()
 void depthOfFieldSettingsPersist(const fs::path& root)
 {
     const auto path = root / L"PhantomFX-depth-of-field.ini";
-    const Settings chosen{.depthOfField = true, .apertureBlades = 7, .fNumber = 2.8f, .lensShotFrames = 512};
+    const Settings chosen{.depthOfField = true, .apertureBlades = 7, .fNumber = 2.8f};
     saveSettings(path, chosen);
-    expect(loadSettings(path) == chosen, "Restart restores the depth of field, its aperture, the f-stop and the lens shot frames.");
+    expect(loadSettings(path) == chosen, "Restart restores the depth of field, its aperture and the f-stop.");
 
-    write(path, "depth_of_field=on\naperture_blades=4\nf_number=0.1\nlens_shot_frames=99999\n");
+    write(path, "depth_of_field=on\naperture_blades=4\nf_number=0.1\n");
     const auto read = loadSettings(path);
-    expect(!read.depthOfField && read.apertureBlades == 0 && read.fNumber == Settings::MinFNumber
-            && read.lensShotFrames == Settings::MaxLensShotFrames,
-        "An invalid toggle leaves the gather off, an aperture of 4 blades stays round, and the f-stop and frames are clamped.");
+    expect(!read.depthOfField && read.apertureBlades == 0 && read.fNumber == Settings::MinFNumber,
+        "An invalid toggle leaves the gather off, an aperture of 4 blades stays round, and the f-stop is clamped.");
 
-    for (const auto& invalid : {Settings{.apertureBlades = 3}, Settings{.fNumber = 64}, Settings{.lensShotFrames = 8}})
+    for (const auto& invalid : {Settings{.apertureBlades = 3}, Settings{.fNumber = 64}})
     {
         saveSettings(path, chosen);
         bool rejected = false;
@@ -476,91 +476,6 @@ void outputSaturation()
 
     expect(lastBlocks.size() == 2, "The shaders end in both forms of the checksum's last block.");
 }
-
-// A lens shot moves the camera within its own plane; the shift keeps the focus plane where the
-// centre sees it and moves everything else.
-void lensShotKeepsFocusStill()
-{
-    // The recorded view's camera position: -R^T t.
-    float centre[3]{};
-    for (int i = 0; i < 3; ++i)
-        for (int k = 0; k < 3; ++k) centre[i] -= ViewRows[k][i] * ViewRows[k][3];
-
-    // 2 cm right and 1.5 cm down in the camera's plane.
-    const double cameraOffset[3]{0.02, -0.015, 0};
-    float offset[3]{}, moved[3]{};
-    float movedRows[4][4]{};
-    std::memcpy(movedRows, ViewRows, sizeof(movedRows));
-    for (int i = 0; i < 3; ++i)
-    {
-        for (int k = 0; k < 3; ++k) offset[i] += static_cast<float>(ViewRows[k][i] * cameraOffset[k]);
-        moved[i] = centre[i] + offset[i];
-    }
-
-    for (int k = 0; k < 3; ++k) movedRows[k][3] -= ViewRows[k][0] * offset[0] + ViewRows[k][1] * offset[1] + ViewRows[k][2] * offset[2];
-
-    camera::SceneConstants still{}, shot{};
-    fill(still, ViewRows, centre);
-    fill(shot, movedRows, moved);
-    constexpr float Focus = 4;
-    camera::applyJitter(shot, camera::lensShift(shot, {centre[0], centre[1], centre[2]}, Focus));
-
-    // World points at view (x, y, z) from the centre.
-    const auto worldPoint = [&centre](double x, double y, double z, double (&point)[3])
-    {
-        for (int i = 0; i < 3; ++i) point[i] = centre[i] + ViewRows[0][i] * x + ViewRows[1][i] * y + ViewRows[2][i] * z;
-    };
-
-    double inFocus[3]{}, behind[3]{}, front[3]{};
-    worldPoint(0.4, 0.2, Focus, inFocus);
-    worldPoint(0.4, 0.2, 40, behind);
-    worldPoint(0.1, 0.05, 1, front);
-    const auto focusStill = project(still, inFocus), focusShot = project(shot, inFocus);
-    // Up to float rounding of positions hundreds of metres out.
-    expect(close(focusShot[0], focusStill[0], 0.05) && close(focusShot[1], focusStill[1], 0.05), "The focus plane stays where the centre sees it.");
-
-    const auto farStill = project(still, behind), farShot = project(shot, behind), nearStill = project(still, front), nearShot = project(shot, front);
-    expect(std::abs(farShot[0] - farStill[0]) > 1 && std::abs(nearShot[0] - nearStill[0]) > 1, "Points off the focus plane move.");
-    expect((farShot[0] - farStill[0]) * (nearShot[0] - nearStill[0]) < 0, "Points behind and in front of the focus move apart.");
-    expect(camera::lensShift(still, {centre[0], centre[1], centre[2]}, Focus) == std::array<float, 2>{},
-        "The camera at its centre needs no shift.");
-}
-
-// The lens shot's points cover the aperture evenly; with blades they stay inside its polygon.
-void aperturePoints()
-{
-    constexpr double Pi = 3.14159265358979323846;
-    for (const int blades : {0, 5, 6, 9})
-    {
-        double sumX = 0, sumY = 0, highest = -1;
-        int inner = 0;
-        constexpr int Count = 256;
-        for (std::uint32_t i = 0; i < Count; ++i)
-        {
-            const auto point = camera::aperturePoint(i, blades);
-            const double radius = std::hypot(point[0], point[1]);
-            double edge = 1;
-            if (blades)
-            {
-                const double sector = 2 * Pi / blades;
-                const double angle = std::atan2(point[1], point[0]) - Pi / 2;
-                edge = std::cos(sector / 2) / std::cos(angle - sector * std::floor(angle / sector) - sector / 2);
-            }
-
-            expect(radius <= edge + 1e-5, "Every point lies inside the aperture.");
-            sumX += point[0];
-            sumY += point[1];
-            highest = std::max(highest, static_cast<double>(point[1]));
-            if (radius < 0.5) ++inner;
-        }
-
-        expect(std::abs(sumX / Count) < 0.03 && std::abs(sumY / Count) < 0.03, "The points are centred on the lens.");
-        // The disc of half the radius lies inside every aperture; its share of the area is the share of points in it.
-        const double area = blades ? blades / 2.0 * std::sin(2 * Pi / blades) : Pi;
-        expect(std::abs(inner / static_cast<double>(Count) - Pi / 4 / area) < 0.05, "The points fill the aperture evenly.");
-        expect(highest > 0.85, "The aperture reaches up to its top.");
-    }
-}
 }
 
 void globalIlluminationSettingsPersist(const fs::path& root)
@@ -648,8 +563,6 @@ int main()
         depthOfFieldSettingsPersist(root);
         hdrSettingsPersist(root);
         outputSaturation();
-        lensShotKeepsFocusStill();
-        aperturePoints();
         globalIlluminationSettingsPersist(root);
         rangesComeBack();
         skyLightMatchesTheGame();

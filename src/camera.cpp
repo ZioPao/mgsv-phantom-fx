@@ -218,40 +218,6 @@ int jitterPhases(float renderScale)
     return std::clamp(static_cast<int>(std::ceil(8.0f / (renderScale * renderScale))), 8, 128);
 }
 
-std::array<float, 2> lensShift(const SceneConstants& scene, const std::array<float, 3>& centre, float focusDistance)
-{
-    if (!(focusDistance > 0)) return {};
-
-    // The camera's offset in view space; its rotation stays, so view x and y move by this much.
-    const float offset[3]{scene.c[EyePosition][0] - centre[0], scene.c[EyePosition][1] - centre[1], scene.c[EyePosition][2] - centre[2]};
-    const auto along = [&offset](const float (&row)[4]) { return row[0] * offset[0] + row[1] * offset[1] + row[2] * offset[2]; };
-
-    // NDC x = (P00 x + shift z) / z, so at z = focus the shift puts back what the offset took away.
-    return {scene.c[Projection][0] * along(scene.c[ViewMatrix]) / focusDistance,
-        scene.c[Projection + 1][1] * along(scene.c[ViewMatrix + 1]) / focusDistance};
-}
-
-std::array<float, 2> aperturePoint(std::uint32_t index, int blades)
-{
-    // Roberts' R2 sequence: any run of it covers the square evenly.
-    constexpr double G = 1.32471795724474602596;
-    const double u = std::fmod(0.5 + index / G, 1.0), v = std::fmod(0.5 + index / (G * G), 1.0);
-    constexpr double Pi = 3.14159265358979323846;
-    const double radius = std::sqrt(v);
-    if (blades < 3)
-    {
-        const double angle = 2 * Pi * u;
-        return {static_cast<float>(radius * std::cos(angle)), static_cast<float>(radius * std::sin(angle))};
-    }
-
-    // The triangle from the centre to two neighbouring corners, chosen by u, filled evenly.
-    const double sector = 2 * Pi / blades, position = u * blades;
-    const double corner = std::floor(position), along = position - corner;
-    const double first = Pi / 2 + corner * sector, second = first + sector;
-    return {static_cast<float>(radius * ((1 - along) * std::cos(first) + along * std::cos(second))),
-        static_cast<float>(radius * ((1 - along) * std::sin(first) + along * std::sin(second)))};
-}
-
 Matrix previousFromCurrent(const View& previous, const View& current)
 {
     return multiply(previous.projectionView, inverse(current.projectionView));

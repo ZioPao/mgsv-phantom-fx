@@ -3,10 +3,11 @@
 
 #include "camera.hpp"
 #include "engine_scene.hpp"
-#include "gi_capture.hpp"
+#include "gi_inputs.hpp"
 #include "gi_lighting.hpp"
 #include "gi_renderer.hpp"
 #include "gi_textures.hpp"
+#include "local_lights.hpp"
 #include "log.hpp"
 #include "performance.hpp"
 #include "shader_bytecode.hpp"
@@ -41,6 +42,10 @@ using Microsoft::WRL::ComPtr;
 // SH_SphereMap, which lights the probe atlas with the sky's light (docs/DEVELOPMENT.md, "Global
 // illumination", "Light").
 constexpr char SkyProbeChecksum[] = "4a3faf87b9ec54a401060a5b736eae5a";
+// MotionBlurCameraVelocity, which reads the game's velocity for its moving meshes at t3, right after
+// the G-buffer (docs/DEVELOPMENT.md, "Velocity").
+constexpr char CameraVelocityChecksum[] = "5d0241dd9804f41c780cd36669c71198";
+constexpr UINT ObjectVelocitySlot = 3;
 constexpr UINT SceneSlot = 2, LightSlot = 3, ProbeSlot = 7;
 
 // Packs what the kernels read from the G-buffer: the depth, the normals in world space (0 where
@@ -93,11 +98,13 @@ struct PackParameters
 // and overshot (a white screen). The output takes the frame's exposure (gi_renderer::Frame::outputScale).
 constexpr float LightScale = 1.0f / 1024;
 
-// The sky's light as PsWork holds it, before exposure, and the exposure the pass had.
+// The sky's light as PsWork holds it, before exposure, and the exposure the pass had; whether the
+// probe's light stands in for it (the game gave no sky).
 struct Sky
 {
     std::array<std::array<float, 16>, 3> matrices{};
     float exposure{};
+    bool fromProbe{};
 };
 
 // The sun's colour before exposure (cPSLight c1), and the exposure the sun pass had.
@@ -111,7 +118,7 @@ struct Sun
 struct Notes
 {
     bool kick{}, wait{};
-    ComPtr<ID3D11ShaderResourceView> depth, normals, albedo;
+    ComPtr<ID3D11ShaderResourceView> depth, normals, albedo, velocity;
     std::optional<Sky> sky;
     std::optional<Sun> sun;
     // The game's shadow map range from the sun pass inside it: cPSLight c8.x, c8.y, c6.x, and 1.
@@ -129,11 +136,12 @@ struct SharedTexture
 
 std::mutex optionsMutex;
 Options wanted, current;
-// The scene runs (for the light, the shadows or both), the light runs, the shadows run.
-std::atomic<bool> enabled{}, lighting{}, shadowing{}, failed{};
+// The scene runs (for the light, the shadows or the point and spot lights), the light runs, the sun's
+// shadows run, the point and spot lights' shadows run.
+std::atomic<bool> enabled{}, lighting{}, shadowing{}, localShadowing{}, failed{};
 
 std::shared_mutex shaderMutex;
-std::unordered_set<IUnknown*> skyProbeShaders;
+std::unordered_set<IUnknown*> skyProbeShaders, cameraVelocityShaders;
 std::vector<ComPtr<IUnknown>> shaderOwners;
 
 std::mutex notesMutex;
@@ -149,6 +157,11 @@ HANDLE fenceHandle{};
 std::uint64_t fenceValue{}, lightSignalled{}, lightWaited{};
 std::uint32_t kicks{};
 std::optional<camera::SceneConstants> sceneCamera, previousCamera;
+// The game's velocity for its moving meshes, whether a list that drew it ran since the last present and
+// before the kick (only then does it hold this frame's), and its shared copy for the shadow denoiser.
+ComPtr<ID3D11ShaderResourceView> objectVelocity;
+bool objectVelocityDrawn{};
+ComPtr<ID3D11Texture2D> objectVelocityCopy;
 std::optional<Sky> sky;
 std::optional<Sun> sun;
 std::array<float, 4> shadowRange{};
@@ -157,7 +170,7 @@ ComPtr<ID3D11ComputeShader> packShader;
 ComPtr<ID3D11Buffer> packParameters;
 // Shared copies of the game's terrain heightmap (gi_renderer::Terrain).
 ComPtr<ID3D11Texture2D> terrainPages, terrainHeights;
-SharedTexture depthOut, normalOut, albedoOut, transfer;
+SharedTexture depthOut, normalOut, albedoOut;
 std::string failure;
 std::atomic<std::uint64_t> lastKick{}; // GetTickCount64 of the last frame lit
 // Diagnostics: the kicks' CPU time in performance counter ticks, and the kicks, since the last log.
@@ -165,17 +178,20 @@ std::atomic<std::int64_t> kickTicks{};
 std::atomic<std::uint64_t> kicksSinceLog{};
 // And its steps' (the rest is the work after the renderer's); how often the terrain's converter
 // constants and heightmap changed, and the converter last used.
-enum KickStep { CaptureStep, ModelsStep, TexturesStep, TerrainStep, SignalStep, RenderStep, KickSteps };
+enum KickStep { InputsStep, ModelsStep, TexturesStep, TerrainStep, SignalStep, RenderStep, KickSteps };
 std::array<std::atomic<std::int64_t>, KickSteps> kickStepTicks{};
 std::atomic<std::uint32_t> converterChanges{}, heightmapChanges{};
 std::array<std::atomic<float>, 8> lastConverter{};
+// Diagnostics: the kicks whose shadow denoiser had the game's velocity for its moving meshes, and not.
+std::atomic<std::uint64_t> kicksWithObjectVelocity{}, kicksWithoutObjectVelocity{};
 
 // The light the resolve reads and the shadow the sun pass reads, made at the render size on
 // whichever thread asks first. Taken after executionMutex when both are.
 std::mutex lightMutex;
 ComPtr<ID3D11Device> lightDevice;
-SharedTexture output, shadowOutput, shadowDebugOutput;
+SharedTexture output, shadowOutput, shadowDebugOutput, localLightOutput;
 bool shadowWritten{}, shadowDebugWritten{}; // Direct3D 12 has traced into shadowOutput, shadowDebugOutput
+bool localLightWritten{};                  // This frame's kick traced the point and spot lights into localLightOutput
 
 void check(HRESULT result, const char* what)
 {
@@ -223,7 +239,7 @@ void fail(const std::string& reason)
     failed = true;
     failure = reason;
     log("Global illumination stopped: " + reason);
-    gi_capture::setActive(false);
+    gi_inputs::setActive(false);
     engine_scene::setActive(false);
     gi_renderer::stop();
     gi_textures::reset();
@@ -252,9 +268,6 @@ void ensurePipeline()
     parameters.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     parameters.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     check(device->CreateBuffer(&parameters, nullptr, packParameters.GetAddressOf()), "Creating the G-buffer pack's constants");
-
-    transfer = makeShared(device.Get(), GI_TRANSFER_WIDTH, gi_renderer::TransferVertices / GI_TRANSFER_WIDTH,
-        DXGI_FORMAT_R32G32B32A32_FLOAT, "Creating the transfer texture");
 
     check(device->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence)), "Creating the shared fence");
     check(fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &fenceHandle), "Sharing the fence");
@@ -337,7 +350,7 @@ bool copyShared(ID3D11ShaderResourceView* view, ComPtr<ID3D11Texture2D>& copy, D
 
 // The game's terrain heightmap into its shared copies, and its constants, for the frame. Call with
 // executionMutex held.
-bool copyTerrain(const engine_scene::TerrainInputs& inputs, gi_renderer::Frame& frame)
+void copyTerrain(const engine_scene::TerrainInputs& inputs, gi_renderer::Frame& frame)
 {
     static std::array<ID3D11ShaderResourceView*, 2> lastViews{};
     if (const std::array views{inputs.pages.Get(), inputs.heights.Get()}; views != lastViews)
@@ -353,7 +366,7 @@ bool copyTerrain(const engine_scene::TerrainInputs& inputs, gi_renderer::Frame& 
 
     gi_renderer::Terrain terrain;
     if (!copyShared(inputs.pages.Get(), terrainPages, terrain.pagesFormat) || !copyShared(inputs.heights.Get(), terrainHeights, terrain.heightsFormat))
-        return false;
+        return;
 
     terrain.pages = terrainPages.Get();
     terrain.heights = terrainHeights.Get();
@@ -362,7 +375,6 @@ bool copyTerrain(const engine_scene::TerrainInputs& inputs, gi_renderer::Frame& 
     std::copy_n(inputs.converter.begin(), 4, terrain.uvConverter.begin());
     std::copy_n(inputs.converter.begin() + 4, 4, terrain.texelCorrect.begin());
     frame.terrain = terrain;
-    return true;
 }
 
 gi_renderer::Matrix projectionViewOf(const camera::SceneConstants& scene)
@@ -372,6 +384,69 @@ gi_renderer::Matrix projectionViewOf(const camera::SceneConstants& scene)
         for (int column = 0; column < 4; ++column) matrix[row * 4 + column] = scene.c[row][column];
 
     return matrix;
+}
+
+// Diagnostics: the light the scene gets, every ten seconds.
+void logLights(const gi_renderer::Frame& frame, float cameraExposure)
+{
+    static std::uint64_t lastLightLog{};
+    const std::uint64_t now = lastKick;
+    if (!frame.traceLight || now - lastLightLog <= 10'000) return;
+
+    lastLightLog = now;
+    const auto text = [](const std::array<float, 3>& v) { return std::to_string(v[0]) + " " + std::to_string(v[1]) + " " + std::to_string(v[2]); };
+    std::string line = "Global illumination's lights (x 1/1024, before exposure): sun " + text(frame.sunColor) + " towards "
+        + text(frame.sunDirection) + "; exposure: main view " + std::to_string(cameraExposure) + ", sun pass "
+        + std::to_string(sun ? sun->exposure : 0.0f) + ", probe pass " + std::to_string(sky ? sky->exposure : 0.0f);
+    if (sky)
+    {
+        gi_lighting::SphericalHarmonics radiance{};
+        for (int i = 0; i < 9; ++i) radiance[i] = frame.skyRadiance[i];
+        // The game's own sky light on an upward surface: c = (0, 0, 1, 1) for n = (0, 1, 0).
+        std::array<float, 3> gameUp{};
+        for (int color = 0; color < 3; ++color)
+        {
+            const auto& m = sky->matrices[color];
+            gameUp[color] = LightScale * (m[10] + m[11] + m[14] + m[15]);
+        }
+
+        line += "; sky radiance up " + text(gi_lighting::evaluate(radiance, {0, 1, 0})) + ", sideways " + text(gi_lighting::evaluate(radiance, {1, 0, 0}))
+            + ", down " + text(gi_lighting::evaluate(radiance, {0, -1, 0})) + "; the game's sky light up " + text(gameUp)
+            + (sky->fromProbe ? " (no sky from the game: its probe's light)" : "");
+    }
+
+    log(line + ".");
+}
+
+// Diagnostics: what the scene holds, and the CPU work a frame, every ten seconds while it runs.
+void logStatus()
+{
+    static std::uint64_t lastStatus{};
+    const auto now = GetTickCount64();
+    if (now - lastStatus <= 10'000) return;
+
+    lastStatus = now;
+    log("Global illumination: " + engine_scene::poseTiming() + ".");
+    log("Global illumination: " + status() + "; the shadow denoiser had the game's velocity for moving meshes in "
+        + std::to_string(kicksWithObjectVelocity.exchange(0)) + " frames, not in " + std::to_string(kicksWithoutObjectVelocity.exchange(0)));
+
+    const auto work = gi_inputs::takeWork();
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+    const double frames = static_cast<double>(std::max<std::uint64_t>(kicksSinceLog.exchange(0), 1));
+    const auto milliseconds = [&](std::atomic<std::int64_t>& ticks) { return static_cast<double>(ticks.exchange(0)) * 1000.0 / static_cast<double>(frequency.QuadPart); };
+    const auto perFrame = [&](double value) { return std::to_string(value / frames); };
+    const double kick = milliseconds(kickTicks);
+    std::string steps;
+    for (const auto [step, name] : {std::pair{InputsStep, "inputs"}, {ModelsStep, "models"}, {TexturesStep, "textures"}, {TerrainStep, "terrain"},
+             {SignalStep, "signal"}, {RenderStep, "renderer"}})
+        steps += std::string(steps.empty() ? "" : ", ") + name + " " + perFrame(milliseconds(kickStepTicks[step]));
+    steps += "; the terrain's converter changed " + std::to_string(converterChanges.exchange(0)) + " times (now";
+    for (const auto& value : lastConverter) steps += " " + std::to_string(value.load());
+    steps += "), its heightmap textures " + std::to_string(heightmapChanges.exchange(0)) + " times";
+
+    log("Global illumination's CPU time a frame: hooks " + perFrame(work.hookMilliseconds) + " ms (all threads) over " + perFrame(static_cast<double>(work.draws))
+        + " mesh draws; the kick " + perFrame(kick) + " ms (render thread: " + steps + ").");
 }
 
 // The frame's kick, before the list with the probe upscale runs; call with executionMutex held.
@@ -392,21 +467,13 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     if (lightSignalled) check(immediate->Wait(fence.Get(), lightSignalled), "Waiting for the global illumination");
 
     timed.next(performance::Pass::GiInputs);
-    auto converted = gi_capture::convert(immediate.Get(), transfer.access.Get());
-    if (converted.camera)
+    if (const auto taken = gi_inputs::takeCamera())
     {
-        previousCamera = sceneCamera ? sceneCamera : converted.camera;
-        sceneCamera = converted.camera;
+        previousCamera = sceneCamera ? sceneCamera : taken->constants;
+        sceneCamera = taken->constants;
     }
 
-    if (!sceneCamera || !depth || !normals)
-    {
-        // Nothing traces this frame; what it captured is captured again when next drawn.
-        std::vector<std::uint32_t> unused;
-        for (const auto& capture : converted.captures) unused.push_back(capture.entry);
-        gi_capture::evicted(unused);
-        return;
-    }
+    if (!sceneCamera || !depth || !normals) return;
 
     pack(depth, *sceneCamera);
     ID3D11Texture2D* light{};
@@ -439,18 +506,40 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
         }
     }
 
+    // The point and spot lights recorded for this frame, a bit each in their shadow mask.
+    std::vector<gi_renderer::LocalLight> localLightsToTrace;
+    if (options.localLights) localLightsToTrace = local_lights::takeForTrace(*sceneCamera);
+    ID3D11Texture2D* localLightShadow{};
+    {
+        std::lock_guard lock(lightMutex);
+        localLightWritten = false;
+        if (!localLightsToTrace.empty())
+        {
+            if (localLightOutput.width != depthOut.width || localLightOutput.height != depthOut.height)
+                localLightOutput = makeShared(device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16_FLOAT, "Creating the lights' shadow");
+            localLightShadow = localLightOutput.texture.Get();
+        }
+    }
+
     // The game's models, the textures their meshes use and its terrain, copied before Direct3D 12 may
     // read them.
-    endStep(CaptureStep);
+    endStep(InputsStep);
     gi_renderer::Frame frame;
     engine_scene::Snapshot engineScene;
-    engine_scene::take(engineScene);
+    engine_scene::take(engineScene, gi_inputs::takeDrawnBones(*sceneCamera));
     for (const auto& model : engineScene.newModels)
         for (const auto& part : model->parts) gi_textures::want(part.baseTexture, part.alphaTested);
     endStep(ModelsStep);
     gi_textures::update(device.Get(), immediate.Get(), frame.newTextures);
     endStep(TexturesStep);
-    if (const auto terrain = engine_scene::takeTerrain(); terrain && copyTerrain(*terrain, frame)) engine_scene::setTerrainFromEngine(true);
+    if (const auto terrain = engine_scene::takeTerrain()) copyTerrain(*terrain, frame);
+
+    // The game's velocity for its moving meshes, for the shadow denoiser: only this frame's, drawn
+    // before this list, at the shadows' size.
+    DXGI_FORMAT velocityFormat{};
+    const bool velocityCopied = shadow && objectVelocityDrawn && objectVelocity && sizeOf(objectVelocity.Get()) == sizeOf(depth)
+        && copyShared(objectVelocity.Get(), objectVelocityCopy, velocityFormat);
+    if (shadow) ++(velocityCopied ? kicksWithObjectVelocity : kicksWithoutObjectVelocity);
 
     endStep(TerrainStep);
     const auto inputsReady = ++fenceValue;
@@ -458,7 +547,8 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     immediate->Flush();
     endStep(SignalStep);
 
-    frame.textures = {depthOut.texture.Get(), normalOut.texture.Get(), albedoOut.texture.Get(), transfer.texture.Get(), light, shadow, shadowDebug};
+    frame.textures = {depthOut.texture.Get(), normalOut.texture.Get(), albedoOut.texture.Get(), light, shadow, shadowDebug,
+        velocityCopied ? objectVelocityCopy.Get() : nullptr, velocityFormat, localLightShadow};
     frame.width = depthOut.width;
     frame.height = depthOut.height;
     frame.viewProjection = projectionViewOf(*sceneCamera);
@@ -491,20 +581,26 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     const float exposure = cameraExposure > 0 ? cameraExposure : sun ? sun->exposure : 0;
     frame.outputScale = exposure / LightScale;
 
-    frame.captures = std::move(converted.captures);
-    frame.drawn = std::move(converted.drawn);
-    frame.alphaTested = std::move(converted.alphaTested);
     frame.newModels = std::move(engineScene.newModels);
     frame.modelInstances = std::move(engineScene.instances);
+    frame.characters = std::move(engineScene.characters);
     frame.modelInstancesUpdated = engineScene.instancesUpdated;
     frame.frameIndex = ++kicks;
     frame.showScene = options.showScene;
+    frame.logOften = options.logOften;
     frame.traceLight = options.enabled && options.light;
     // The rays need the sun's direction, which the first sun pass gives.
     frame.traceShadows = shadow && sun;
-    frame.shadowRange = shadowRange;
+    // Without the shadow map's shadow the rays have no range to leave anything to (BeyondShadowMap).
+    frame.shadowRange = options.withShadowMap ? shadowRange : std::array<float, 4>{};
     frame.sunTangent = std::tan(options.sunSize * 0.5f * 3.14159265f / 180);
     frame.debugShadows = shadowDebug != nullptr;
+    frame.shadowsFromDepth = options.shadowsFromDepth;
+    // The lights' colours in the sun's units for the hits (gi_light.hlsl, LocalLightAt).
+    for (auto& localLight : localLightsToTrace)
+        for (auto& value : localLight.color) value *= LightScale;
+    frame.localLights = std::move(localLightsToTrace);
+    frame.localLightRays = static_cast<std::uint32_t>(options.lightRays);
     frame.waitValue = inputsReady;
     frame.signalValue = ++fenceValue;
     const auto result = gi_renderer::render(frame);
@@ -516,45 +612,21 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
         shadowWritten = shadowOutput.texture.Get() == shadow;
         shadowDebugWritten = shadowDebug && shadowDebugOutput.texture.Get() == shadowDebug;
     }
+    if (localLightShadow)
+    {
+        std::lock_guard lock(lightMutex);
+        localLightWritten = localLightOutput.texture.Get() == localLightShadow;
+    }
 
-    gi_capture::evicted(result.evicted);
     engine_scene::forget(result.releasedModels);
     gi_textures::release(result.releasedTextures);
     lastKick = GetTickCount64();
-
-    // Diagnostics: the light the scene gets, every ten seconds.
-    static std::uint64_t lastLightLog{};
-    if (frame.traceLight && lastKick - lastLightLog > 10'000)
-    {
-        lastLightLog = lastKick;
-        const auto text = [](const std::array<float, 3>& v) { return std::to_string(v[0]) + " " + std::to_string(v[1]) + " " + std::to_string(v[2]); };
-        std::string line = "Global illumination's lights (x 1/1024, before exposure): sun " + text(frame.sunColor) + " towards "
-            + text(frame.sunDirection) + "; exposure: main view " + std::to_string(cameraExposure) + ", sun pass "
-            + std::to_string(sun ? sun->exposure : 0.0f) + ", probe pass " + std::to_string(sky ? sky->exposure : 0.0f);
-        if (sky)
-        {
-            gi_lighting::SphericalHarmonics radiance{};
-            for (int i = 0; i < 9; ++i) radiance[i] = frame.skyRadiance[i];
-            // The game's own sky light on an upward surface: c = (0, 0, 1, 1) for n = (0, 1, 0).
-            std::array<float, 3> gameUp{};
-            for (int color = 0; color < 3; ++color)
-            {
-                const auto& m = sky->matrices[color];
-                gameUp[color] = LightScale * (m[10] + m[11] + m[14] + m[15]);
-            }
-
-            line += "; sky radiance up " + text(gi_lighting::evaluate(radiance, {0, 1, 0})) + ", sideways " + text(gi_lighting::evaluate(radiance, {1, 0, 0}))
-                + ", down " + text(gi_lighting::evaluate(radiance, {0, -1, 0})) + "; the game's sky light up " + text(gameUp);
-        }
-
-        log(line + ".");
-    }
+    if constexpr (DiagnosticLog) logLights(frame, cameraExposure);
 }
 }
 
 void attach(ID3D11Device* gameDevice, ID3D11DeviceContext* gameImmediate) noexcept
 {
-    gi_capture::attach(gameDevice);
     {
         std::lock_guard lock(executionMutex);
         nativeImmediate = gameImmediate;
@@ -574,9 +646,9 @@ void attach(ID3D11Device* gameDevice, ID3D11DeviceContext* gameImmediate) noexce
 void detach() noexcept
 {
     enabled = false;
-    gi_capture::setActive(false);
+    gi_inputs::setActive(false);
     engine_scene::setActive(false);
-    gi_capture::detach();
+    gi_inputs::detach();
     {
         std::lock_guard lock(executionMutex);
         gi_renderer::stop();
@@ -585,9 +657,12 @@ void detach() noexcept
         terrainPages.Reset();
         terrainHeights.Reset();
         gi_textures::reset();
-        depthOut = normalOut = albedoOut = transfer = {};
+        depthOut = normalOut = albedoOut = {};
         normals.Reset();
         albedo.Reset();
+        objectVelocity.Reset();
+        objectVelocityCopy.Reset();
+        objectVelocityDrawn = false;
         fence.Reset();
         if (fenceHandle) CloseHandle(fenceHandle);
         fenceHandle = nullptr;
@@ -606,8 +681,8 @@ void detach() noexcept
 
     {
         std::lock_guard lock(lightMutex);
-        output = shadowOutput = shadowDebugOutput = {};
-        shadowWritten = shadowDebugWritten = false;
+        output = shadowOutput = shadowDebugOutput = localLightOutput = {};
+        shadowWritten = shadowDebugWritten = localLightWritten = false;
         lightDevice.Reset();
     }
 
@@ -618,6 +693,7 @@ void detach() noexcept
 
     std::unique_lock lock(shaderMutex);
     skyProbeShaders.clear();
+    cameraVelocityShaders.clear();
     shaderOwners.clear();
 }
 
@@ -631,7 +707,7 @@ std::string problem()
 {
     {
         std::lock_guard lock(optionsMutex);
-        if (!wanted.enabled && !wanted.shadows) return {};
+        if (!wanted.enabled && !wanted.shadows && !wanted.localLights) return {};
     }
 
     std::lock_guard lock(executionMutex);
@@ -644,7 +720,7 @@ std::string problem()
 
 std::string status()
 {
-    std::string text = gi_capture::status() + "; " + engine_scene::status() + "; " + gi_textures::status();
+    std::string text = engine_scene::status() + "; " + gi_textures::status();
     const auto scene = gi_renderer::status();
     if (!scene.empty()) text += "\n" + scene;
 
@@ -654,12 +730,15 @@ std::string status()
 void pixelShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
 {
     const auto checksum = dxbcHashOf(code, size);
-    if (!checksum || !shader || toHex(*checksum) != SkyProbeChecksum) return;
+    if (!checksum || !shader) return;
+
+    const auto name = toHex(*checksum);
+    if (name != SkyProbeChecksum && name != CameraVelocityChecksum) return;
 
     try
     {
         std::unique_lock lock(shaderMutex);
-        skyProbeShaders.insert(shader);
+        (name == SkyProbeChecksum ? skyProbeShaders : cameraVelocityShaders).insert(shader);
         shaderOwners.emplace_back(shader);
     }
     catch (...)
@@ -669,22 +748,22 @@ void pixelShaderCreated(const void* code, std::size_t size, IUnknown* shader) no
 
 void vertexShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
 {
-    gi_capture::vertexShaderCreated(code, size, shader);
+    gi_inputs::vertexShaderCreated(code, size, shader);
 }
 
 void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept
 {
-    gi_capture::vertexShaderBound(context, shader);
+    gi_inputs::vertexShaderBound(context, shader);
 }
 
 void bufferMapped(ID3D11Resource* buffer, void* data) noexcept
 {
-    gi_capture::bufferMapped(buffer, data);
+    gi_inputs::bufferMapped(buffer, data);
 }
 
 void bufferUnmapped(ID3D11Resource* buffer) noexcept
 {
-    gi_capture::bufferUnmapped(buffer);
+    gi_inputs::bufferUnmapped(buffer);
 }
 
 void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
@@ -692,7 +771,7 @@ void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
     if (!enabled.load(std::memory_order_relaxed)) return;
     if (call.indexed)
     {
-        gi_capture::drawIndexed(context, call);
+        gi_inputs::drawIndexed(context, call);
         return;
     }
 
@@ -702,21 +781,40 @@ void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
     {
         ComPtr<ID3D11PixelShader> shader;
         context->PSGetShader(shader.GetAddressOf(), nullptr, nullptr);
+        bool skyProbe{}, cameraVelocity{};
         {
             std::shared_lock lock(shaderMutex);
-            if (!skyProbeShaders.contains(shader.Get())) return;
+            skyProbe = skyProbeShaders.contains(shader.Get());
+            cameraVelocity = cameraVelocityShaders.contains(shader.Get());
         }
 
-        // PsWork's g_psParamSHSky (c16 to c27) and the scene's exposure (c23.z).
+        if (cameraVelocity)
+        {
+            ComPtr<ID3D11ShaderResourceView> velocity;
+            context->PSGetShaderResources(ObjectVelocitySlot, 1, velocity.GetAddressOf());
+            std::lock_guard lock(notesMutex);
+            notesOf(context).velocity = std::move(velocity);
+            return;
+        }
+
+        if (!skyProbe) return;
+
+        // PsWork (SH_SphereMap_ps): the probe's light, g_psParamSH (c0 to c11, then its sky occlusion
+        // c12 to c15), and the sky's, g_psParamSHSky (c16 to c27); the scene's exposure (c23.z). The
+        // game's ambient light is the probe's plus the sky's times the occlusion. Where the game gives no
+        // sky (Mother Base: sky and occlusion zero, the probe's light all of it), the probe's light stands
+        // in for the sky.
         ComPtr<ID3D11Buffer> scene, probes;
         context->PSGetConstantBuffers(SceneSlot, 1, scene.GetAddressOf());
         context->PSGetConstantBuffers(ProbeSlot, 1, probes.GetAddressOf());
         std::array<float, 120> sceneConstants{};
         std::array<float, 144> probeConstants{};
-        if (!gi_capture::written(scene.Get(), sceneConstants) || !gi_capture::written(probes.Get(), probeConstants)) return;
+        if (!gi_inputs::written(scene.Get(), sceneConstants) || !gi_inputs::written(probes.Get(), probeConstants)) return;
 
         Sky noted;
-        for (int color = 0; color < 3; ++color) std::memcpy(noted.matrices[color].data(), &probeConstants[(16 + 4 * color) * 4], 16 * sizeof(float));
+        noted.fromProbe = std::all_of(probeConstants.begin() + 16 * 4, probeConstants.begin() + 28 * 4, [](float value) { return value == 0.0f; });
+        const int first = noted.fromProbe ? 0 : 16;
+        for (int color = 0; color < 3; ++color) std::memcpy(noted.matrices[color].data(), &probeConstants[(first + 4 * color) * 4], 16 * sizeof(float));
         noted.exposure = sceneConstants[23 * 4 + 2];
         std::lock_guard lock(notesMutex);
         notesOf(context).sky = noted;
@@ -767,7 +865,7 @@ void noteSun(ID3D11DeviceContext* context, bool shadowMapped) noexcept
         context->PSGetConstantBuffers(LightSlot, 1, light.GetAddressOf());
         std::array<float, 120> sceneConstants{};
         std::array<float, 44> lightConstants{};
-        if (!gi_capture::written(scene.Get(), sceneConstants) || !gi_capture::written(light.Get(), lightConstants)) return;
+        if (!gi_inputs::written(scene.Get(), sceneConstants) || !gi_inputs::written(light.Get(), lightConstants)) return;
 
         // cPSLight c0: towards the sun in view space; c1: its colour, which the pass multiplies by
         // m_exposure.z. The lighting passes' m_view rows (c8 to c10) take view to world.
@@ -784,8 +882,22 @@ void noteSun(ID3D11DeviceContext* context, bool shadowMapped) noexcept
         contextNotes.sun = noted;
         // c8.x, c8.y: the range's centre depth and start distance; c6.x: its fade (shadows_shaders.hpp, SunShadow).
         if (shadowMapped) contextNotes.shadowRange = std::array<float, 4>{lightConstants[32], lightConstants[33], lightConstants[24], 1};
-        // The sun pass reads the shadows: its list waits for them.
-        if (shadowing.load(std::memory_order_relaxed)) contextNotes.wait = true;
+        // The sun pass reads the shadows, and the point and spot lights are drawn before its list: it waits for them.
+        if (shadowing.load(std::memory_order_relaxed) || localShadowing.load(std::memory_order_relaxed)) contextNotes.wait = true;
+    }
+    catch (...)
+    {
+    }
+}
+
+void noteSkySpecular(ID3D11DeviceContext* context) noexcept
+{
+    if (!enabled.load(std::memory_order_relaxed) || !localShadowing.load(std::memory_order_relaxed)) return;
+
+    try
+    {
+        std::lock_guard lock(notesMutex);
+        notesOf(context).wait = true;
     }
     catch (...)
     {
@@ -826,6 +938,13 @@ ID3D11ShaderResourceView* light(UINT width, UINT height) noexcept
         log(std::string("Global illumination: ") + error.what());
         return nullptr;
     }
+}
+
+ID3D11ShaderResourceView* localLightShadow(UINT width, UINT height) noexcept
+{
+    std::lock_guard lock(lightMutex);
+
+    return localLightWritten && localLightOutput.width == width && localLightOutput.height == height ? localLightOutput.view.Get() : nullptr;
 }
 
 ID3D11ShaderResourceView* shadowDebug(UINT width, UINT height) noexcept
@@ -880,7 +999,7 @@ bool running() noexcept
 
 void recorded(std::uint64_t list, std::uint64_t context) noexcept
 {
-    gi_capture::recorded(list, context);
+    gi_inputs::recorded(list, context);
     try
     {
         std::lock_guard lock(notesMutex);
@@ -895,6 +1014,7 @@ void recorded(std::uint64_t list, std::uint64_t context) noexcept
         if (from.depth) into.depth = std::move(from.depth);
         if (from.normals) into.normals = std::move(from.normals);
         if (from.albedo) into.albedo = std::move(from.albedo);
+        if (from.velocity) into.velocity = std::move(from.velocity);
         if (from.sky) into.sky = from.sky;
         if (from.sun) into.sun = from.sun;
         if (from.shadowRange) into.shadowRange = from.shadowRange;
@@ -906,7 +1026,7 @@ void recorded(std::uint64_t list, std::uint64_t context) noexcept
 
 void forget(std::uint64_t list) noexcept
 {
-    gi_capture::forget(list);
+    gi_inputs::forget(list);
     std::lock_guard lock(notesMutex);
     notes.erase(list);
 }
@@ -929,7 +1049,7 @@ void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
     std::lock_guard lock(executionMutex);
     if (!immediate || failed || context != nativeImmediate) return;
 
-    gi_capture::executing(list);
+    gi_inputs::executing(list);
     if (noted.sky) sky = noted.sky;
     if (noted.sun) sun = noted.sun;
     if (noted.shadowRange) shadowRange = *noted.shadowRange;
@@ -965,10 +1085,22 @@ void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
     {
         fail(error.what());
     }
+
+    // Noted after the kick: a list's velocity is drawn when the list runs, after the kick before it.
+    if (noted.velocity)
+    {
+        objectVelocity = std::move(noted.velocity);
+        objectVelocityDrawn = true;
+    }
 }
 
 void present() noexcept
 {
+    {
+        std::lock_guard lock(executionMutex);
+        objectVelocityDrawn = false;
+    }
+
     Options options;
     {
         std::lock_guard lock(optionsMutex);
@@ -976,9 +1108,10 @@ void present() noexcept
         options = current;
     }
 
-    const bool on = (options.enabled || options.shadows) && !failed;
+    const bool on = (options.enabled || options.shadows || options.localLights) && !failed;
     lighting = on && options.enabled;
     shadowing = on && options.shadows;
+    localShadowing = on && options.localLights;
     if (enabled.exchange(on) && !on)
     {
         // Off gives the GPU memory back; on starts the scene over.
@@ -988,36 +1121,12 @@ void present() noexcept
         lightSignalled = lightWaited = 0;
     }
 
-    gi_capture::setActive(on);
+    gi_inputs::setActive(on);
     engine_scene::setActive(on);
-    gi_capture::setCapturing(options.capture);
-
-    // What the scene holds, and the CPU work a frame, every ten seconds while it runs.
-    static std::uint64_t lastStatus{};
-    const auto now = GetTickCount64();
-    if (on && now - lastStatus > 10'000)
+    engine_scene::setBonesFromSnapshot(options.bonesFromSnapshot);
+    if constexpr (DiagnosticLog)
     {
-        lastStatus = now;
-        log("Global illumination: " + status() + "; " + gi_capture::keyChanges());
-
-        const auto work = gi_capture::takeWork();
-        LARGE_INTEGER frequency{};
-        QueryPerformanceFrequency(&frequency);
-        const double frames = static_cast<double>(std::max<std::uint64_t>(kicksSinceLog.exchange(0), 1));
-        const auto milliseconds = [&](std::atomic<std::int64_t>& ticks) { return static_cast<double>(ticks.exchange(0)) * 1000.0 / static_cast<double>(frequency.QuadPart); };
-        const auto perFrame = [&](double value) { return std::to_string(value / frames); };
-        const double kick = milliseconds(kickTicks);
-        std::string steps;
-        for (const auto [step, name] : {std::pair{CaptureStep, "captures"}, {ModelsStep, "models"}, {TexturesStep, "textures"}, {TerrainStep, "terrain"},
-                 {SignalStep, "signal"}, {RenderStep, "renderer"}})
-            steps += std::string(steps.empty() ? "" : ", ") + name + " " + perFrame(milliseconds(kickStepTicks[step]));
-        steps += "; the terrain's converter changed " + std::to_string(converterChanges.exchange(0)) + " times (now";
-        for (const auto& value : lastConverter) steps += " " + std::to_string(value.load());
-        steps += "), its heightmap textures " + std::to_string(heightmapChanges.exchange(0)) + " times";
-
-        log("Global illumination's CPU time a frame: hooks " + perFrame(work.hookMilliseconds) + " ms (all threads) over " + perFrame(static_cast<double>(work.draws))
-            + " mesh draws, with " + perFrame(static_cast<double>(work.captures)) + " captures (" + perFrame(static_cast<double>(work.skinned)) + " skinned, "
-            + perFrame(static_cast<double>(work.vertices) / 1000) + "k vertices); the kick " + perFrame(kick) + " ms (render thread: " + steps + ").");
+        if (on) logStatus();
     }
 }
 }

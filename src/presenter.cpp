@@ -817,4 +817,11 @@ std::string status()
     std::lock_guard lock(statusMutex);
     return statusText;
 }
+
+unsigned presentedPerFrame() noexcept
+{
+    if (!presenting) return 1;
+
+    return presentRoute == Route::Fsr ? fsr_frame_generation::presentedPerFrame() : frame_generation::presentedPerFrame();
+}
 }

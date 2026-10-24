@@ -31,4 +31,6 @@ Route route() noexcept;
 // One line for the overlay: the route the game's frames take, or why frame generation did not start.
 // Empty when install() was not called.
 std::string status();
+// Frames shown per frame the game renders: what frame generation on route() presents, else 1.
+unsigned presentedPerFrame() noexcept;
 }

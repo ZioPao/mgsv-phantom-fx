@@ -53,15 +53,6 @@ std::array<float, 2> jitterPixels(std::uint64_t frame, int phases);
 // DLSS asks for 8 x (output / render)^2 phases; DLAA renders at output size.
 int jitterPhases(float renderScale);
 
-// A lens shot (photo_mode.hpp) renders the frozen scene from points across the aperture, each frame
-// with the camera moved off `centre` within its own plane. This NDC shift for a MainCamera upload
-// keeps the plane at `focusDistance` (metres along the view) where the centre sees it, as a lens
-// focused there does; nearer and farther points move apart.
-std::array<float, 2> lensShift(const SceneConstants& scene, const std::array<float, 3>& centre, float focusDistance);
-// Point `index` of a sequence whose every run spreads evenly over an aperture of radius 1: a disc,
-// or with `blades` of 3 or more a regular polygon with its corners at 1, one of them straight up (y).
-std::array<float, 2> aperturePoint(std::uint32_t index, int blades);
-
 // Maps this frame's unjittered NDC and depth to the previous frame's clip position.
 Matrix previousFromCurrent(const View& previous, const View& current);
 

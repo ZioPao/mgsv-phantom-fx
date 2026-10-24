@@ -2,6 +2,7 @@
 
 #include "global_illumination.hpp"
 #include "indirect_light_shaders.hpp"
+#include "local_lights.hpp"
 #include "log.hpp"
 #include "performance.hpp"
 #include "shader_bytecode.hpp"
@@ -38,6 +39,7 @@ enum class Role : std::uint8_t
     GameOcclusion, // The game's SSAO, whose result only the resolve reads
     Sun,           // Binds the G-buffer's specular target, which holds the material
     SunShadowMap,  // The same, inside the shadow map's range
+    SkySpecular,   // Indoors, where no sun shines, the sky's specular alone in the sun pass's place
 };
 
 struct GameShader
@@ -66,6 +68,7 @@ constexpr GameShader Shaders[]{
     {Role::Sun, "SunLight_DL_ES", "92726e8d231c8ed85f0db90400ef2258"},
     {Role::SunShadowMap, "SunLight_DL_CS", "7e5c2fc99c9d84ddd32df4e789e7082a"}, // In rain
     {Role::Sun, "SunLight_DL", "853f56a63e5bc66e6ee301c85ebfeaa8"},    // In rain
+    {Role::SkySpecular, "SunLight_ES", "367e8f6128befd48f2840ab3d6ed19b4"}, // Indoors
 };
 
 constexpr UINT NormalSlot = 0;     // The sky light's g_NormalTexture
@@ -738,7 +741,8 @@ bool drawResolve(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
 }
 
 // What the ray-traced scene needs from the game's passes (global_illumination.hpp): the normals, the
-// kick at the upscale, the wait at the resolve, and the sun.
+// kick at the upscale, the wait at the resolve, and the sun; the first of the sun pass, the sky's specular
+// pass and the resolve draws the point and spot lights too.
 void noteForRayTracing(ID3D11DeviceContext* context, Role role)
 {
     ComPtr<ID3D11ShaderResourceView> view;
@@ -755,9 +759,20 @@ void noteForRayTracing(ID3D11DeviceContext* context, Role role)
     case Role::Resolve:
         context->PSGetShaderResources(AlbedoSlot, 1, view.GetAddressOf());
         global_illumination::noteResolve(context, view.Get());
+        local_lights::noteDrawPoint(context);
         return;
-    case Role::Sun: global_illumination::noteSun(context, false); return;
-    case Role::SunShadowMap: global_illumination::noteSun(context, true); return;
+    case Role::Sun:
+        global_illumination::noteSun(context, false);
+        local_lights::noteDrawPoint(context);
+        return;
+    case Role::SunShadowMap:
+        global_illumination::noteSun(context, true);
+        local_lights::noteDrawPoint(context);
+        return;
+    case Role::SkySpecular:
+        global_illumination::noteSkySpecular(context);
+        local_lights::noteDrawPoint(context);
+        return;
     case Role::GameOcclusion: return;
     }
 }
@@ -995,7 +1010,8 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
             case Role::GameOcclusion: return global_illumination::running();
             case Role::SkyLight:
             case Role::Sun:
-            case Role::SunShadowMap: return false;
+            case Role::SunShadowMap:
+            case Role::SkySpecular: return false;
             }
 
         switch (*role)
@@ -1006,6 +1022,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
         case Role::GameOcclusion: return options.occlusion;
         case Role::Sun:
         case Role::SunShadowMap: noteSpecular(context); return false;
+        case Role::SkySpecular: return false;
         }
     }
     catch (const std::exception& error)

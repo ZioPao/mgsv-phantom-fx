@@ -8,7 +8,7 @@
 namespace phantom_fx
 {
 // Hands out ranges of [0, capacity), first fit, and merges a released range with its free
-// neighbours. The global illumination keeps its captured geometry and acceleration structures in
+// neighbours. The global illumination keeps its scene's geometry and acceleration structures in
 // a few large buffers this way.
 class RangeAllocator
 {

@@ -316,4 +316,10 @@ std::string status()
 
     return "Generating with FSR " + version + ": 2 frames presented per rendered frame.";
 }
+
+unsigned presentedPerFrame() noexcept
+{
+    std::lock_guard lock(stateMutex);
+    return failure.empty() && wanted && generating ? 2 : 1;
+}
 }

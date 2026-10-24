@@ -22,6 +22,25 @@ It builds with `/W4 /WX`. The version comes from `project()` in `CMakeLists.txt`
 add-on's version resource (`src/version.rc.in`), which ReShade shows and logs, and the first line
 of `PhantomFX.log`.
 
+### The diagnostic log
+
+The `release` preset is what players get: `PhantomFX.log` holds only what happens once (startup,
+the game build, sizes, what was identified, failures, and NGX's and Streamline's own messages). The
+`dev` preset (`cmake --preset dev`, `cmake --build --preset dev`, into `build/dev`) sets
+`PHANTOM_FX_DIAGNOSTIC_LOG`, which adds the statistics logged every few seconds and the work that
+only feeds them (`DiagnosticLog` in `src/log.hpp`, tested with `if constexpr`):
+
+- the global illumination's light, rays, largest values and cost (the output and counters copied
+  back from the GPU every ten seconds), its lights and exposures, its scene, its characters' bones
+  and its CPU time a frame, with the time of every draw hook (`gi_inputs`' `HookTimer`);
+- the ray-traced lights' "Lights in ten seconds";
+- the physical sky's parameters, copied back from the GPU every ten seconds;
+- the upscaler's frame counts every 1800 presents;
+- the shadow probe's findings, while its debug view shows;
+- Diagnostics, **Log global illumination often**, which shows only in this build.
+
+Its log's first line says "with the diagnostic log". Builds for in-game checks use this preset.
+
 `cmake --install build/release --component addon --prefix <dir>` collects the add-on, its DLLs,
 player documentation and licenses for distribution. The DLLs are at the install root;
 documentation and licenses are in `PhantomFX/`.
@@ -35,8 +54,8 @@ ctest --test-dir build/release
 This runs `tests/upscaler_tests.cpp`, which needs neither the game nor a GPU: settings (defaults,
 round trip, clamping, invalid files and values), the mode maths (render scales, texture LOD bias)
 and the camera maths (main-view recognition, jitter direction and units, reprojection, camera cuts,
-jitter phases and the Halton sequence, the camera frame generation gets, the lens shot's shift and
-aperture points). Everything else is checked in the game.
+jitter phases and the Halton sequence, the camera frame generation gets). Everything else is checked
+in the game.
 
 ## Package a release
 
@@ -69,10 +88,12 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/ui_redirect.cpp`, `src/ui_redirect.hpp` | The 2D pass and `GammaControl` on an output-size target while the engine renders below it |
 | `src/upscaler_shaders.hpp` | HLSL: the upscaler's inputs and motion vectors, composite with RCAS and debug views, stretch fallback |
 | `src/camera.cpp`, `src/camera.hpp` | Scene constants: main-view recognition, jitter, reprojection, camera cuts |
-| `src/upscaler_settings.cpp`, `src/upscaler_settings.hpp` | Upscaler, mode, custom scale, preset, texture bias, sharpening, frame rate unlock, frame generation, soft shadows, sun and lamp contact shadows, ambient occlusion, indirect lighting, volumetric fog; `PhantomFX.ini` |
-| `src/upscaler_menu.cpp`, `src/menu_style.hpp` | The "Phantom FX" overlay window: Upscaling, Visuals, Ray Tracing, Utility and Diagnostics |
+| `src/upscaler_settings.cpp`, `src/upscaler_settings.hpp` | Upscaler, mode, custom scale, preset, texture bias, sharpening, frame rate unlock, frame generation, soft shadows, sun and lamp contact shadows, ambient occlusion, indirect lighting, volumetric fog, draw distance; `PhantomFX.ini` |
+| `src/upscaler_menu.cpp` | The "Phantom FX" overlay window: its pages (Upscaling, Shadows, Lighting, Atmosphere, Camera, Display, World, Diagnostics) |
+| `src/menu_budget.cpp`, `src/menu_budget.hpp` | The window's sections, and each effect as a budget line: its state, its switch and its timed passes |
+| `src/fxui/` | fxui, the reusable frame budget settings window for ReShade add-ons (see its README.md) |
 | `src/performance.cpp`, `src/performance.hpp` | The passes' GPU costs: timestamp queries, the averages, the real cost measurement, `PhantomFX-performance.txt` (see "Costs") |
-| `src/performance_menu.cpp` | The cost table in Diagnostics and over the game, and as text |
+| `src/performance_menu.cpp` | The budget page, the costs over the game, and the costs as text |
 | `src/device_check.cpp`, `src/device_check.hpp` | Lets the game start under ReShade (see below); the build check |
 | `src/motion_blur.cpp`, `src/motion_blur.hpp` | Hooks on the motion blur plugin: velocity passes every frame, no blur |
 | `src/fxaa.cpp`, `src/fxaa.hpp` | Hook on the FXAA plugin: the FXAA pass at any post processing setting |
@@ -82,17 +103,20 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/fidelityfx.cpp`, `src/fidelityfx.hpp` | Loads the AMD FSR API |
 | `src/fsr_upscaler.cpp`, `src/fsr_upscaler.hpp` | FSR upscaling on Direct3D 12 for the upscaler |
 | `src/fsr_frame_generation.cpp`, `src/fsr_frame_generation.hpp` | FSR frame generation: AMD's swap chain and its inputs |
-| `src/game_loop.cpp`, `src/game_loop.hpp` | Hooks on the main loop's frame start and end, for Reflex and the weather menu |
+| `src/game_loop.cpp`, `src/game_loop.hpp` | Hooks on the main loop's frame start and end, for Reflex, the weather menu and the draw distance |
+| `src/draw_distance.cpp`, `src/draw_distance.hpp` | Draw distance: wider streaming windows at a location's load, the level of detail and the models' and vegetation's cull lengths (see "Draw distance") |
 | `src/weather.cpp`, `src/weather.hpp` | The overlay's weather and time control, in Utility (see "Weather and time") |
 | `src/sun_shadows.cpp`, `src/sun_shadows.hpp` | Soft shadows and Bend Studio's screen-space shadows on the sun: the trace and the sun pass's replacement draw |
 | `src/sun_shadows_shaders.hpp` | HLSL: Bend's trace ported to FXC, the game's sun light shaders rebuilt with soft shadows and the screen-space shadow |
 | `third_party/bend_sss/bend_sss_cpu.h` | Bend Studio's dispatch layout, unchanged (Apache License 2.0) |
 | `src/gi_scene.cpp`, `src/gi_scene.hpp` | The ray-traced scene on Direct3D 12: the geometry pool, bottom-level structures (a geometry per mesh, compacted), the geometry table, the frame's instances and top level (see "Ray-traced scene") |
-| `src/engine_scene.cpp`, `src/engine_scene.hpp` | The game's loaded models from its visibility manager, their FMDL meshes and base textures, its texture manager, the terrain's heightmap inputs (see "Scene objects") |
+| `src/engine_scene.cpp`, `src/engine_scene.hpp` | The game's loaded models from its visibility managers, its characters from its model list, their FMDL meshes and base textures, its texture manager, the terrain's heightmap inputs (see "Scene objects") |
+| `src/gi_inputs.cpp`, `src/gi_inputs.hpp` | What the ray tracing takes from the game's draws: the constants it writes, the main camera of the frame drawn, the terrain's inputs |
 | `src/engine_brush.cpp`, `src/engine_brush.hpp` | The game's object brush: its loaded blocks' vegetation and props, read from their placement records (see "Scene objects") |
 | `src/game_memory.hpp` | Guarded reads of the game's objects |
 | `src/gi_textures.cpp`, `src/gi_textures.hpp` | Shared copies of the game's textures the ray-traced scene's meshes use, from its texture manager (see "Ray-traced scene") |
 | `src/gi_shadow.cpp`, `src/gi_shadow.hpp` | Ray-traced shadows on the global illumination's Direct3D 12 device: the denoiser's memory and passes |
+| `src/local_lights.cpp`, `src/local_lights.hpp` | Ray-traced lights: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights") |
 | `src/shaders/gi_shadow.hlsl`, `gi_shadow_filter.hlsl`, `gi_shadow.hlsli` | HLSL: the sun's shadow rays, and the FidelityFX Shadow Denoiser's data access, temporal pass and filters |
 | `third_party/ffx_denoiser_shadows/` | AMD's FidelityFX Shadow Denoiser headers, unchanged (MIT; `licenses/AMD-FidelityFX-LICENSE.txt`) |
 | `src/indirect_light.cpp`, `src/indirect_light.hpp` | GTVBAO in place of the game's SSAO, on the indirect light, and SSILVB's bounce light: pass recognition, the compute passes, the multiply, the resolve's white occlusion and diffuse light |
@@ -652,6 +676,13 @@ the shaders' disassembly.
   record the sky light pass, which binds the G-buffer normals as `g_NormalTexture` (`t0`), directly
   precedes the upscale in the same command list; the upscale binds the depth as `inDepthBuffer`
   (`t2`) and `cPSScene` (b2).
+- **`SH_SphereMap`'s light** (`b7`, `PsWork`): `g_psParamSH`, four 4x4 matrices (`c0` to `c15`: the
+  probe's light, a matrix a colour, then the sky's occlusion), and `g_psParamSHSky`, three (`c16` to
+  `c27`: the sky's light); the ambient it draws is the probe's light plus the sky's times the occlusion
+  (clamped to 0..1). Read at Mother Base 2026-10-23: the sky and the occlusion all zero, the probe's
+  light near 800 at `c3.w`: its ambient is all baked into the probes. The global illumination takes
+  the sky's light for its rays that reach the sky, and the probe's light where the game gives no sky
+  (Mother Base was black-red with the sun's bounce alone).
 - **G-buffer normals** (`DecodeViewSpaceNormal`): `z = 2 b^2 - 1`, and `xy` the direction of
   `2 rg - 1` scaled to `sqrt(1 - z^2)`. They are in the view space the passes reconstruct positions
   in, with x mirrored.
@@ -697,6 +728,11 @@ the shaders' disassembly.
 | `0x536550`, `0x551430`, `0x54F8F0` | Set the clock, request and cancel weather, called by the weather menu |
 | `0x537DD0` | `WeatherManager` update; its pause bit 8 test at `0x537FBF`, made to run in photo mode |
 | `0x22C6F0`, `0x22C8B0` | Model visibility tests (see "Scene objects"); `rcx` the visibility manager, `r8d` its capacity |
+| `0x165BD0` | `StageBlockControllerData` setup: copies a location's streaming settings into a description and creates its stream controller (see "Draw distance") |
+| `0x15F010` | Creates the stream controller from that description (only the setup calls it), hooked for the draw distance |
+| `0x2B73434` | The level of detail's reference resolution, set by `GrTools.SetLodFactorResolution` (`0x1BB2D0`); 0 uses each view's width |
+| `0x2B74330`, `0x2B77FB0` | The models' and the vegetation's `RejectionLengthBias` settings; `+0x64` the value the draw jobs read |
+| `0x205AF0` | Selects those two settings' value by a graphics quality's name, hooked for the draw distance |
 
 ### Scene objects
 
@@ -708,8 +744,13 @@ level at Camp Omega's cliffs. No names in the exe: the class names here are desc
   two more with capacity 256 had no records). The visibility tests `0x22C6F0` and `0x22C8B0` take it in
   `rcx` and the capacity in `r8d`, about 300 calls a second from the job threads (one a view: main
   camera, shadow cascades). Objects are handles: bits 16 to 27 a chunk, bits 8 to 15 a slot. The chunk
-  table at `+0x88` has 24-byte entries (chunk pointer, handle tag with `0x3` in the top nibble, element
-  size `0x30` at `+0x10`); 256 records a chunk, chunks not contiguous.
+  table at `+0x88` has 24-byte entries (chunk pointer, handle tag, element size `0x30` at `+0x10`); 256
+  records a chunk, chunks not contiguous. The tag's low 32 bits are the chunk's handle (`0x3` in the top
+  nibble, the chunk's number in bits 16 to 23); its high 32 bits hold other data in some chunks (Africa,
+  2026-10-23: from chunk 11 of the 6144 manager, from chunk 0 of three smaller ones with 248, 39 and 5
+  records). Read as one 64-bit word, the scene's walk stopped at the first such chunk and left about
+  60% of the placements out (1,075 records of 2,675), which draw capture then filled in where they were
+  drawn. Every manager the tests run with counts, not only the one whose test comes first in a frame.
 - **Record** (`0x30` bytes): `+0x10`, `+0x18` the box as signed 16-bit x, y, z in half metres (min, max);
   `+0x20` the manager plus `0x100` while in use; `+0x28` the owner. One record an instance.
 - **Instance group** (vtable `0x2106720`, constructor `0x239770`): `+0x40` its model, `+0x4C` the
@@ -776,6 +817,29 @@ level at Camp Omega's cliffs. No names in the exe: the class names here are desc
   holding its shader resource view at `+8`). The manager's streaming list (`+0x10` to `+0x18`, 24-byte
   nodes whose first word points 0x10 into a record) leaves a few loaded textures out. Neither the model
   objects nor their materials hold the texture: the draws bind it by id.
+- **Every model** (found 2026-10-23): the object registry (vtable `0x20F08C8`; the global at RVA
+  `0x2BA04A8` points to it) keeps a list of each object type's instances: at `+0x1E8` a table of list
+  headers by type number (`+0x38` of an object, a word; models are type 3, the global at RVA
+  `0x29E51B4`), each header the last object, the first and the count; objects are linked first to last
+  through `+0x10` (and back through `+0x18`). In Afghanistan the model list held 882 models: 566 rigid,
+  360 skinned. Characters are among them and in no visibility manager.
+- **Characters** (found 2026-10-23): a skinned model (its file has bones) is an ordinary model object:
+  its world matrix at `+0x40` (identity while unused), the passes it is hidden from at `+0x1A4`, its
+  bone count at `+0xF8`, and at `[+0x188] + 0x78` its skinning palette: a 3x4 matrix (rows, translation
+  in the fourth column, in the model's space and with the bind pose taken out) for each of its file's
+  bones, in the file's bone order. A mesh's palette is that array through its bone group: the draw's
+  `b6` slot k is the model's bone `group[k]` (checked at the draw replay `0x2D6310`: equal to the last
+  bit, for a soldier's body). The game keeps pools of bodies: of 18 soldier bodies of one file, 4 were
+  shown and animated, 14 hidden with identity matrices and the bind pose (palette all identity).
+  The palette is current when the frame's draws are replayed. Weapons and props a character holds are
+  skinned models of their own (a rifle: 2 bones, one weight a vertex), placed at the hand: their world
+  matrix is made from the hand's bone, its bottom row (0 0 0 1) give or take rounding (0.99999988
+  measured for the 1), which the scene took for no matrix until 2026-10-23.
+- **Skinned model files**: block 0 the bones (48 bytes: name, parent, box, flags; then the local and
+  the world (bind) position as float4: positions only, no rotations); block 5 the bone groups (68 bytes:
+  a word, the count, 32 bone numbers); a mesh's bone group at `+6`. Its second vertex stream adds the
+  bone weights (usage 1, four 8-bit unorms) and bone numbers (usage 7, four 8-bit integers into the
+  mesh's bone group) beside the texture coordinates (usage 8, two halves).
 - **Mesh flags** (an FMDL mesh's first two bytes, alpha and shadow), measured 2026-10-23 from the
   game's own draws: hooking the draw packet replay `0x2D6310` (`rcx` the replay state, its constant
   buffers at `+0x28`, 32-byte slots with the source at `+8`; `rdx` the packet, an indexed draw's count
@@ -794,12 +858,13 @@ level at Camp Omega's cliffs. No names in the exe: the class names here are desc
   material's technique (the FMDL material type's StrCode64: two meshes of `0x69CCC8871944` cast, one of
   `fox3DDF_Blin_NC` did not), so the flags alone do not tell. The game keeps a pass mask in each mesh's
   draw item (`+0x80`), which its draw-list builders test (`0x25BE00` and five like it); reading those
-  is the exact answer, not done yet. The ray-traced scene takes what the game draws into its shadow
-  maps: no shadow bit 0, no alpha bit 6, alpha bit 7 only with shadow bit 1 or as alpha 128 with
-  shadow 64 (cut out). Which of them the shadow pass
+  is the exact answer, not done yet. A tree's twigs in Africa (model `84a32080686afb21`, mesh 0, alpha
+  160 with shadow 64) cast in the game's shadow maps and were missing from the rays' shadows, so until
+  the pass masks are read the ray-traced scene takes every decal (2026-10-23): it takes all but shadow
+  bit 0 and alpha bit 6. Which of them the shadow pass
   alpha-tests was measured per draw (its `cPSSystem` `m_param.w`, 1 testing, 0 not): alpha 32 (bit 5)
   and the shadow-only decal (alpha 128, shadow 66) test; alpha 16 (glass, shadow 4) does not and casts a
-  solid shadow. The scene takes alpha bit 5 and shadow-only decals as cut out, the rest as opaque.
+  solid shadow. The scene takes alpha bits 5 and 7 as cut out, the rest as opaque.
 
 ## What the add-on changes
 
@@ -1266,26 +1331,28 @@ Not handled:
 
 What the global illumination and the ray-traced shadows trace (`src/gi_scene.cpp`, its use in
 `src/gi_renderer.cpp`), laid out as DXR scenes are. Rebuilt 2026-10-23 from one structure per
-captured draw or model part with every triangle expanded.
+captured draw or model part with every triangle expanded; since stage 5 of that rewrite (the same day)
+it is the game's own scene throughout (see "Draw capture (removed)" below).
 
 - **Geometry pool.** One 384 MB buffer: vertices of 16 bytes (position, then the texture coordinates
   as two halves where a mesh has them) and 16-bit indices, from 16-byte boundaries. A model's meshes
   keep the game's own index buffers (the FMDL's most detailed face range), so its vertices are stored
-  once. Captured meshes, the frame's skinned meshes and the terrain rings are written there by
-  kernels (`Scatter`, `TerrainGrid`), unindexed.
+  once. The terrain rings (unindexed) and the characters' poses are written there by kernels
+  (`TerrainGrid`, `Skin`).
 - **Bottom levels.** A model's structure has one geometry per mesh the scene takes; opaque meshes
   carry `D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE`, so the hardware runs no candidate code for them, and
   only cut-out meshes reach the alpha test. Static structures are built `PREFER_FAST_TRACE |
   ALLOW_COMPACTION` within a budget a frame (128 builds, 300k triangles, 64 MB of scratch), emit their
   compacted size with the build, and are copied into that room when the frame slot comes round
   (`COPY_MODE_COMPACT`); the old room returns once the GPU is past that frame. Offline they compact to
-  34 to 40% of their size. The terrain rings are built in place or refitted (`ALLOW_UPDATE`); the skinned
-  meshes' structure is built every frame (`PREFER_FAST_BUILD`, its own scratch).
+  34 to 40% of their size. The terrain rings and the characters are built in place or refitted
+  (`ALLOW_UPDATE`).
 - **Geometry table** (`GIGeometry`, `t16`). A row per geometry, a structure's rows contiguous and in its
   order: the vertices' and indices' offsets, `GI_GEOMETRY_CUT_OUT`, `GI_GEOMETRY_UV`, its base texture
   (1 + its index in `g_SceneTextures`) and, for cut-out geometry with one (`GI_GEOMETRY_ALPHA_TEXTURE`),
   the alpha below which light passes. The CPU keeps the table and copies the rows changed each frame.
-  The learnt mean albedo (`LearnAlbedo`) is kept by row, for geometry without a texture.
+  The learnt mean albedo (`LearnAlbedo`) is kept by row, for geometry without a texture, and starts
+  over for each new row (`ClearNewGeometries`).
 - **Textures** (added 2026-10-23; draws no longer involved). A model mesh's base texture is its material
   instance's texture parameter named `Base_Tex_SRGB` (FMDL: mesh `+4` material instance; block 4 texture
   count `+6`, first parameter `+8`; block 7 parameters, name and texture; block 6 textures, path index;
@@ -1320,29 +1387,63 @@ captured draw or model part with every triangle expanded.
   Reading `b0` back at the kick, as the first alpha copies did, gave the last draw's constants (0, so every
   texel blocked: the pylon's solid shadow).
 - **Instances.** The frame's `D3D12_RAYTRACING_INSTANCE_DESC`s (up to 131,072) are both the top
-  level's input and what the kernels read (`t5`): one per placement of a model, with its transform; the
-  terrain rings, the skinned meshes and the captured meshes with identity. `InstanceID` holds the kind
-  (`GI_INSTANCE_*`, low 8 bits) and a captured mesh's entry above it; `InstanceContributionToHitGroupIndex`
+  level's input and what the kernels read (`t5`): one per placement of a model and per character, with
+  its transform; the terrain rings with identity. `InstanceID` holds the kind (`GI_INSTANCE_*`, low 8
+  bits); `InstanceContributionToHitGroupIndex`
   holds the first row of its structure, so a ray's geometry is `CandidateInstanceContributionToHitGroupIndex()
   + CandidateGeometryIndex()`. Kernels reach a hit's triangle through `LoadTriangle` (`gi_common.hlsli`):
   instance, row, indices, vertices, transform. A hit the global illumination keeps packs its instance (20
   bits) and its geometry within the structure (12 bits) into one word.
-- **Recording order.** The pool's uploads and the table's rows; `ClearBounds` and `Scatter`, `TerrainGrid`;
-  the bottom levels and compactions; the depth pyramid; the instances' copy, `CullCaptured` (below); the
-  top level. Between frames the pool, the table and the instances are in the non-pixel shader resource state.
-- **Vegetation and clones.** The clone arrays and the object brush's placements join the game's models
-  in the snapshot (`engine_brush.cpp` reads a block once, when first seen); the capture then leaves the
-  `_clone` shaders' draws alone (`Kind::Clone`). The bushes' and grass's meshes are flagged alpha 0xA0 (a
+- **Recording order.** The pool's uploads and the table's rows; `ClearNewGeometries`, `TerrainGrid`,
+  `Skin`; the bottom levels and compactions; the instances' copy; the top level. Between frames the pool, the table and the instances are in the non-pixel shader resource state.
+- **Characters** (2026-10-23). The snapshot also walks the object registry's model list (see "Scene
+  objects", "Every model") for the skinned models the game shows, each with its world matrix, its
+  skinning palette and its mesh groups' states, and the files' parse takes skinned models too: each
+  vertex's four bones (through its mesh's bone group to the model's bone numbers) and weights, and each
+  mesh's group. In the pool a skinned model lays out its bind pose, indices and skin (16 bytes a
+  vertex: four 16-bit bones, four 8-bit weights) and has no structure of its own; each character gets
+  its own room for its posed vertices and a refittable structure of the meshes it shows (a mesh group
+  drawn while none of bits 0x33 of its state is set; a character showing other meshes is made again).
+  Each frame with a new snapshot the palettes go up with the frame's other uploads and `Skin`
+  (`gi_scene.hlsl`) poses every character's meshes into their rooms, a thread a vertex, as the game's
+  skinning shaders do (each weight's bone's 3x4 matrix, the weights scaled to add up to one); the
+  structures are refitted, and built again every 30 frames. The palettes are not the snapshot's: it reads them at the
+  frame's first visibility test, before the game animates the bones for the frame it draws (2026-10-24:
+  in the helicopter a lamp's shadow of Snake trailed his moving arms and face; at the kick 10 to 15% of
+  the palettes had moved on, every kick in the next game frame). Each main-camera draw of a skinned mesh
+  (`m_useWeightCount`, `b5` `c8.x`, set) gives its bones instead (`VSBones` `g_vsBone`, `b6`: 32 3x4
+  rows, a mesh's palette through its bone group), its model found by its place (the view's inverse
+  times `m_viewWorld`'s translation, within 2 cm of the character's matrix) and its mesh by its index
+  range (the FMDL's most detailed faces: first face plus the level's first, and its count); bones no
+  draw had are read again at the kick. Diagnostics, **Character bones from the snapshot (old)**, brings
+  the lag back for comparison; the log counts the draws placed. A character whose refit finds no scratch
+  is left out of that frame. Its instances carry `GI_INSTANCE_MODEL | GI_INSTANCE_CHARACTER`. The props
+  and weapons a character holds are skinned models of their own; the player's rifle and pistol were
+  missing until 2026-10-23, left out for their rounded matrices (see "Characters"): found by logging the
+  skinned draws no character showed, while draw capture still ran. Marked soldiers' silhouettes
+  (layer bit 0x20, see "Characters") are left out: the game draws them in the main view only.
+- **Model files read once.** A model the renderer has not placed for 600 frames is let go and its file
+  read again when the game places it again. The 600 frames count from the model's arrival: counted from
+  frame 0, a model the frame's lists did not place went as it came, and the walk of the model list
+  queued every listed model's file, rigid ones too, before its other tests. In one session that read
+  105,181 files for about 1,600 models.
+- **Vegetation.** The object brush's placements join the game's models in the snapshot
+  (`engine_brush.cpp` reads a block once, when first seen). The bushes' and grass's meshes are flagged alpha 0xA0 (a
   cut-out decal) and shadow 0x41 or 0x40 (bit 0: no shadow; the game draws none for its vegetation), which
   the models' rule leaves out: models from the brush's plugins take them as cut out. In the first session
   with the brush (Afghanistan, 25 blocks) the captured meshes fell from 1,800 to 167 and the geometry pool
   from 91% to 16%. Placements come grouped by model, so the renderer looks a
   model up once a run.
-- **Captured meshes** still come from the game's draws (`gi_capture.cpp`) for what has no engine source
-  yet: they keep their entries, retention, eviction when the pool or the structures are full, and
-  `CullCaptured` (`gi_scene.hlsl`, was `BuildInstances`), which gives a captured instance the game did not
-  draw and would show mask `GI_MASK_HIDDEN`. Their bounds stay by entry. `Scatter` skips the vertices of a
-  capture the renderer left out: before, they landed past the previous record's range.
+- **Draw capture (removed).** Until stage 5 (2026-10-23) what the scene lacked was captured from the
+  game's draws: each draw made again through stream output into a ring, turned into world positions at
+  the kick, scattered into the pool by entry, kept while the game drew it and culled against a depth
+  pyramid when it stopped, with the frame's skinned meshes in one structure built every frame. Once the
+  visibility managers were read in full (see "Scene objects", the chunk tags), a second of every draw in
+  Africa found the main view's and the shadow passes' rigid draws all in the scene but the sky dome and
+  spare soldiers' gear parked about 200 m under the map, and the helicopter's interior added nothing.
+  The capture went, with its kernels (`Scatter`, `ClearBounds`, `BuildDepthPyramid`, `CullCaptured`), the
+  transfer texture, the per-frame structure, the captured instances' masks and the coverage checks. The
+  camera and the terrain's inputs still come from the draws (`gi_inputs.cpp`).
 - **Offline checks** (`%TEMP%\phantom-rts\harness`): every earlier mode gives the same numbers, with the
   D3D12 debug layer quiet; mode `multipart` puts the post (eight corners shared through indices, opaque)
   and the alpha card (cut-out) in one model, one structure, and gives the same shadows as `alphacard`.
@@ -1354,47 +1455,48 @@ With **Ray-traced shadows** on, the sun's shadow comes from rays traced through 
 shadow map, soft shadows and sun contact shadows. The scene runs for them with the global
 illumination's light on or off; `global_illumination::Options::shadows` turns them on, and the
 light passes run only with `enabled`. Lamp contact shadows stay as they are: lamps are not ray
-traced yet.
+traced here (see "Ray-traced lights").
 
 - **Rays** (`TraceSunShadows` in `src/shaders/gi_shadow.hlsl`). One ray a pixel at the render
   size, from the depth's world position towards a point on the sun's disc (uniform over the disc of
-  the sun size's angular radius, a new point each frame), up to 5 km. It leaves from the surface's
-  side facing the sun, offset by 2 cm plus 0.2% of the distance as the global illumination's rays
-  are, and skips copies of the surface just above it ("Copies of a surface" in
-  `gi_common.hlsli`). The sun's direction is the sun pass's (`cPSLight` `c0`), noted the frame
-  before, as the scene is traced before that frame's sun pass is recorded.
-- **Alpha-tested meshes.** The scene holds triangles only: a leaf card is solid, and grass, whose
-  instances the game rewrites each frame, is missing. So the rays leave alpha-tested meshes to the
-  shadow map. A mesh counts as alpha-tested once the game draws it with `ModelForward_Shadow` (the
-  shadow map's shader whose pixel shader discards; the solid casters draw with
-  `ModelForward_ShadowOpaque` and `ModelForward_ShadowOpaqueRigid`, which do not), or with a
-  G-buffer shader whose source name holds `leaf`, `wave`, `translucent` or `hair`. Every G-buffer
-  pixel shader discards, so the pixel shaders cannot tell. The tag is per captured entry
-  (`gi_capture.cpp`, kept by key, so a later shadow draw tags a mesh the G-buffer captured); its
-  structure is made again with its geometry cut-out (non-opaque), and its instance gets mask
-  `GI_MASK_CAPTURED_CUT_OUT`, which the shadow rays take only beyond the shadow map. Without that mask
-  (the first build of the new scene core) the captured vegetation's leaf cards went through the shadow
-  rays' alpha test inside the shadow map too: with 900 to 1,500 captured meshes (5 to 8 million
-  triangles, the `_clone` grass and bushes) the shadow rays took 8 to 47 ms against 0.7 to 1.2 ms with
-  150. A model's cut-out meshes are cut-out geometry from the start. The global illumination's rays force everything opaque, as
-  before. Skinned alpha-tested meshes (hair) are not captured: the frame's skinned meshes share one
-  structure, so they could not be told apart.
+  the sun size's angular radius, a new point each frame), up to 5 km. The sun's direction is the sun
+  pass's (`cPSLight` `c0`), noted the frame before, as the scene is traced before that frame's sun
+  pass is recorded.
+- **Where a ray leaves** (`ShadowSurfaceAt`, for the sun's rays, the lights' and the debug view's). A
+  ray from the eye through the pixel looks for the scene's own surface near the depth's point (within
+  3 cm plus 2% of the distance; cut-out geometry by its alpha). Found, the shadow ray leaves its exact
+  point on the triangle, from the side facing the light, by Wachter and Binder's offset
+  (`OffsetFromTriangle`, Ray Tracing Gems chapter 6), and nothing near it is skipped. Where the game
+  drew something the scene lacks, or holds at another level of detail too far off, it leaves from
+  the depth's point along the G-buffer's normal, offset by 2 cm plus 0.2% of the distance, skipping
+  copies of the surface just above it ("Copies of a surface" in `gi_common.hlsli`). Until 2026-10-24
+  every ray left that way: a lamp's hard shadow showed the skip taking a character pressed to a wall
+  for a copy of the wall, light through his back in patches ragged along the wall's bumpy normals.
+  Diagnostics, **Shadow rays from the depth (old)**, brings that back for comparison.
+- **Cut-out meshes.** A model mesh the game alpha-tests (FMDL alpha bits 5 and 7, see "Scene objects",
+  mesh flags) is cut-out geometry: non-opaque in its structure, so only it reaches the rays' candidate
+  code. In the captured-mesh era the shadow rays' alpha test on the captured grass and bushes' cards (5
+  to 8 million triangles) took 8 to 47 ms; the brush's vegetation meshes with their textures cost 1.5 to
+  2.6 ms.
 - **The game's alpha on cut-out meshes.** A loaded model's cut-out mesh (its alpha bits other than
   translucent, or a shadow-only lattice) is cut-out geometry with its texture coordinates (the FMDL's
   UV0, two halves) in the fourth float of each pool vertex and its base texture (see "Ray-traced
   scene", textures and alpha test). The sun's shadow rays and the shadow debug rays sample its alpha
   where they cross a triangle (`CutOutBlocks`) and pass where it is below the threshold, inside the
-  shadow map's range and beyond it. The global illumination's rays take every triangle as opaque: testing alpha in them
-  made its rays cost about five times as much in game (light 8 to 43 ms). Cut-out meshes without their
-  alpha yet are left to the shadow map as before. Several models can share a placement (a pylon is a
-  model and an instance group's model at one transform): a shadow draw is matched against each.
+  shadow map's range and beyond it. The global illumination's rays test it too (2026-10-23), with a cone
+  a pixel wide where they start that spreads as a pixel's angle does (`LightCone`), and let cut-out
+  geometry without its texture through: taking every triangle as opaque, as they did since the
+  captured-mesh era (when testing alpha made them about five times as costly, 8 to 43 ms), a bank of
+  grass was a heap of solid cards to them and went dark. Before, in the same spot, the global
+  illumination's ray passes took 0.85 ms (probe rays 0.41, second bounces 0.19, hit lighting 0.24) of
+  5.1 ms. Cut-out meshes without their alpha yet are left to the shadow map by the sun's rays.
   Offline harness mode `alphacard`: a card clear on one half shadows exactly with the other.
 - **The game's terrain from its heightmap.** The terrain shaders (`NewTerrain_Depth`, `_Shadow`)
   read a virtual heightmap: `virtualUv = v0.xy x c9.xy + c9.zw` (b5, per patch), the page table at
   `t0` (`B8G8R8A8`, 128 x 128: tile x, y and level of detail as texel x 255.4, floored), the height
   atlas at `t1` (`R16_UNORM`, 1024 x 2048), `physicalUv = (frac(virtualUv x b4.c0.xy x 2^-level) +
-  tile.xy) x b4.c0.zw + b4.c1.xy`, and world = `(u, height, v) x c10.xyz + c11.xyz`. The capture notes
-  these at the main view's first terrain draw a frame (`engine_scene::noteTerrain`); the kick copies
+  tile.xy) x b4.c0.zw + b4.c1.xy`, and world = `(u, height, v) x c10.xyz + c11.xyz`. The draw hooks
+  (`gi_inputs.cpp`) note these at the main view's first terrain draw a frame (`engine_scene::noteTerrain`); the kick copies
   both textures' most detailed level into shared textures (`t14`, `t15`) and reads `b4` back now and
   then. `TerrainGrid` (gi_scene.hlsl) makes four rings of 256 x 256 cells around the camera, 1, 4,
   16 and 64 m cells (256 m to 16 km), two triangles a cell sampled as the game's shader samples, the
@@ -1402,25 +1504,16 @@ traced yet.
   ring that moves, or whose inner ring moves, is made again and its structure built again
   (`ALLOW_UPDATE`); every 120 frames, staggered, it is made again and refitted as finer pages stream
   in. A ring whose build finds no scratch left that frame is left out until it is built. Their
-  instances carry `GI_INSTANCE_TERRAIN` (brown in the shadow debug view); the terrain's
-  draws are no longer captured once its inputs are known. Harness modes `terrain` (flat heightmap at
+  instances carry `GI_INSTANCE_TERRAIN` (brown in the shadow debug view). Harness modes `terrain` (flat heightmap at
   the ground: the same shadows as `beyond`) and `terrainhigh` (a metre up: everything shadowed).
-- **Rigid meshes from skinning shaders.** Most object shaders (`fox3ddf_blin*`,
-  `ModelForward_ShadowOpaqueRigid`) have the bones (`b6`) but apply them only where
-  `m_useWeightCount` (`b5` `c8.x`) is not 0. A draw with 0 is a rigid mesh and is captured once and
-  kept like one. Taken for skinned meshes (captured from the main camera, each frame), the world's
-  buildings and props left the scene as soon as they were out of view, and their ray-traced
-  shadows went with them (the shadow probe's blocker was always the skinned instance). Only the
-  main camera's pass adds them: from the shadow passes they came as 20k to 140k new entries every
-  ten seconds while moving, which filled the vertex pool, kept 1k to 5k meshes waiting for a
-  structure and made the game stutter. Why their keys keep changing there is not known yet; a
-  shadow pass still marks and tags the ones held.
 - **Inside and beyond the shadow map.** Each ray works out how far its pixel lies past the game's
   shadow map range, as `SunLight_DL_CS_ES` fades its shadow to lit there (`cPSLight` `c8.x`, `c8.y`
   and `c6.x`, noted from the shadow-mapped sun shaders): 0 inside, 1 past the fade. Cut-out geometry
-  with the game's alpha is tested by it everywhere. Cut-out geometry without it lets the rays through
-  inside; beyond, each such triangle a ray passes blocks it with chance 0.5 times that share, so trees
-  far away cast a half-transparent shadow that the denoiser averages.
+  with the game's alpha is tested by it everywhere. Cut-out geometry without it (its texture not copied
+  yet, or a mesh without texture coordinates) lets the rays through inside, where the game's shadow map
+  has its shadow; beyond, each such triangle a ray passes blocks it with chance 0.5 times that share, so
+  it casts a half-transparent shadow that the denoiser averages. With the rays alone (the default, see
+  "Sun pass") there is no range: such geometry blocks with chance 0.5 everywhere.
 - **Denoiser.** AMD's FidelityFX Shadow Denoiser (FidelityFX Denoiser 1.0, MIT,
   `third_party/ffx_denoiser_shadows`, unchanged), with the passes and memory of FidelityFX SDK
   1.1.4's integration: 8x4 tile masks of the ray results, the tile classification's temporal pass
@@ -1428,74 +1521,48 @@ traced yet.
   three edge-avoiding à-trous filters 1, 2 and 4 pixels apart, the first writing the next frame's
   history; the last restores contrast (`pow(mean, max(1.2 - variance, 1))`). Deviations: the
   trace writes the tile masks itself through groupshared memory (any wave size); the motion is
-  the camera's, reprojected from the depth (moving characters' shadows lag a little); no 16-bit
+  the camera's, reprojected from the depth, and where the game's velocity pass drew a moving mesh
+  (characters, the horse, trees in the wind) the game's velocity (see "Velocity"): its
+  `MotionBlurCameraVelocity` pass gives the texture (`t3`), copied at the kick when a list that drew
+  it ran since the last present, before the kick's list. Until 2026-10-23 the camera's motion alone
+  served, which gave moving characters' shadows a lag; the velocity passes run while an upscaler
+  replaces FXAA or with the game's motion blur on, and without them the camera's motion serves; no 16-bit
   types; the depth similarity's sigma is 1 m plus 5% of the depth instead of 1 m, as sloping ground
   kilometres away is metres deep per pixel.
 - **Sun pass** (`src/shadows.cpp`, `shadows_shaders.hpp`). The shared R16_FLOAT shadow goes to
-  `t6` of the replacement sun shaders, with `g_rayTraced` in `b6`. Inside the shadow map's range
-  the shadow is the darker of the shadow map's soft shadow (PCSS, whatever its checkbox) and the
-  rays', and it fades to the rays' alone where the game faded to lit; the shadow offset, clouds and
-  height fade follow as before. Beyond the range the rays' shadow is the shadow. With every option
+  `t6` of the replacement sun shaders, with `g_rayTraced` in `b6`. By default (2026-10-23) the rays
+  alone shadow the sun: the far shader lights everything, with the rays' shadow. With **Show vanilla
+  shadows with RT** (`vanilla_shadows_with_ray_tracing`), inside the shadow map's range the shadow is
+  the darker of the shadow map's soft shadow (PCSS, whatever its checkbox) and the rays', and it fades
+  to the rays' alone where the game faded to lit; the shadow offset, clouds and height fade follow as
+  before. Beyond the range the rays' shadow is the shadow. Until 2026-10-23 that mix was the only way,
+  and the rays alone a diagnostic ("Ray-traced shadows only"). With every option
   off the shaders still match the game bit for bit on WARP (cascade blend on and off).
-- **Meshes the scene captures again.** While the camera moves, a static mesh can get a new key,
-  and the copy under the new key waits for its acceleration structure (the builds have a budget a
-  frame). In the first test, moving showed 50 to 108 builds a frame with 600 to 2,400 waiting,
-  against none standing still, and shadows vanished while the camera turned: the old copy left the
-  scene at once (in view, not drawn). An entry the game drew in more than one frame now counts as
-  drawn for 120 frames after its last draw (`DrawnGraceFrames` in `gi_renderer.cpp`): the copy
-  from before the camera moved stays through a turn even when every key during it lasts a single
-  frame; a moving mesh, drawn once under each key, gets no grace.
-- **Terrain keys.** The second test lost a mountain's shadow until the camera faced it again. The
-  log showed the vertex pool 87 to 96% full, half of it meshes drawn in one frame only, 25,000 to
-  75,000 new terrain entries per 10 s while moving (about 90% of all new entries), and 14,187 of
-  14,206 duplicates differing only in the second vertex buffer's offset. The terrain's vertex
-  shaders read one stream (`NewTerrain_Depth`: `dcl_input v0.xy`), so slot 1 is whatever an
-  earlier draw left bound; its offset changed every frame and every patch got a new key. The copies
-  filled the pool, and eviction took the terrain out of view first. Terrain keys now leave slot 1
-  out (`gi_capture.cpp`).
-- **Culled meshes.** The third test lost a far cliff's shadow with small camera moves, back and
-  forth, also with "Ray-traced shadows only". `BuildInstances` (`gi_scene.hlsl`, now `CullCaptured`) left out every
-  entry wholly in view that the game did not draw, taking it as moved or removed; but the game also
-  skips what is hidden behind nearer surfaces (occlusion culling), and those still cast shadows. A
-  depth pyramid of the frame (`BuildDepthPyramid`: the farthest depth of each 2^(k+1)-pixel
-  square, levels from half the render size) now tells them apart: an entry wholly in view stays
-  when the farthest depth over its screen rectangle, read at the level where it spans about four
-  texels, is nearer than its box's nearest corner. Checked offline: a post behind a wall, not
-  drawn for 198 frames, kept its shadow; the same post with nothing in front lost it.
 - **Timing.** The shadow is traced in the global illumination's Direct3D 12 frame, before its
   light passes. The sun pass and the resolve were in the same command list in every frame record
   checked (`frame-5289`, `frame-236525`), and that list already waits for the frame's signal; the
   sun pass's list is marked to wait as well, in case it is not. Until Direct3D 12 has traced a
   shadow at the render size, the sun pass keeps the game's shadows.
-- **Diagnostics.** "Ray-traced shadows only" lights everything with the far shader: the sun is
-  shadowed by the rays alone, without the shadow map's leaves and grass. The cost table's
+- **Diagnostics.** The cost table's
   measurement leaves them out first, so with the global illumination on that step is their own
   cost; the Direct3D 12 times are in the log ("shadow rays", "shadow denoiser") and the scene
   status (Diagnostics, "Global illumination scene").
 - **Shadow rays debug view and probe** (Diagnostics, Debug view "Ray-traced shadow rays"; needs
   the ray-traced shadows and an upscaler, as the upscaler's composite blends it over the image).
-  An instance `CullCaptured` leaves out keeps its place in the scene with mask
-  `GI_MASK_HIDDEN` (0x80), which no real ray takes (they take `GI_MASK_SCENE`), and each instance's
-  reason, box depth, the farthest depth over its rectangle and the pyramid level go to
-  `g_InstanceDebug`. `DebugShadows` traces each pixel's ray as the shadow rays do but towards the
-  sun's centre, without chance, once as the shadow rays see the scene and once with every instance,
-  and colours what blocks it: yellow cut-out geometry, lavender a model from the engine's list
-  ("Scene objects"), brown the terrain, green a captured mesh drawn, cyan kept out of view, blue
-  kept behind what the game drew, red left out (only it would block), olive cut-out geometry the
-  rays let through inside the shadow map, magenta anything else only the full ray finds; clear
-  where the sun reaches. `ProbeShadows` does the same for the
-  screen's centre pixel (the cross) and adds the instances by reason, and every captured mesh whose
-  bounds the ray crosses with its state (no structure yet, past the instance limit, or its
-  instance's reason), from a per-entry state buffer the CPU uploads while the probe runs, and the
-  game's models whose bounds it crosses with each one's state and meshes. The probe is read back when
-  the frame's slot comes round again, shown in the overlay with the denoised shadow, this frame's ray,
-  the geometry pool, the structures waiting to be built and the captured meshes evicted in the last
-  60 frames, and logged ("Shadow probe:") whenever what blocks its ray
+  `DebugShadows` traces each pixel's ray as the shadow rays do but towards the sun's centre, without
+  chance, once as the shadow rays see the scene and once over the whole ray with cut-out geometry
+  without its texture letting it through, and colours what blocks it: yellow cut-out geometry,
+  lavender the game's models and characters ("Scene objects"), brown the terrain, olive cut-out geometry
+  without its texture the rays let through inside the shadow map, magenta anything else only the whole
+  ray finds; clear where the sun reaches. `ProbeShadows` does the same for the screen's centre pixel
+  (the cross), with its global illumination rays, and the CPU adds the game's models whose bounds the
+  ray crosses with each one's state and meshes. The probe is read back when the frame's slot comes round
+  again, shown in the overlay with the denoised shadow, this frame's ray, the geometry pool and the
+  structures waiting to be built, and logged ("Shadow probe:") whenever what blocks its ray
   changes, at most five times a second. When the terrain blocks it, the probe adds the hit triangle's
   highest corner as its ring was made, the heightmap's height there now and the level of detail resident
   there; every probe has its frame and the frames each terrain ring was last made. Checked offline on the
-  four harness scenes: each scene's shadow takes the expected colour, and the probe names the post, its
-  reason and its box test.
+  four harness scenes, before the captured meshes went: each scene's shadow takes the expected colour.
 - **Open: terrain blocking for one refresh** (2026-10-23, after the copy race was fixed). With the camera
   still, the probe showed a pixel's sun ray blocked by the terrain 140 m away (66 m above the pixel) for
   about 2.3 s, twice, lit otherwise: one ring made with a wrong height, the next refresh right again. The
@@ -1506,11 +1573,129 @@ traced yet.
 Not handled:
 
 - Lamps: they keep their shadow maps or none. Their draws come right after the kick, so a ray-traced
-  lamp shadow would stall the game's GPU work for the trace.
-- What the scene lacks: meshes the game has not drawn yet (behind the camera since the area loaded),
-  forward and transparent objects, and grass beyond the shadow map.
-- Alpha-tested meshes that never draw with `ModelForward_Shadow` and whose G-buffer shader names
-  give no sign are traced as solid.
+  lamp shadow would stall the game's GPU work for the trace. "Ray-traced lights" avoids that by drawing
+  them again later.
+- What the scene lacks: translucent meshes (alpha bit 6), the sky dome, and anything the game places
+  outside its visibility managers, the object brush and the model list.
+- Decals all cast as cut-out geometry until the game's own per-mesh pass masks are read (see "Scene
+  objects", mesh flags): some decals the game never casts may shadow the surface under them.
+
+## Ray-traced lights
+
+With **Ray-traced lights** on, the game's point and spot lights (lamps, floodlights, the player's and
+the soldiers' flashlights) cast shadows from rays traced through the ray-traced scene, in place of
+their shadow maps or of none, and lights without specular get the game's. The scene runs for them on
+its own if neither the light nor the sun's shadows run. Lamp contact shadows are off while it is on.
+
+- **The game's lights** (24 pixel shaders, `SSLighting2_*` and `Lighting_*_NA`, point or spot, with or
+  without a mask, specular and a shadow map; their checksums in `local_lights.cpp`). Two draws a light
+  in the light pass: the light's volume marks the stencil (colour writes off), then lights where it
+  marked (ONE, ONE into both light targets). Their vertex shaders are one and the same: the volume
+  comes in clip space. Every one reads `cPSLight` (`b3`, the light passes' view space) alike: `c3` the
+  light, `c4` its colour and size (which only widens the specular), `c5` the way a spot points, `c6`
+  the falloff (see "Screen-space shadows": `SSLighting2_*` `1 / d^2 - d^2 c6.w`, `Lighting_*_NA`
+  `(1 - d^16 c6.z) / d^2`, a point's distance plus `c6.x`), `c7.x` the cosine past which a spot's cone
+  cuts its light off, `c8` the specular's scale, the diffuse's and the shadow's strength. A mask (`t4`)
+  is projected by `cPSScene` `c16`, `c17` and `c19`.
+- **Flashlights**, read from frame dumps at night (2026-10-23): `Lighting_Spot_NA_Mask_NSpec_NShdw`
+  (`fd570742642f09e699d193ffb02bf0df`), a 13 degree cone (`c7.x` 0.976) reaching about 30 m, colour
+  (2101, 2254, 1537), size 0, `c8` (0, 1, 0): no shadow and no specular. The shadowed spot lights in the
+  same frames (`Lighting_Spot_NA`, a 4096 x 4096 shadow map each, in command lists of their own after
+  their shadow maps') were the bases' floodlights (60 degrees, size 0.24 m).
+- **Flashlight brightness** (`flashlight_brightness`, 1 to 16, 8 by default). The game's flashlight gives
+  2254 at 1 m (green, before exposure), 22 at 10 m, against moonlight's direct light of about 4 (the
+  global illumination's log, `sun`, times 1024), and cuts off at about 30 m: barely brighter than the
+  moon at 20 m, where a real 1980s incandescent weapon light (about 1,000 to 2,000 cd) is many times
+  full moonlight at 30 m. The game's night is brighter than a real one, so its units are no measure of a
+  real light; 8x is about such a light against the game's night. A flashlight's colour is multiplied by
+  the brightness and its falloff's `c6.z` divided by its 8th power, which moves the end of its reach
+  (`c6.z^(-1/16)`) the brightness's square root further, where the brighter light falls to the same
+  dimness. Set when the light is noted, so its redrawn light, its shadow rays and its bounce all have
+  it. Only the look: the game's guards see as before.
+- **Drawn with.** Each kind of light (point or spot, mask or not, `SSLighting2` or `NA`) is drawn again
+  with the game's own shader for it with specular and without a shadow map, which reads `c8.x` and the
+  specular tables at `t8` and `t9`; a light whose own shader has no specular gets a scale of 1, as the
+  game's other lights have. A kind whose shader the game has not loaded keeps the game's draws.
+- **Recording** (`local_lights.cpp`). A light's marking draw is made as the game makes it; its lighting
+  draw is made without a pixel shader, so the stencil is left as the game leaves it, and noted:
+  `cPSScene`, `cPSLight`, `cPSMaterial` (as `gi_inputs.cpp` keeps them), `t0` to `t10`, `s8` to `s11`,
+  the light targets and the viewport. Both draws are taken before the lamp contact shadows see them.
+- **Which lights.** At the kick, the lights of the lists recorded and not run yet whose `cPSScene` eye
+  is the kick camera's (within a millimetre) go to Direct3D 12 in world space (`cPSScene` `c8` to `c10`
+  take the light passes' view space there), up to 128, those reaching the most pixels on screen first,
+  so that past 128 the smallest go without, the same ones frame after frame; those reaching none are
+  never drawn again. (On 2026-10-23, with a bit a light, they were taken in the order of a hash map of
+  command lists, which changes every frame: in a base at night with about 100 lights and 64 bits, a
+  different 45 went without each frame and a spotlight flickered between its shadow and none.)
+- **Soft shadows** (`TraceLocalLightShadows` in `src/shaders/gi_shadow.hlsl`, 2026-10-24). One value a
+  pixel for all the lights together, the share of their light that reaches it: the ratio estimator of
+  Heitz, Hill and McGuire ("Combining Analytic Direct Illumination and Stochastic Shadows", I3D 2018).
+  Each light's diffuse light there without shadows (`LocalLightAt`, the game's own formula, with the
+  G-buffer's normal) weighs it; **Ray quality** rays a pixel (1, 2, 4 or 8) go to the lights in
+  proportion (systematic sampling), each to a point on a disc of the light's radius facing the pixel,
+  leaving the surface as the sun's do (see "Ray-traced shadows", where a ray leaves; cut-out geometry by
+  its alpha, cut-out geometry without its texture letting light through) and ending short of the light
+  by its size or 10 cm, whichever is more, as it sits inside its lamp's model. The share is the rays
+  that get through over those traced. The game gives most of its lights no size (`c4.w` 0: every
+  flashlight, the hall's spots, the point lights in the captures; the floodlights 0.24 m); those take a
+  bulb's 3 cm. Every traced light's light times the share is each light's own shadow where lights do
+  not overlap, and the right diffuse light in total where they do; specular takes the same share. Each
+  blocked ray also gives the penumbra its blocker casts from the light, `2 r t / (d - t)`, in pixels.
+- **Filter** (`FilterLocalLightShadows`). Three edge-avoiding a-trous passes (Dammertz et al., 2010),
+  1, 2 and 4 pixels apart, a 3 x 3 B-spline weighted by how near the neighbours' depth (2% plus 1 cm)
+  and normal (cosine to the 8th) are; a pixel whose penumbra is narrower than a pass's step keeps its
+  value, so contact shadows stay as sharp as the rays found them while wide penumbrae are smoothed. No
+  history: nothing trails behind moving casters. Before 2026-10-24 each light took one ray to its centre
+  and a bit, and its hard edge showed every pixel's difference.
+- **Bounce.** With the global illumination on, the same lights light the surfaces its rays hit
+  (`HitDirectLight` in `src/shaders/gi_light.hlsl`), first and second bounce, besides the sun and the
+  sky: every light's diffuse light there without shadows, as the game's shaders work it out
+  (`LocalLightAt`: the falloff, a point's least and added distance, a spot's cap and cone, the colour
+  in the sun's units), picks one in proportion (weighted reservoir sampling, a candidate a light), and
+  a shadow ray to it, ending short of the light as the shadow rays do, adds its light over the chance
+  it was picked. The hash grid's cells average the picks over frames. Flashlights are left out of
+  that: a cell takes 1/16 of a frame's light (as in Capsaicin), so it held a flashlight's bounce one to
+  three seconds after the beam moved on (2026-10-24, logged four times a second: the brightest lit hit
+  fell from 1.03 to 0.036 within a quarter second, what the probes read from the cache took 1.3 s and
+  the final light 3 s to settle). Every probe ray's hit takes their light afresh each frame instead
+  (`FlashlightLight`, in `ResolveCells`), as path tracers light every bounce; they come first in the
+  frame's lights (`localLightCount.z` of them) and give no second bounce. Indoors the game's probe light,
+  which the global illumination replaces, held the lamps' baked bounce; without this an indoor hall lit
+  by 47 lamps was dark but for their direct light (2026-10-24).
+- **Drawn again.** At the first list with a draw point, which waits for Direct3D 12, the immediate
+  context draws the frame's lights before the list runs: a full-screen triangle, cut by a scissor to the light's sphere
+  (a spot's: the bounding sphere of its cone) on screen, in the light vertex shaders' form (the clip-space
+  position twice, then where it samples the light targets). First the share (1 for a light not traced)
+  goes into both light targets' alpha; then its shader with specular, with the noted bindings and constants, adds
+  its light scaled by that alpha (`DEST_ALPHA`, `ONE`), as the lamp contact shadows do. A lig  run after it is drawn at once. A draw point is a pass after the game's lights and before anything
+  reads them: the sun pass; indoors, where no sun shines, the sky's specular alone in its place
+  (`SunLight_ES`, `367e8f6128befd48f2840ab3d6ed19b4`: `cPSLight` `c2.x` and `c3`, the sky reflection at
+  `t15`; its list waits as the sun pass's does, `global_illumination::noteSkySpecular`); or the
+  resolve, whose list also runs the skin filter, after the list starts. Outdoors the sun pass and the
+  resolve share one list; some scenes draw no sun pass at all (three captures on 2026-10-24, lamps lit
+  through everything), and only the resolve is there. Until then the sun pass was the only draw point:
+  in such a scene the first frame's lights were lost and the game's drew from then on. Only after a
+  frame with a draw point are the game's lights taken over, so menus and loading screens keep theirs. keep theirs.
+- **Diagnostics.** "Log global illumination often" logs the light and each step's largest value every
+  few frames (as each readback returns), to see which step holds light after a light goes away.
+  Every ten seconds the log counts the lights drawn with their shadow and without it
+  (recorded after the kick, or not traced), those left at the kicks for another frame's camera or over
+  the 128 bits, and those lost. The cost table times the drawing ("Ray-traced lights", under the global
+  illumination) and measures the whole by leaving it out; the Direct3D 12 time is in the log ("shadow
+  rays for lights"). The flashlights alone took 0.18 ms of rays at 2560 x 1440 in their first session,
+  every one traced at the kick.
+
+Not handled:
+
+- Lights recorded after the kick are drawn without their shadow; the log tells how often.
+- A light's specular takes the share its diffuse light gives; where lights overlap with different
+  shadows, the specular's split between them is the diffuse light's.
+- Leaves lit from behind (the game's translucency) weigh nothing, so where only that light falls the
+  share is 1: no shadow.
+- The game still draws the shadow maps of the lights that have them.
+- A spot's mask (a flashlight's pattern) is left out of its bounce, which is a little brighter for it.
+- The bounce comes with the ray-traced lights: with them off, the global illumination has the sun and
+  the sky only.
 
 ## GTVBAO
 
@@ -1798,8 +1983,7 @@ with the game's Depth of Field option on runs the `DOF_Scatter*` passes; `DOF_0_
 
 With **Depth of field** on, the add-on runs a gather in its place (`src/depth_of_field.*`), after
 Call of Duty: Advanced Warfare's scatter-as-gather (Jimenez, SIGGRAPH 2014) and Unreal Engine's
-Diaphragm DOF (Abadie, SIGGRAPH 2018). Off, and outside photo mode, it only checks a flag on each
-draw.
+Diaphragm DOF (Abadie, SIGGRAPH 2018). Off, it only checks a flag on each draw.
 
 - **Where.** At `DOF_ScatterBakeFirst`'s draw, from its scene (`t0`), depth (`t1`), `cPSScene`
   (`b2`) and `cPSObject` (`b5`): compute passes recorded on its deferred context, with the game's
@@ -1829,38 +2013,69 @@ draw.
   background (bilinear, weighted by how close the blur is); the foreground goes over both; then
   the tonemap and sRGB.
 - **Limits.** The largest blur radius is 5% of the render height.
-- **Photo mode** blurs with its own lens instead of the game's constants, the one a lens shot uses:
-  radius `W / 4 x |P00| x aperture x (1 / focus - 1 / z)`, aperture = focal length (the active
-  camera's `+0x3C`, millimetres) / f-number (the overlay's **f-stop**).
-
-### Lens shot
-
-F5 in photo mode (`photo_mode.cpp`), whether the gather is on or not.
-
-- **Camera.** The free camera holds still. Each camera update moves it to the next point of the
-  aperture in its own plane: Roberts' R2 sequence, even over a disc or the blades' polygon
-  (`camera::aperturePoint`), radius focal length / f-number / 2. Moving the camera or F5 ends it.
-- **Projection.** Each frame's main-view scene constants get an NDC shift (`camera::lensShift`):
-  the eye's (`c20`) offset from the shot's centre along the view's x and y rows, times P00 / focus
-  and P11 / focus, applied as the jitter is. It keeps the focus plane where the centre sees it, an
-  off-axis projection, and is taken from the frame's own eye, so the latency between the game and
-  render threads cannot mismatch them. A Halton sub-pixel jitter on top antialiases the average;
-  DLSS gets no jitter and drops its history on every frame of a shot.
-- **Sum.** At `DOF_ScatterBakeFirst` the scene, through the inverse tonemap, adds to a float3 sum at
-  the render size (12 bytes a pixel, about 100 MB at 3840x2160); at `DOF_ScatterCompositeFinal` the
-  average goes back through the tonemap into the scene target. The first 3 frames of a shot are
-  left out: they were recorded before the camera stopped. Once all are in, photo mode puts the
-  camera back at the centre and the average stays until the shot ends.
+- **Photo mode** blurs with its own lens instead of the game's constants: radius
+  `W / 4 x |P00| x aperture x (1 / focus - 1 / z)`, aperture = focal length (the active camera's
+  `+0x3C`, millimetres) / f-number (the overlay's **f-stop**).
 
 Not handled:
 
-- Screen space: the gather cannot show what a blurred foreground hides; the lens shot can, within
-  what the game draws.
+- Screen space: the gather cannot show what a blurred foreground hides.
 - Lights are as bright as 8 bits and the inverse tonemap's cap of 64 allow.
-- Main-view uploads before a frame's first `MainCamera` upload get no lens shift.
-- Strong blur with few frames shows separate copies of what is out of focus.
-- In the upscaling modes a lens shot is averaged at the render size and upscaled by DLSS from
-  single frames.
+
+## Draw distance
+
+How far the game draws and loads its world, measured 2026-10-23 in Afghanistan from the outside
+(`ReadProcessMemory`, and Frida hooks for the limits; scripts in `%TEMP%\mgsv-lod`).
+
+- **Streaming.** A location's `StageBlockControllerData` entity (vtable `0x20E2F90`; `afgh` in
+  Afghanistan) loads the world in square windows of blocks around the camera: full detail in 5 x 5
+  blocks of 128 m (`blockSizeX`, `blockSizeZ` at `+0xAC`, `+0xB0`; `countX`, `countZ` at `+0xB4`,
+  `+0xB8`; 577,746 bytes a block at `+0xC4`), and two coarser copies of the world, `small_lod0` and
+  `small_lod1` (`/Assets/tpp/pack/environ/stagelow/afgh/`), in 5 x 5 blocks of 2 and 4 full-detail
+  blocks (sizes and counts as bytes at `+0x134` to `+0x137` and `+0x150` to `+0x153`). One large
+  block, a base, loads at a time (`largeBlockCount0` at `+0xE8`). A window of n blocks of size s ends
+  between (n - 1) / 2 and (n + 1) / 2 times s from the camera, by where the camera is in its block: full
+  detail 256 to 384 m, `small_lod0` 512 to 768 m, `small_lod1` 1 to 1.5 km. Past them only the
+  terrain.
+- **What full detail holds.** The props, the object brush's vegetation (exactly 25 `ObjectBrushBlock`s
+  loaded, all within 412 m) and the `StaticModelArray`s, with their collision. The coarser copies'
+  content is not in the visibility managers; it is not identified yet.
+- **The setup.** `0x165BD0` runs when a location loads (Continue from the title screen; restarting
+  from a checkpoint did not run it). It copies the entity's fields into a description on its stack and
+  passes it to `0x15F010` (nothing else calls it), which builds the controller (constructor `0x15CCC0`). In the
+  description: full detail's block size at `+0x64`, `+0x68` and count at `+0xB0`, `+0xB4`;
+  `small_lod0`'s at `+0x16C`, `+0x170` and `+0x174`, `+0x178`; `small_lod1`'s at `+0x1E4`, `+0x1E8` and
+  `+0x1EC`, `+0x1F0`; all 32-bit.
+- **Limits.** Widened by a hook on the setup: 7 x 7 for all three loads and plays (49 brush blocks; the
+  ray-traced scene held 66,000 instances in 8% of its geometry pool), and so does full detail at 7 x 7
+  with the coarser copies at 9 x 9. 9 x 9 for all three crashes while loading, in a `StaticModelArray`'s
+  set-up (`0x44429F`, `0x4458A7`, `0x1B935B3`, `0x1B971BC`, `0x1B94816`): `0x1BCCF50` reads a null entry
+  of a fixed array of 168 pointers (`+0x9C0`, the count at `+0xF00`) in the object `[0x2C79710]`
+  (vtable `0x24F01D8`). `0x1BD0070` copies a list into that array with no bounds check. What the array
+  holds, and what fills it while loading, is not decoded: no such copy ran during a 7 x 7 load.
+- **Level of detail.** A render view's level of detail factor (`+0x608`, set at `0x1B87B0`) is a
+  resolution x the camera's cot(fov / 2) (`+0x10C`) / 200, times `GrTools.SetLodScale` (view `+0x618`;
+  `SetVertexLodScale` `+0x61C`, `SetModelLodScale` `+0x620`, `SetModelVertexLodScale` `+0x624`; all 1
+  in the game). The resolution is the global `0x2B73434` (`SetLodFactorResolution`) or, at 0 (the
+  game's), the view's width (`+0x5D8`): the render width, so upscaling lowers the detail. A LodScale of
+  4 changed 254 pixels of a 4K view: the level of detail is not what pops in.
+- **Cull lengths.** `Fox/Scripts/Gr/gr_init_dx11.lua` sets a `RejectionLengthBias` for each graphics
+  quality, for `PluginModel` (Extra High 128) and `PluginClone`, the vegetation (250). Each is a static
+  object (`0x2B74330`, vtable `0x20F4DF8`; `0x2B77FB0`, vtable `0x20FFA20`): the quality names' values
+  in a map at `+0x18`, the selected value at `+0x60`, the applied one at `+0x64`, a pending change at
+  `+0x68` (`0x205AF0` selects, `0x1C8500` applies or reverts). The draw jobs copy `+0x64` each frame
+  (models at `0x1CA8E8`, `0x1CBC0F`, `0x1CD2AF`; vegetation at `0x206A63`, `0x206D46`, `0x206EF3`). How
+  the length enters the cull is not decoded; the objects' `drawRejectionLevel`s name sizes (0.5 to
+  32 m for models, 400 to 1 pixels for vegetation).
+- **What the add-on does** (`src/draw_distance.cpp`). Vanilla changes nothing. Extended hooks
+  `0x15F010` and sets the counts to 7, 7 and 7 where the description has the open world's layout (block
+  sizes 128, 2 and 4, counts 5); at each game frame start it sets the resolution to 8192 and the
+  applied lengths to 1024 and 2048. Far does the same with 7, 9 and 9. The game skips a selection whose
+  value equals the applied one, so with the applied lengths overwritten it would never record its own:
+  a hook on `0x205AF0` gives the selection the game's value to compare with, and a change it leaves
+  pending runs on the game's values until applied or reverted, then counts as the game's. Back to
+  Vanilla, the game's resolution and lengths return at once and its windows at the next location load.
+  Untested: Central Africa, Mother Base (its own controller class), the cost in frame time.
 
 ## Photo mode
 

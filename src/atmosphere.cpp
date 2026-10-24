@@ -940,6 +940,9 @@ void present(ID3D11DeviceContext* immediate) noexcept
         haze = wanted.haze;
     }
 
-    if (physicalLook && immediate) logSkyParameters(immediate);
+    if constexpr (DiagnosticLog)
+    {
+        if (physicalLook && immediate) logSkyParameters(immediate);
+    }
 }
 }

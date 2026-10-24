@@ -15,6 +15,10 @@ enum class Mode : std::uint8_t { Off, Dlaa, Quality, Balanced, Performance, Ultr
 enum class Preset : std::uint8_t { Default = 0, J = 10, K = 11, L = 12, M = 13 };
 // The volumetric fog's look: the game's own sky and fog colours, or Hillaire's physical sky and air.
 enum class AtmosphereLook : std::uint8_t { Mgsv, Physical, Count };
+// How far the world is drawn and loaded: the game's own, or full detail and the world's coarser copies
+// loaded farther (Far loads the coarser copies farther still), with more detail and longer draw
+// distances (draw_distance.hpp).
+enum class DrawDistance : std::uint8_t { Vanilla, Extended, Far, Count };
 // Frames presented per rendered frame, by DLSS Frame Generation up to Dynamic, which chooses them to
 // reach the display's refresh rate. Fsr is FSR frame generation, 2x on any GPU.
 enum class FrameGeneration : std::uint8_t { Off, X2, X3, X4, X5, X6, Dynamic, Fsr, Count };
@@ -31,7 +35,8 @@ struct Settings
     static constexpr float MaxGlobalIlluminationStrength = 3.0f;
     static constexpr float MinSunSize = 0.1f, MaxSunSize = 4.0f, DefaultSunSize = 0.53f;
     static constexpr float MinFNumber = 0.7f, MaxFNumber = 32.0f, DefaultFNumber = 1.4f;
-    static constexpr int MinLensShotFrames = 16, MaxLensShotFrames = 1024, DefaultLensShotFrames = 256;
+    static constexpr int DefaultRayQuality = 4;
+    static constexpr float MinFlashlightBrightness = 1.0f, MaxFlashlightBrightness = 16.0f, DefaultFlashlightBrightness = 8.0f;
     static constexpr float MinPeakNits = 400, MaxPeakNits = 10000;
     static constexpr float MinPaperWhiteNits = 80, MaxPaperWhiteNits = 500, DefaultPaperWhiteNits = 203;
 
@@ -59,8 +64,17 @@ struct Settings
     bool sunScreenSpaceShadows{};
     bool lightScreenSpaceShadows{};
     // The sun's ray-traced shadows through the global illumination's scene (shadows.hpp), whatever
-    // the mode; soft shadows and sun contact shadows are off while it is on. Uses the sun size.
+    // the mode; soft shadows and sun contact shadows are off while it is on. Uses the sun size. With
+    // vanilla shadows the game's shadow map adds its shadow near the camera: the darker of the two.
     bool rayTracedShadows{};
+    bool vanillaShadowsWithRayTracing{};
+    // The point and spot lights drawn again with specular and a ray-traced shadow through the same scene
+    // (local_lights.hpp), whatever the mode; lamp contact shadows are off while it is on. The ray quality
+    // is their shadow rays a pixel: 1, 2, 4 or 8. The flashlights' brightness multiplies the game's; their
+    // reach grows with its square root. 8x is about a real 1980s weapon light against the game's night.
+    bool rayTracedLights{};
+    int rayQuality{DefaultRayQuality};
+    float flashlightBrightness{DefaultFlashlightBrightness};
     // GTVBAO on the indirect light in place of the game's SSAO (indirect_light.hpp), whatever the mode.
     // The radius is in metres; the strength is an exponent on the visibility.
     bool ambientOcclusion{};
@@ -82,13 +96,14 @@ struct Settings
     bool volumetricFog{};
     AtmosphereLook atmosphereLook{AtmosphereLook::Mgsv};
     float atmosphereHaze{};
+    // Whatever the mode. The loading distance takes effect when a location loads, the rest at once.
+    DrawDistance drawDistance{DrawDistance::Vanilla};
     // The depth of field's gather in place of the game's (depth_of_field.hpp), whatever the mode.
     bool depthOfField{};
     // The aperture's blades, the shape of the blur's highlights: 0 is round, otherwise 5 to 9.
     int apertureBlades{};
-    // Photo mode's lens: its f-number, and the frames a lens shot (F5) averages.
+    // Photo mode's aperture, as an f-number.
     float fNumber{DefaultFNumber};
-    int lensShotFrames{DefaultLensShotFrames};
     // HDR10 output (hdr.hpp). Turning it on or off takes a restart: the swap chain and the scene targets
     // are made for it. The display's peak brightness (0: as the display reports it) and the brightness
     // of the game's white, in nits, apply at once.
@@ -104,10 +119,12 @@ std::string_view label(Mode mode, Upscaler upscaler);
 std::string_view label(Preset preset);
 std::string_view label(FrameGeneration mode);
 std::string_view label(AtmosphereLook look);
+std::string_view label(DrawDistance distance);
 // 2 to 6 for the fixed DLSS modes, 0 for Off, Dynamic and FSR.
 unsigned multiplier(FrameGeneration mode);
 bool validPreset(int value);
 bool validApertureBlades(int value);
+bool validRayQuality(int value);
 // Quality, Balanced, Performance, Ultra Performance and Custom render below the output size.
 bool upscales(Mode mode);
 

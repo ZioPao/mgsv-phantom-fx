@@ -14,7 +14,6 @@
 #include <cstring>
 #include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
@@ -44,8 +43,10 @@ constexpr std::size_t TextureNodes = 0x10, TextureNodeSize = 24, NodeToRecord = 
                       TexturePath = 0x20, TextureIndex = 0x34, TextureResource = 0x10, EntryTexture = 0x10;
 constexpr std::uint32_t MaxTextureRecords = 1 << 16;
 
-// The manager's record chunks: 24-byte entries (chunk, handle tag with 3 in the top nibble, element
-// size); a record in use holds the manager plus RecordInUse, and its owner.
+// The manager's record chunks: 24-byte entries (chunk, handle tag, element size); the tag's low 32 bits
+// hold 3 in the top nibble and the chunk's number in bits 16 to 23, its high 32 bits other data, set
+// from chunk 11 of the largest manager on (read as 64 bits, the walk stopped there and left 60% of
+// Africa's placements out). A record in use holds the manager plus RecordInUse, and its owner.
 constexpr std::size_t ChunkTable = 0x88, RecordInUse = 0x100;
 constexpr std::size_t RecordSize = 0x30, RecordsPerChunk = 256, RecordUse = 0x20, RecordOwner = 0x28;
 // An instance group: its model, and the holder of its world matrices (begin, end).
@@ -58,6 +59,27 @@ constexpr std::size_t ModelMatrix = 0x40, ModelResource = 0x118, ResourceHash = 
 // Levels keep hidden copies of rocks and cliffs, in the visibility manager too.
 constexpr std::size_t ModelHiddenPasses = 0x1A4;
 constexpr std::uint32_t HiddenFromEveryPass = 0xFFFFFFFF;
+// A model's layer flags, which a few draw-list builders test against a pass's (0x25BE00). Bit 0x20 marks
+// the silhouette of a soldier the player marked (a copy of its skeleton with glass-flagged meshes, its
+// root bone's matrix not a pose): the game draws it in the main view only, through walls (measured
+// draw by draw, 2026-10-23: the only two such models, never in a shadow pass). Posed as a character,
+// its root-weighted vertices streaked from the soldier to the player.
+constexpr std::size_t ModelLayer = 0x1AC;
+constexpr std::uint32_t MarkerSilhouetteLayer = 0x20;
+// Every model, characters too, is on the object registry's model list (docs/DEVELOPMENT.md, "Every
+// model"): the global pointing to the registry, its table of list headers by type number (a header:
+// the last object, then the first), the global holding the models' type number, and the link from
+// one object to the next.
+constexpr std::uintptr_t RegistryGlobal = 0x2BA04A8, RegistryVtable = 0x20F08C8, ModelTypeGlobal = 0x29E51B4;
+constexpr std::size_t RegistryLists = 0x1E8, ListFirst = 8, ObjectNext = 0x10;
+constexpr std::uint32_t MaxTypes = 256, MaxListedModels = 1 << 16;
+// A skinned model (docs/DEVELOPMENT.md, "Characters"): its bone count (16 bits: a flag above it is set
+// on animals' and some characters' models, the dog's 0x1004E for 78 bones), the object whose +0x78 holds
+// its skinning palette, and its mesh groups' count and state, a byte each: drawn while none of
+// HiddenGroupBits is set (measured against a soldier's draws: 13 groups drawn, 33 not).
+constexpr std::size_t ModelBoneCount = 0xF8, ModelSkin = 0x188, SkinPalette = 0x78, ModelGroupCount = 0x1E8, ModelGroupStates = 0x178;
+constexpr std::uint8_t HiddenGroupBits = 0x33;
+constexpr std::uint32_t MaxBones = 1024;
 constexpr std::uint32_t MaxChunks = 64, MaxManagers = 8;
 constexpr std::uint64_t MaxGroupInstances = 4096, MaxFileBytes = 64ull << 20;
 // A model file that does not read as one (still streaming in, or not an FMDL) is looked at again for
@@ -70,15 +92,14 @@ constexpr std::uint64_t ParseBytesPerTake = 8ull << 20;
 // mesh (docs/DEVELOPMENT.md, "Scene objects"), by an FMDL mesh's alpha (first byte) and shadow
 // (second byte) bits. Shadow bit 0: never drawn into the shadow maps (sky domes kilometres wide
 // around the camera have it: they blocked the sky for the global illumination). Alpha bit 6:
-// translucent, never drawn into them either. Alpha bit 7: decals, unless shadow bit 1 makes the mesh
-// a shadow caster the main view does not draw (a pylon's lattice), or alpha 128 comes with shadow 64:
-// a cut-out caster (a trench's grating, all 16 draws of 7 such meshes measured went into the shadow
-// maps through the alpha-tested shadow shader). Alpha 160 with shadow 64 is mixed: the material's
-// technique decides (fox3DDF_Blin_NC never cast), so those stay out until the game's own per-mesh
-// pass mask is read. Alpha bit 5 (32): cut out, the shadow pass testing its alpha (m_param.w 1,
-// measured per draw), as it does a shadow-only decal's; alpha 16 (glass) is drawn into the shadow
-// maps without the test (m_param.w 0): solid.
-constexpr std::uint8_t CastsNoShadow = 0x01, ShadowOnly = 0x02, CutOutShadow = 0x40;
+// translucent, never drawn into them either. Alpha bit 7: decals, which the game casts or not by the
+// material's technique: some do (a pylon's lattice with shadow bit 1, a trench's grating and a tree's
+// twigs with shadow 64), others never (fox3DDF_Blin_NC). Until the game's own per-mesh pass mask is
+// read, every decal is taken as a cut-out caster (the user's call, 2026-10-23: see what breaks). Alpha
+// bit 5 (32): cut out, the shadow pass testing its alpha (m_param.w 1, measured per draw), as it does
+// a shadow-only decal's; alpha 16 (glass) is drawn into the shadow maps without the test (m_param.w 0):
+// solid.
+constexpr std::uint8_t CastsNoShadow = 0x01;
 constexpr std::uint8_t CutOutAlpha = 0x20, TranslucentAlpha = 0x40, DecalAlpha = 0x80;
 // The StrCode64s of a material's texture parameters "Base_Tex_SRGB" (the colour, and a cut-out mesh's
 // alpha) and "Mask_Tex_LIN" (a shadow-only mesh's mask, its only texture): Fox Engine's string hash,
@@ -89,18 +110,23 @@ constexpr std::uint64_t BaseTextureParameter = 0x41EA7BE81B61, MaskTextureParame
 using VisibilityTest = void (*)(std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t,
     std::uintptr_t, std::uintptr_t, std::uintptr_t);
 std::array<VisibilityTest, 2> originals{};
-// The object brush's hooks are in.
-bool brushHooked{};
 std::uintptr_t base{};
 std::atomic<bool> active{};
 
 // Taking a snapshot: one job thread a frame.
 std::mutex snapshotMutex;
 std::atomic<std::uint64_t> lastSnapshotFrame{};
-std::vector<std::uintptr_t> managers;
-// Models by path hash: true when rigid (and its file queued or read), false when left out; and the
-// snapshots each unreadable file has been tried in.
-std::unordered_map<std::uint64_t, bool> knownModels;
+// The visibility managers the tests ran with (noteManager), a slot each.
+std::array<std::atomic<std::uintptr_t>, MaxManagers> seenManagers{};
+// Models by path hash: rigid or skinned (its file queued or read), or left out; and the snapshots each
+// unreadable file has been tried in.
+enum class FileKind : std::uint8_t
+{
+    LeftOut,
+    Rigid,
+    Skinned
+};
+std::unordered_map<std::uint64_t, FileKind> knownModels;
 std::unordered_map<std::uint64_t, std::uint32_t> unreadableTries;
 std::vector<std::uint8_t> recordBuffer(RecordSize * RecordsPerChunk);
 std::vector<float> matrixBuffer;
@@ -112,24 +138,30 @@ struct PendingFile
     bool vegetation{}; // See parseModel
 };
 
-// What the snapshots publish for the render thread and the draw hooks.
+// What the snapshots publish for the render thread.
 std::mutex publishMutex;
 std::vector<gi_renderer::ModelInstance> latestInstances;
+std::vector<gi_renderer::CharacterInstance> latestCharacters;
 bool latestFresh{};
+std::uint64_t latestFrame{}; // The game loop's frame the latest snapshot was taken in
+
+// The skinned models parsed, for their meshes' index ranges and bone groups (take); render thread.
+std::unordered_map<std::uint64_t, std::shared_ptr<const gi_renderer::Model>> skinnedModels;
+
+// Diagnostics: the bones as the snapshot took them (setBonesFromSnapshot); and where they came from.
+std::atomic<bool> bonesFromSnapshot{};
+std::atomic<std::uint64_t> posesCompared{}, posesChanged{}, drawsNoted{}, drawsPlaced{}, meshesPosed{};
 std::vector<PendingFile> pendingFiles;
-// The last snapshot's placements (placementKey) and the hashes of the models placed there: several
-// can share one (a pylon is a model and an instance group's model at one transform).
-using Placements = std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>;
-std::atomic<std::shared_ptr<const Placements>> placements;
-// The terrain inputs last noted, and the game frame they were noted in; whether the scene makes the terrain.
+// The terrain inputs last noted, and the game frame they were noted in.
 std::mutex terrainMutex;
 std::optional<TerrainInputs> terrainInputs;
 std::atomic<std::uint64_t> terrainFrame{};
-std::atomic<bool> engineTerrain{};
 
 // Diagnostics.
-std::atomic<std::uint64_t> snapshots{}, filesRead{}, animatedFiles{}, unreadableFiles{}, modelsParsed{}, parseFailures{}, decalMeshes{}, shadowlessMeshes{};
-std::atomic<std::uint32_t> lastInstances{}, lastOwners{}, lastOtherOwners{}, lastLeftOut{}, lastHidden{};
+std::atomic<std::uint64_t> snapshots{}, filesRead{}, skinnedFiles{}, unreadableFiles{}, modelsParsed{}, parseFailures{}, shadowlessMeshes{};
+std::atomic<std::uint32_t> lastInstances{}, lastOwners{}, lastOtherOwners{}, lastLeftOut{}, lastHidden{}, lastCharacters{}, lastListedModels{};
+// The model list was found in the last snapshot: the characters come from it.
+std::atomic<bool> modelListFound{};
 
 // Takes a reference to a COM object the game holds; false when it is gone.
 bool hold(IUnknown* object) noexcept
@@ -150,22 +182,13 @@ bool isA(std::uintptr_t object, std::uintptr_t vtableRva) noexcept
     return game_memory::isA(object, base + vtableRva);
 }
 
-// FNV-1a over a placement's translation and first rotation element, as the game stores them and
-// copies them into the draws' m_world.
-std::uint64_t placementKey(float x, float y, float z, float r00) noexcept
-{
-    const float values[]{x, y, z, r00};
-    const auto* bytes = reinterpret_cast<const std::uint8_t*>(values);
-    std::uint64_t hash = 14695981039346656037ull;
-    for (std::size_t i = 0; i < sizeof(values); ++i) hash = (hash ^ bytes[i]) * 1099511628211ull;
-
-    return hash;
-}
-
-// A stored world matrix (4x4, column-major, translation in the last column) as the scene's rows.
+// A stored world matrix (4x4, column-major, translation in the last column) as the scene's rows. The
+// bottom row is (0 0 0 1) give or take rounding: a weapon held in a hand, its matrix made from the
+// hand's bone, had 0.99999988 for the 1.
 std::optional<gi_renderer::Transform> transformOf(const float* m) noexcept
 {
-    if (m[3] != 0 || m[7] != 0 || m[11] != 0 || m[15] != 1) return std::nullopt;
+    constexpr float Rounding = 1e-3f;
+    if (std::abs(m[3]) > Rounding || std::abs(m[7]) > Rounding || std::abs(m[11]) > Rounding || std::abs(m[15] - 1) > Rounding) return std::nullopt;
 
     gi_renderer::Transform rows{};
     for (int row = 0; row < 3; ++row)
@@ -250,6 +273,24 @@ struct Stream
     std::uint8_t dataType{};
 };
 
+// Each mesh's group (block 2, 32 bytes: the group at +4, the count of its meshes at +6, the first at +8).
+std::optional<std::vector<std::uint32_t>> meshGroupsOf(const FileReader& file, const FileLayout& layout)
+{
+    constexpr int GroupMeshes = 2, Meshes = 3;
+    const auto& b = layout.blocks;
+    std::vector<std::uint32_t> groups(b[Meshes].count);
+    for (std::uint32_t i = 0; i < b[GroupMeshes].count; ++i)
+    {
+        const auto at = b[GroupMeshes].offset + 32ull * i;
+        std::uint16_t group{}, count{}, first{};
+        if (!file.at(at + 4, group) || !file.at(at + 6, count) || !file.at(at + 8, first)) return std::nullopt;
+
+        for (std::uint32_t mesh = first; mesh < std::uint32_t{first} + count && mesh < groups.size(); ++mesh) groups[mesh] = group;
+    }
+
+    return groups;
+}
+
 // The path hash of a mesh's texture for a parameter: its material instance's (block 4: texture count at
 // +6, first texture parameter at +8) texture parameter of that name (block 7: the name's StrCode64
 // index into block 22, the texture's into block 6), whose texture (block 6: its path's index into
@@ -280,20 +321,60 @@ std::uint64_t textureOf(const FileReader& file, const FileLayout& layout, std::u
     return 0;
 }
 
-// A rigid model's meshes that the game draws into its shadow maps: each one's vertices with their
-// texture coordinates, and the indices of its most detailed triangles, as the game keeps them. The
-// object brush's bushes and grass (`vegetation`) cast no shadow in the game (alpha 0xA0, a cut-out
-// decal; shadow bit 0): their meshes are taken as cut out all the same, for the rays' shadows.
+// A skinned mesh's vertices' bones and weights (ModelPart::bones, weights): its four bone numbers a
+// vertex index its bone group (block 5, 68 bytes: the count at +2, then 32 of the model's bone numbers;
+// the mesh's group at +6), as the game's palette for the mesh is the model's through the group.
+// Without numbers a vertex follows the group's first bone; without weights, its first number alone.
+bool readSkin(const FileReader& file, const Block& boneGroups, std::uint64_t meshAt, std::uint32_t bones, std::optional<Stream> numbers,
+    std::optional<Stream> weights, gi_renderer::ModelPart& part)
+{
+    std::uint16_t group{}, count{};
+    if (!file.at(meshAt + 6, group) || group >= boneGroups.count || !file.at(boneGroups.offset + 68ull * group + 2, count)) return false;
+
+    std::array<std::uint16_t, 32> members{};
+    for (std::uint32_t i = 0; i < std::min<std::uint32_t>(count, 32); ++i)
+        if (!file.at(boneGroups.offset + 68ull * group + 4 + 2ull * i, members[i])) return false;
+
+    part.boneGroup.assign(members.begin(), members.begin() + std::min<std::uint32_t>(count, 32));
+
+    const auto vertexCount = part.vertices.size();
+    part.bones.resize(vertexCount);
+    part.weights.resize(vertexCount);
+    for (std::size_t v = 0; v < vertexCount; ++v)
+    {
+        std::array<std::uint8_t, 4> local{};
+        std::uint32_t weight = 0xFF;
+        if ((numbers && !file.at(numbers->at + v * numbers->stride, local)) || (weights && !file.at(weights->at + v * weights->stride, weight))) return false;
+
+        std::uint64_t packed{};
+        for (int k = 0; k < 4; ++k)
+        {
+            const std::uint64_t bone = local[k] < std::min<std::uint32_t>(count, 32) && members[local[k]] < bones ? members[local[k]] : 0;
+            packed |= bone << (16 * k);
+        }
+
+        part.bones[v] = packed;
+        part.weights[v] = weight;
+    }
+
+    return true;
+}
+
+// A model's meshes that the game draws into its shadow maps: each one's vertices with their texture
+// coordinates, its mesh group, and the indices of its most detailed triangles, as the game keeps them;
+// a skinned model's vertices also with their bones (readSkin). The object brush's bushes and grass
+// (`vegetation`) cast no shadow in the game (alpha 0xA0, a cut-out decal; shadow bit 0): their meshes
+// are taken as cut out all the same, for the rays' shadows.
 std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::span<const std::uint8_t> bytes, bool vegetation)
 {
     const FileReader file{bytes};
     const auto layout = layoutOf(file);
-    if (!layout || layout->hasBones) return nullptr;
+    if (!layout) return nullptr;
 
     const auto& b = layout->blocks;
-    constexpr int Meshes = 3, Assignments = 9, MeshFormats = 10, VertexFormats = 11, BufferOffsets = 14, FaceInfos = 17;
+    constexpr int Bones = 0, Meshes = 3, BoneGroups = 5, Assignments = 9, MeshFormats = 10, VertexFormats = 11, BufferOffsets = 14, FaceInfos = 17;
     // Vertex format usages and data types.
-    constexpr std::uint8_t Position = 0, Uv0 = 8, ThreeFloats = 1, TwoHalves = 7;
+    constexpr std::uint8_t Position = 0, BoneWeights = 1, BoneNumbers = 7, Uv0 = 8, ThreeFloats = 1, TwoHalves = 7, FourUnorms = 8, FourBytes = 9;
     if (!b[BufferOffsets].count) return nullptr;
 
     std::uint32_t facesOffset{};
@@ -302,6 +383,10 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
 
     auto model = std::make_shared<gi_renderer::Model>();
     model->hash = hash;
+    model->bones = layout->hasBones ? std::min(b[Bones].count, MaxBones) : 0;
+    const auto meshGroups = meshGroupsOf(file, *layout);
+    if (!meshGroups) return nullptr;
+
     for (std::uint32_t mesh = 0; mesh < b[Meshes].count; ++mesh)
     {
         const auto meshAt = b[Meshes].offset + 48ull * mesh;
@@ -312,13 +397,6 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
         if (!file.at(meshAt, alpha) || !file.at(meshAt + 1, shadow) || !file.at(meshAt + 4, materialInstance) || !file.at(meshAt + 10, vertexCount)
             || !file.at(meshAt + 16, firstFace) || !file.at(meshAt + 24, firstFaceInfo))
             return nullptr;
-
-        const bool decalCaster = (shadow & ShadowOnly) || (alpha == DecalAlpha && (shadow & CutOutShadow));
-        if ((alpha & DecalAlpha) && !decalCaster && !vegetation)
-        {
-            ++decalMeshes;
-            continue;
-        }
 
         if (((shadow & CastsNoShadow) && !vegetation) || (alpha & TranslucentAlpha))
         {
@@ -335,7 +413,7 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
             || !file.at(assignmentAt + 6, firstVertexFormat))
             return nullptr;
 
-        std::optional<Stream> positions, uvs;
+        std::optional<Stream> positions, uvs, weights, numbers;
         std::uint32_t vertexFormat = firstVertexFormat;
         for (std::uint32_t i = firstMeshFormat; i < std::uint32_t{firstMeshFormat} + meshFormatCount && i < b[MeshFormats].count; ++i)
         {
@@ -355,6 +433,8 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
                 const Stream stream{layout->bufferData + buffer + offset + element, stride, dataType};
                 if (usage == Position && !positions) positions = stream;
                 if (usage == Uv0 && !uvs) uvs = stream;
+                if (usage == BoneWeights && !weights) weights = stream;
+                if (usage == BoneNumbers && !numbers) numbers = stream;
             }
         }
 
@@ -367,7 +447,8 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
         // one is left to the shadow map, any one takes its mean albedo from the screen.
         auto& part = model->parts.emplace_back();
         part.mesh = mesh;
-        part.alphaTested = (alpha & CutOutAlpha) || ((alpha & DecalAlpha) && decalCaster);
+        part.group = (*meshGroups)[mesh];
+        part.alphaTested = (alpha & (CutOutAlpha | DecalAlpha)) != 0;
         part.baseTexture = textureOf(file, *layout, materialInstance, BaseTextureParameter);
         if (!part.baseTexture)
         {
@@ -384,9 +465,15 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
                 return nullptr;
 
         const auto indices = layout->bufferData + facesOffset + 2ull * (std::uint64_t{firstFace} + lodFirst);
+        part.firstIndex = firstFace + lodFirst;
+        part.indexCount = lodCount;
         part.indices.resize(lodCount / 3 * 3);
         for (std::uint32_t i = 0; i < part.indices.size(); ++i)
             if (!file.at(indices + 2ull * i, part.indices[i]) || part.indices[i] >= vertexCount) return nullptr;
+
+        if (model->bones && !readSkin(file, b[BoneGroups], meshAt, model->bones, numbers && numbers->dataType == FourBytes ? numbers : std::nullopt,
+                                weights && weights->dataType == FourUnorms ? weights : std::nullopt, part))
+            return nullptr;
 
         if (part.indices.empty()) model->parts.pop_back();
     }
@@ -394,15 +481,15 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
     return model;
 }
 
-// A model resource's path hash when its model is rigid; its file is queued the first time it is seen
-// (`vegetation`: see parseModel). On the job thread taking the snapshot.
-std::optional<std::uint64_t> rigidResource(std::uintptr_t resource, bool vegetation = false)
+// A model resource's path hash when its model is of the kind `wanted`; its file is queued the first
+// time it is seen (`vegetation`: see parseModel). On the job thread taking the snapshot.
+std::optional<std::uint64_t> modelResource(std::uintptr_t resource, FileKind wanted, bool vegetation = false)
 {
     if (!isA(resource, ResourceVtable)) return std::nullopt;
 
     const auto hash = read<std::uint64_t>(resource + ResourceHash);
     if (!hash) return std::nullopt;
-    if (const auto found = knownModels.find(*hash); found != knownModels.end()) return found->second ? hash : std::nullopt;
+    if (const auto found = knownModels.find(*hash); found != knownModels.end()) return found->second == wanted ? hash : std::nullopt;
 
     // A file not loaded yet is looked at again next frame.
     const auto fileAt = read<std::uintptr_t>(resource + ResourceFile);
@@ -423,23 +510,21 @@ std::optional<std::uint64_t> rigidResource(std::uintptr_t resource, bool vegetat
         if (++unreadableTries[*hash] < UnreadableRetries) return std::nullopt;
 
         unreadableTries.erase(*hash);
-        knownModels[*hash] = false;
+        knownModels[*hash] = FileKind::LeftOut;
         ++unreadableFiles;
         return std::nullopt;
     }
 
     unreadableTries.erase(*hash);
-    knownModels[*hash] = !layout->hasBones;
-    if (layout->hasBones)
+    const auto kind = layout->hasBones ? FileKind::Skinned : FileKind::Rigid;
+    knownModels[*hash] = kind;
+    ++(kind == FileKind::Skinned ? skinnedFiles : filesRead);
     {
-        ++animatedFiles;
-        return std::nullopt;
+        std::lock_guard lock(publishMutex);
+        pendingFiles.push_back(std::move(file));
     }
 
-    ++filesRead;
-    std::lock_guard lock(publishMutex);
-    pendingFiles.push_back(std::move(file));
-    return hash;
+    return kind == wanted ? hash : std::nullopt;
 }
 
 std::optional<std::uint64_t> rigidModel(std::uintptr_t model)
@@ -447,24 +532,87 @@ std::optional<std::uint64_t> rigidModel(std::uintptr_t model)
     if (!isA(model, ModelVtable)) return std::nullopt;
 
     const auto resource = read<std::uintptr_t>(model + ModelResource);
-    return resource ? rigidResource(*resource) : std::nullopt;
+    return resource ? modelResource(*resource, FileKind::Rigid) : std::nullopt;
+}
+
+// The game's characters: every skinned model on the object registry's model list the game shows,
+// in its pose this frame (docs/DEVELOPMENT.md, "Every model", "Characters"); false without the list.
+bool collectCharacters(std::vector<gi_renderer::CharacterInstance>& characters, std::uint32_t& listed)
+{
+    const auto registry = read<std::uintptr_t>(base + RegistryGlobal);
+    const auto type = read<std::uint32_t>(base + ModelTypeGlobal);
+    if (!registry || !type || *type >= MaxTypes || !isA(*registry, RegistryVtable)) return false;
+
+    const auto list = read<std::uintptr_t>(*registry + RegistryLists + 8ull * *type);
+    auto node = list && *list ? read<std::uintptr_t>(*list + ListFirst) : std::nullopt;
+    if (!node) return false;
+
+    for (listed = 0; *node && listed < MaxListedModels; ++listed)
+    {
+        const auto model = *node;
+        if (!isA(model, ModelVtable)) break;
+
+        node = read<std::uintptr_t>(model + ObjectNext);
+        if (!node) break;
+        if (read<std::uint32_t>(model + ModelHiddenPasses) == HiddenFromEveryPass) continue;
+        if (read<std::uint32_t>(model + ModelLayer).value_or(0) & MarkerSilhouetteLayer) continue;
+
+        // The file is queued last: a model that is no character (most of the list's are rigid) has its
+        // file read for nothing, again each time the renderer lets go of what it never placed.
+        const auto bones = read<std::uint16_t>(model + ModelBoneCount);
+        const auto skin = read<std::uintptr_t>(model + ModelSkin);
+        const auto palette = skin && *skin ? read<std::uintptr_t>(*skin + SkinPalette) : std::nullopt;
+        const auto groups = read<std::uint16_t>(model + ModelGroupCount);
+        const auto states = read<std::uintptr_t>(model + ModelGroupStates);
+        float matrix[16]{};
+        if (!bones || !*bones || *bones > MaxBones || !palette || !*palette || !groups || !states || !readRaw(matrix, model + ModelMatrix, sizeof(matrix)))
+            continue;
+
+        const auto transform = transformOf(matrix);
+        const auto resource = transform ? read<std::uintptr_t>(model + ModelResource) : std::nullopt;
+        const auto hash = resource ? modelResource(*resource, FileKind::Skinned) : std::nullopt;
+        if (!hash) continue;
+
+        gi_renderer::CharacterInstance character{model, *hash, *transform, std::vector<float>(std::size_t{*bones} * 12), {}};
+        std::vector<std::uint8_t> groupStates(*groups);
+        if (!readRaw(character.palette.data(), *palette, character.palette.size() * sizeof(float))
+            || (*groups && (!*states || !readRaw(groupStates.data(), *states, groupStates.size()))))
+            continue;
+
+        character.shownGroups.resize(*groups);
+        for (std::size_t g = 0; g < groupStates.size(); ++g) character.shownGroups[g] = (groupStates[g] & HiddenGroupBits) == 0;
+        characters.push_back(std::move(character));
+    }
+
+    return true;
 }
 
 // Every record in use of the managers seen, their owners' instances, published; with snapshotMutex.
 void snapshot()
 {
     std::vector<std::uintptr_t> owners;
-    for (const auto manager : managers)
+    for (auto& slot : seenManagers)
     {
+        const auto manager = slot.load(std::memory_order_relaxed);
+        if (!manager) continue;
+
+        // A manager gone frees its slot for the one that replaces it.
+        if (!isA(manager, ManagerVtable))
+        {
+            auto expected = manager;
+            slot.compare_exchange_strong(expected, 0);
+            continue;
+        }
+
         const auto table = read<std::uintptr_t>(manager + ChunkTable);
         if (!table) continue;
 
         for (std::uint32_t chunk = 0; chunk < MaxChunks; ++chunk)
         {
             const auto records = read<std::uintptr_t>(*table + 24 * chunk);
-            const auto tag = read<std::uint64_t>(*table + 24 * chunk + 8);
+            const auto tag = read<std::uint32_t>(*table + 24 * chunk + 8);
             const auto size = read<std::uint16_t>(*table + 24 * chunk + 16);
-            if (!records || !*records || !tag || (*tag >> 28) != 3 || !size || *size != RecordSize) break;
+            if (!records || !*records || !tag || (*tag >> 28) != 3 || ((*tag >> 16) & 0xFF) != chunk || !size || *size != RecordSize) break;
             if (!readRaw(recordBuffer.data(), *records, recordBuffer.size())) continue;
 
             for (std::size_t i = 0; i < RecordsPerChunk; ++i)
@@ -481,7 +629,6 @@ void snapshot()
     owners.erase(std::unique(owners.begin(), owners.end()), owners.end());
 
     std::vector<gi_renderer::ModelInstance> instances;
-    Placements placed;
     std::uint32_t others{}, leftOut{}, hidden{};
     const auto place = [&](std::uint64_t hash, const float* matrix) {
         const auto transform = transformOf(matrix);
@@ -492,8 +639,6 @@ void snapshot()
         }
 
         instances.push_back({hash, *transform});
-        auto& models = placed[placementKey(matrix[12], matrix[13], matrix[14], matrix[0])];
-        if (std::find(models.begin(), models.end(), hash) == models.end()) models.push_back(hash);
     };
 
     for (const auto owner : owners)
@@ -538,9 +683,13 @@ void snapshot()
 
     // The object brush's vegetation, a plugin's placements in a block at a time.
     engine_brush::collect([&](std::uintptr_t resource, std::span<const gi_renderer::Transform> transforms) {
-        if (const auto hash = rigidResource(resource, true))
+        if (const auto hash = modelResource(resource, FileKind::Rigid, true))
             for (const auto& transform : transforms) instances.push_back({*hash, transform});
     });
+
+    std::vector<gi_renderer::CharacterInstance> characters;
+    std::uint32_t listed{};
+    modelListFound = collectCharacters(characters, listed);
 
     ++snapshots;
     lastInstances = static_cast<std::uint32_t>(instances.size());
@@ -548,27 +697,44 @@ void snapshot()
     lastOtherOwners = others;
     lastLeftOut = leftOut;
     lastHidden = hidden;
-    placements.store(std::make_shared<const Placements>(std::move(placed)));
+    lastCharacters = static_cast<std::uint32_t>(characters.size());
+    lastListedModels = listed;
     std::lock_guard lock(publishMutex);
     latestInstances = std::move(instances);
+    latestCharacters = std::move(characters);
     latestFresh = true;
+    latestFrame = lastSnapshotFrame.load(std::memory_order_relaxed);
 }
 
-// Before the game's visibility test: the first one a game frame takes the snapshot.
+// Registers a manager in the first free slot unless it has one; any thread.
+void noteManager(std::uintptr_t manager) noexcept
+{
+    for (auto& slot : seenManagers)
+    {
+        auto current = slot.load(std::memory_order_relaxed);
+        if (current == manager) return;
+        if (!current && (slot.compare_exchange_strong(current, manager) || current == manager)) return;
+    }
+}
+
+// Before the game's visibility test: every manager it runs with is noted, and the first test a game
+// frame takes the snapshot.
 void beforeVisibilityTest(std::uintptr_t manager) noexcept
 {
     if (!active.load(std::memory_order_relaxed)) return;
+
+    // Noted on every test: a manager whose tests never come first in a frame was missed before.
+    if (isA(manager, ManagerVtable)) noteManager(manager);
 
     // Without the game loop's count, about once a 60 Hz frame.
     const std::uint64_t frame = game_loop::currentFrame() ? game_loop::currentFrame() : GetTickCount64() / 16;
     if (lastSnapshotFrame.load(std::memory_order_relaxed) == frame) return;
 
     std::unique_lock lock(snapshotMutex, std::try_to_lock);
-    if (!lock.owns_lock() || lastSnapshotFrame.load(std::memory_order_relaxed) == frame || !isA(manager, ManagerVtable)) return;
+    if (!lock.owns_lock() || lastSnapshotFrame.load(std::memory_order_relaxed) == frame) return;
 
     try
     {
-        if (std::find(managers.begin(), managers.end(), manager) == managers.end() && managers.size() < MaxManagers) managers.push_back(manager);
         lastSnapshotFrame = frame;
         snapshot();
     }
@@ -590,12 +756,12 @@ constexpr VisibilityTest Detours[]{&visibilityTest<0>, &visibilityTest<1>};
 
 std::string hook() noexcept
 {
-    if (!supportedBuild()) return "Unknown game build; the ray-traced scene captures every mesh as it is drawn.";
+    if (!supportedBuild()) return "Unknown game build: the ray-traced scene has none of the game's models.";
 
     base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
     for (const auto rva : VisibilityTestRvas)
         if (std::memcmp(reinterpret_cast<const void*>(base + rva), VisibilityTestStart, sizeof(VisibilityTestStart)))
-            return "The visibility tests have unexpected code; the ray-traced scene captures every mesh as it is drawn.";
+            return "The visibility tests have unexpected code: the ray-traced scene has none of the game's models.";
 
     for (std::size_t i = 0; i < std::size(VisibilityTestRvas); ++i)
     {
@@ -605,13 +771,11 @@ std::string hook() noexcept
         if (status != MH_OK)
         {
             for (std::size_t j = 0; j <= i; ++j) MH_RemoveHook(reinterpret_cast<void*>(base + VisibilityTestRvas[j]));
-            return std::string("Hooking the visibility tests failed (") + MH_StatusToString(status) + "); the ray-traced scene captures every mesh as it is drawn.";
+            return std::string("Hooking the visibility tests failed (") + MH_StatusToString(status) + "): the ray-traced scene has none of the game's models.";
         }
     }
 
-    const auto brush = engine_brush::hook(base);
-    brushHooked = engine_brush::hooked();
-    return "The visibility tests are hooked: the ray-traced scene takes the game's loaded models from its visibility manager." + brush;
+    return "The visibility tests are hooked: the ray-traced scene takes the game's loaded models from its visibility manager." + engine_brush::hook(base);
 }
 
 void setActive(bool on) noexcept
@@ -619,10 +783,8 @@ void setActive(bool on) noexcept
     active = on;
     if (on) return;
 
-    // Off, the draws are captured again, and the renderer lets its scene go: the model files are read
-    // again when next on.
-    placements.store(nullptr);
-    engineTerrain = false;
+    // Off, the renderer lets its scene go: the model files are read again when next on.
+    modelListFound = false;
 
     try
     {
@@ -631,6 +793,7 @@ void setActive(bool on) noexcept
         unreadableTries.clear();
         pendingFiles.clear();
         latestInstances.clear();
+        latestCharacters.clear();
         latestFresh = false;
         lastSnapshotFrame = 0;
     }
@@ -639,13 +802,20 @@ void setActive(bool on) noexcept
     }
 }
 
-void take(Snapshot& snapshot)
+void take(Snapshot& snapshot, const std::vector<gi_inputs::DrawnBones>& drawn)
 {
     std::vector<PendingFile> files;
+    std::uint64_t snapshotFrame{};
     {
         std::lock_guard lock(publishMutex);
         snapshot.instancesUpdated = latestFresh;
-        if (latestFresh) snapshot.instances = std::move(latestInstances);
+        if (latestFresh)
+        {
+            snapshot.instances = std::move(latestInstances);
+            snapshot.characters = std::move(latestCharacters);
+            snapshotFrame = latestFrame;
+        }
+
         latestFresh = false;
 
         std::uint64_t bytes{};
@@ -653,6 +823,61 @@ void take(Snapshot& snapshot)
         while (taken < pendingFiles.size() && bytes < ParseBytesPerTake) bytes += pendingFiles[taken++].bytes.size();
         files.assign(std::make_move_iterator(pendingFiles.begin()), std::make_move_iterator(pendingFiles.begin() + taken));
         pendingFiles.erase(pendingFiles.begin(), pendingFiles.begin() + taken);
+    }
+
+    // The snapshot reads the bones at the frame's first visibility test, before the game animates them
+    // for the frame it draws (measured 2026-10-24: in the helicopter, a lamp's shadow of Snake trailed his
+    // moving arms and face). The bones the frame's draws had replace them: each draw's mesh found by its
+    // model's place and its index range, its g_vsBone slots written through its bone group. The bones no
+    // draw had are read again now, at the kick, which races the game's next frame.
+    if (!bonesFromSnapshot.load(std::memory_order_relaxed) && !snapshot.characters.empty())
+    {
+        std::vector<float> now;
+        for (auto& character : snapshot.characters)
+        {
+            const auto skin = read<std::uintptr_t>(character.id + ModelSkin);
+            const auto palette = skin && *skin ? read<std::uintptr_t>(*skin + SkinPalette) : std::nullopt;
+            now.resize(character.palette.size());
+            if (!palette || !*palette || !readRaw(now.data(), *palette, now.size() * sizeof(float))) continue;
+
+            ++posesCompared;
+            if (std::memcmp(now.data(), character.palette.data(), now.size() * sizeof(float)) == 0) continue;
+
+            ++posesChanged;
+            character.palette = now;
+        }
+
+        // Within 2 cm: the place is a product of the game's float matrices.
+        constexpr float SamePlace = 0.02f;
+        drawsNoted += drawn.size();
+        for (const auto& mesh : drawn)
+            for (auto& character : snapshot.characters)
+            {
+                const auto& t = character.transform;
+                if (std::abs(t[3] - mesh.position[0]) > SamePlace || std::abs(t[7] - mesh.position[1]) > SamePlace
+                    || std::abs(t[11] - mesh.position[2]) > SamePlace)
+                    continue;
+
+                const auto model = skinnedModels.find(character.hash);
+                if (model == skinnedModels.end()) continue;
+
+                const auto& parts = model->second->parts;
+                const auto part = std::find_if(parts.begin(), parts.end(),
+                    [&](const auto& candidate) { return candidate.firstIndex == mesh.firstIndex && candidate.indexCount == mesh.indexCount; });
+                if (part == parts.end()) continue;
+
+                ++drawsPlaced;
+                for (std::size_t slot = 0; slot < part->boneGroup.size(); ++slot)
+                {
+                    const std::size_t bone = part->boneGroup[slot];
+                    if ((bone + 1) * 12 > character.palette.size()) continue;
+
+                    std::copy_n(mesh.bones.begin() + slot * 12, 12, character.palette.begin() + bone * 12);
+                }
+
+                ++meshesPosed;
+                break;
+            }
     }
 
     for (const auto& file : files)
@@ -665,6 +890,7 @@ void take(Snapshot& snapshot)
         }
 
         ++modelsParsed;
+        if (parsed->bones) skinnedModels[parsed->hash] = parsed;
         snapshot.newModels.push_back(std::move(parsed));
     }
 }
@@ -674,18 +900,11 @@ void forget(const std::vector<std::uint64_t>& hashes)
     if (hashes.empty()) return;
 
     std::lock_guard lock(snapshotMutex);
-    for (const auto hash : hashes) knownModels.erase(hash);
-}
-
-bool clonesFromEngine() noexcept
-{
-    return brushHooked && active.load(std::memory_order_relaxed);
-}
-
-bool covers(const float* worldRows) noexcept
-{
-    const auto placed = placements.load();
-    return placed && placed->contains(placementKey(worldRows[3], worldRows[7], worldRows[11], worldRows[0]));
+    for (const auto hash : hashes)
+    {
+        knownModels.erase(hash);
+        skinnedModels.erase(hash);
+    }
 }
 
 void noteTerrain(ID3D11DeviceContext* context, const float* objectConstants, const float* materialConstants) noexcept
@@ -716,16 +935,6 @@ std::optional<TerrainInputs> takeTerrain()
 {
     std::lock_guard lock(terrainMutex);
     return std::exchange(terrainInputs, std::nullopt);
-}
-
-bool terrainFromEngine() noexcept
-{
-    return engineTerrain.load(std::memory_order_relaxed);
-}
-
-void setTerrainFromEngine(bool on) noexcept
-{
-    engineTerrain = on;
 }
 
 std::vector<LoadedTexture> loadedTextures(const std::vector<std::uint64_t>& paths)
@@ -790,16 +999,34 @@ std::vector<LoadedTexture> loadedTextures(const std::vector<std::uint64_t>& path
     return found;
 }
 
+void setBonesFromSnapshot(bool on) noexcept
+{
+    bonesFromSnapshot = on;
+}
+
+std::string poseTiming()
+{
+    if (bonesFromSnapshot.load()) return "characters' bones as the snapshot took them (diagnostics)";
+
+    const auto compared = posesCompared.exchange(0), changed = posesChanged.exchange(0);
+    const auto noted = drawsNoted.exchange(0), placed = drawsPlaced.exchange(0), posed = meshesPosed.exchange(0);
+    return "characters' bones: " + std::to_string(changed) + " of " + std::to_string(compared) + " palettes moved on since the snapshot; "
+        + std::to_string(noted) + " skinned draws, " + std::to_string(placed) + " found their character and mesh, " + std::to_string(posed)
+        + " meshes posed as drawn";
+}
+
 std::string status()
 {
     if (!snapshots.load()) return "the game's scene: no snapshot yet";
 
     return "the game's scene: " + std::to_string(lastInstances.load()) + " instances from " + std::to_string(lastOwners.load()) + " owners ("
         + std::to_string(lastOtherOwners.load()) + " of other kinds, " + std::to_string(lastLeftOut.load()) + " left out, "
-        + std::to_string(lastHidden.load()) + " models the game hides), " + std::to_string(snapshots.load()) + " snapshots; model files: " + std::to_string(filesRead.load()) + " read, "
-        + std::to_string(animatedFiles.load()) + " animated, " + std::to_string(unreadableFiles.load()) + " unreadable, "
+        + std::to_string(lastHidden.load()) + " models the game hides), " + std::to_string(lastCharacters.load()) + " characters of "
+        + std::to_string(lastListedModels.load()) + " models listed" + (modelListFound.load() ? "" : " (no model list)") + ", "
+        + std::to_string(snapshots.load()) + " snapshots; model files: " + std::to_string(filesRead.load()) + " rigid, "
+        + std::to_string(skinnedFiles.load()) + " skinned, " + std::to_string(unreadableFiles.load()) + " unreadable, "
         + std::to_string(modelsParsed.load()) + " parsed, "
-        + std::to_string(parseFailures.load()) + " failed; " + std::to_string(decalMeshes.load()) + " decal meshes and "
-        + std::to_string(shadowlessMeshes.load()) + " meshes that cast no shadow left out; " + engine_brush::status();
+        + std::to_string(parseFailures.load()) + " failed; " + std::to_string(shadowlessMeshes.load())
+        + " meshes that cast no shadow left out; " + engine_brush::status();
 }
 }

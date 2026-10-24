@@ -21,6 +21,8 @@ static_assert(std::size(ModeKeys) == static_cast<std::size_t>(Mode::Count));
 constexpr std::string_view FrameGenerationKeys[]{"off", "2x", "3x", "4x", "5x", "6x", "dynamic", "fsr"};
 constexpr std::string_view AtmosphereLookKeys[]{"mgsv", "physical"};
 static_assert(std::size(AtmosphereLookKeys) == static_cast<std::size_t>(AtmosphereLook::Count));
+constexpr std::string_view DrawDistanceKeys[]{"vanilla", "extended", "far"};
+static_assert(std::size(DrawDistanceKeys) == static_cast<std::size_t>(DrawDistance::Count));
 static_assert(std::size(FrameGenerationKeys) == static_cast<std::size_t>(FrameGeneration::Count));
 
 std::string_view trim(std::string_view text)
@@ -89,6 +91,17 @@ std::string_view label(AtmosphereLook look)
     }
 }
 
+std::string_view label(DrawDistance distance)
+{
+    switch (distance)
+    {
+    case DrawDistance::Vanilla: return "Vanilla";
+    case DrawDistance::Extended: return "Extended";
+    case DrawDistance::Far: return "Far";
+    default: return "Unknown";
+    }
+}
+
 std::string_view label(FrameGeneration mode)
 {
     switch (mode)
@@ -118,6 +131,11 @@ bool validPreset(int value)
 bool validApertureBlades(int value)
 {
     return value == 0 || (value >= 5 && value <= 9);
+}
+
+bool validRayQuality(int value)
+{
+    return value == 1 || value == 2 || value == 4 || value == 8;
 }
 
 bool upscales(Mode mode)
@@ -223,6 +241,25 @@ Settings loadSettings(const std::filesystem::path& path)
         {
             if (value == "0" || value == "1") settings.rayTracedShadows = value == "1";
         }
+        else if (key == "vanilla_shadows_with_ray_tracing")
+        {
+            if (value == "0" || value == "1") settings.vanillaShadowsWithRayTracing = value == "1";
+        }
+        else if (key == "ray_traced_lights")
+        {
+            if (value == "0" || value == "1") settings.rayTracedLights = value == "1";
+        }
+        else if (key == "ray_quality")
+        {
+            int rays{};
+            if (number(value, rays) && validRayQuality(rays)) settings.rayQuality = rays;
+        }
+        else if (key == "flashlight_brightness")
+        {
+            float brightness{};
+            if (number(value, brightness) && std::isfinite(brightness))
+                settings.flashlightBrightness = std::clamp(brightness, Settings::MinFlashlightBrightness, Settings::MaxFlashlightBrightness);
+        }
         else if (key == "frame_generation")
         {
             const auto found = std::find(std::begin(FrameGenerationKeys), std::end(FrameGenerationKeys), value);
@@ -256,6 +293,11 @@ Settings loadSettings(const std::filesystem::path& path)
         {
             float haze{};
             if (number(value, haze) && std::isfinite(haze)) settings.atmosphereHaze = std::clamp(haze, 0.0f, 1.0f);
+        }
+        else if (key == "draw_distance")
+        {
+            const auto found = std::find(std::begin(DrawDistanceKeys), std::end(DrawDistanceKeys), value);
+            if (found != std::end(DrawDistanceKeys)) settings.drawDistance = static_cast<DrawDistance>(found - std::begin(DrawDistanceKeys));
         }
         else if (key == "indirect_light")
         {
@@ -297,11 +339,6 @@ Settings loadSettings(const std::filesystem::path& path)
             float fNumber{};
             if (number(value, fNumber) && std::isfinite(fNumber)) settings.fNumber = std::clamp(fNumber, Settings::MinFNumber, Settings::MaxFNumber);
         }
-        else if (key == "lens_shot_frames")
-        {
-            int frames{};
-            if (number(value, frames)) settings.lensShotFrames = std::clamp(frames, Settings::MinLensShotFrames, Settings::MaxLensShotFrames);
-        }
         else if (key == "hdr")
         {
             if (value == "0" || value == "1") settings.hdr = value == "1";
@@ -337,9 +374,9 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
         || !within(settings.indirectLightRadius, Settings::MinIndirectLightRadius, Settings::MaxIndirectLightRadius)
         || !within(settings.indirectLightStrength, 0, Settings::MaxIndirectLightStrength) || !within(settings.atmosphereHaze, 0, 1)
         || !within(settings.globalIlluminationStrength, 0, Settings::MaxGlobalIlluminationStrength)
-        || !validApertureBlades(settings.apertureBlades)
-        || !within(settings.fNumber, Settings::MinFNumber, Settings::MaxFNumber) || settings.lensShotFrames < Settings::MinLensShotFrames
-        || settings.lensShotFrames > Settings::MaxLensShotFrames
+        || !validApertureBlades(settings.apertureBlades) || !validRayQuality(settings.rayQuality)
+        || !within(settings.flashlightBrightness, Settings::MinFlashlightBrightness, Settings::MaxFlashlightBrightness)
+        || !within(settings.fNumber, Settings::MinFNumber, Settings::MaxFNumber)
         || (settings.peakNits != 0 && !within(settings.peakNits, Settings::MinPeakNits, Settings::MaxPeakNits))
         || !within(settings.paperWhiteNits, Settings::MinPaperWhiteNits, Settings::MaxPaperWhiteNits))
         throw std::runtime_error("Cannot save invalid DLSS settings.");
@@ -357,15 +394,20 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
                << "\nsoft_shadows=" << settings.softShadows << "\nsun_size=" << settings.sunSize
                << "\nsun_screen_space_shadows=" << settings.sunScreenSpaceShadows
                << "\nlight_screen_space_shadows=" << settings.lightScreenSpaceShadows << "\nray_traced_shadows=" << settings.rayTracedShadows
+               << "\nvanilla_shadows_with_ray_tracing=" << settings.vanillaShadowsWithRayTracing
+               << "\nray_traced_lights=" << settings.rayTracedLights << "\nray_quality=" << settings.rayQuality
+               << "\nflashlight_brightness=" << settings.flashlightBrightness
                << "\nambient_occlusion=" << settings.ambientOcclusion
                << "\nocclusion_radius=" << settings.occlusionRadius << "\nocclusion_strength=" << settings.occlusionStrength
                << "\nindirect_light=" << settings.indirectLight << "\nindirect_light_radius=" << settings.indirectLightRadius
                << "\nindirect_light_strength=" << settings.indirectLightStrength << "\nglobal_illumination=" << settings.globalIllumination
                << "\nglobal_illumination_strength=" << settings.globalIlluminationStrength << "\nvolumetric_fog=" << settings.volumetricFog
                << "\natmosphere_look=" << AtmosphereLookKeys[static_cast<std::size_t>(settings.atmosphereLook)]
-               << "\natmosphere_haze=" << settings.atmosphereHaze << "\ndepth_of_field=" << settings.depthOfField
+               << "\natmosphere_haze=" << settings.atmosphereHaze
+               << "\ndraw_distance=" << DrawDistanceKeys[static_cast<std::size_t>(settings.drawDistance)]
+               << "\ndepth_of_field=" << settings.depthOfField
                << "\naperture_blades=" << settings.apertureBlades << "\nf_number=" << settings.fNumber
-               << "\nlens_shot_frames=" << settings.lensShotFrames << "\nhdr=" << settings.hdr << "\nhdr_peak_nits=" << settings.peakNits
+               << "\nhdr=" << settings.hdr << "\nhdr_peak_nits=" << settings.peakNits
                << "\nhdr_paper_white_nits=" << settings.paperWhiteNits << '\n';
         output.close();
         if (!output) throw std::runtime_error("Cannot write the DLSS settings.");

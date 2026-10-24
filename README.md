@@ -6,11 +6,15 @@ AIO visual enhancement ReShade add-on for Metal Gear Solid V: The Phantom Pain.
 
 **Caution: Playing online with this mod may get you banned.**
 
-![Vanilla and Phantom FX (ray-traced), flipping](docs/images/canyon-flip-4k.webp)
+![Gate: vanilla and Phantom FX (ray-traced), flipping](docs/images/gate-flip-4k.webp)
 
-![Vanilla](docs/images/smoker-full-vanilla.png)
+*Gate: morning, sunny.*
 
-![Phantom FX](docs/images/smoker-full-phantom-fx.png)
+![Canyon: vanilla and Phantom FX (ray-traced), flipping](docs/images/canyon-flip-4k.webp)
+
+*Canyon: noon, sunny.*
+
+More comparisons: [Previews](docs/PREVIEWS.md)
 
 ## Features
 
@@ -21,12 +25,14 @@ AIO visual enhancement ReShade add-on for Metal Gear Solid V: The Phantom Pain.
 - **HDR10 output**
 - **Unlock frame rate:** lifts the 60 fps cap
 - **Ray-traced shadows** for the sun (needs DXR 1.1)
+- **Ray-traced lights:** shadows for every lamp, spot light and flashlight (needs DXR 1.1)
 - **Ray-traced global illumination** (AMD GI-1.2, needs DXR 1.1)
 - **Soft shadows** (PCSS)
 - **Contact shadows** (Bend Studio's screen-space shadows)
 - **Ambient occlusion** (GTVBAO)
 - **Indirect lighting** (SSILVB)
 - **Volumetric fog** with light shafts and a physical sky
+- **Draw distance:** loads full detail and the distant world farther, with more detail at a distance
 - **Depth of field**
 - **Photo mode**
 - **Weather and time of day controls**
@@ -56,13 +62,13 @@ ReShade alone crashes the game at start-up. Phantom FX fixes that, so keep both 
 | F2 | Photo mode |
 | F3 | Hide HUD |
 | F4 | Photo mode blur on/off |
-| F5 | Photo mode lens shot |
 
 Photo mode: WASD to move, mouse to look, Space/Ctrl up/down, Shift faster.
 
 ## Notes
 
 - Enabling frame generation, switching it between DLSS and FSR, or enabling HDR requires a game restart.
+- A new draw distance loads farther or nearer once a location loads, as on Continue from the title screen.
 
 ## Uninstall
 

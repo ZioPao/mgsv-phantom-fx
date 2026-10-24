@@ -6,9 +6,11 @@
 // - A hit's albedo is the G-buffer's where the hit is on screen; otherwise the game's albedo texture
 //   for a model's mesh (taken from its G-buffer draw, engine_scene.hpp), and the mesh's mean albedo,
 //   learnt from the screen (LearnAlbedo), for the rest.
-// - The lights are the sun and the sky, as the game's own sky light gives them: each cell takes a
-//   shadow ray to the sun and a cosine-weighted one to the sky (PopulateCells), in place of
-//   Capsaicin's light sampler and reservoirs. Emissive surfaces and lamps are left out.
+// - The lights are the sun and the sky, as the game's own sky light gives them, and the frame's point
+//   and spot lights: each cell takes a shadow ray to the sun, a cosine-weighted one to the sky and one
+//   to a light chosen by its light there (PopulateCells), in place of Capsaicin's light sampler and
+//   reservoirs. Emissive surfaces are left out. Flashlights skip the cache: every probe ray's hit
+//   takes their light afresh (ResolveCells), as they move faster than a cell lets go of light.
 // - Positions come from the depth buffer, not a visibility buffer, and the motion from the camera.
 // - The probes' spherical harmonics weigh each of a probe's 64 equal-area cells by its solid angle,
 //   2 pi / 64; Capsaicin's 1 / 8 gave 4 / pi too much light.
@@ -23,7 +25,9 @@
 //   Capsaicin gave it that mean over the number of empty cells, which darkened the probes frame by
 //   frame (to 0.7 under a uniform sky) and which its 1 / 8 weight partly hid. A quarter of the rays
 //   go to their own cell rather than where the last frame's light guides them, so every cell is
-//   traced now and then.
+//   traced now and then. Where the traced cells lost over half their light, the history of the
+//   others drops alike (BlendScreenProbes), and the denoiser drops a pixel's history when the light
+//   falls under an eighth of it (ReprojectGI): Capsaicin held a light that went out for a second.
 #include "gi_common.hlsli"
 
 // ---- Bindings, after gi_common.hlsli's ----
@@ -80,6 +84,7 @@ RWStructuredBuffer<uint> g_ScanInput : register(u54);
 RWStructuredBuffer<uint> g_ScanOutput : register(u55);
 RWStructuredBuffer<uint> g_ScanBlockSums : register(u56);
 RWStructuredBuffer<uint> g_HashGridCache_LightBuffer : register(u57); // Hits to light: the visibility index, flags in the top bits
+RWTexture2D<float> g_ScreenProbes_Change : register(u58); // A probe tile's light over its history where rays went this frame; below 0 if none
 RWTexture2D<uint> g_ProbeMaskMips[12] : register(u64); // The current mask's mips, u64 to u75
 
 #define kGI1_InvalidId 0xFFFFFFFFu
@@ -127,6 +132,7 @@ groupshared uint lds_ScreenProbes_RadianceValues[4 * 64];
 groupshared uint lds_ScreenProbes_RadianceSampleCounts[64];
 groupshared uint lds_ScreenProbes_RadianceReuseSampleCount;
 groupshared float4 lds_ScreenProbes_RadianceBackup[64];
+groupshared float3 lds_ScreenProbes_Change[64];
 
 // ---- The game's frame ----
 
@@ -584,7 +590,43 @@ float3 HitAlbedo(float3 world, HashGridCache_Visibility visibility)
     return learnt.w ? float3(learnt.xyz) / (255.0f * learnt.w) : g_Frame.nearFar.z;
 }
 
-// The light a hit reflects from the sun and the sky, in the game's diffuse light units times albedo.
+// The light at a hit from one of the frame's point and spot lights `first` to `last` - 1, chosen by its light
+// here without shadows (weighted reservoir sampling, a candidate a light), through a shadow ray to it: its
+// light over the chance it was chosen.
+float3 SampledLocalLight(uint first, uint last, float3 world, float3 normal, float3 origin, float tolerance, inout Random random)
+{
+    float total = 0.0f, chosenWeight = 0.0f;
+    float3 chosenLight = 0.0f, chosenDirection = 0.0f;
+    float chosenDistance = 0.0f, chosenClearance = 0.0f;
+    for (uint i = first; i < last; ++i)
+    {
+        GILocalLight candidate = g_Frame.localLights[i];
+        float3 toLight;
+        float lightDistance;
+        float3 candidateLight = LocalLightAt(candidate, world, normal, toLight, lightDistance);
+        float weight = luminance(candidateLight);
+        if (!(weight > 0.0f)) continue;
+
+        total += weight;
+        if (random.rand() * total < weight)
+        {
+            chosenWeight = weight;
+            chosenLight = candidateLight;
+            chosenDirection = toLight;
+            chosenDistance = lightDistance;
+            chosenClearance = candidate.shape.x;
+        }
+    }
+
+    float rayLength = chosenDistance - chosenClearance;
+    if (chosenWeight > 0.0f && (rayLength <= 0.0f || VisibleFromSurface(origin, normal, tolerance, chosenDirection, rayLength)))
+        return chosenLight * (total / chosenWeight);
+
+    return 0.0f;
+}
+
+// The light a hit reflects from the sun and the sky, and from the frame's point and spot lights but the
+// flashlights (FlashlightLight), in the game's diffuse light units times albedo.
 float3 HitDirectLight(float3 world, float3 normal, float3 albedo, inout Random random)
 {
     float3 origin = OffsetFromTriangle(world, normal);
@@ -609,7 +651,21 @@ float3 HitDirectLight(float3 world, float3 normal, float3 albedo, inout Random r
     float3 skyDirection = mapToCosineHemisphere(random.rand2(), normal);
     if (VisibleFromSurface(origin, normal, tolerance, skyDirection, 1e4f)) light += SkyRadiance(skyDirection);
 
+    // The point and spot lights after the flashlights; a cell averages the choices over frames.
+    light += SampledLocalLight(g_Frame.localLightCount.z, g_Frame.localLightCount.x, world, normal, origin, tolerance, random);
+
     return albedo * light;
+}
+
+// The flashlights' light a first-bounce hit reflects, worked out each frame rather than read from its cell:
+// they swing with whoever carries them, and a cell takes 1 / 16 of a frame's light, so it would hold theirs
+// for a second or more (path tracers light every bounce afresh this way). They give no second bounce.
+float3 FlashlightLight(HashGridCache_Visibility visibility, inout Random random)
+{
+    float3 world, normal;
+    HitSurface(visibility, world, normal);
+    float3 light = SampledLocalLight(0, g_Frame.localLightCount.z, world, normal, OffsetFromTriangle(world, normal), CopyTolerance(world), random);
+    return any(light > 0.0f) ? HitAlbedo(world, visibility) * light : 0.0f;
 }
 
 // ---- Utilities ----
@@ -756,7 +812,11 @@ void ReprojectScreenProbes(uint2 did : SV_DispatchThreadID, uint2 groupId : SV_G
     uint2 cell = localId % PROBE_SIZE;
     uint cellIndex = cell.x + cell.y * PROBE_SIZE;
 
-    if (cellIndex == 0) lds_ScreenProbes_Reprojection[0] = (f32tof16(65504.0f) << 16) | 0xFFFFu;
+    if (cellIndex == 0)
+    {
+        lds_ScreenProbes_Reprojection[0] = (f32tof16(65504.0f) << 16) | 0xFFFFu;
+        g_ScreenProbes_Change[groupId] = -1.0f; // Until a probe traced here says otherwise (BlendScreenProbes)
+    }
     lds_ScreenProbes_RadianceValues[(localIndex << 2) + 0] = 0;
     lds_ScreenProbes_RadianceValues[(localIndex << 2) + 1] = 0;
     lds_ScreenProbes_RadianceValues[(localIndex << 2) + 2] = 0;
@@ -1470,7 +1530,7 @@ void UpdateMultibounceCells(uint did : SV_DispatchThreadID)
     InterlockedAdd(g_HashGridCache_UpdateCellValueIndirectBuffer[4 * baseCellIndex + 3], quantized.w);
 }
 
-// First-bounce cells, filtered, into the probe rays that found them.
+// First-bounce cells, filtered, into the probe rays that found them, with the flashlights' light at each hit.
 [numthreads(64, 1, 1)]
 void ResolveCells(uint did : SV_DispatchThreadID)
 {
@@ -1480,6 +1540,13 @@ void ResolveCells(uint did : SV_DispatchThreadID)
     float4 own = unpackHalf4(g_HashGridCache_VisibilityRadianceBuffer[did]);
     float3 radiance = own.w > 0.0f ? own.rgb : HashGridCache_FilteredDirect(cellIndex);
     radiance += HashGridCache_FilteredIndirect(cellIndex);
+    if (g_Frame.localLightCount.z > 0)
+    {
+        Random random = MakeRandom(did + 0x85EBCA6Bu, g_FrameIndex);
+        float3 flashlights = FlashlightLight(HashGridCache_UnpackVisibility(g_HashGridCache_VisibilityBuffer[did]), random);
+        MaxDiagnostic(GI_COUNTER_MAX_DIRECT, flashlights);
+        radiance += flashlights;
+    }
     MaxDiagnostic(GI_COUNTER_MAX_RESOLVED, radiance);
     ScreenProbes_AccumulateRadiance(g_HashGridCache_VisibilityQueryBuffer[did], GIDenoiser_RemoveNaNs(radiance));
 }
@@ -1520,16 +1587,24 @@ void BlendScreenProbes(uint did : SV_DispatchThreadID, uint localId : SV_GroupTh
     }
     GroupMemoryBarrierWithGroupSync();
 
-    // The radiance for cells no ray went to.
-    lds_ScreenProbes_RadianceBackup[localId] = float4(ScreenProbes_RecoverRadiance(uint3(lds_ScreenProbes_RadianceValues[(localId << 2) + 0],
-        lds_ScreenProbes_RadianceValues[(localId << 2) + 1], lds_ScreenProbes_RadianceValues[(localId << 2) + 2])),
-        lds_ScreenProbes_RadianceSampleCounts[localId] > 0 ? 1.0f : 0.0f);
+    // The radiance for cells no ray went to, and how the light changed in the cells rays went to: their
+    // luminance now and in their history, and how many there are.
+    uint sampleCount = lds_ScreenProbes_RadianceSampleCounts[localId];
+    float3 traced = ScreenProbes_RecoverRadiance(uint3(lds_ScreenProbes_RadianceValues[(localId << 2) + 0],
+        lds_ScreenProbes_RadianceValues[(localId << 2) + 1], lds_ScreenProbes_RadianceValues[(localId << 2) + 2]));
+    float4 previousRadiance = probeIndex < probeCount ? g_ScreenProbes_PreviousProbeBuffer[pos] : float4(0.0f, 0.0f, 0.0f, -1.0f);
+    lds_ScreenProbes_RadianceBackup[localId] = float4(traced, sampleCount > 0 ? 1.0f : 0.0f);
+    lds_ScreenProbes_Change[localId] = sampleCount > 0 && previousRadiance.w > 0.0f
+        ? float3(luminance(traced / sampleCount), luminance(previousRadiance.xyz), 1.0f) : 0.0f;
     GroupMemoryBarrierWithGroupSync();
 
     for (uint stride = 1; stride < 64; stride <<= 1)
     {
         if (localId < 64 / (2 * stride))
+        {
             lds_ScreenProbes_RadianceBackup[2 * (localId + 1) * stride - 1] += lds_ScreenProbes_RadianceBackup[(2 * localId + 1) * stride - 1];
+            lds_ScreenProbes_Change[2 * (localId + 1) * stride - 1] += lds_ScreenProbes_Change[(2 * localId + 1) * stride - 1];
+        }
         GroupMemoryBarrierWithGroupSync();
     }
 
@@ -1545,10 +1620,21 @@ void BlendScreenProbes(uint did : SV_DispatchThreadID, uint localId : SV_GroupTh
     float4 radiance = ScreenProbes_RecoverRadiance(uint4(lds_ScreenProbes_RadianceValues[(localId << 2) + 0],
         lds_ScreenProbes_RadianceValues[(localId << 2) + 1], lds_ScreenProbes_RadianceValues[(localId << 2) + 2],
         lds_ScreenProbes_RadianceValues[(localId << 2) + 3]));
-    uint sampleCount = lds_ScreenProbes_RadianceSampleCounts[localId];
-    float4 previousRadiance = g_ScreenProbes_PreviousProbeBuffer[pos];
+    // The light the rays found over what the history had, from enough cells: A-SVGF's temporal gradient
+    // (Schied et al. 2018), a probe at a time. PropagateProbeChange takes it to the probes not traced.
+    float3 change = lds_ScreenProbes_Change[63];
+    float kept = change.z >= 8.0f && change.y > 0.0f ? change.x / change.y : 1.0f;
+    if (cellIndex == 0) g_ScreenProbes_Change[probe] = kept;
+
     if (sampleCount > 0) radiance /= sampleCount;
-    else radiance = previousRadiance.w > 0.0f ? previousRadiance : lds_ScreenProbes_RadianceBackup[0];
+    else if (previousRadiance.w > 0.0f)
+    {
+        // Where the rays found under half (a light gone), the cells no ray went to lose theirs alike, or
+        // they would hold it until rays come.
+        radiance = previousRadiance;
+        if (kept < 0.5f) radiance.xyz *= kept;
+    }
+    else radiance = lds_ScreenProbes_RadianceBackup[0];
 
     if (previousRadiance.w > 0.0f)
     {
@@ -1600,6 +1686,52 @@ void BlendScreenProbes(uint did : SV_DispatchThreadID, uint localId : SV_GroupTh
     if (cellIndex == 0) g_ScreenProbes_ProbeMaskBuffer[probe] = ScreenProbes_PackSeed(seed);
     g_ScreenProbes_ProbeBuffer[pos] = radiance;
     MaxDiagnostic(GI_COUNTER_MAX_PROBE, radiance.xyz);
+}
+
+// The probes not traced this frame (three in four) take the change in light the traced ones near them on
+// their surface found, where it lost over half: A-SVGF spreads its sparse gradients the same way. Without
+// it they hold a light gone until rays reach them, and the probe filter mixes it back into the traced ones
+// (FilterScreenProbes), so it took half a second to go.
+[numthreads(8, 8, 1)]
+void PropagateProbeChange(uint2 tile : SV_GroupID, uint2 cell : SV_GroupThreadID)
+{
+    uint probeMask = g_ScreenProbes_ProbeMaskBuffer[tile];
+    if (g_ScreenProbes_Change[tile] >= 0.0f || probeMask == kGI1_InvalidId) return;
+
+    // FilterScreenProbes's depth weight.
+    float depth = toLinearDepth(g_Depth.Load(int3(ScreenProbes_UnpackSeed(probeMask), 0)), g_NearFar);
+    int2 dims = int2(g_Frame.probeLayout.zw);
+    float total = 0.0f, weight = 0.0f;
+    for (int y = -2; y <= 2; ++y)
+        for (int x = -2; x <= 2; ++x)
+        {
+            int2 tap = int2(tile) + int2(x, y);
+            if (any(tap < 0) || any(tap >= dims)) continue;
+
+            float change = g_ScreenProbes_Change[tap];
+            uint tapMask = g_ScreenProbes_ProbeMaskBuffer[tap];
+            if (change < 0.0f || tapMask == kGI1_InvalidId) continue;
+
+            float tapDepth = toLinearDepth(g_Depth.Load(int3(ScreenProbes_UnpackSeed(tapMask), 0)), g_NearFar);
+            float w = pow(saturate(1.0f - abs(tapDepth - depth) / depth), 8.0f);
+            total += w * change;
+            weight += w;
+        }
+
+    float kept = weight >= 0.5f ? total / weight : 1.0f;
+    if (kept >= 0.5f) return;
+
+    uint2 pos = tile * PROBE_SIZE + cell;
+    float4 radiance = g_ScreenProbes_ProbeBuffer[pos];
+    g_ScreenProbes_ProbeBuffer[pos] = float4(radiance.xyz * kept, radiance.w);
+
+    uint cellIndex = cell.x + cell.y * PROBE_SIZE;
+    if (cellIndex < 9)
+    {
+        uint index = 9 * (tile.x + tile.y * g_Frame.probeLayout.z) + cellIndex;
+        float4 coefficient = unpackHalf4(g_ScreenProbes_ProbeSHBuffer[index]);
+        g_ScreenProbes_ProbeSHBuffer[index] = packHalf4(float4(coefficient.xyz * kept, coefficient.w));
+    }
 }
 
 // Copies this frame's probes over the last frame's, which the filter reads (Capsaicin's copy).
@@ -1855,6 +1987,16 @@ void ReprojectGI(uint2 did : SV_DispatchThreadID)
                 float lumaB = luminance(lighting.xyz / max(lighting.w, 1.0f));
                 colorDelta = lerp(colorDelta, lumaA - lumaB, 1.0f / 8.0f);
                 alphaBlend = saturate(1.0f - abs(colorDelta) / max(lumaB, 1e-4f));
+
+                // A light gone (a flashlight turned away): under an eighth of the history brings the history down
+                // to this frame's light at once, which the smoothed change above takes 30 frames or more to do (NRD's
+                // anti-lag, in spirit). Its sample count stays, so its blur does too: dropping it widened the glow.
+                // Brighter jumps keep the smoothed path: one bright frame is more often a firefly.
+                if (lumaA < 0.125f * lumaB)
+                {
+                    lighting.xyz *= lumaA / lumaB;
+                    colorDelta = 0.0f;
+                }
             }
         }
     }

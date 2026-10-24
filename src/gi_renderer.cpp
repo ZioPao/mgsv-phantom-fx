@@ -30,10 +30,10 @@
 
 // The kernels, compiled by DXC at build time (CMakeLists.txt).
 #include "BlendScreenProbes.h"
-#include "BuildDepthPyramid.h"
-#include "CullCaptured.h"
+#include "PropagateProbeChange.h"
 #include "TerrainGrid.h"
-#include "ClearBounds.h"
+#include "Skin.h"
+#include "ClearNewGeometries.h"
 #include "ClassifyShadowTiles.h"
 #include "ClearBuffer.h"
 #include "ClearCounters.h"
@@ -47,6 +47,7 @@
 #include "FilterGI.h"
 #include "FilterProbeMask.h"
 #include "FilterScreenProbes.h"
+#include "FilterLocalLightShadows.h"
 #include "FilterShadows.h"
 #include "GenerateDispatch.h"
 #include "InitCachedTileLRU.h"
@@ -67,10 +68,10 @@
 #include "ScanAddOffsets.h"
 #include "ScanBlockSums.h"
 #include "ScanBlocks.h"
-#include "Scatter.h"
 #include "ScatterScreenProbes.h"
 #include "SpawnScreenProbes.h"
 #include "StoreSpawnCount.h"
+#include "TraceLocalLightShadows.h"
 #include "TraceSunShadows.h"
 #include "UpdateMultibounceCells.h"
 #include "UpdateTiles.h"
@@ -92,36 +93,25 @@ static_assert(MaxInstances <= (1u << GI_HIT_INSTANCE_BITS));
 constexpr GUID UnwrappedObject{0x7f2c9a11, 0x3b4e, 0x4d6a, {0x81, 0x2f, 0x5e, 0x9c, 0xd3, 0x7a, 0x1b, 0x42}};
 constexpr DWORD FenceTimeout = 10'000;
 
-// The frame's skinned meshes, as many vertices as a frame can capture, in one structure built again
-// each frame. The renderer's own upload buffer holds the frame's constants, scatter records and the
-// probe's entry states.
-constexpr std::uint64_t SkinnedVertices = TransferVertices;
+// The renderer's own upload buffer holds the frame's constants, its new geometries' rows, and its
+// characters' skin records and palettes.
 constexpr std::uint64_t UploadBytes = 8ull << 20;
-// A captured mesh the game has not drawn for this many frames leaves the scene.
-constexpr std::uint32_t RetentionFrames = 3600;
-// A captured mesh the game drew in more than one frame counts as drawn this long after: when the
-// camera moves, a static mesh can get a new key (terrain did each frame, gi_capture.cpp, until its keys
-// left out the stale second vertex slot), and a copy under a new key waits up to about 20 frames for its
-// acceleration structure. Without this, the copy from before the camera moved left the scene at once
-// (in view, not drawn) and the mesh was missing until the camera stopped: its ray-traced shadow
-// vanished while the camera turned. Two seconds cover a turn. A moving mesh, drawn once under each
-// key, gets none.
-constexpr std::uint32_t DrawnGraceFrames = 120;
-// The depth pyramid's levels at most (GI_DEPTH_PYRAMID_LEVELS in gi_scene.hlsl), and the first of
-// their unordered access slots.
-constexpr std::size_t MaxPyramidLevels = 12;
-constexpr UINT PyramidSlot = 96;
 // Where no albedo is known yet: MGSV's materials are dark.
 constexpr float DefaultAlbedo = 0.2f;
 // Tangent of the sun's angular radius, 0.27 degrees.
 constexpr float SunRadius = 0.0047f;
-// The sun's ray-traced shadows: how much of the sun cut-out geometry without the game's alpha blocks
-// beyond the game's shadow map, and how far the rays look for what blocks the sun.
+// The sun's ray-traced shadows: how much of the sun cut-out geometry without its texture (not copied
+// yet, or a mesh without texture coordinates) blocks beyond the game's shadow map, and how far the rays
+// look for what blocks the sun.
 constexpr float AlphaTestedBlocking = 0.5f, ShadowRayLength = 5000;
 // Diagnostics: the most phases a frame's list times.
 constexpr std::uint32_t MaxMarks = 32;
 // A model the game has not placed for this many frames is let go.
 constexpr std::uint32_t ModelRetentionFrames = 600;
+// A character's structure is refitted to each pose and built again this often; the frame's palettes
+// take this much of the upload buffer at most (characters past it wait for the next frame).
+constexpr std::uint32_t CharacterRebuildFrames = 30;
+constexpr std::uint64_t MaxPaletteBytes = 2ull << 20;
 // The meshes of a model the scene takes at most (GI_HIT_INSTANCE_BITS).
 constexpr std::size_t MaxModelParts = 4096;
 // The terrain's rings (TerrainGrid in gi_scene.hlsl), a structure each. Ring r's cells are
@@ -135,41 +125,44 @@ constexpr std::uint32_t TerrainRefreshFrames = 120;
 constexpr std::uint32_t TerrainRingVertices = GI_TERRAIN_CELLS * GI_TERRAIN_CELLS * 6;
 
 // The kernels' DXIL in gi_d3d12::Kernel's order.
-constexpr std::span<const unsigned char> Bytecode[]{GI_ClearBounds, GI_Scatter, GI_CullCaptured, GI_DebugScene, GI_ClearOutput, GI_BuildDepthPyramid, GI_TerrainGrid,
+constexpr std::span<const unsigned char> Bytecode[]{GI_ClearNewGeometries, GI_DebugScene, GI_ClearOutput, GI_TerrainGrid, GI_Skin,
     GI_ClearCounters, GI_GenerateDispatch, GI_ClearBuffer, GI_ScanBlocks, GI_ScanBlockSums, GI_ScanAddOffsets, GI_ClearProbeMask,
     GI_FilterProbeMask, GI_InitCachedTileLRU, GI_ReprojectScreenProbes, GI_CountScreenProbes, GI_ScatterScreenProbes, GI_SpawnScreenProbes,
     GI_CompactScreenProbes, GI_PatchScreenProbes, GI_StoreSpawnCount, GI_SampleScreenProbes, GI_LearnAlbedo, GI_PopulateScreenProbes,
     GI_PurgeTiles, GI_PopulateMultibounceCells, GI_PopulateCells, GI_UpdateTiles, GI_UpdateMultibounceCells, GI_ResolveCells,
-    GI_BlendScreenProbes, GI_CopyProbes, GI_ReorderScreenProbes, GI_FilterScreenProbes, GI_ProjectScreenProbes, GI_InterpolateScreenProbes,
+    GI_BlendScreenProbes, GI_PropagateProbeChange, GI_CopyProbes, GI_ReorderScreenProbes, GI_FilterScreenProbes, GI_ProjectScreenProbes, GI_InterpolateScreenProbes,
     GI_ReprojectGI, GI_FilterGI, GI_TraceSunShadows, GI_ClassifyShadowTiles, GI_FilterShadows,
-    GI_DebugShadows, GI_ProbeShadows};
+    GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows};
 static_assert(std::size(Bytecode) == static_cast<std::size_t>(Kernel::Count));
 
-// A static mesh captured from the game's draws (gi_capture.cpp): world-space triangles, three
-// vertices each, in the pool, and its structure.
-struct Entry
-{
-    bool live{};
-    bool hasVertices{};
-    std::uint64_t poolOffset{};
-    std::uint32_t vertexCount{};
-    std::optional<BlasId> blas;
-    bool needsBlas{};
-    std::uint32_t lastDrawn{};
-    std::uint32_t framesDrawn{}; // Diagnostics: the frames the game drew it in
-    bool alphaTested{};
-};
-
-// One of the game's models on the GPU side: its meshes in the pool from `poolOffset`, a geometry
-// each of its structure, made once it is first placed; the frame it was last placed.
+// One of the game's models on the GPU side: its meshes in the pool from `poolOffset`, made once it is
+// first placed; the frame it was last placed. A rigid model has a structure, a geometry a mesh; a
+// skinned model's characters pose its meshes (`parts`: where each one's bind pose and indices lie, and
+// its material; `skins`: where each one's skin lies) into their own structures.
 struct ModelRecord
 {
     std::shared_ptr<const Model> geometry;
     std::optional<std::uint64_t> poolOffset;
     std::uint64_t poolBytes{};
     std::optional<BlasId> blas;
+    std::vector<gi_scene::Geometry> parts;
+    std::vector<std::uint64_t> skins;
     std::uint32_t lastPlaced{};
     std::array<float, 6> bounds{}; // Diagnostics (the shadow probe): object space, lowest then highest
+};
+
+// One of the game's characters on the GPU side: its model's meshes it shows (`parts`, in the model's
+// order), posed into the pool from `poolOffset` in that order, a geometry each of its structure; where
+// it is this frame; whether its structure matches its pose this frame, and the frame it was last built.
+struct CharacterRecord
+{
+    std::uint64_t hash{};
+    std::vector<std::uint32_t> parts;
+    std::uint64_t poolOffset{}, poolBytes{};
+    BlasId blas{};
+    Transform transform{};
+    bool traced{};
+    std::uint32_t built{};
 };
 
 // Diagnostics (the probe): one of a frame's instances of the game's models, and where it is.
@@ -238,17 +231,16 @@ struct State
     UINT descriptorSize{};
 
     std::unique_ptr<gi_scene::Scene> scene;
-    ComPtr<ID3D12Resource> entryBounds, geometryAlbedo, counters, dispatchArguments;
+    ComPtr<ID3D12Resource> geometryAlbedo, counters, dispatchArguments;
     std::array<ComPtr<ID3D12Resource>, FramesInFlight> upload;
     std::array<std::uint8_t*, FramesInFlight> uploadData{};
 
-    // The captured meshes, and the frame's skinned meshes' vertices and structure.
-    std::vector<Entry> entries = std::vector<Entry>(MaxEntries);
-    std::uint64_t skinnedOffset{};
-    BlasId skinnedBlas{};
-    // The game's models (engine_scene.hpp) by hash, and the latest placements.
+    // The game's models (engine_scene.hpp) by hash, and the latest placements; the characters by id,
+    // and the latest list.
     std::unordered_map<std::uint64_t, ModelRecord> models;
     std::vector<ModelInstance> modelInstances;
+    std::unordered_map<std::uint64_t, CharacterRecord> characters;
+    std::vector<CharacterInstance> characterList;
     std::array<TerrainRing, GI_TERRAIN_RINGS> terrain;
     // The game's textures the models' meshes use, by path hash; their free descriptors, and those the GPU
     // may still read.
@@ -263,32 +255,25 @@ struct State
     // models too large for a frame's upload.
     std::uint32_t modelInstanceCount{}, modelsWaiting{}, modelsTooLarge{}, terrainRings{};
     std::uint64_t modelTriangles{};
-    std::uint32_t liveEntries{}, instances{};
+    // Diagnostics: the frame's characters traced, those waiting for their model or for room, and their
+    // posed vertices and triangles.
+    std::uint32_t charactersTraced{}, charactersWaiting{};
+    std::uint64_t characterVertices{}, characterTriangles{};
+    std::uint32_t instances{};
     std::uint64_t triangles{};
-    // Diagnostics: the live captured meshes, and their triangles, by when the game last drew them: this
-    // frame, within a second, within ten seconds, before.
-    std::array<std::uint32_t, 4> entriesByAge{};
-    std::array<std::uint64_t, 4> trianglesByAge{};
-    // Diagnostics: the live captured meshes the game drew in one frame only, an earlier one.
-    std::uint32_t drawnOnce{};
-    std::uint64_t drawnOnceTriangles{};
 
     std::unique_ptr<gi_light::Light> light;
     std::unique_ptr<gi_shadow::Shadows> shadows;
-    // Diagnostics (the shadow debug view and probe): why each instance is in the scene or left out,
-    // the probe and the captured meshes its ray crosses, read back when the frame's slot comes round
-    // again; each frame's instance by entry.
-    ComPtr<ID3D12Resource> instanceDebug, probe, probeCrossings;
+    // The point and spot lights' shadows before and between the filter's passes (TraceLocalLightShadows,
+    // FilterLocalLightShadows), R16G16_FLOAT at the render size.
+    ComPtr<ID3D12Resource> localShadowRays, localShadowFirst;
+    UINT localShadowWidth{}, localShadowHeight{};
+    // Diagnostics (the shadow debug view and probe): the probe, read back when the frame's slot comes
+    // round again, and each frame's instances of the game's models.
+    ComPtr<ID3D12Resource> probe;
     std::array<ComPtr<ID3D12Resource>, FramesInFlight> probeReadback;
     std::array<bool, FramesInFlight> probeWritten{};
-    std::vector<std::uint32_t> entryInstance = std::vector<std::uint32_t>(MaxEntries, GI_REASON_NONE);
     std::array<std::vector<InstancedModel>, FramesInFlight> instancedModels; // Each slot's frame's, by instance
-    // Diagnostics: the entries evicted in each of the last frames.
-    std::array<std::uint32_t, 60> evictedByFrame{};
-    // The frame's depth pyramid for CullCaptured (gi_scene.hlsl): level k is the farthest depth of
-    // each square of 2^(k+1) pixels, the first at half the render size.
-    ComPtr<ID3D12Resource> depthPyramid;
-    UINT pyramidWidth{}, pyramidHeight{}, pyramidLevels{};
 
     // Diagnostics: GPU timestamps between the named phases of each frame's list (Recorder::mark),
     // read when the frame's slot comes round again. The scene's and the light's times are averaged
@@ -302,7 +287,7 @@ struct State
     {
         std::vector<std::pair<const char*, double>> phases; // Milliseconds, in the order they first ran
         std::uint32_t timedFrames{}, frames{}, builds{}, mostBuilds{}, waiting{}, compactions{};
-        std::uint64_t builtTriangles{}, skinnedTriangles{};
+        std::uint64_t builtTriangles{};
         double cpuMilliseconds{}, mostCpuMilliseconds{};
         std::array<double, CpuSteps> cpuSteps{};
         std::uint64_t since{};
@@ -312,7 +297,7 @@ struct State
     ComPtr<ID3D12Resource> statsReadback, statsCounters;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT statsFootprint{};
     std::uint64_t statsFence{}, lastStats{};
-    Shared depth, normal, albedo, transfer, output, shadow, shadowDebug, terrainPages, terrainHeights;
+    Shared depth, normal, albedo, output, shadow, shadowDebug, velocity, terrainPages, terrainHeights, localLightShadow;
 
     ~State()
     {
@@ -419,15 +404,12 @@ void createResources(State& s)
 {
     auto* device = s.device.Get();
     s.scene = std::make_unique<gi_scene::Scene>(device);
-    s.entryBounds = createStorage(device, std::uint64_t{MaxEntries} * 6 * 4, "Creating the entry bounds");
     s.geometryAlbedo = createStorage(device, std::uint64_t{MaxGeometries} * 16, "Creating the geometry albedo");
     s.counters = createStorage(device, GI_COUNTER_COUNT * 4, "Creating the counters");
-    s.instanceDebug = createStorage(device, std::uint64_t{MaxInstances} * 16, "Creating the instance diagnostics");
     s.probe = createStorage(device, sizeof(GIShadowProbe), "Creating the shadow probe");
-    s.probeCrossings = createStorage(device, std::uint64_t{GI_PROBE_CROSSINGS} * 16, "Creating the shadow probe's crossings");
     for (auto& readback : s.probeReadback)
-        readback = createBuffer(device, sizeof(GIShadowProbe) + std::uint64_t{GI_PROBE_CROSSINGS} * 16, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
-            D3D12_RESOURCE_FLAG_NONE, "Creating the shadow probe's readback");
+        readback = createBuffer(device, sizeof(GIShadowProbe), D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE,
+            "Creating the shadow probe's readback");
     s.dispatchArguments = createStorage(device, GI_DISPATCH_SLOTS * 16, "Creating the dispatch arguments");
 
     for (std::uint32_t slot = 0; slot < FramesInFlight; ++slot)
@@ -439,14 +421,7 @@ void createResources(State& s)
         s.uploadData[slot] = static_cast<std::uint8_t*>(data);
     }
 
-    // The skinned meshes' and the terrain's room in the pool and their structures, kept while the
-    // renderer runs.
-    const auto skinned = s.scene->allocate(SkinnedVertices * 16);
-    const auto skinnedBlas = skinned ? s.scene->createBlas(gi_scene::Use::PerFrame, {{*skinned, static_cast<std::uint32_t>(SkinnedVertices)}}) : std::nullopt;
-    if (!skinnedBlas) throw std::runtime_error("The scene has no room for the skinned meshes.");
-
-    s.skinnedOffset = *skinned;
-    s.skinnedBlas = *skinnedBlas;
+    // The terrain's room in the pool and its structures, kept while the renderer runs.
     for (auto& ring : s.terrain)
     {
         const auto vertices = s.scene->allocate(std::uint64_t{TerrainRingVertices} * 16);
@@ -495,51 +470,6 @@ void waitFor(State& s, std::uint64_t value)
     if (WaitForSingleObject(s.event, FenceTimeout) != WAIT_OBJECT_0) throw std::runtime_error("The global illumination's GPU work did not finish within 10 seconds.");
 }
 
-void evict(State& s, std::uint32_t index, std::vector<std::uint32_t>& evicted)
-{
-    auto& entry = s.entries[index];
-    if (!entry.live) return;
-
-    if (entry.hasVertices) s.scene->release(entry.poolOffset, std::uint64_t{entry.vertexCount} * 16);
-    if (entry.blas) s.scene->destroyBlas(*entry.blas);
-    entry = {};
-    evicted.push_back(index);
-}
-
-// The live captured meshes the frame did not draw, the one drawn longest ago first.
-std::vector<std::uint32_t> leastRecentlyDrawn(const State& s, const Frame& frame)
-{
-    std::vector<std::uint32_t> candidates;
-    for (std::uint32_t i = 0; i < DynamicEntry; ++i)
-        if (s.entries[i].live && s.entries[i].lastDrawn != frame.frameIndex) candidates.push_back(i);
-
-    std::sort(candidates.begin(), candidates.end(), [&](auto a, auto b) { return s.entries[a].lastDrawn < s.entries[b].lastDrawn; });
-
-    return candidates;
-}
-
-// When the pool or the structures have no room: the first time a frame, evicts the captured meshes the
-// game drew longest ago until an eighth of the room, and at least `wanted`, is on its way back. The
-// memory returns once the GPU is past this frame, so what wanted the room waits, as does the frame's
-// other: the search runs once a frame, not once an allocation.
-void evictForRoom(State& s, bool structures, std::uint64_t wanted, const Frame& frame, std::vector<std::uint32_t>& evicted, bool& evictedThisFrame)
-{
-    if (evictedThisFrame) return;
-
-    evictedThisFrame = true;
-    const auto stats = s.scene->stats();
-    const auto target = std::max(wanted, (structures ? stats.blasCapacity : stats.poolCapacity) / 8);
-    std::uint64_t freed{};
-    for (const auto index : leastRecentlyDrawn(s, frame))
-    {
-        if (freed >= target) break;
-
-        const auto& entry = s.entries[index];
-        freed += structures ? (entry.blas ? s.scene->size(*entry.blas) : 0) : (entry.hasVertices ? std::uint64_t{entry.vertexCount} * 16 : 0);
-        evict(s, index, evicted);
-    }
-}
-
 // A model mesh's row of the geometry table, with its base texture once the game's is copied: its
 // colour for the hits' albedo, and a cut-out mesh's alpha for the shadow rays' test.
 gi_scene::Geometry materialOf(const State& s, const ModelPart& part)
@@ -561,20 +491,27 @@ gi_scene::Geometry materialOf(const State& s, const ModelPart& part)
 }
 
 // The bytes of a model's meshes in the pool: each mesh's vertices (16 bytes: the position, then the
-// texture coordinates), then its indices, from 16-byte boundaries.
+// texture coordinates), then its indices, from 16-byte boundaries; a skinned model's then its skin
+// (GISkinRecord: 16 bytes a vertex).
 std::uint64_t modelBytes(const Model& model)
 {
     std::uint64_t bytes{};
     for (std::size_t i = 0; i < model.parts.size() && i < MaxModelParts; ++i)
-        bytes += model.parts[i].vertices.size() * 16 + (model.parts[i].indices.size() * 2 + 15) / 16 * 16;
+    {
+        const auto& part = model.parts[i];
+        bytes += part.vertices.size() * 16 + (part.indices.size() * 2 + 15) / 16 * 16 + (model.bones ? part.vertices.size() * 16 : 0);
+    }
 
     return bytes;
 }
 
-// The model's meshes laid out from `poolOffset` into `bytes`, and their geometries.
-std::vector<gi_scene::Geometry> stageModel(const State& s, const Model& model, std::uint64_t poolOffset, std::vector<std::uint8_t>& bytes)
+// The model's meshes laid out from `poolOffset` into `bytes`, and their geometries; a skinned model's
+// skins' places into `skins`.
+std::vector<gi_scene::Geometry> stageModel(const State& s, const Model& model, std::uint64_t poolOffset, std::vector<std::uint8_t>& bytes,
+    std::vector<std::uint64_t>& skins)
 {
     std::vector<gi_scene::Geometry> geometries;
+    skins.clear();
     bytes.assign(modelBytes(model), 0);
     std::uint64_t at{};
     for (std::size_t i = 0; i < model.parts.size() && i < MaxModelParts; ++i)
@@ -596,6 +533,17 @@ std::vector<gi_scene::Geometry> stageModel(const State& s, const Model& model, s
         std::memcpy(bytes.data() + at, part.indices.data(), part.indices.size() * 2);
         at += (part.indices.size() * 2 + 15) / 16 * 16;
         geometries.push_back(geometry);
+        if (!model.bones) continue;
+
+        skins.push_back(poolOffset + at);
+        for (std::size_t v = 0; v < part.vertices.size(); ++v)
+        {
+            const std::uint64_t bones = v < part.bones.size() ? part.bones[v] : 0;
+            const std::uint32_t weights = v < part.weights.size() ? part.weights[v] : 0xFF;
+            std::memcpy(bytes.data() + at, &bones, 8);
+            std::memcpy(bytes.data() + at + 8, &weights, 4);
+            at += 16;
+        }
     }
 
     return geometries;
@@ -623,15 +571,30 @@ void updateTextures(State& s, const Frame& frame)
         for (const auto user : record.users)
         {
             const auto model = s.models.find(user);
-            if (model == s.models.end() || !model->second.blas) continue;
+            if (model == s.models.end()) continue;
 
-            const auto& parts = model->second.geometry->parts;
+            auto& modelRecord = model->second;
+            const auto& parts = modelRecord.geometry->parts;
             for (std::uint32_t i = 0; i < parts.size() && i < MaxModelParts; ++i)
-                if (parts[i].baseTexture == made.path)
+            {
+                if (parts[i].baseTexture != made.path) continue;
+
+                const auto geometry = materialOf(s, parts[i]);
+                if (modelRecord.blas) s.scene->setMaterial(*modelRecord.blas, i, geometry.flags, geometry.texture, geometry.alphaThreshold);
+                if (i >= modelRecord.parts.size()) continue;
+
+                // A skinned model's mesh: its characters' structures have it among the meshes they show.
+                modelRecord.parts[i].flags = geometry.flags;
+                modelRecord.parts[i].texture = geometry.texture;
+                modelRecord.parts[i].alphaThreshold = geometry.alphaThreshold;
+                for (const auto& [id, character] : s.characters)
                 {
-                    const auto geometry = materialOf(s, parts[i]);
-                    s.scene->setMaterial(*model->second.blas, i, geometry.flags, geometry.texture, geometry.alphaThreshold);
+                    const auto shown = std::find(character.parts.begin(), character.parts.end(), i);
+                    if (character.hash == user && shown != character.parts.end())
+                        s.scene->setMaterial(character.blas, static_cast<std::uint32_t>(shown - character.parts.begin()), geometry.flags, geometry.texture,
+                            geometry.alphaThreshold);
                 }
+            }
         }
     }
 
@@ -680,8 +643,11 @@ void updateModels(State& s, const Frame& frame, Result& result)
         if (!model || s.models.contains(model->hash)) continue;
 
         useTextures(s, *model, true, frame, result);
+        // Kept ModelRetentionFrames from now, placed or not: counted from frame 0, a model the frame's
+        // lists did not place was let go as it came, and its file read again the next snapshot.
         auto& record = s.models[model->hash];
         record.geometry = model;
+        record.lastPlaced = frame.frameIndex;
         record.bounds = {FLT_MAX, FLT_MAX, FLT_MAX, -FLT_MAX, -FLT_MAX, -FLT_MAX};
         for (const auto& part : model->parts)
             for (const auto& vertex : part.vertices)
@@ -694,7 +660,12 @@ void updateModels(State& s, const Frame& frame, Result& result)
 
     updateTextures(s, frame);
 
-    if (frame.modelInstancesUpdated) s.modelInstances = frame.modelInstances;
+    if (frame.modelInstancesUpdated)
+    {
+        s.modelInstances = frame.modelInstances;
+        s.characterList = frame.characters;
+    }
+
     // Placements come grouped by model (an instance group's, a brush plugin's): one lookup a run.
     auto found = s.models.end();
     std::uint64_t lastHash{};
@@ -703,6 +674,9 @@ void updateModels(State& s, const Frame& frame, Result& result)
         if (placement.hash != lastHash) found = s.models.find(lastHash = placement.hash);
         if (found != s.models.end()) found->second.lastPlaced = frame.frameIndex;
     }
+
+    for (const auto& character : s.characterList)
+        if (const auto model = s.models.find(character.hash); model != s.models.end()) model->second.lastPlaced = frame.frameIndex;
 
     s.modelsWaiting = 0;
     std::vector<std::uint8_t> bytes;
@@ -719,20 +693,30 @@ void updateModels(State& s, const Frame& frame, Result& result)
             continue;
         }
 
-        // Made once first placed; a model larger than a frame's upload never is.
+        // Made once first placed; a model larger than a frame's upload never is. A skinned model is
+        // only laid out in the pool: its characters make their own structures (updateCharacters).
+        const bool skinned = record.geometry->bones != 0;
+        const bool made = skinned ? record.poolOffset.has_value() : record.blas.has_value();
         const auto needed = modelBytes(*record.geometry);
-        if (record.lastPlaced == frame.frameIndex && !record.blas && needed && needed <= gi_scene::GeometryUploadBytes)
+        if (record.lastPlaced == frame.frameIndex && !made && needed && needed <= gi_scene::GeometryUploadBytes)
         {
             // What has no room this frame waits for the next; an upload whose structure has no room
             // lands in the range given back, which nothing uses before this frame's copy.
             const auto offset = needed <= s.scene->uploadRoom() ? s.scene->allocate(needed) : std::nullopt;
-            const auto geometries = offset ? stageModel(s, *record.geometry, *offset, bytes) : std::vector<gi_scene::Geometry>{};
-            const auto blas = offset && s.scene->upload(*offset, bytes) ? s.scene->createBlas(gi_scene::Use::Static, geometries) : std::nullopt;
-            if (blas)
+            std::vector<std::uint64_t> skins;
+            auto geometries = offset ? stageModel(s, *record.geometry, *offset, bytes, skins) : std::vector<gi_scene::Geometry>{};
+            const bool uploaded = offset && s.scene->upload(*offset, bytes);
+            const auto blas = uploaded && !skinned ? s.scene->createBlas(gi_scene::Use::Static, geometries) : std::nullopt;
+            if (uploaded && (skinned || blas))
             {
                 record.poolOffset = offset;
                 record.poolBytes = needed;
                 record.blas = blas;
+                if (skinned)
+                {
+                    record.parts = std::move(geometries);
+                    record.skins = std::move(skins);
+                }
             }
             else
             {
@@ -740,10 +724,122 @@ void updateModels(State& s, const Frame& frame, Result& result)
                 ++s.modelsWaiting;
             }
         }
-        else if (needed > gi_scene::GeometryUploadBytes && record.lastPlaced == frame.frameIndex && !record.blas)
+        else if (needed > gi_scene::GeometryUploadBytes && record.lastPlaced == frame.frameIndex && !made)
             ++s.modelsTooLarge;
 
         ++it;
+    }
+}
+
+// The frame's characters (Frame::characters): each one's shown meshes posed into its own room of the
+// pool (a record a mesh into `skins` for Skin in gi_scene.hlsl, its palette onto `palettes`), its
+// structure refitted to the pose, or built again when new and every CharacterRebuildFrames (a refit's
+// boxes loosen as limbs move). One that shows other meshes is made again; one gone from the list is
+// let go. Without a newer list the last poses stand.
+void updateCharacters(State& s, const Frame& frame, std::vector<GISkinRecord>& skins, std::vector<float>& palettes)
+{
+    if (!frame.modelInstancesUpdated) return;
+
+    auto& scene = *s.scene;
+    std::unordered_set<std::uint64_t> seen;
+    std::uint32_t vertices{};
+    s.charactersWaiting = 0;
+    for (const auto& character : s.characterList)
+    {
+        const auto model = s.models.find(character.hash);
+        if (model != s.models.end() && model->second.geometry->parts.empty()) continue; // Nothing the scene takes
+
+        const auto bones = std::uint64_t{character.palette.size() / 12};
+        if (model == s.models.end() || model->second.parts.empty() || bones < model->second.geometry->bones
+            || (palettes.size() + character.palette.size()) * sizeof(float) > MaxPaletteBytes)
+        {
+            // One made already keeps its room, out of this frame.
+            if (const auto kept = s.characters.find(character.id); kept != s.characters.end())
+            {
+                kept->second.traced = false;
+                seen.insert(character.id);
+            }
+
+            ++s.charactersWaiting;
+            continue;
+        }
+
+        const auto& modelRecord = model->second;
+        const auto& parts = modelRecord.geometry->parts;
+        std::vector<std::uint32_t> shown;
+        for (std::uint32_t i = 0; i < modelRecord.parts.size(); ++i)
+            if (parts[i].group >= character.shownGroups.size() || character.shownGroups[parts[i].group]) shown.push_back(i);
+
+        if (shown.empty()) continue;
+
+        auto found = s.characters.find(character.id);
+        if (found != s.characters.end() && (found->second.hash != character.hash || found->second.parts != shown))
+        {
+            scene.destroyBlas(found->second.blas);
+            scene.release(found->second.poolOffset, found->second.poolBytes);
+            s.characters.erase(found);
+            found = s.characters.end();
+        }
+
+        const bool fresh = found == s.characters.end();
+        if (fresh)
+        {
+            std::uint64_t bytes{};
+            for (const auto i : shown) bytes += std::uint64_t{modelRecord.parts[i].vertexCount} * 16;
+            const auto offset = scene.allocate(bytes);
+            std::vector<gi_scene::Geometry> geometries;
+            std::uint64_t at{};
+            for (const auto i : shown)
+            {
+                auto& geometry = geometries.emplace_back(modelRecord.parts[i]);
+                geometry.vertexOffset = offset.value_or(0) + at;
+                at += std::uint64_t{geometry.vertexCount} * 16;
+            }
+
+            const auto blas = offset ? scene.createBlas(gi_scene::Use::Refit, geometries) : std::nullopt;
+            if (!blas)
+            {
+                if (offset) scene.release(*offset, bytes);
+                ++s.charactersWaiting;
+                continue;
+            }
+
+            found = s.characters.emplace(character.id, CharacterRecord{character.hash, std::move(shown), *offset, bytes, *blas}).first;
+        }
+
+        auto& record = found->second;
+        seen.insert(character.id);
+        record.transform = character.transform;
+        const auto firstBone = static_cast<std::uint32_t>(palettes.size() / 12);
+        palettes.insert(palettes.end(), character.palette.begin(), character.palette.end());
+        std::uint64_t at{};
+        for (const auto i : record.parts)
+        {
+            const auto& part = modelRecord.parts[i];
+            skins.push_back({vertices, part.vertexCount, static_cast<std::uint32_t>(part.vertexOffset), static_cast<std::uint32_t>(modelRecord.skins[i]),
+                static_cast<std::uint32_t>(record.poolOffset + at), firstBone, {}});
+            vertices += part.vertexCount;
+            at += std::uint64_t{part.vertexCount} * 16;
+        }
+
+        // Not refitted (the frame's scratch is full), the structure no longer matches the pose: left
+        // out of the frame.
+        const bool rebuild = fresh || frame.frameIndex - record.built >= CharacterRebuildFrames;
+        record.traced = rebuild ? scene.rebuild(record.blas) : scene.refit(record.blas);
+        if (rebuild && record.traced) record.built = frame.frameIndex;
+    }
+
+    for (auto it = s.characters.begin(); it != s.characters.end();)
+    {
+        if (seen.contains(it->first))
+        {
+            ++it;
+            continue;
+        }
+
+        scene.destroyBlas(it->second.blas);
+        scene.release(it->second.poolOffset, it->second.poolBytes);
+        it = s.characters.erase(it);
     }
 }
 
@@ -845,7 +941,7 @@ void copyMatrix(float4x4& to, const Matrix& from)
     std::memcpy(to.m, from.data(), sizeof(to.m));
 }
 
-GIFrameConstants constantsOf(const Frame& frame, std::uint32_t scatterCount, std::uint32_t instanceCount)
+GIFrameConstants constantsOf(const Frame& frame, std::uint32_t newGeometries, std::uint32_t instanceCount)
 {
     GIFrameConstants constants{};
     copyMatrix(constants.viewProjection, frame.viewProjection);
@@ -859,10 +955,25 @@ GIFrameConstants constantsOf(const Frame& frame, std::uint32_t scatterCount, std
     for (int i = 0; i < 9; ++i) constants.skySH[i] = {frame.skyRadiance[i][0], frame.skyRadiance[i][1], frame.skyRadiance[i][2], 0};
     constants.dimensions = {frame.width, frame.height, frame.frameIndex, instanceCount};
     constants.nearFar = {frame.nearPlane, frame.farPlane, DefaultAlbedo, frame.outputScale};
-    constants.counts = {scatterCount, scatterCount, frame.showScene ? GI_VIEW_SCENE : GI_VIEW_OFF, 0};
+    constants.counts = {newGeometries, 0, frame.showScene ? GI_VIEW_SCENE : GI_VIEW_OFF, 0};
     constants.shadowRange = {frame.shadowRange[0], frame.shadowRange[1], frame.shadowRange[2], frame.shadowRange[3]};
     constants.shadowParams = {frame.sunTangent, AlphaTestedBlocking, ShadowRayLength, 0};
     constants.rayCone = {2 * std::tan(frame.verticalFov / 2) / static_cast<float>(std::max(frame.height, 1u)), 0, 0, 0};
+    // The flashlights first: the light's hits take them afresh and the cache the rest (gi_light.hlsl, FlashlightLight).
+    const auto localLights = std::min<std::size_t>(frame.localLights.size(), GI_MAX_LOCAL_LIGHTS);
+    std::uint32_t slot = 0, flashlights = 0;
+    for (const bool flashlight : {true, false})
+        for (std::size_t i = 0; i < localLights; ++i)
+        {
+            const auto& light = frame.localLights[i];
+            if (light.flashlight != flashlight) continue;
+
+            if (flashlight) ++flashlights;
+            constants.localLights[slot++] = {{light.position[0], light.position[1], light.position[2], light.range},
+                {light.axis[0], light.axis[1], light.axis[2], light.cosOuter}, {light.clearance, light.penumbraScale, light.coneExponent, light.maxFalloff},
+                {light.color[0], light.color[1], light.color[2], light.factor}, {light.sixteenth ? 1.0f : 0.0f, light.addedDistance, light.leastDistance, light.radius}};
+        }
+    constants.localLightCount = {slot, frame.localLightRays, flashlights, 0};
 
     return constants;
 }
@@ -931,6 +1042,37 @@ void stop() noexcept
 bool started() noexcept
 {
     return state != nullptr;
+}
+
+// Diagnostics: every ten seconds, a copy of the output and the counters for logStats.
+void copyStats(State& s, Recorder& recorder, ID3D12Resource* output, const Frame& frame)
+{
+    const auto now = GetTickCount64();
+    if (s.statsFence || now - s.lastStats <= (frame.logOften ? 0u : 10'000u)) return;
+
+    s.lastStats = now;
+    const auto desc = output->GetDesc();
+    UINT64 bytes{};
+    s.device->GetCopyableFootprints(&desc, 0, 1, 0, &s.statsFootprint, nullptr, nullptr, &bytes);
+    if (!s.statsReadback || s.statsReadback->GetDesc().Width < bytes)
+        s.statsReadback = createBuffer(s.device.Get(), bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_RESOURCE_FLAG_NONE, "Creating the light's readback");
+    if (!s.statsCounters)
+        s.statsCounters = createBuffer(s.device.Get(), GI_COUNTER_COUNT * 4, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_RESOURCE_FLAG_NONE, "Creating the counters' readback");
+
+    recorder.transition(s.counters.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    s.list->CopyBufferRegion(s.statsCounters.Get(), 0, s.counters.Get(), 0, GI_COUNTER_COUNT * 4);
+    recorder.transition(s.counters.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    recorder.transition(output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION from{output, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {}};
+    from.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION to{s.statsReadback.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, {}};
+    to.PlacedFootprint = s.statsFootprint;
+    s.list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    recorder.transition(output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    s.statsFence = frame.signalValue;
 }
 
 // Diagnostics: the output light's level, logged once its copy is back.
@@ -1033,29 +1175,6 @@ void readTimes(State& s, std::uint32_t slot)
     ++s.tally.timedFrames;
 }
 
-const char* reasonName(std::uint32_t reason)
-{
-    switch (reason)
-    {
-    case GI_REASON_DRAWN: return "in the scene";
-    case GI_REASON_OUT_OF_VIEW: return "in the scene, kept: not drawn, not all of it in view";
-    case GI_REASON_BEHIND: return "in the scene, kept: not drawn, all in view but behind what the game drew";
-    case GI_REASON_LEFT_OUT: return "LEFT OUT: not drawn, all in view, and its place on screen shows";
-    default: return "no instance";
-    }
-}
-
-std::string entryState(std::uint32_t bits)
-{
-    if (!(bits & GI_ENTRY_LIVE)) return "not live";
-
-    std::string text = !(bits & GI_ENTRY_BUILT) ? "live, no acceleration structure yet"
-        : !(bits & GI_ENTRY_INSTANCED) ? "live, built, past the instance limit" : "live, built, instanced";
-    if (bits & GI_ENTRY_ALPHA_TESTED) text += ", alpha-tested";
-
-    return text + ", last drawn " + std::to_string((bits >> 8) & 0xFFFu) + " frames ago, drawn in " + std::to_string(bits >> 20) + " frames";
-}
-
 std::string percentOf(std::uint64_t used, std::uint64_t capacity)
 {
     return std::to_string(capacity ? used * 100 / capacity : 0) + "%";
@@ -1067,12 +1186,16 @@ std::string describeHit(const State& s, std::span<const InstancedModel> instance
     if (!hit.x) return "nothing";
 
     const auto instance = hit.x - 1, geometry = hit.y & 0x7FFFFFFFu, kind = hit.z;
-    std::string what = (kind & GI_INSTANCE_TERRAIN) ? "the terrain" : (kind & GI_INSTANCE_DYNAMIC) ? "the skinned meshes" : "a captured mesh";
+    std::string what = "the terrain";
     if (kind & GI_INSTANCE_MODEL)
     {
         const auto placed = std::lower_bound(instancedModels.begin(), instancedModels.end(), instance,
             [](const InstancedModel& model, std::uint32_t value) { return model.instance < value; });
         if (placed == instancedModels.end() || placed->instance != instance) what = "one of the game's models";
+        else if (kind & GI_INSTANCE_CHARACTER)
+            // A character's geometries are the meshes it shows, not its model's.
+            what = std::format("character {:x} at ({:.1f} {:.1f} {:.1f}), its shown mesh {}", placed->hash, placed->position[0], placed->position[1],
+                placed->position[2], geometry);
         else
         {
             what = std::format("model {:x} placed at ({:.1f} {:.1f} {:.1f})", placed->hash, placed->position[0], placed->position[1], placed->position[2]);
@@ -1089,17 +1212,11 @@ std::string describeHit(const State& s, std::span<const InstancedModel> instance
 }
 
 // The probe as text, and a key that changes when what blocks its ray changes.
-std::pair<std::string, std::string> describeProbe(const State& s, std::span<const InstancedModel> instancedModels, const GIShadowProbe& probe,
-    std::vector<uint4> crossings)
+std::pair<std::string, std::string> describeProbe(const State& s, std::span<const InstancedModel> instancedModels, const GIShadowProbe& probe)
 {
-    const auto& r = probe.reasons;
     const auto stats = s.scene->stats();
-    std::uint32_t evicted{};
-    for (const auto count : s.evictedByFrame) evicted += count;
-    const auto scene = std::format("scene: {} instances: {} in the scene, {} captured kept out of view, {} kept behind what the game drew, {} left out; "
-        "geometry pool {}, structures {}, {} structures waiting to be built; {} captured meshes evicted in the last {} frames",
-        r.x + r.y + r.z + r.w, r.x, r.y, r.z, r.w, percentOf(stats.poolUsed, stats.poolCapacity), percentOf(stats.blasUsed, stats.blasCapacity),
-        stats.waiting, evicted, s.evictedByFrame.size());
+    const auto scene = std::format("scene: {} instances; geometry pool {}, structures {}, {} structures waiting to be built", s.instances,
+        percentOf(stats.poolUsed, stats.poolCapacity), percentOf(stats.blasUsed, stats.blasCapacity), stats.waiting);
     if (probe.receiver.w <= 0) return {"centre pixel: the sky\n" + scene, "sky"};
 
     std::string text = std::format("centre pixel: surface {:.1f} m away at ({:.1f} {:.1f} {:.1f}), normal ({:.2f} {:.2f} {:.2f}), {:.2f} beyond the "
@@ -1114,27 +1231,17 @@ std::pair<std::string, std::string> describeProbe(const State& s, std::span<cons
             : h.z ? std::format("are blocked at {:.1f} m (instance {})", probe.segments.w, h.z - 1)
                   : std::string("reach the sun"));
 
-    std::string key = std::format("{}|{}", h.y || h.z ? "blocked" : "lit", h.w ? std::to_string(probe.hitEntry.x) : "-");
+    std::string key = std::format("{}|{}", h.y || h.z ? "blocked" : "lit", h.w ? std::to_string(probe.hitGeometry.x) : "-");
     if (h.w)
     {
-        const auto& e = probe.hitEntry;
-        const auto kind = e.z & 0xFFFFu, flags = e.z >> 16;
-        const bool captured = (kind & (GI_INSTANCE_CAPTURED | GI_INSTANCE_DYNAMIC)) != 0;
-        const auto what = (kind & GI_INSTANCE_MODEL) ? std::format("one of the game's models, geometry {}", e.x)
-            : (kind & GI_INSTANCE_TERRAIN) ? std::format("the terrain, geometry {}", e.x)
-            : (kind & GI_INSTANCE_DYNAMIC) ? std::string("the skinned meshes")
-                                           : std::format("captured entry {}", e.x);
-        text += std::format("with every instance: hits {} ({}{}), {}", what, (flags & GI_GEOMETRY_CUT_OUT) ? "cut-out" : "opaque",
-            (flags & GI_GEOMETRY_ALPHA_TEXTURE) ? " with the game's alpha" : "", reasonName(e.y));
-        if (probe.hitBox.w > 0.5f)
-            text += std::format(" (its box's nearest depth {:.6f}, the farthest drawn over its rectangle {:.6f} at pyramid level {:.0f})", probe.hitBox.x,
-                probe.hitBox.y, probe.hitBox.z);
+        const auto& g = probe.hitGeometry;
+        const auto kind = g.y & 0xFFFFu, flags = g.y >> 16;
+        text += std::format("with every instance: hits {}, geometry {} ({}{})", (kind & GI_INSTANCE_TERRAIN) ? "the terrain" : "one of the game's models", g.x,
+            (flags & GI_GEOMETRY_CUT_OUT) ? "cut-out" : "opaque", (flags & GI_GEOMETRY_ALPHA_TEXTURE) ? " with the game's alpha" : "");
         if (kind & GI_INSTANCE_TERRAIN)
             text += std::format("; its triangle's highest corner at {:.1f} m as its ring was made, the heightmap {:.1f} m there now (level of detail {:.0f})",
                 probe.terrain.x, probe.terrain.y, probe.terrain.z);
-        if (captured) text += "; entry " + entryState(e.w);
         text += "\n";
-        key += std::format("|{}", e.y);
     }
     else
         text += "with every instance: nothing in the scene blocks it\n";
@@ -1148,29 +1255,6 @@ std::pair<std::string, std::string> describeProbe(const State& s, std::span<cons
     text += std::format("frame {}; the terrain rings last made at frames", static_cast<std::uint32_t>(probe.terrain.w));
     for (const auto& ring : s.terrain) text += " " + std::to_string(ring.refreshed);
     text += "\n";
-
-    // The captured meshes whose bounds the ray crosses, nearest first, past the receiver's own.
-    std::sort(crossings.begin(), crossings.end(), [](const uint4& a, const uint4& b) { return std::bit_cast<float>(a.y) < std::bit_cast<float>(b.y); });
-    std::uint32_t inScene{}, leftOut{}, unbuilt{}, uninstanced{};
-    for (const auto& c : crossings)
-    {
-        if (!(c.z & GI_ENTRY_BUILT)) ++unbuilt;
-        else if (!(c.z & GI_ENTRY_INSTANCED)) ++uninstanced;
-        else if (c.w == GI_REASON_LEFT_OUT) ++leftOut;
-        else ++inScene;
-    }
-
-    text += std::format("bounds crossed: {} captured meshes{}: {} in the scene, {} left out, {} without a structure yet, {} past the instance limit",
-        probe.crossings.x, probe.crossings.x > crossings.size() ? std::format(" ({} listed)", crossings.size()) : "", inScene, leftOut, unbuilt, uninstanced);
-    std::uint32_t shown{};
-    for (const auto& c : crossings)
-    {
-        const float enter = std::bit_cast<float>(c.y);
-        if (enter < 0.5f || shown == 8) continue;
-
-        text += std::format("{} entry {} at {:.1f} m ({})", shown++ ? ";" : "; nearest past 0.5 m:", c.x, enter,
-            !(c.z & GI_ENTRY_BUILT) ? "no structure yet" : !(c.z & GI_ENTRY_INSTANCED) ? "past the instance limit" : reasonName(c.w));
-    }
 
     // The game's models whose world bounds the ray crosses, past the receiver: whether the renderer has
     // them, and each mesh.
@@ -1228,7 +1312,7 @@ std::pair<std::string, std::string> describeProbe(const State& s, std::span<cons
     }
 
     std::sort(crossed.begin(), crossed.end(), [](const Crossed& a, const Crossed& b) { return a.enter < b.enter; });
-    text += std::format("\nthe game's models whose bounds the ray crosses: {}{}", crossed.size(),
+    text += std::format("the game's models whose bounds the ray crosses: {}{}", crossed.size(),
         unknown ? std::format(" ({} placements of models not read yet)", unknown) : "");
     for (std::size_t i = 0; i < crossed.size() && i < 8; ++i)
     {
@@ -1260,20 +1344,21 @@ void readProbe(State& s, std::uint32_t slot)
 
     GIShadowProbe probe{};
     std::memcpy(&probe, data, sizeof(probe));
-    std::vector<uint4> crossings(std::min(probe.crossings.y, GI_PROBE_CROSSINGS));
-    std::memcpy(crossings.data(), static_cast<const std::uint8_t*>(data) + sizeof(probe), crossings.size() * sizeof(uint4));
     const D3D12_RANGE none{};
     s.probeReadback[slot]->Unmap(0, &none);
 
-    auto [text, key] = describeProbe(s, s.instancedModels[slot], probe, std::move(crossings));
+    auto [text, key] = describeProbe(s, s.instancedModels[slot], probe);
     const auto now = GetTickCount64();
     std::lock_guard lock(probeMutex);
     probeText = text;
-    if (key != lastProbeKey && now - lastProbeLog >= 200)
+    if constexpr (DiagnosticLog)
     {
-        lastProbeKey = key;
-        lastProbeLog = now;
-        log("Shadow probe:\n" + text);
+        if (key != lastProbeKey && now - lastProbeLog >= 200)
+        {
+            lastProbeKey = key;
+            lastProbeLog = now;
+            log("Shadow probe:\n" + text);
+        }
     }
 }
 
@@ -1305,8 +1390,7 @@ void logTally(State& s)
 
     log(line + " total " + milliseconds(total) + " ms. Bottom-level structures a frame: " + std::to_string(t.builds / t.frames) + " built ("
         + std::to_string(t.builtTriangles / t.frames / 1000) + "k triangles), at most " + std::to_string(t.mostBuilds) + " in a frame, "
-        + std::to_string(t.waiting / t.frames) + " waiting, " + std::to_string(t.compactions) + " compacted in all; skinned meshes: "
-        + std::to_string(t.skinnedTriangles / t.frames / 1000) + "k triangles. CPU a frame: " + milliseconds(t.cpuMilliseconds / t.frames)
+        + std::to_string(t.waiting / t.frames) + " waiting, " + std::to_string(t.compactions) + " compacted in all. CPU a frame: " + milliseconds(t.cpuMilliseconds / t.frames)
         + " ms (" + steps + "), at most " + milliseconds(t.mostCpuMilliseconds) + " ms.");
     t = {};
     t.since = now;
@@ -1333,11 +1417,11 @@ Result render(const Frame& frame)
     lap(WaitStep);
     auto& scene = *s.scene;
     scene.beginFrame(slot, s.fence->GetCompletedValue(), frame.signalValue);
-    logStats(s);
+    if constexpr (DiagnosticLog) logStats(s);
     readTimes(s, slot);
     readProbe(s, slot);
     lap(ProbeStep);
-    logTally(s);
+    if constexpr (DiagnosticLog) logTally(s);
 
     // A new render size starts the light and the shadows over. Each has memory only once traced;
     // the shadows give theirs back when turned off.
@@ -1363,135 +1447,41 @@ Result render(const Frame& frame)
         s.shadows.reset();
     }
 
-    if (s.pyramidWidth != (frame.width + 1) / 2 || s.pyramidHeight != (frame.height + 1) / 2)
-    {
-        waitForAll();
-        s.pyramidWidth = (frame.width + 1) / 2;
-        s.pyramidHeight = (frame.height + 1) / 2;
-        s.pyramidLevels = static_cast<UINT>(std::min<std::size_t>(std::bit_width(std::max(s.pyramidWidth, s.pyramidHeight)), MaxPyramidLevels));
-        s.depthPyramid = createTexture(s.device.Get(), s.pyramidWidth, s.pyramidHeight, DXGI_FORMAT_R32_FLOAT, static_cast<UINT16>(s.pyramidLevels),
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "Creating the depth pyramid");
-    }
-
     const bool traceLight = frame.traceLight && s.light;
     const bool traceShadows = frame.traceShadows && s.shadows && frame.textures.shadow;
     const bool debugShadows = traceShadows && frame.debugShadows && frame.textures.shadowDebug;
+    const bool traceLocalLights = !frame.localLights.empty() && frame.textures.localLightShadow;
+    if (traceLocalLights && (s.localShadowWidth != frame.width || s.localShadowHeight != frame.height))
+    {
+        waitForAll();
+        const auto texture = [&](const char* what) {
+            return createTexture(s.device.Get(), frame.width, frame.height, DXGI_FORMAT_R16G16_FLOAT, 1, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, what);
+        };
+        s.localShadowRays = texture("Creating the lights' shadow rays");
+        s.localShadowFirst = texture("Creating the lights' shadow filter");
+        s.localShadowWidth = frame.width;
+        s.localShadowHeight = frame.height;
+    }
     if (!debugShadows)
     {
         std::lock_guard lock(probeMutex);
         probeText.clear();
     }
 
-    // Captured meshes the frame drew stay; eviction takes others first.
-    for (const auto index : frame.drawn)
-        if (index < DynamicEntry && s.entries[index].live && s.entries[index].lastDrawn != frame.frameIndex)
-        {
-            s.entries[index].lastDrawn = frame.frameIndex;
-            ++s.entries[index].framesDrawn;
-        }
-
-    // ---- The game's models ----
+    // ---- The game's models and characters ----
     updateModels(s, frame, result);
+    std::vector<GISkinRecord> skins;
+    std::vector<float> palettes;
+    updateCharacters(s, frame, skins, palettes);
     lap(ModelsStep);
 
-    // ---- The frame's captures into the pool ----
-    std::vector<GIScatterRecord> scatter;
-    std::uint32_t scatterVertices{}, skinnedVertices{};
-    bool evictedVertices{}, evictedStructures{};
-    for (const auto& capture : frame.captures)
-    {
-        if (!capture.vertexCount) continue;
-
-        // The skinned meshes follow one another in their room.
-        if (capture.dynamic)
-        {
-            if (skinnedVertices + capture.vertexCount > SkinnedVertices) continue;
-
-            scatter.push_back({DynamicEntry, capture.transferOffset, capture.vertexCount, static_cast<std::uint32_t>(s.skinnedOffset + std::uint64_t{skinnedVertices} * 16), 0, 0, {}});
-            scatterVertices = std::max(scatterVertices, capture.transferOffset + capture.vertexCount);
-            skinnedVertices += capture.vertexCount;
-            continue;
-        }
-
-        if (capture.entry >= DynamicEntry) continue;
-
-        auto& entry = s.entries[capture.entry];
-        if (!entry.live)
-        {
-            entry = {};
-            entry.live = true;
-            entry.framesDrawn = 1;
-        }
-
-        entry.lastDrawn = frame.frameIndex;
-        entry.alphaTested |= capture.alphaTested;
-        if (!entry.hasVertices || entry.vertexCount != capture.vertexCount)
-        {
-            if (entry.hasVertices) scene.release(entry.poolOffset, std::uint64_t{entry.vertexCount} * 16);
-            entry.hasVertices = false;
-            const auto offset = scene.allocate(std::uint64_t{capture.vertexCount} * 16);
-            if (!offset)
-            {
-                evictForRoom(s, false, std::uint64_t{capture.vertexCount} * 16, frame, result.evicted, evictedVertices);
-                evict(s, capture.entry, result.evicted);
-                continue;
-            }
-
-            entry.poolOffset = *offset;
-            entry.vertexCount = capture.vertexCount;
-            entry.hasVertices = true;
-        }
-
-        // Records adjoin in the transfer texture, in the order they came.
-        scatter.push_back({capture.entry, capture.transferOffset, capture.vertexCount, static_cast<std::uint32_t>(entry.poolOffset), 0, 0, {}});
-        scatterVertices = std::max(scatterVertices, capture.transferOffset + capture.vertexCount);
-        entry.needsBlas = true;
-    }
-
-    for (const auto index : frame.alphaTested)
-        if (index < DynamicEntry && s.entries[index].live && !s.entries[index].alphaTested)
-        {
-            s.entries[index].alphaTested = true;
-            s.entries[index].needsBlas = s.entries[index].hasVertices;
-        }
-
-    // A captured mesh's structure is made again with its vertices, and with its cut-out flag; those not
-    // drawn for RetentionFrames leave.
-    std::uint32_t live{};
-    for (std::uint32_t index = 0; index < DynamicEntry; ++index)
-    {
-        auto& entry = s.entries[index];
-        if (!entry.live) continue;
-
-        if (frame.frameIndex - entry.lastDrawn > RetentionFrames)
-        {
-            evict(s, index, result.evicted);
-            continue;
-        }
-
-        ++live;
-        if (!entry.needsBlas) continue;
-
-        if (entry.blas) scene.destroyBlas(*entry.blas);
-        entry.blas = scene.createBlas(gi_scene::Use::Static,
-            {{entry.poolOffset, entry.vertexCount, 0, 0, entry.alphaTested ? GI_GEOMETRY_CUT_OUT : 0u}});
-        entry.needsBlas = false;
-        if (!entry.blas)
-        {
-            evictForRoom(s, true, 0, frame, result.evicted, evictedStructures);
-            evict(s, index, result.evicted);
-        }
-    }
-
-    // ---- The game's terrain, and the skinned meshes ----
+    // ---- The game's terrain ----
     std::array<bool, GI_TERRAIN_RINGS> remadeRing{};
     const bool terrain = frame.terrain.has_value();
     if (terrain) planTerrain(s, frame, remadeRing);
-    scene.buildFrame(s.skinnedBlas, skinnedVertices);
 
-    // New geometry starts what was learnt about it over (ClearBounds); its records scatter no
-    // vertices, so they lie past the captures'.
-    for (const auto row : scene.takeNewGeometries()) scatter.push_back({0, scatterVertices, 0, 0, row, GI_SCATTER_NEW, {}});
+    // New geometry starts what was learnt about it over (ClearNewGeometries).
+    const auto newGeometries = scene.takeNewGeometries();
 
     scene.planBuilds();
 
@@ -1503,23 +1493,19 @@ Result render(const Frame& frame)
         auto* depth = openShared(s, s.depth, frame.textures.depth, "Opening the depth").Get();
         auto* normal = openShared(s, s.normal, frame.textures.normal, "Opening the normals").Get();
         auto* albedo = openShared(s, s.albedo, frame.textures.albedo, "Opening the albedo").Get();
-        auto* transfer = openShared(s, s.transfer, frame.textures.transfer, "Opening the transfer texture").Get();
         auto* output = openShared(s, s.output, frame.textures.output, "Opening the output").Get();
         auto* shadow = traceShadows ? openShared(s, s.shadow, frame.textures.shadow, "Opening the shadow").Get() : nullptr;
         auto* shadowDebug = debugShadows ? openShared(s, s.shadowDebug, frame.textures.shadowDebug, "Opening the shadow debug view").Get() : nullptr;
+        auto* velocity = traceShadows && frame.textures.velocity ? openShared(s, s.velocity, frame.textures.velocity, "Opening the velocity").Get() : nullptr;
+        auto* localLightShadow = traceLocalLights
+            ? openShared(s, s.localLightShadow, frame.textures.localLightShadow, "Opening the lights' shadow").Get()
+            : nullptr;
         auto* terrainPages = terrain ? openShared(s, s.terrainPages, frame.terrain->pages, "Opening the terrain's page table").Get() : nullptr;
         auto* terrainHeights = terrain ? openShared(s, s.terrainHeights, frame.terrain->heights, "Opening the terrain's heights").Get() : nullptr;
 
-        // ---- The frame's instances: the skinned meshes, the game's models where the game has them
-        // (drawn this frame or not), the terrain, the captured meshes ----
+        // ---- The frame's instances: the game's models where the game has them (on screen or not), its
+        // characters, its terrain ----
         std::uint64_t triangles{};
-        if (debugShadows) std::fill(s.entryInstance.begin(), s.entryInstance.end(), GI_REASON_NONE);
-        if (const auto instance = scene.addInstance(s.skinnedBlas, nullptr, GI_INSTANCE_DYNAMIC | GI_INSTANCE_DRAWN | (DynamicEntry << GI_INSTANCE_ENTRY_SHIFT)))
-        {
-            s.entryInstance[DynamicEntry] = *instance;
-            triangles += skinnedVertices / 3;
-        }
-
         std::uint32_t modelInstances{};
         std::uint64_t modelTriangles{};
         auto found = s.models.end();
@@ -1541,6 +1527,30 @@ Result render(const Frame& frame)
         }
 
         triangles += modelTriangles;
+        std::uint32_t charactersTraced{};
+        std::uint64_t characterVertices{}, characterTriangles{};
+        for (const auto& [id, character] : s.characters)
+        {
+            if (!character.traced) continue;
+
+            const auto instance = scene.addInstance(character.blas, character.transform.data(), GI_INSTANCE_MODEL | GI_INSTANCE_CHARACTER);
+            if (!instance) continue;
+
+            if (debugShadows) instancedModels.push_back({*instance, character.hash, {character.transform[3], character.transform[7], character.transform[11]}});
+
+            ++charactersTraced;
+            const auto& parts = s.models.at(character.hash).parts;
+            for (const auto i : character.parts)
+            {
+                characterVertices += parts[i].vertexCount;
+                characterTriangles += parts[i].indexCount / 3;
+            }
+        }
+
+        triangles += characterTriangles;
+        s.charactersTraced = charactersTraced;
+        s.characterVertices = characterVertices;
+        s.characterTriangles = characterTriangles;
         std::uint32_t terrainRings{};
         for (std::uint32_t r = 0; r < GI_TERRAIN_RINGS && terrain; ++r)
             if (scene.addInstance(s.terrain[r].blas, nullptr, GI_INSTANCE_TERRAIN))
@@ -1553,54 +1563,26 @@ Result render(const Frame& frame)
         s.modelInstanceCount = modelInstances;
         s.modelTriangles = modelTriangles;
 
-        std::array<std::uint32_t, 4> entriesByAge{};
-        std::array<std::uint64_t, 4> trianglesByAge{};
-        std::uint32_t drawnOnce{};
-        std::uint64_t drawnOnceTriangles{};
-        for (std::uint32_t index = 0; index < DynamicEntry; ++index)
-        {
-            const auto& entry = s.entries[index];
-            if (!entry.live) continue;
-
-            const auto age = frame.frameIndex - entry.lastDrawn;
-            const bool drawn = age <= (entry.framesDrawn > 1 ? DrawnGraceFrames : 0);
-            const auto bucket = age == 0 ? 0 : age <= 60 ? 1 : age <= 600 ? 2 : 3;
-            ++entriesByAge[bucket];
-            trianglesByAge[bucket] += entry.vertexCount / 3;
-            if (age > 0 && entry.framesDrawn == 1)
-            {
-                ++drawnOnce;
-                drawnOnceTriangles += entry.vertexCount / 3;
-            }
-
-            if (!entry.blas) continue;
-
-            const auto kind = GI_INSTANCE_CAPTURED | (drawn ? GI_INSTANCE_DRAWN : 0u) | (index << GI_INSTANCE_ENTRY_SHIFT);
-            if (const auto instance = scene.addInstance(*entry.blas, nullptr, kind, entry.alphaTested ? GI_MASK_CAPTURED_CUT_OUT : GI_MASK_SCENE))
-            {
-                s.entryInstance[index] = *instance;
-                triangles += entry.vertexCount / 3;
-            }
-        }
-
         const auto instanceCount = scene.instanceCount();
-        s.liveEntries = live;
         s.instances = instanceCount;
         s.triangles = triangles;
-        s.entriesByAge = entriesByAge;
-        s.trianglesByAge = trianglesByAge;
-        s.drawnOnce = drawnOnce;
-        s.drawnOnceTriangles = drawnOnceTriangles;
         lap(InstancesStep);
 
         Uploads uploads{s.uploadData[slot], s.upload[slot]->GetGPUVirtualAddress()};
-        const auto scatterCount = static_cast<std::uint32_t>(scatter.size());
-        const auto scatterOffset = uploads.reserve(sizeof(GIScatterRecord), scatterCount);
-        std::memcpy(uploads.data + scatterOffset, scatter.data(), scatter.size() * sizeof(GIScatterRecord));
+        const auto newGeometryCount = static_cast<std::uint32_t>(newGeometries.size());
+        const auto newGeometriesOffset = uploads.reserve(4, newGeometryCount);
+        std::memcpy(uploads.data + newGeometriesOffset, newGeometries.data(), newGeometries.size() * 4);
+        const auto skinCount = static_cast<std::uint32_t>(skins.size());
+        const auto skinVertices = skins.empty() ? 0u : skins.back().firstVertex + skins.back().vertexCount;
+        const auto skinOffset = uploads.reserve(sizeof(GISkinRecord), skinCount);
+        std::memcpy(uploads.data + skinOffset, skins.data(), skins.size() * sizeof(GISkinRecord));
+        const auto paletteRows = palettes.size() / 4;
+        const auto paletteOffset = uploads.reserve(16, paletteRows);
+        std::memcpy(uploads.data + paletteOffset, palettes.data(), palettes.size() * sizeof(float));
 
         const auto parity = frame.frameIndex & 1;
         const auto constantsOffset = uploads.reserve(256, (sizeof(GIFrameConstants) + 255) / 256);
-        auto constants = constantsOf(frame, scatterCount, instanceCount);
+        auto constants = constantsOf(frame, newGeometryCount, instanceCount);
         if (terrain)
         {
             const auto& t = *frame.terrain;
@@ -1617,6 +1599,8 @@ Result render(const Frame& frame)
         }
         if (traceLight) s.light->fill(constants, frame.verticalFov, parity);
         if (traceShadows) s.shadows->fill(constants);
+        constants.shadowMotion = {velocity ? 1u : 0u, 0, 0, 0};
+        constants.shadowDiagnostics = {frame.shadowsFromDepth ? 1u : 0u, 0, 0, 0};
         std::memcpy(uploads.data + constantsOffset, &constants, sizeof(constants));
 
         // ---- Descriptors ----
@@ -1624,52 +1608,36 @@ Result render(const Frame& frame)
         descriptors.texture(0, depth, DXGI_FORMAT_R32_FLOAT);
         descriptors.texture(1, normal, DXGI_FORMAT_R10G10B10A2_UNORM);
         descriptors.texture(2, albedo, DXGI_FORMAT_R8G8B8A8_UNORM);
-        descriptors.texture(3, transfer, DXGI_FORMAT_R32G32B32A32_FLOAT);
-        descriptors.buffer(4, s.upload[slot].Get(), scatterOffset, sizeof(GIScatterRecord), scatterCount);
+        descriptors.buffer(4, s.upload[slot].Get(), newGeometriesOffset, 4, newGeometryCount);
+        descriptors.buffer(12, s.upload[slot].Get(), skinOffset, sizeof(GISkinRecord), skinCount);
+        descriptors.buffer(13, s.upload[slot].Get(), paletteOffset, 16, paletteRows);
         descriptors.buffer(5, scene.instanceBuffer(), 0, sizeof(GIInstanceDesc), instanceCount);
         descriptors.rawBuffer(6, scene.pool(), gi_scene::Scene::PoolBytes);
         descriptors.buffer(16, scene.geometryTable(), 0, sizeof(GIGeometry), MaxGeometries);
         descriptors.outputTexture(0, output, DXGI_FORMAT_R16G16B16A16_FLOAT);
         descriptors.outputRawBuffer(1, scene.pool(), gi_scene::Scene::PoolBytes);
-        descriptors.outputBuffer(2, s.entryBounds.Get(), 4, std::uint64_t{MaxEntries} * 6);
-        descriptors.outputBuffer(3, scene.instanceBuffer(), sizeof(GIInstanceDesc), MaxInstances);
         descriptors.outputBuffer(4, s.counters.Get(), 4, GI_COUNTER_COUNT);
         descriptors.outputBuffer(5, s.dispatchArguments.Get(), 16, GI_DISPATCH_SLOTS);
         descriptors.outputBuffer(6, s.geometryAlbedo.Get(), 16, MaxGeometries);
-        descriptors.texture(10, s.depthPyramid.Get(), DXGI_FORMAT_R32_FLOAT, s.pyramidLevels);
         if (terrain)
         {
             descriptors.texture(14, terrainPages, frame.terrain->pagesFormat);
             descriptors.texture(15, terrainHeights, frame.terrain->heightsFormat);
         }
-        descriptors.outputBuffer(76, s.instanceDebug.Get(), 16, MaxInstances);
+        if (velocity) descriptors.texture(17, velocity, frame.textures.velocityFormat);
         if (debugShadows)
         {
-            // Each captured mesh's state for the probe (GI_ENTRY_* in gi_shared.h), and its instance.
-            const auto statesOffset = uploads.reserve(8, MaxEntries);
-            auto* states = reinterpret_cast<std::uint32_t*>(uploads.data + statesOffset);
-            for (std::uint32_t index = 0; index < MaxEntries; ++index)
-            {
-                const auto& entry = s.entries[index];
-                const auto instance = s.entryInstance[index];
-                const bool built = entry.blas && scene.ready(*entry.blas);
-                std::uint32_t bits = (entry.live ? GI_ENTRY_LIVE : 0u) | (built ? GI_ENTRY_BUILT : 0u) | (entry.alphaTested ? GI_ENTRY_ALPHA_TESTED : 0u)
-                    | (instance != GI_REASON_NONE ? GI_ENTRY_INSTANCED : 0u);
-                if (index == DynamicEntry && skinnedVertices) bits = GI_ENTRY_LIVE | GI_ENTRY_BUILT | GI_ENTRY_INSTANCED;
-                const auto age = entry.live ? std::min<std::uint32_t>(frame.frameIndex - entry.lastDrawn, 0xFFF) : 0u;
-                states[2 * index] = bits | (age << 8) | (std::min<std::uint32_t>(entry.framesDrawn, 0xFFF) << 20);
-                states[2 * index + 1] = instance;
-            }
-
-            descriptors.buffer(11, s.upload[slot].Get(), statesOffset, 8, MaxEntries);
             descriptors.outputBuffer(77, s.probe.Get(), sizeof(GIShadowProbe), 1);
             descriptors.outputTexture(78, shadowDebug, DXGI_FORMAT_R8G8B8A8_UNORM);
-            descriptors.outputBuffer(79, s.probeCrossings.Get(), 16, GI_PROBE_CROSSINGS);
         }
-        for (UINT level = 0; level < s.pyramidLevels; ++level)
-            descriptors.outputTexture(PyramidSlot + level, s.depthPyramid.Get(), DXGI_FORMAT_R32_FLOAT, level);
         if (traceLight) s.light->describe(descriptors, parity);
         if (traceShadows) s.shadows->describe(descriptors, parity, shadow);
+        if (traceLocalLights)
+        {
+            descriptors.outputTexture(89, localLightShadow, DXGI_FORMAT_R16_FLOAT);
+            descriptors.outputTexture(90, s.localShadowRays.Get(), DXGI_FORMAT_R16G16_FLOAT);
+            descriptors.outputTexture(91, s.localShadowFirst.Get(), DXGI_FORMAT_R16G16_FLOAT);
+        }
 
         ID3D12DescriptorHeap* heaps[]{s.heap.Get()};
         list.SetDescriptorHeaps(1, heaps);
@@ -1692,71 +1660,65 @@ Result render(const Frame& frame)
             marks.push_back(phase ? phase : "");
         };
 
-        recorder.mark("scatter");
+        recorder.mark("scene writes");
         D3D12_RESOURCE_BARRIER begin[]{
             transition(depth, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
             transition(normal, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
             transition(albedo, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
-            transition(transfer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
             transition(output, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
         };
         list.ResourceBarrier(static_cast<UINT>(std::size(begin)), begin);
         if (traceShadows) recorder.transition(shadow, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (debugShadows) recorder.transition(shadowDebug, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (velocity) recorder.transition(velocity, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (traceLocalLights) recorder.transition(localLightShadow, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (terrain)
         {
             recorder.transition(terrainPages, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             recorder.transition(terrainHeights, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
 
-        // The pool's uploads and the table's rows, then the geometry the GPU makes: the captures, the terrain.
+        // The pool's uploads and the table's rows, then the geometry the GPU makes: the terrain, the
+        // characters' poses.
         scene.recordWrites(list);
-        if (scatterCount)
-        {
-            recorder.dispatch(Kernel::ClearBounds, groups(scatterCount, 64));
-            recorder.barrier();
-            recorder.dispatch(Kernel::Scatter, groups(scatterVertices, 64), 1, {scatterVertices});
-        }
+        if (newGeometryCount) recorder.dispatch(Kernel::ClearNewGeometries, groups(newGeometryCount, 64));
 
         for (std::uint32_t r = 0; r < GI_TERRAIN_RINGS; ++r)
             if (remadeRing[r]) recorder.dispatch(Kernel::TerrainGrid, groups(GI_TERRAIN_CELLS, 8), groups(GI_TERRAIN_CELLS, 8), {r});
 
+        if (skinCount) recorder.dispatch(Kernel::Skin, groups(skinVertices, 64), 1, {skinVertices, skinCount});
+
         recorder.mark("bottom-level structures");
         scene.recordBottomLevels(list);
 
-        // The captured meshes' culling reads the depth pyramid and their bounds; the top level, the
-        // bottom levels and the instances.
+        // The instances, then the top level over the bottom levels.
         recorder.mark("instances and top level");
-        for (UINT level = 0; level < s.pyramidLevels; ++level)
-        {
-            recorder.dispatch(Kernel::BuildDepthPyramid, groups(std::max(s.pyramidWidth >> level, 1u), 8), groups(std::max(s.pyramidHeight >> level, 1u), 8),
-                {level});
-            recorder.barrier();
-        }
-
         scene.recordInstances(list);
-        recorder.transition(s.depthPyramid.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        recorder.dispatch(Kernel::CullCaptured, groups(instanceCount, 64));
-        recorder.transition(s.depthPyramid.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         scene.recordTopLevel(list);
 
         // ---- The shadows, then the light or the debug view ----
+        if (traceLocalLights)
+        {
+            recorder.mark("shadow rays for lights");
+            recorder.dispatch(Kernel::TraceLocalLightShadows, groups(frame.width, 8), groups(frame.height, 8));
+            recorder.barrier();
+            recorder.mark("shadow filter for lights");
+            for (std::uint32_t pass = 0; pass < 3; ++pass)
+            {
+                recorder.dispatch(Kernel::FilterLocalLightShadows, groups(frame.width, 8), groups(frame.height, 8), {pass, 1u << pass});
+                recorder.barrier();
+            }
+        }
         if (traceShadows) s.shadows->record(recorder);
         if (debugShadows)
         {
             recorder.mark("debug view and probe");
             recorder.dispatch(Kernel::DebugShadows, groups(frame.width, 8), groups(frame.height, 8));
-            recorder.dispatch(Kernel::ProbeShadows, 1, 1, {MaxEntries});
+            recorder.dispatch(Kernel::ProbeShadows, 1, 1);
             recorder.barrier();
-            D3D12_RESOURCE_BARRIER copy[]{
-                transition(s.probe.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
-                transition(s.probeCrossings.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
-            };
-            list.ResourceBarrier(static_cast<UINT>(std::size(copy)), copy);
+            recorder.transition(s.probe.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
             list.CopyBufferRegion(s.probeReadback[slot].Get(), 0, s.probe.Get(), 0, sizeof(GIShadowProbe));
-            list.CopyBufferRegion(s.probeReadback[slot].Get(), sizeof(GIShadowProbe), s.probeCrossings.Get(), 0, std::uint64_t{GI_PROBE_CROSSINGS} * 16);
-            for (auto& barrier : copy) std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-            list.ResourceBarrier(static_cast<UINT>(std::size(copy)), copy);
+            recorder.transition(s.probe.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             s.probeWritten[slot] = true;
         }
         if (frame.showScene)
@@ -1766,33 +1728,9 @@ Result render(const Frame& frame)
         }
         else if (traceLight) s.light->record(recorder, parity, depth, normal);
 
-        // Diagnostics: every ten seconds, a copy of the output to read back.
-        const auto now = GetTickCount64();
-        if (!s.statsFence && now - s.lastStats > 10'000 && !frame.showScene && traceLight)
+        if constexpr (DiagnosticLog)
         {
-            s.lastStats = now;
-            const auto desc = output->GetDesc();
-            UINT64 bytes{};
-            s.device->GetCopyableFootprints(&desc, 0, 1, 0, &s.statsFootprint, nullptr, nullptr, &bytes);
-            if (!s.statsReadback || s.statsReadback->GetDesc().Width < bytes)
-                s.statsReadback = createBuffer(s.device.Get(), bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
-                    D3D12_RESOURCE_FLAG_NONE, "Creating the light's readback");
-            if (!s.statsCounters)
-                s.statsCounters = createBuffer(s.device.Get(), GI_COUNTER_COUNT * 4, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
-                    D3D12_RESOURCE_FLAG_NONE, "Creating the counters' readback");
-
-            recorder.transition(s.counters.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            list.CopyBufferRegion(s.statsCounters.Get(), 0, s.counters.Get(), 0, GI_COUNTER_COUNT * 4);
-            recorder.transition(s.counters.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-            recorder.transition(output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            D3D12_TEXTURE_COPY_LOCATION from{output, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {}};
-            from.SubresourceIndex = 0;
-            D3D12_TEXTURE_COPY_LOCATION to{s.statsReadback.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, {}};
-            to.PlacedFootprint = s.statsFootprint;
-            list.CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
-            recorder.transition(output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            s.statsFence = frame.signalValue;
+            if (traceLight && !frame.showScene) copyStats(s, recorder, output, frame);
         }
 
         D3D12_RESOURCE_BARRIER end[]{
@@ -1800,12 +1738,13 @@ Result render(const Frame& frame)
             transition(depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON),
             transition(normal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON),
             transition(albedo, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON),
-            transition(transfer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON),
             transition(output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON),
         };
         list.ResourceBarrier(static_cast<UINT>(std::size(end)), end);
         if (traceShadows) recorder.transition(shadow, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
         if (debugShadows) recorder.transition(shadowDebug, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+        if (velocity) recorder.transition(velocity, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+        if (traceLocalLights) recorder.transition(localLightShadow, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
         if (terrain)
         {
             recorder.transition(terrainPages, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
@@ -1843,9 +1782,7 @@ Result render(const Frame& frame)
     t.builtTriangles += stats.builtTriangles;
     t.waiting += stats.waiting;
     t.compactions += stats.compactedThisFrame;
-    t.skinnedTriangles += skinnedVertices / 3;
 
-    s.evictedByFrame[frame.frameIndex % s.evictedByFrame.size()] = static_cast<std::uint32_t>(result.evicted.size());
     return result;
 }
 
@@ -1866,10 +1803,6 @@ std::string status()
         return text.substr(0, text.find('.') + 3) + " ms";
     };
 
-    const auto aged = [&](int bucket) {
-        return std::to_string(s.entriesByAge[bucket]) + " (" + std::to_string(s.trianglesByAge[bucket] / 1000) + "k triangles)";
-    };
-
     const auto compactedShare = stats.compactedFrom ? std::to_string(stats.compactedTo * 100 / stats.compactedFrom) + "%" : std::string("-");
     return std::to_string(s.instances) + " instances, " + std::to_string(s.triangles / 1000) + "k triangles; geometry pool "
         + percentOf(stats.poolUsed, stats.poolCapacity) + ", structures " + percentOf(stats.blasUsed, stats.blasCapacity) + " (" + std::to_string(stats.structures)
@@ -1878,9 +1811,8 @@ std::string status()
         + ", shadows " + milliseconds(s.shadowMilliseconds) + "; the game's models: " + std::to_string(s.modelInstanceCount) + " instances ("
         + std::to_string(s.modelTriangles / 1000) + "k triangles) of " + std::to_string(s.models.size()) + " models, " + std::to_string(s.modelsWaiting)
         + " waiting for room" + (s.modelsTooLarge ? ", " + std::to_string(s.modelsTooLarge) + " too large" : "") + ", "
-        + std::to_string(GI_MAX_TEXTURES - s.freeTextureIndices.size()) + " of the game's textures held; terrain rings "
-        + std::to_string(s.terrainRings) + " of " + std::to_string(GI_TERRAIN_RINGS) + "; captured meshes " + std::to_string(s.liveEntries)
-        + ": drawn this frame " + aged(0) + ", within a second " + aged(1) + ", within ten seconds " + aged(2) + ", before " + aged(3)
-        + "; drawn in one earlier frame only " + std::to_string(s.drawnOnce) + " (" + std::to_string(s.drawnOnceTriangles / 1000) + "k triangles)";
+        + std::to_string(GI_MAX_TEXTURES - s.freeTextureIndices.size()) + " of the game's textures held; characters: " + std::to_string(s.charactersTraced)
+        + " traced (" + std::to_string(s.characterVertices / 1000) + "k vertices posed, " + std::to_string(s.characterTriangles / 1000) + "k triangles), "
+        + std::to_string(s.charactersWaiting) + " waiting; terrain rings " + std::to_string(s.terrainRings) + " of " + std::to_string(GI_TERRAIN_RINGS);
 }
 }

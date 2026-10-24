@@ -651,8 +651,8 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
         if (options.onlyScreenSpace) sun = reflectsSky(sun) ? Sun::Far : Sun::RainFar;
     }
 
-    // The same for the rays' shadow alone.
-    if (rayTraced && options.onlyRayTraced) sun = reflectsSky(sun) ? Sun::Far : Sun::RainFar;
+    // The rays' shadow alone, unless the shadow map's joins it: everything lit as beyond the shadow range.
+    if (rayTraced && !options.withShadowMap) sun = reflectsSky(sun) ? Sun::Far : Sun::RainFar;
 
     writeOptions(context, options, rayTraced != nullptr);
     ComPtr<ID3D11ShaderResourceView> gameView, gameRayTracedView;

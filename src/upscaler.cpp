@@ -3,6 +3,7 @@
 #include "camera.hpp"
 #include "atmosphere.hpp"
 #include "depth_of_field.hpp"
+#include "draw_distance.hpp"
 #include "focus.hpp"
 #include "frame_rate.hpp"
 #include "fsr_upscaler.hpp"
@@ -11,6 +12,7 @@
 #include "global_illumination.hpp"
 #include "hdr.hpp"
 #include "indirect_light.hpp"
+#include "local_lights.hpp"
 #include "log.hpp"
 #include "motion_blur.hpp"
 #include "performance.hpp"
@@ -50,8 +52,6 @@ using Microsoft::WRL::ComPtr;
 // Any GUID identifies a custom-engine NGX project.
 constexpr char NgxProjectId[] = "3f6c2a91-7d4e-4b8a-a1c5-9e0d2b7f4c68";
 constexpr UINT SceneConstantsSize = sizeof(camera::SceneConstants);
-// Sub-pixel positions a lens shot's frames take turns at.
-constexpr int LensShotJitterPhases = 64;
 
 // The game's pixel shaders the add-on looks for, each drawn as one full-screen triangle.
 enum class Pass : std::uint8_t { Fxaa, CameraVelocity, GammaControl, Count, None = Count };
@@ -119,12 +119,6 @@ struct Frame
     bool jittered{};
     std::array<float, 2> jitter{}; // Render pixels
     std::optional<camera::View> view;
-    // A lens shot (photo_mode.hpp): the camera's centre and focus, and the NDC shift every main-view
-    // upload gets, from the first that carries the camera.
-    bool lensShot{};
-    std::array<float, 3> lensCentre{};
-    float lensFocus{};
-    std::optional<std::array<float, 2>> lensShift;
 };
 
 struct Target
@@ -299,6 +293,11 @@ bool rayTracedShadows()
     return supported && enhancements && settings.rayTracedShadows && !leftOut.rayTracedShadows;
 }
 
+bool rayTracedLights()
+{
+    return supported && enhancements && settings.rayTracedLights && !leftOut.rayTracedLights;
+}
+
 // Call with settingsMutex held, after updateReplacing.
 void configureShadows()
 {
@@ -308,19 +307,20 @@ void configureShadows()
         .sunSize = settings.sunSize,
         .turnPattern = replacing,
         .screenSpaceSun = enhancements && settings.sunScreenSpaceShadows && !leftOut.sunScreenSpaceShadows && !rayTraced,
-        .screenSpaceLights = enhancements && settings.lightScreenSpaceShadows && !leftOut.lightScreenSpaceShadows,
+        .screenSpaceLights = enhancements && settings.lightScreenSpaceShadows && !leftOut.lightScreenSpaceShadows && !rayTracedLights(),
         .rayTraced = rayTraced,
+        .withShadowMap = settings.vanillaShadowsWithRayTracing,
         .onlyScreenSpace = diagnostics.onlyScreenSpaceShadows,
-        .onlyRayTraced = diagnostics.onlyRayTracedShadows,
     });
 }
 
 // Call with settingsMutex held. The global illumination replaces GTVBAO and SSILVB; its scene also
-// gives the ray-traced shadows.
+// gives the ray-traced shadows of the sun and of the point and spot lights.
 void configureIndirectLight()
 {
     const bool global = supported && enhancements && settings.globalIllumination && !leftOut.globalIllumination;
     const bool rayTraced = rayTracedShadows();
+    const bool tracedLights = rayTracedLights();
     indirect_light::configure({
         .occlusion = supported && enhancements && settings.ambientOcclusion && !leftOut.ambientOcclusion && !global,
         .occlusionRadius = settings.occlusionRadius,
@@ -330,13 +330,16 @@ void configureIndirectLight()
         .lightStrength = settings.indirectLightStrength,
         .globalIllumination = global,
         .globalIlluminationStrength = settings.globalIlluminationStrength,
-        .rayTracing = global || rayTraced,
+        .rayTracing = global || rayTraced || tracedLights,
         .showOcclusion = diagnostics.showAmbientOcclusion,
         .showLight = diagnostics.showIndirectLight,
         .showGlobalIllumination = diagnostics.showGlobalIllumination || diagnostics.showTracedScene,
     });
-    global_illumination::configure({.enabled = global, .shadows = rayTraced, .sunSize = settings.sunSize, .showScene = diagnostics.showTracedScene,
-        .debugShadows = diagnostics.debugView == ShadowRaysView, .light = !leftOut.globalLight, .capture = !leftOut.globalCapture});
+    global_illumination::configure({.enabled = global, .shadows = rayTraced, .withShadowMap = settings.vanillaShadowsWithRayTracing,
+        .localLights = tracedLights, .lightRays = settings.rayQuality, .sunSize = settings.sunSize, .showScene = diagnostics.showTracedScene,
+        .debugShadows = diagnostics.debugView == ShadowRaysView, .shadowsFromDepth = diagnostics.shadowsFromDepth, .bonesFromSnapshot = diagnostics.bonesFromSnapshot,
+        .logOften = diagnostics.logGlobalIlluminationOften, .light = !leftOut.globalLight});
+    local_lights::configure({.enabled = tracedLights, .flashlightBrightness = settings.flashlightBrightness});
 }
 
 // Call with settingsMutex held.
@@ -353,14 +356,24 @@ void configureAtmosphere()
 void configureDepthOfField()
 {
     depth_of_field::configure({.gather = supported && settings.depthOfField && !leftOut.depthOfField, .blades = settings.apertureBlades});
-    photo_mode::configure({.fNumber = settings.fNumber, .blades = settings.apertureBlades,
-        .shotFrames = static_cast<std::uint32_t>(settings.lensShotFrames)});
+    photo_mode::configure({.fNumber = settings.fNumber});
 }
 
 // Call with settingsMutex held. Whether HDR runs is decided at start.
 void configureHdr()
 {
     hdr::configure({.peakNits = settings.peakNits, .paperWhiteNits = settings.paperWhiteNits});
+}
+
+// Call with settingsMutex held. Full detail stops at 7 x 7: 9 x 9 overruns a fixed table in the engine.
+void configureDrawDistance()
+{
+    switch (supported ? settings.drawDistance : DrawDistance::Vanilla)
+    {
+    case DrawDistance::Extended: draw_distance::configure({.fullDetail = 7, .coarse = 7, .coarsest = 7, .farDetail = true}); break;
+    case DrawDistance::Far: draw_distance::configure({.fullDetail = 7, .coarse = 9, .coarsest = 9, .farDetail = true}); break;
+    default: draw_distance::configure({}); break;
+    }
 }
 
 // The game keeps FXAA's output where DLSS cannot run.
@@ -474,13 +487,7 @@ void startFrame()
 {
     frame.index++;
     frame.gameFrame = game_loop::currentFrame();
-    // A lens shot jitters on its own, and DLSS starts afresh on each of its frames.
-    const auto lens = photo_mode::lens();
-    frame.lensShot = lens.shooting;
-    frame.lensCentre = lens.centre;
-    frame.lensFocus = lens.focusDistance;
-    frame.lensShift.reset();
-    frame.jittered = jitterNext.load() && replacing.load() && !frame.lensShot;
+    frame.jittered = jitterNext.load() && replacing.load();
     frame.jitter = frame.jittered ? camera::jitterPixels(frame.index, jitterPhases.load()) : std::array<float, 2>{};
     frame.view.reset();
 }
@@ -498,17 +505,7 @@ void sceneWritten(camera::SceneConstants& scene)
     }
 
     if (kind == camera::SceneView::MainCamera && !frame.view) frame.view = camera::viewOf(scene);
-    // The shift holds the focus plane still as the camera moves across the aperture; the jitter
-    // under it antialiases the shot's average.
-    if (frame.lensShot && kind == camera::SceneView::MainCamera && !frame.lensShift)
-    {
-        const auto shift = camera::lensShift(scene, frame.lensCentre, frame.lensFocus);
-        const auto jitter = camera::jitterNdc(camera::jitterPixels(frame.index, LensShotJitterPhases), scene.c[22][0], scene.c[22][1]);
-        frame.lensShift = std::array{shift[0] + jitter[0], shift[1] + jitter[1]};
-    }
-
-    if (frame.lensShift) camera::applyJitter(scene, *frame.lensShift);
-    else if (frame.jittered) camera::applyJitter(scene, camera::jitterNdc(frame.jitter, scene.c[22][0], scene.c[22][1]));
+    if (frame.jittered) camera::applyJitter(scene, camera::jitterNdc(frame.jitter, scene.c[22][0], scene.c[22][1]));
 }
 
 // GammaControl draws once more, from DLSS's image before the HUD into frame generation's hudless
@@ -1068,8 +1065,7 @@ bool replaceFxaa(const FxaaPass& pass)
         "Creating the upscaler's output texture", fsr);
 
     // A gap means the upscaler missed frames; its history and the previous camera are stale.
-    // A lens shot moves the camera every frame and shows the average of its frames.
-    bool reset = current.lensShot || !lastEvaluated || lastEvaluated->index + 1 != current.index;
+    bool reset = !lastEvaluated || lastEvaluated->index + 1 != current.index;
     if (!reset && camera::cameraCut(*lastEvaluated->view, *current.view))
     {
         reset = true;
@@ -1343,6 +1339,7 @@ void initialize(const std::filesystem::path& directory, bool supportedBuild) noe
     configureAtmosphere();
     configureDepthOfField();
     configureHdr();
+    configureDrawDistance();
     log(std::string(label(settings.upscaler)) + " mode " + std::string(label(settings.mode, settings.upscaler))
         + (supported ? "." : "; this game build is not supported, so it stays off."));
 }
@@ -1680,10 +1677,13 @@ void present() noexcept
         fail(error.what());
     }
 
-    if (replacing && presents % 1800 == 0)
-        log("Status: " + std::to_string(evaluations) + " upscaled frames, " + std::to_string(fallbacks) + " without, "
-            + std::to_string(resets) + " history resets (" + std::to_string(cameraCuts) + " at camera cuts); last fallback: "
-            + (lastFallback.empty() ? "none" : lastFallback) + ".");
+    if constexpr (DiagnosticLog)
+    {
+        if (replacing && presents % 1800 == 0)
+            log("Status: " + std::to_string(evaluations) + " upscaled frames, " + std::to_string(fallbacks) + " without, "
+                + std::to_string(resets) + " history resets (" + std::to_string(cameraCuts) + " at camera cuts); last fallback: "
+                + (lastFallback.empty() ? "none" : lastFallback) + ".");
+    }
 }
 
 void setFrameGeneration(bool on) noexcept
@@ -1760,6 +1760,7 @@ void applySettings(const Settings& wanted)
     configureAtmosphere();
     configureDepthOfField();
     configureHdr();
+    configureDrawDistance();
 }
 
 Diagnostics currentDiagnostics()

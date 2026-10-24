@@ -77,7 +77,6 @@ void Scene::beginFrame(std::uint32_t frameSlot, std::uint64_t completedFence, st
         else if (release.pool == Pool::Rows) rowAllocator.release(release.offset, release.size);
         return true;
     });
-    std::erase_if(retired, [&](const auto& buffer) { return buffer.first <= completedFence; });
 
     // The slot's last static builds wrote their compacted sizes; the GPU is past them.
     auto& built = builtInSlot[slot];
@@ -125,7 +124,7 @@ void Scene::planBuilds()
         }
 
         // The readback's k-th compacted size is the slot's k-th static build's.
-        builds.push_back({id, blas.generation, false, scratchUsed, staticBuilds++, 0});
+        builds.push_back({id, blas.generation, false, scratchUsed, staticBuilds++});
         builtInSlot[slot].push_back({id, blas.generation});
         scratchUsed += blas.scratch;
         triangles += blas.triangles;
@@ -215,15 +214,12 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
         const auto& blas = structures[build.id];
         if (!blas.live || blas.generation != build.generation) continue;
 
-        auto geometries = blas.geometries;
-        if (blas.use == Use::PerFrame) geometries.front().Triangles.VertexCount = build.vertexCount;
-
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc{};
         desc.Inputs = inputsOf(blas, build.update);
-        desc.Inputs.pGeometryDescs = geometries.data();
+        desc.Inputs.pGeometryDescs = blas.geometries.data();
         desc.DestAccelerationStructureData = address(blas);
         desc.SourceAccelerationStructureData = build.update ? address(blas) : 0;
-        desc.ScratchAccelerationStructureData = (blas.ownScratch ? blas.ownScratch : scratch)->GetGPUVirtualAddress() + build.scratch;
+        desc.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress() + build.scratch;
         if (blas.use == Use::Static)
         {
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC info{postbuildSizes->GetGPUVirtualAddress() + std::uint64_t{build.postbuild} * 8,
@@ -235,7 +231,7 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
             list.BuildRaytracingAccelerationStructure(&desc, 0, nullptr);
 
         ++tally.builtThisFrame;
-        tally.builtTriangles += blas.use == Use::PerFrame ? build.vertexCount / 3 : blas.triangles;
+        tally.builtTriangles += blas.triangles;
     }
 
     const auto all = uavBarrier();
@@ -367,7 +363,6 @@ std::optional<BlasId> Scene::createBlas(Use use, const std::vector<Geometry>& ge
     blas.size = prebuild.ResultDataMaxSizeInBytes;
     blas.scratch = aligned(prebuild.ScratchDataSizeInBytes, 256);
     blas.updateScratch = aligned(prebuild.UpdateScratchDataSizeInBytes, 256);
-    if (use == Use::PerFrame) blas.ownScratch = createStorage(device, blas.scratch, "Creating a structure's build scratch");
 
     for (std::uint32_t i = 0; i < geometries.size(); ++i)
     {
@@ -408,7 +403,6 @@ void Scene::destroyBlas(BlasId id)
 
     releases.push_back({signalValue, Pool::Structures, blas.offset, blas.size});
     releases.push_back({signalValue, Pool::Rows, blas.firstGeometry, blas.geometries.size()});
-    if (blas.ownScratch) retired.push_back({signalValue, std::move(blas.ownScratch)});
 
     const auto generation = blas.generation;
     blas = {};
@@ -425,7 +419,7 @@ bool Scene::rebuild(BlasId id)
         return false;
     }
 
-    builds.push_back({id, blas.generation, false, scratchUsed, 0, 0});
+    builds.push_back({id, blas.generation, false, scratchUsed, 0});
     scratchUsed += blas.scratch;
     blas.built = true;
     return true;
@@ -437,17 +431,9 @@ bool Scene::refit(BlasId id)
     if (!blas.built) return rebuild(id);
     if (scratchUsed + blas.updateScratch > tlasScratch + BuildScratchBytes) return false;
 
-    builds.push_back({id, blas.generation, true, scratchUsed, 0, 0});
+    builds.push_back({id, blas.generation, true, scratchUsed, 0});
     scratchUsed += blas.updateScratch;
     return true;
-}
-
-void Scene::buildFrame(BlasId id, std::uint32_t vertexCount)
-{
-    auto& blas = structures[id];
-    vertexCount = std::min(vertexCount, blas.geometries.front().Triangles.VertexCount) / 3 * 3;
-    blas.builtFrame = vertexCount ? signalValue : 0;
-    if (vertexCount) builds.push_back({id, blas.generation, false, 0, 0, vertexCount});
 }
 
 void Scene::setMaterial(BlasId id, std::uint32_t geometry, std::uint32_t flags, std::uint32_t texture, float alphaThreshold)
@@ -467,7 +453,7 @@ bool Scene::ready(BlasId id) const
     const auto& blas = structures[id];
     if (!blas.live) return false;
 
-    return blas.use == Use::PerFrame ? blas.builtFrame == signalValue : blas.built;
+    return blas.built;
 }
 
 std::uint32_t Scene::firstGeometry(BlasId id) const
@@ -485,7 +471,7 @@ std::vector<std::uint32_t> Scene::takeNewGeometries()
     return std::exchange(newRows, {});
 }
 
-std::optional<std::uint32_t> Scene::addInstance(BlasId id, const float* transform, std::uint32_t kind, std::uint32_t mask)
+std::optional<std::uint32_t> Scene::addInstance(BlasId id, const float* transform, std::uint32_t kind)
 {
     if (instances.size() >= MaxInstances || !ready(id)) return std::nullopt;
 
@@ -499,7 +485,7 @@ std::optional<std::uint32_t> Scene::addInstance(BlasId id, const float* transfor
 
     // Only the terrain is one-sided (GI_RAY_FLAGS); the game's meshes are often open shells.
     const std::uint32_t flags = (kind & GI_INSTANCE_TERRAIN) ? 0 : D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
-    desc.idAndMask = (kind & 0xFFFFFFu) | (mask << 24);
+    desc.idAndMask = (kind & 0xFFFFFFu) | (GI_MASK_SCENE << 24);
     desc.hitGroupAndFlags = (blas.firstGeometry & 0xFFFFFFu) | (flags << 24);
     const auto blasAddress = address(blas);
     desc.blas = {static_cast<std::uint32_t>(blasAddress), static_cast<std::uint32_t>(blasAddress >> 32)};

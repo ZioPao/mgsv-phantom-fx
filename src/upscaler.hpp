@@ -24,11 +24,13 @@ struct Diagnostics
     bool noJitter{};
     bool gameFxaa{}; // Comparison: leave the frame to the game's FXAA, keeping DLSS ready
     bool onlyScreenSpaceShadows{}; // The sun shadowed by the screen-space shadows alone
-    bool onlyRayTracedShadows{};   // The sun shadowed by the ray-traced shadows alone
+    bool shadowsFromDepth{};       // Every ray-traced shadow ray from the depth and the G-buffer's normal, as before 2026-10-24
+    bool bonesFromSnapshot{};      // The ray-traced scene's characters posed a frame behind, as before 2026-10-24
     bool showAmbientOcclusion{};   // GTVBAO's occlusion alone in place of the lit scene
     bool showIndirectLight{};      // SSILVB's light alone in place of the lit scene
     bool showGlobalIllumination{}; // The global illumination's light alone in place of the lit scene
     bool showTracedScene{};        // The global illumination's traced scene from the camera
+    bool logGlobalIlluminationOften{}; // The global illumination's light logged every few frames, not every ten seconds
 };
 
 struct Status
@@ -104,10 +106,10 @@ void drawMenu();
 // them on. Leaving out the upscaler shows the game's FXAA at the same render size.
 struct LeftOut
 {
-    bool upscaler{}, sharpening{}, softShadows{}, sunScreenSpaceShadows{}, lightScreenSpaceShadows{}, rayTracedShadows{}, ambientOcclusion{},
-        indirectLight{}, globalIllumination{}, volumetricFog{}, depthOfField{};
-    // Parts of the global illumination, left out before all of it: its light passes, then its mesh capture.
-    bool globalLight{}, globalCapture{};
+    bool upscaler{}, sharpening{}, softShadows{}, sunScreenSpaceShadows{}, lightScreenSpaceShadows{}, rayTracedShadows{}, rayTracedLights{},
+        ambientOcclusion{}, indirectLight{}, globalIllumination{}, volumetricFog{}, depthOfField{};
+    // Part of the global illumination, left out before all of it: its light passes.
+    bool globalLight{};
 };
 void leaveOut(const LeftOut& effects);
 }
