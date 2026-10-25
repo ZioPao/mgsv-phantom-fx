@@ -1,6 +1,7 @@
 #include "atmosphere.hpp"
 
 #include "atmosphere_shaders.hpp"
+#include "camera.hpp"
 #include "device_check.hpp"
 #include "hdr.hpp"
 #include "log.hpp"
@@ -434,15 +435,6 @@ UINT groups(UINT texels)
     return (texels + 7) / 8;
 }
 
-// The Halton sequence in `base`, from 0 to 1.
-float halton(std::uint32_t index, std::uint32_t base)
-{
-    float result = 0, scale = 1.0f / static_cast<float>(base);
-    for (; index; index /= base, scale /= static_cast<float>(base)) result += scale * static_cast<float>(index % base);
-
-    return result;
-}
-
 // Runs `shader` over `x` x `y` x `z` groups with `output` as its only unordered access, unbinding it after.
 void dispatch(ID3D11DeviceContext* context, ID3D11ComputeShader* shader, ID3D11UnorderedAccessView* output, UINT x, UINT y, UINT z)
 {
@@ -592,8 +584,8 @@ void fill(ID3D11DeviceContext* context, bool physical)
     // view and 5 through the slice.
     const auto step = fills++ % JitterPeriod + 1;
     const float history = shadowed && lastFillShadowed ? HistoryWeight : 0;
-    const Constants constants{{TileWidth, TileHeight}, shadowed ? 1u : 0u, ShadowSamples, {halton(step, 2) - 0.5f, halton(step, 3) - 0.5f},
-        halton(step, 5), history, physical ? 1u : 0u, skySun ? 1u : 0u, haze.load(std::memory_order_relaxed), {}};
+    const Constants constants{{TileWidth, TileHeight}, shadowed ? 1u : 0u, ShadowSamples, {static_cast<float>(camera::halton(step, 2)) - 0.5f, static_cast<float>(camera::halton(step, 3)) - 0.5f},
+        static_cast<float>(camera::halton(step, 5)), history, physical ? 1u : 0u, skySun ? 1u : 0u, haze.load(std::memory_order_relaxed), {}};
     D3D11_MAPPED_SUBRESOURCE mapped{};
     check(context->Map(constantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Writing the fog constants");
     std::memcpy(mapped.pData, &constants, sizeof(constants));
