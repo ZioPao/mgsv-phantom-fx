@@ -2205,7 +2205,9 @@ planet's centre is the origin, in km; the game's world has y up in metres.
 - **Sky.** `Sky_Draw_TppBaked`, `Sky_Draw_Tpp` (with the sun's or moon's sprite) and
   `Sky_Draw_TppNoSky` (fog and sandstorms) draw with the add-on's pixel shader and their own vertex
   shader (all three pass the world-space view ray in `TEXCOORD0`, the sprite's place in `TEXCOORD1`
-  and colour in `TEXCOORD2`): the sky-view table times the sunlight, the game's sprite over it, the
+  and colour in `TEXCOORD2`): the sky-view table times the sunlight (below the horizon, its horizon
+  row, as the game's sky does: the sea at Mother Base ends short of the planet's horizon, and the
+  dark air in front of the planet showed between them as a grey band), the game's sprite over it, the
   last slice's fog in front, the game's dither (`t8`), then the game's TppTonemap (`cPSMaterial`
   `c1`) and sRGB encoding, or the encoding alone with HDR, which takes TppTonemap out of the scene.
   Its two textures go to `t6` and `t7` for the draw; the game's are bound again after it.

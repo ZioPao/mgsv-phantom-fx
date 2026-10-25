@@ -204,7 +204,9 @@ float2 SkyViewUv(bool intersectGround, float viewZenithCos, float lightViewCos, 
     return float2(FromUnitToSubUvs(uv.x, SkyViewSize.x), FromUnitToSubUvs(uv.y, SkyViewSize.y));
 }
 
-// The sky towards `direction` from the camera, both in the world, per unit of sunlight.
+// The sky towards `direction` from the camera, both in the world, per unit of sunlight. Below the
+// horizon it is the horizon, as the game's sky does: the game's ground and sea cover the planet there,
+// and where they stop short of it (the sea at Mother Base) the planet's dark air showed as a band.
 float3 SkyLight(float3 direction, float3 towardsSun, float cameraHeight)
 {
     float3 d = ToAtmosphere(direction), sun = ToAtmosphere(towardsSun);
@@ -216,8 +218,11 @@ float3 SkyLight(float3 direction, float3 towardsSun, float cameraHeight)
     float2 sunOnPlane = float2(dot(sun, forward), dot(sun, side));
     float lightViewCos = dot(sunOnPlane, sunOnPlane) > 1e-8 ? normalize(sunOnPlane).x : 1;
     bool intersectGround = RaySphereIntersectNearest(position, d, 0, BottomRadius) >= 0;
+    float2 uv = SkyViewUv(intersectGround, d.z, lightViewCos, viewHeight);
+    // The table's upper half is the sky, its last row the horizon.
+    uv.y = min(uv.y, (SkyViewSize.y / 2 - 0.5) / SkyViewSize.y);
 
-    return SkyViewLut.SampleLevel(LinearClamp, SkyViewUv(intersectGround, d.z, lightViewCos, viewHeight), 0).rgb;
+    return SkyViewLut.SampleLevel(LinearClamp, uv, 0).rgb;
 }
 
 struct Medium
