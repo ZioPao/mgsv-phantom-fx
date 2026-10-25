@@ -86,7 +86,7 @@ float4 main(uint vertex : SV_VertexID) : SV_Position
 inline constexpr char Composite[] = PHANTOM_FX_HDR_COMMON R"(
 cbuffer CompositeParameters : register(b0)
 {
-    uint DebugView; // 1 motion vectors, 2 where the engine's velocity was used, 3 the ray-traced shadows' rays over the image
+    uint DebugView; // 1 motion vectors, 2 where the engine's velocity was used; 3, 4 and 5 a debug view over the image (ShadowRays)
     float Sharpness;
     uint ObjectMotion;
     uint Linear; // The upscaler made linear colour, sharpened through x / (1 + x) and encoded here
@@ -134,9 +134,9 @@ float4 main(float4 position : SV_Position) : SV_Target
     else if (Sharpness > 0)
         color = Rcas(Load(pixel + int2(0, -1)), Load(pixel + int2(-1, 0)), color, Load(pixel + int2(1, 0)), Load(pixel + int2(0, 1)));
 
-    if (Linear && (DebugView == 0 || DebugView == 3 || DebugView == 4)) color = LinearToSrgb(color / max(1 - color, 1.0 / HalfMax));
+    if (Linear && (DebugView == 0 || DebugView >= 3)) color = LinearToSrgb(color / max(1 - color, 1.0 / HalfMax));
 
-    if (DebugView == 3 || DebugView == 4)
+    if (DebugView >= 3)
     {
         uint width, height, raysWidth, raysHeight;
         Upscaled.GetDimensions(width, height);

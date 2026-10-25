@@ -629,6 +629,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     frame.shadowRange = options.withShadowMap ? shadowRange : std::array<float, 4>{};
     frame.sunTangent = std::tan(options.sunSize * 0.5f * 3.14159265f / 180);
     frame.debugShadows = shadowDebug != nullptr;
+    frame.shadowStarts = options.shadowStarts;
     frame.shadowsFromDepth = options.shadowsFromDepth;
     frame.opaqueLeaves = options.opaqueLeaves;
     frame.lightRays = static_cast<std::uint32_t>(std::clamp(options.lightPixelRays, 1, 4));
@@ -1162,7 +1163,9 @@ void present() noexcept
     lighting = on && options.enabled;
     shadowing = on && options.shadows;
     localShadowing = on && options.localLights;
-    if (enabled.exchange(on) && !on)
+    // Taking other meshes, the scene starts over and reads the models again.
+    const bool otherMeshes = engine_scene::setMainViewMeshes(!options.mainViewMeshesLeftOut) && on;
+    if ((enabled.exchange(on) && !on) || otherMeshes)
     {
         // Off gives the GPU memory back; on starts the scene over.
         std::lock_guard lock(executionMutex);
@@ -1172,6 +1175,7 @@ void present() noexcept
     }
 
     gi_inputs::setActive(on);
+    if (otherMeshes) engine_scene::setActive(false);
     engine_scene::setActive(on);
     engine_scene::setBonesFromSnapshot(options.bonesFromSnapshot);
     if constexpr (DiagnosticLog)

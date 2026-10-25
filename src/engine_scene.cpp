@@ -88,12 +88,17 @@ constexpr std::uint32_t UnreadableRetries = 600;
 // New model files read a take at most; the rest wait for the next takes.
 constexpr std::uint64_t ParseBytesPerTake = 8ull << 20;
 
-// The scene takes the meshes the game draws into its shadow maps, as its draws showed them mesh by
-// mesh (docs/DEVELOPMENT.md, "Scene objects"), by an FMDL mesh's alpha (first byte) and shadow
-// (second byte) bits. Shadow bit 0: never drawn into the shadow maps (sky domes kilometres wide
-// around the camera have it: they blocked the sky for the global illumination). Alpha bit 6:
-// translucent, never drawn into them either. Alpha bit 7: decals, which the game casts or not by the
-// material's technique: some do (a pylon's lattice with shadow bit 1, a trench's grating and a tree's
+// The scene takes the meshes the game draws, in its main view or its shadow maps, as its draws showed
+// them mesh by mesh (docs/DEVELOPMENT.md, "Scene objects"), by an FMDL mesh's alpha (first byte) and
+// shadow (second byte) bits. Shadow bit 0: drawn in the main view only. A room's inner walls, floor and
+// ceiling have it, its building casting the shadows with an outer shell: until 2026-10-25 the scene left
+// them out, and shadow rays left a room's walls from the shell 7 cm behind them, past the backs of the
+// shelves on them (the shadow probe). Only the opaque ones are taken: cut-out ones and decals stay out,
+// as the game keeps them out of its shadows (crossed cards 44 cm above a road, which the game showed
+// nothing of there, cast a moon shadow, 2026-10-25). Alpha bit 6: translucent, never drawn into the
+// shadow maps and left out (sky domes kilometres wide around the camera, alpha 80: they blocked the sky
+// for the global illumination). Alpha bit 7: decals, which the game casts or not by the material's
+// technique: some do (a pylon's lattice with shadow bit 1, a trench's grating and a tree's
 // twigs with shadow 64), others never (fox3DDF_Blin_NC). Until the game's own per-mesh pass mask is
 // read, every decal is taken as a cut-out caster (the user's call, 2026-10-23: see what breaks). Alpha
 // bit 5 (32): cut out, the shadow pass testing its alpha (m_param.w 1, measured per draw), as it does
@@ -155,6 +160,8 @@ std::unordered_map<std::uint64_t, std::shared_ptr<const gi_renderer::Model>> ski
 
 // Diagnostics: the bones as the snapshot took them (setBonesFromSnapshot); and where they came from.
 std::atomic<bool> bonesFromSnapshot{};
+// Diagnostics: the opaque meshes the game draws in the main view only are taken (setMainViewMeshes).
+std::atomic<bool> mainViewMeshes{true};
 std::atomic<std::uint64_t> posesCompared{}, posesChanged{}, drawsNoted{}, drawsPlaced{}, meshesPosed{};
 std::vector<PendingFile> pendingFiles;
 // The terrain inputs last noted, and the game frame they were noted in.
@@ -365,8 +372,8 @@ bool readSkin(const FileReader& file, const Block& boneGroups, std::uint64_t mes
     return true;
 }
 
-// A model's meshes that the game draws into its shadow maps, a character's that it draws in the main
-// view (see CastsNoShadow): each one's vertices with their texture coordinates, its mesh group, and the
+// A model's meshes that the game draws, a character's that it draws in the main view (see
+// CastsNoShadow): each one's vertices with their texture coordinates, its mesh group, and the
 // indices of its most detailed triangles, as the game keeps them; a skinned model's vertices also with
 // their bones (readSkin). The object brush's bushes and grass (`vegetation`) cast no shadow in the game
 // (alpha 0xA0, a cut-out decal; shadow bit 0): their meshes are taken as cut out all the same, for the
@@ -405,7 +412,9 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
             return nullptr;
 
         const bool character = model->bones != 0;
-        const bool leftOut = character ? (shadow & ShadowMapsOnly) != 0 : ((shadow & CastsNoShadow) && !vegetation) || (alpha & TranslucentAlpha);
+        const bool mainViewOnly = (shadow & CastsNoShadow) && !vegetation;
+        const bool mainViewTaken = mainViewMeshes.load() && !(alpha & (CutOutAlpha | DecalAlpha));
+        const bool leftOut = character ? (shadow & ShadowMapsOnly) != 0 : (mainViewOnly && !mainViewTaken) || (alpha & TranslucentAlpha);
         if (leftOut)
         {
             ++shadowlessMeshes;
@@ -1017,6 +1026,11 @@ std::vector<LoadedTexture> loadedTextures(const std::vector<std::uint64_t>& path
 void setBonesFromSnapshot(bool on) noexcept
 {
     bonesFromSnapshot = on;
+}
+
+bool setMainViewMeshes(bool on) noexcept
+{
+    return mainViewMeshes.exchange(on) != on;
 }
 
 std::string poseTiming()

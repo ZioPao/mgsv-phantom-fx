@@ -406,10 +406,26 @@ DebugRay TraceDebugRay(float3 position, float3 normal, float depth)
     return r;
 }
 
+// The debug view of where a pixel's shadow rays leave (ShadowSurfaceAt), against the depth's point and
+// the G-buffer's normal. Grey: from the depth's point, the scene having no surface near it. Blue: the
+// scene's surface there faces over 60 degrees away from the game's normal. Otherwise red where it lies
+// nearer the eye than the depth's point, cyan where farther, clear up to 5 mm apart and full from 3 cm.
+float4 ShadowStartColor(float3 position, float3 normal)
+{
+    ShadowSurface surface = ShadowSurfaceAt(position, normal);
+    if (!surface.exact) return float4(0.5f, 0.5f, 0.5f, 0.6f);
+    if (dot(surface.normal, normal) < 0.5f) return float4(0.2f, 0.3f, 1.0f, 0.75f);
+
+    float apart = distance(surface.position, g_Frame.eye.xyz) - distance(position, g_Frame.eye.xyz);
+    float strength = saturate((abs(apart) - 0.005f) / 0.025f);
+    return float4(apart < 0.0f ? float3(1.0f, 0.1f, 0.1f) : float3(0.0f, 1.0f, 1.0f), 0.75f * strength);
+}
+
 // The debug view: what blocks each pixel's sun ray. Lavender: one of the game's models or characters;
 // brown: the terrain; yellow: cut-out geometry; olive: cut-out geometry without its texture, which the
 // rays let the sun through inside the shadow map; magenta: anything else only the whole ray finds.
-// Clear where the sun reaches. A cross marks the probe's pixel.
+// Clear where the sun reaches. With shadowDiagnostics.y, where the shadow rays leave instead
+// (ShadowStartColor). A cross marks the probe's pixel.
 [numthreads(8, 8, 1)]
 void DebugShadows(uint2 did : SV_DispatchThreadID)
 {
@@ -428,7 +444,14 @@ void DebugShadows(uint2 did : SV_DispatchThreadID)
     {
         float2 uv = (did + 0.5f) / g_Frame.dimensions.xy;
         float3 position = transformPointProjection(uv, depth, g_Frame.viewProjectionInverse);
-        DebugRay r = TraceDebugRay(position, DecodeNormal(g_Normal.Load(int3(did, 0))), depth);
+        float3 normal = DecodeNormal(g_Normal.Load(int3(did, 0)));
+        if (g_Frame.shadowDiagnostics.y)
+        {
+            g_ShadowDebug[did] = ShadowStartColor(position, normal);
+            return;
+        }
+
+        DebugRay r = TraceDebugRay(position, normal, depth);
         SceneHit real = r.farHit;
         if (r.nearHit.hit) real = r.nearHit;
         if (real.hit)

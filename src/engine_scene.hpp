@@ -75,4 +75,7 @@ std::string status();
 // frame behind those drawn, as before 2026-10-24; and since the last call, where the bones came from.
 void setBonesFromSnapshot(bool on) noexcept;
 std::string poseTiming();
+// Diagnostics: off leaves out the opaque meshes the game draws in the main view only, as before 2026-10-25.
+// Returns whether that changed, the models read so far then having the other meshes.
+bool setMainViewMeshes(bool on) noexcept;
 }

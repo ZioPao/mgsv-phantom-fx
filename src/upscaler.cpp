@@ -338,8 +338,9 @@ void configureIndirectLight()
     global_illumination::configure({.enabled = global, .shadows = rayTraced, .withShadowMap = settings.vanillaShadowsWithRayTracing,
         .localLights = tracedLights, .lightRays = settings.rayQuality, .sunSize = settings.sunSize, .lightPixelRays = settings.globalIlluminationRays,
         .showScene = diagnostics.showTracedScene,
-        .debugShadows = diagnostics.debugView == ShadowRaysView, .shadowsFromDepth = diagnostics.shadowsFromDepth, .bonesFromSnapshot = diagnostics.bonesFromSnapshot,
-        .opaqueLeaves = diagnostics.opaqueLeaves, .debugHistory = diagnostics.debugView == LightHistoryView,
+        .debugShadows = diagnostics.debugView == ShadowRaysView || diagnostics.debugView == ShadowStartsView,
+        .shadowStarts = diagnostics.debugView == ShadowStartsView, .shadowsFromDepth = diagnostics.shadowsFromDepth, .bonesFromSnapshot = diagnostics.bonesFromSnapshot,
+        .opaqueLeaves = diagnostics.opaqueLeaves, .mainViewMeshesLeftOut = diagnostics.mainViewMeshesLeftOut, .debugHistory = diagnostics.debugView == LightHistoryView,
         .logOften = diagnostics.logGlobalIlluminationOften, .light = !leftOut.globalLight});
     local_lights::configure({.enabled = tracedLights, .flashlightBrightness = settings.flashlightBrightness});
 }
@@ -974,7 +975,8 @@ void runComposite(ID3D11RenderTargetView* destination, ID3D11ShaderResourceView*
     immediate->UpdateSubresource(compositeConstants.Get(), 0, nullptr, &constants, 0, 0);
 
     const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(outputTarget.width), static_cast<float>(outputTarget.height), 0, 1};
-    auto* shadowRays = options.debugView == ShadowRaysView     ? global_illumination::shadowDebug(colorTarget.width, colorTarget.height)
+    auto* shadowRays = options.debugView == ShadowRaysView || options.debugView == ShadowStartsView
+                           ? global_illumination::shadowDebug(colorTarget.width, colorTarget.height)
                        : options.debugView == LightHistoryView ? global_illumination::lightDebug(colorTarget.width, colorTarget.height)
                                                                : nullptr;
     ID3D11ShaderResourceView* inputs[]{outputTarget.view.Get(), motionTarget.view.Get(), objectVelocity, shadowRays};

@@ -19,17 +19,20 @@ namespace phantom_fx::upscaler
 constexpr int ShadowRaysView = 3;
 // The debug view that blends the global illumination's denoiser history over the image.
 constexpr int LightHistoryView = 4;
+// The debug view that blends where each pixel's shadow rays leave over the image, with the shadows' probe.
+constexpr int ShadowStartsView = 5;
 
 struct Diagnostics
 {
     int debugView{}; // 0 final image, 1 motion vectors, 2 where the engine's velocity was used, 3 the ray-traced shadows' rays (ShadowRaysView),
-                     // 4 the global illumination's denoiser history (LightHistoryView)
+                     // 4 the global illumination's denoiser history (LightHistoryView), 5 where the shadow rays leave (ShadowStartsView)
     bool noJitter{};
     bool gameFxaa{}; // Comparison: leave the frame to the game's FXAA, keeping DLSS ready
     bool onlyScreenSpaceShadows{}; // The sun shadowed by the screen-space shadows alone
     bool shadowsFromDepth{};       // Every ray-traced shadow ray from the depth and the G-buffer's normal, as before 2026-10-24
     bool bonesFromSnapshot{};      // The ray-traced scene's characters posed a frame behind, as before 2026-10-24
     bool opaqueLeaves{};           // The global illumination's leaves let no light through, as before 2026-10-24
+    bool mainViewMeshesLeftOut{};  // The ray-traced scene without the meshes drawn in the main view only, as before 2026-10-25
     bool showAmbientOcclusion{};   // GTVBAO's occlusion alone in place of the lit scene
     bool showIndirectLight{};      // SSILVB's light alone in place of the lit scene
     bool showGlobalIllumination{}; // The global illumination's light alone in place of the lit scene

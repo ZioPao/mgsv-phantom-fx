@@ -1445,9 +1445,13 @@ std::pair<std::string, std::string> describeProbe(const State& s, std::span<cons
         {
             const auto texture = s.textures.find(part.baseTexture);
             const bool textured = !part.uvs.empty() && texture != s.textures.end() && texture->second.shared.resource;
-            text += std::format(" mesh {} {}, {} {} triangles", part.mesh, part.alphaTested ? "cut-out" : "opaque",
-                !part.baseTexture ? "no base texture" : textured ? "its texture copied" : "its texture not copied yet", part.indices.size() / 3);
+            text += std::format(" mesh {} {} (alpha {:#04x} shadow {:#04x}), {} {} triangles", part.mesh, part.alphaTested ? "cut-out" : "opaque",
+                part.alphaBits, part.shadowBits, !part.baseTexture ? "no base texture" : textured ? "its texture copied" : "its texture not copied yet",
+                part.indices.size() / 3);
         }
+
+        for (const auto& mesh : record.geometry->leftOut)
+            text += std::format(" mesh {} left out (alpha {:#04x} shadow {:#04x})", mesh.mesh, mesh.alphaBits, mesh.shadowBits);
     }
 
     key += std::format("|{}", crossed.empty() ? 0 : crossed.front().placement->hash);
@@ -1728,7 +1732,7 @@ Result render(const Frame& frame)
         if (traceLight) s.light->fill(constants, frame.verticalFov, parity);
         if (traceShadows) s.shadows->fill(constants);
         constants.objectMotion = {velocity ? 1u : 0u, 0, 0, 0};
-        constants.shadowDiagnostics = {frame.shadowsFromDepth ? 1u : 0u, 0, 0, 0};
+        constants.shadowDiagnostics = {frame.shadowsFromDepth ? 1u : 0u, frame.shadowStarts ? 1u : 0u, 0, 0};
         constants.lightDiagnostics = {frame.opaqueLeaves ? 1u : 0u, 0, lightDebug ? 1u : 0u, 0};
         constants.lightRays = {frame.lightRays, 0, 0, 0};
         std::memcpy(uploads.data + constantsOffset, &constants, sizeof(constants));

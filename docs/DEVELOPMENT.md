@@ -935,7 +935,8 @@ level at Camp Omega's cliffs. No names in the exe: the class names here are desc
   is the exact answer, not done yet. A tree's twigs in Africa (model `84a32080686afb21`, mesh 0, alpha
   160 with shadow 64) cast in the game's shadow maps and were missing from the rays' shadows, so until
   the pass masks are read the ray-traced scene takes every decal (2026-10-23): it takes all but shadow
-  bit 0 and alpha bit 6. Which of them the shadow pass
+  bit 0 and alpha bit 6, and since 2026-10-25 the opaque meshes with shadow bit 0 as well ("Ray-traced
+  scene", "Characters"). Which of them the shadow pass
   alpha-tests was measured per draw (its `cPSSystem` `m_param.w`, 1 testing, 0 not): alpha 32 (bit 5)
   and the shadow-only decal (alpha 128, shadow 66) test; alpha 16 (glass, shadow 4) does not and casts a
   solid shadow. The scene takes alpha bits 5 and 7 as cut out, the rest as opaque.
@@ -1605,7 +1606,21 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   its model left out: the rays saw her bald, 1,270-triangle head, and its outline crossed her hair as a
   jagged shadow) and a 40-triangle stand-in of her outfit lying on her skin, blocking her neck's and
   chest's sun rays within a centimetre. Rigid models keep the shadow maps' meshes (a pylon's lattice is
-  a stand-in, its visible mesh is not cast). The shadow probe lists every model at a character's place
+  a stand-in, its visible mesh is not cast), and since 2026-10-25 also take the opaque meshes the main
+  view alone shows (shadow bit 0, no alpha bits 5 or 7): a building casts its shadows with an outer
+  shell, and a room's inner walls, floor and ceiling have shadow bit 0. Without them a shelf's shadow
+  hung below it, a lit line between, and a dark line crossed the wall above a door frame: the debug view
+  "Shadow ray starts" showed the room's walls farther than the game's by 3 cm or more, its floor and
+  ceiling with no surface near, and the shadow probe found the start on the back of the shell (model
+  `84a120f9301becbe`, mesh 21) 7 cm behind the wall, with 61 of the wall's 64 global illumination rays on
+  back faces. Main-view cut-out meshes and decals stay out: taken, crossed cards (model
+  `84a1da1c1308e887`, mesh 3) 44 cm above a road, where the game showed nothing, cast a moon shadow.
+  Diagnostics, **Main view meshes left out (old)**, brings the old scene back; the scene starts over and
+  reads its models again when it changes. Open: a tarp on a fence (model `84a1bc5b4702c16b`) is a
+  main-view cut-out (mesh 2) cast in the game by a flat 4-triangle stand-in (mesh 3, shadow bit 1) up
+  to 25 cm off it, so its shadow rays start on the stand-in or meet it, in patches that change with the
+  distance; taking a rigid model as its main view shows it, as a character is, would fix it, untried
+  as it may drop a building's shell. The shadow probe lists every model at a character's place
   with all its meshes: each one's group and state, alpha and shadow bytes, whether it is shown and drawn
   (posed by a draw this frame), and the meshes left out.
 - **Model files read once.** A model the renderer has not placed for 600 frames is let go and its file
@@ -1781,7 +1796,14 @@ traced here (see "Ray-traced lights").
   (Wächter and Binder's offset grows with the world coordinates: about 3 cm at 1,200 m) and whatever that
   lift passes through, and whether the blocker is the start's own triangle or mesh. Added 2026-10-24 when
   Snake's chest was shadowed in strips along its folds, each ray blocked at 0.00 m by his own suit's mesh
-  from inside.
+  from inside. Each model it lists shows its meshes' alpha and shadow bytes and the meshes left out.
+- **Shadow ray starts debug view** (Diagnostics, Debug view "Shadow ray starts"; needs the ray-traced
+  shadows and an upscaler, with the probe). `ShadowStartColor` colours where each pixel's shadow rays
+  leave (`ShadowSurfaceAt`) against the depth's point and the G-buffer's normal: grey from the depth's
+  point (no scene surface near), blue on a scene surface facing over 60 degrees away from the game's
+  normal, red where the scene's surface lies nearer the eye than the game's, cyan where farther (clear
+  up to 5 mm, full from 3 cm); clear on the game's surface. Built 2026-10-25 for the detached shelf
+  shadow ("Ray-traced scene", "Characters").
 - **Open: terrain blocking for one refresh** (2026-10-23, after the copy race was fixed). With the camera
   still, the probe showed a pixel's sun ray blocked by the terrain 140 m away (66 m above the pixel) for
   about 2.3 s, twice, lit otherwise: one ring made with a wrong height, the next refresh right again. The

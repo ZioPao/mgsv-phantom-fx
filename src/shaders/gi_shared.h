@@ -146,7 +146,8 @@ struct GIFrameConstants
     float4 shadowRange;  // The game's shadow map range (cPSLight): x: centre depth (c8.x); y: start distance (c8.y); z: fade rate (c6.x); w: 1 once known
     float4 shadowParams; // x: tangent of the sun's angular radius; y: how much sun an alpha-tested mesh blocks; z: ray length; w: 1 on a fresh start
     uint4 objectMotion;  // x: 1 when g_ObjectVelocity (gi_common.hlsli) holds this frame's velocity of the game's moving meshes
-    uint4 shadowDiagnostics; // x: 1 to start every shadow ray from the depth and the G-buffer's normal, as before 2026-10-24 (ShadowSurfaceAt)
+    uint4 shadowDiagnostics; // x: 1 to start every shadow ray from the depth and the G-buffer's normal, as before 2026-10-24 (ShadowSurfaceAt);
+                             // y: 1 for the debug view of where they leave (ShadowStartColor)
     uint4 lightDiagnostics;  // x: 1 to keep leaves from letting light through, as before 2026-10-24 (HitDirectLight); z: 1 for
                              // the denoiser's history into g_LightDebug (CompositeLight)
     // The game's terrain (TerrainGrid in gi_scene.hlsl): a world point is (u, height, v) x scale +

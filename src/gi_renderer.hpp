@@ -177,6 +177,7 @@ struct Frame
     // Diagnostics, with the shadows: the debug view into textures.shadowDebug, and the probe at the
     // screen's centre (shadowProbe).
     bool debugShadows{};
+    bool shadowStarts{};     // The debug view: where the shadow rays leave each pixel (ShadowStartColor)
     bool shadowsFromDepth{}; // Diagnostics: every shadow ray from the depth and the G-buffer's normal, as before 2026-10-24
     bool opaqueLeaves{};     // Diagnostics: leaves let no light through (GI_GEOMETRY_LEAF), as before 2026-10-24
     std::uint32_t lightRays{2}; // The light's rays a light pixel, 1 to 4 (TraceLight)

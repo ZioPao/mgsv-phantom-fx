@@ -542,17 +542,22 @@ void drawDiagnostics(const Status& state)
     if (const fxui::Item item({.id = "debugView", .name = "Debug view", .keywords = "motion vectors object motion shadow rays probe"}); item)
     {
         constexpr Choice<int> views[]{{0, "Final image"}, {1, "Motion vectors"}, {2, "Object motion (red)"}, {ShadowRaysView, "Ray-traced shadow rays"},
-            {LightHistoryView, "Global illumination history"}};
+            {LightHistoryView, "Global illumination history"}, {ShadowStartsView, "Shadow ray starts"}};
         changed |= fxui::combo("Debug view", options.debugView, views,
             "Ray-traced shadow rays: with ray-traced shadows and an upscaler on, what blocks each pixel's ray to the sun's centre, over the image. The "
             "cross is the probe, whose findings show below (and, in a dev build, go to PhantomFX.log whenever they change).");
         if (options.debugView == LightHistoryView)
             fxui::note(Tone::Dim, "With global illumination and an upscaler on: red where the denoiser started a pixel's light over this frame or "
                                   "the last two, yellow where it holds under ten frames. Clear: a full history.");
+        if (options.debugView == ShadowStartsView)
+            fxui::note(Tone::Dim, "With ray-traced shadows on, where each pixel's shadow rays leave, against what the game drew. Grey: from the depth, "
+                                  "the scene having no surface there. Blue: the scene's surface faces another way. Red: it lies nearer than the "
+                                  "game's, cyan: farther (clear under 5 mm, full from 3 cm). Clear: on the game's surface.");
         if (options.debugView == ShadowRaysView)
-        {
             fxui::note(Tone::Dim, "Lavender: the game's models and characters. Brown: the terrain. Yellow: cut-out geometry. Olive: cut-out geometry "
                                   "without its texture, left to the shadow map. Magenta: anything else only the whole ray finds. Clear: the sun reaches.");
+        if (options.debugView == ShadowRaysView || options.debugView == ShadowStartsView)
+        {
             if (const auto probe = global_illumination::shadowProbe(); !probe.empty()) fxui::note(Tone::Dim, probe);
             else fxui::note(Tone::Warn, "Waiting for the ray-traced shadows (on, with an upscaler).");
         }
@@ -576,7 +581,7 @@ void drawDiagnostics(const Status& state)
     }
 
     if (const fxui::Item item({.id = "oldPaths", .name = "Old paths", .summary = "How the ray tracing worked before, to compare.",
-            .keywords = "shadow rays depth bones snapshot leaves log"});
+            .keywords = "shadow rays depth bones snapshot leaves main view meshes walls log"});
         item)
     {
         changed |= fxui::checkbox("Shadow rays from the depth", options.shadowsFromDepth,
@@ -588,6 +593,9 @@ void drawDiagnostics(const Status& state)
         changed |= fxui::checkbox("Leaves without light through them", options.opaqueLeaves,
             "With global illumination on, the leaves of bushes and grass light what is around them only from the side the light falls on, as "
             "before: a bush is black inside. Off, they also let through half of the light on their far side.");
+        changed |= fxui::checkbox("Main view meshes left out", options.mainViewMeshesLeftOut,
+            "The ray-traced scene leaves out the opaque meshes the game draws only in the main view, never into its shadow maps, as before: a "
+            "room's inner walls, so shadow rays leave them from the building's outer shell behind. The scene starts over when this changes.");
     }
     if (changed) applyDiagnostics(options);
 
