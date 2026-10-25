@@ -344,8 +344,7 @@ void configureIndirectLight()
         .localLights = tracedLights, .lightRays = settings.rayQuality, .sunSize = settings.sunSize, .lightPixelRays = settings.globalIlluminationRays,
         .showScene = diagnostics.showTracedScene,
         .debugShadows = diagnostics.debugView == ShadowRaysView || diagnostics.debugView == ShadowStartsView,
-        .shadowStarts = diagnostics.debugView == ShadowStartsView, .shadowsFromDepth = diagnostics.shadowsFromDepth, .bonesFromSnapshot = diagnostics.bonesFromSnapshot,
-        .opaqueLeaves = diagnostics.opaqueLeaves, .mainViewMeshesLeftOut = diagnostics.mainViewMeshesLeftOut, .debugHistory = diagnostics.debugView == LightHistoryView,
+        .shadowStarts = diagnostics.debugView == ShadowStartsView, .debugHistory = diagnostics.debugView == LightHistoryView,
         .logOften = diagnostics.logGlobalIlluminationOften, .light = !leftOut.globalLight});
     local_lights::configure({.enabled = tracedLights, .flashlightBrightness = settings.flashlightBrightness});
 }

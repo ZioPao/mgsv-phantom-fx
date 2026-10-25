@@ -1701,8 +1701,8 @@ Result render(const Frame& frame)
         if (traceLight) s.light->fill(constants, frame.verticalFov, parity);
         if (traceShadows) s.shadows->fill(constants);
         constants.objectMotion = {velocity ? 1u : 0u, 0, 0, 0};
-        constants.shadowDiagnostics = {frame.shadowsFromDepth ? 1u : 0u, frame.shadowStarts ? 1u : 0u, 0, 0};
-        constants.lightDiagnostics = {frame.opaqueLeaves ? 1u : 0u, 0, lightDebug ? 1u : 0u, 0};
+        constants.shadowDiagnostics = {0, frame.shadowStarts ? 1u : 0u, 0, 0};
+        constants.lightDiagnostics = {0, 0, lightDebug ? 1u : 0u, 0};
         constants.lightRays = {frame.lightRays, 0, 0, 0};
         std::memcpy(uploads.data + constantsOffset, &constants, sizeof(constants));
 

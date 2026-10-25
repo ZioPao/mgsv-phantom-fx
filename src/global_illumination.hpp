@@ -39,10 +39,6 @@ struct Options
     bool showScene{}; // Diagnostics: the output shows the traced scene
     bool debugShadows{}; // Diagnostics: the shadow debug view and probe (shadowDebug, shadowProbe), with the shadows
     bool shadowStarts{}; // Diagnostics: the debug view shows where the shadow rays leave each pixel
-    bool shadowsFromDepth{}; // Diagnostics: every shadow ray from the depth and the G-buffer's normal, as before 2026-10-24
-    bool bonesFromSnapshot{}; // Diagnostics: the characters' bones as the snapshot took them (engine_scene::setBonesFromSnapshot)
-    bool opaqueLeaves{};      // Diagnostics: leaves let no light through, as before 2026-10-24
-    bool mainViewMeshesLeftOut{}; // Diagnostics: the scene without the meshes drawn in the main view only, as before 2026-10-25
     bool debugHistory{};      // Diagnostics: the light's denoiser history over the image (lightDebug)
 
     bool logOften{};         // Diagnostics: the light's statistics logged every few frames (as each readback returns), not every ten seconds
