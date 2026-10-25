@@ -113,8 +113,8 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/dev_tools.hpp` | Whether the build has the Developer page (the dev preset) |
 | `src/game_lua.cpp`, `src/game_lua.hpp` | Lua in the game's script state, and the Developer page's console (see "Game Lua") |
 | `src/travel.cpp`, `src/travel.hpp` | The Developer page's travel: free roam in another map (see "Travel") |
-| `src/sun_shadows.cpp`, `src/sun_shadows.hpp` | Soft shadows and Bend Studio's screen-space shadows on the sun: the trace and the sun pass's replacement draw |
-| `src/sun_shadows_shaders.hpp` | HLSL: Bend's trace ported to FXC, the game's sun light shaders rebuilt with soft shadows and the screen-space shadow |
+| `src/shadows.cpp`, `src/shadows.hpp` | Soft shadows and Bend Studio's screen-space shadows on the sun and the lamps: the traces and the light passes' replacement draws |
+| `src/shadows_shaders.hpp` | HLSL: Bend's trace ported to FXC, the game's sun light shaders rebuilt with soft shadows and the screen-space shadow |
 | `third_party/bend_sss/bend_sss_cpu.h` | Bend Studio's dispatch layout, unchanged (Apache License 2.0) |
 | `src/gi_scene.cpp`, `src/gi_scene.hpp` | The ray-traced scene on Direct3D 12: the geometry pool, bottom-level structures (a geometry per mesh, compacted), the geometry table, the frame's instances and top level (see "Ray-traced scene") |
 | `src/engine_scene.cpp`, `src/engine_scene.hpp` | The game's loaded models from its visibility managers, its characters from its model list, their FMDL meshes and base textures, its texture manager, the terrain's heightmap inputs (see "Scene objects") |
@@ -1417,7 +1417,7 @@ every point and spot light (`drawLocalLight` in `src/shadows.cpp`), one trace pe
 are a toggle of their own: the sun's is one trace a frame, the lamps' grows with the lights on
 screen.
 
-- **Replacement shaders** (`src/sun_shadows_shaders.hpp`). `SunLight_DL_CS_ES` and
+- **Replacement shaders** (`src/shadows_shaders.hpp`). `SunLight_DL_CS_ES` and
   `SunLight_DL_ES`, and their rain pair without the sky reflection (`SKY_REFLECTION 0`),
   rebuilt in HLSL from their disassembly, with the same bindings, plus the
   options in `b6` (soft shadows, the sun's tangent, the noise frame, screen-space shadows) and the
