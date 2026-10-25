@@ -30,10 +30,6 @@ struct Diagnostics
     bool noJitter{};
     bool gameFxaa{}; // Comparison: leave the frame to the game's FXAA, keeping DLSS ready
     bool onlyScreenSpaceShadows{}; // The sun shadowed by the screen-space shadows alone
-    bool shadowsFromDepth{};       // Every ray-traced shadow ray from the depth and the G-buffer's normal, as before 2026-10-24
-    bool bonesFromSnapshot{};      // The ray-traced scene's characters posed a frame behind, as before 2026-10-24
-    bool opaqueLeaves{};           // The global illumination's leaves let no light through, as before 2026-10-24
-    bool mainViewMeshesLeftOut{};  // The ray-traced scene without the meshes drawn in the main view only, as before 2026-10-25
     bool showAmbientOcclusion{};   // GTVBAO's occlusion alone in place of the lit scene
     bool showIndirectLight{};      // SSILVB's light alone in place of the lit scene
     bool showGlobalIllumination{}; // The global illumination's light alone in place of the lit scene

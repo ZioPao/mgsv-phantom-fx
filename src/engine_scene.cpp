@@ -160,10 +160,7 @@ std::uint64_t latestFrame{}; // The game loop's frame the latest snapshot was ta
 // The skinned models parsed, for their meshes' index ranges and bone groups (take); render thread.
 std::unordered_map<std::uint64_t, std::shared_ptr<const gi_renderer::Model>> skinnedModels;
 
-// Diagnostics: the bones as the snapshot took them (setBonesFromSnapshot); and where they came from.
-std::atomic<bool> bonesFromSnapshot{};
-// Diagnostics: the opaque meshes the game draws in the main view only are taken (setMainViewMeshes).
-std::atomic<bool> mainViewMeshes{true};
+// Diagnostics: where the bones came from.
 std::atomic<std::uint64_t> posesCompared{}, posesChanged{}, drawsNoted{}, drawsPlaced{}, meshesPosed{};
 std::vector<PendingFile> pendingFiles;
 // The terrain inputs last noted, and the game frame they were noted in.
@@ -415,7 +412,7 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
 
         const bool character = model->bones != 0;
         const bool mainViewOnly = (shadow & CastsNoShadow) && !vegetation;
-        const bool mainViewTaken = mainViewMeshes.load() && !(alpha & (CutOutAlpha | DecalAlpha));
+        const bool mainViewTaken = !(alpha & (CutOutAlpha | DecalAlpha));
         const bool mainViewGlass = mainViewOnly && (alpha & GlassAlpha);
         const bool leftOut = mainViewGlass
             || (character ? (shadow & ShadowMapsOnly) != 0 : (mainViewOnly && !mainViewTaken) || (alpha & TranslucentAlpha));
@@ -856,7 +853,7 @@ void take(Snapshot& snapshot, const std::vector<gi_inputs::DrawnBones>& drawn)
     // moving arms and face). The bones the frame's draws had replace them: each draw's mesh found by its
     // model's place and its index range, its g_vsBone slots written through its bone group. The bones no
     // draw had are read again now, at the kick, which races the game's next frame.
-    if (!bonesFromSnapshot.load(std::memory_order_relaxed) && !snapshot.characters.empty())
+    if (!snapshot.characters.empty())
     {
         std::vector<float> now;
         for (auto& character : snapshot.characters)
@@ -1027,20 +1024,8 @@ std::vector<LoadedTexture> loadedTextures(const std::vector<std::uint64_t>& path
     return found;
 }
 
-void setBonesFromSnapshot(bool on) noexcept
-{
-    bonesFromSnapshot = on;
-}
-
-bool setMainViewMeshes(bool on) noexcept
-{
-    return mainViewMeshes.exchange(on) != on;
-}
-
 std::string poseTiming()
 {
-    if (bonesFromSnapshot.load()) return "characters' bones as the snapshot took them (diagnostics)";
-
     const auto compared = posesCompared.exchange(0), changed = posesChanged.exchange(0);
     const auto noted = drawsNoted.exchange(0), placed = drawsPlaced.exchange(0), posed = meshesPosed.exchange(0);
     return "characters' bones: " + std::to_string(changed) + " of " + std::to_string(compared) + " palettes moved on since the snapshot; "

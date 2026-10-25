@@ -36,7 +36,7 @@ struct Snapshot
 // On the render thread: the latest snapshot's instances and characters, when one came since the last
 // call, and the new models, a few megabytes of model files a call at most.
 // The characters take their bones as the frame's draws had them (`drawn`), where a draw found its
-// character and mesh; the rest as they are now, at the kick (Diagnostics: setBonesFromSnapshot).
+// character and mesh; the rest as they are now, at the kick.
 void take(Snapshot& snapshot, const std::vector<gi_inputs::DrawnBones>& drawn);
 
 // The renderer let these models go: their files are read again when the game places them again.
@@ -71,11 +71,6 @@ std::vector<LoadedTexture> loadedTextures(const std::vector<std::uint64_t>& path
 
 // For the log.
 std::string status();
-// Diagnostics: the characters' bones as the snapshot took them at the frame's first visibility test, a
-// frame behind those drawn, as before 2026-10-24; and since the last call, where the bones came from.
-void setBonesFromSnapshot(bool on) noexcept;
+// Diagnostics: since the last call, where the characters' bones came from.
 std::string poseTiming();
-// Diagnostics: off leaves out the opaque meshes the game draws in the main view only, as before 2026-10-25.
-// Returns whether that changed, the models read so far then having the other meshes.
-bool setMainViewMeshes(bool on) noexcept;
 }

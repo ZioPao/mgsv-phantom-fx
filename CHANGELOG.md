@@ -1,5 +1,10 @@
 # Phantom FX changelog
 
+## Unreleased
+
+- Remove **Old paths** from the Diagnostics page: the ray tracing's earlier behaviour, kept to compare
+  against, is gone. The ray-traced shadows, lights and global illumination are unchanged.
+
 ## 1.7.0
 
 - Add **presets** on the Budget page: **Screen-space** (soft and contact shadows, GTVBAO, SSILVB)

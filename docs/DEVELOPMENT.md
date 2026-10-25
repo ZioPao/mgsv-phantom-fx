@@ -1663,8 +1663,7 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   rows, a mesh's palette through its bone group), its model found by its place (the view's inverse
   times `m_viewWorld`'s translation, within 2 cm of the character's matrix) and its mesh by its index
   range (the FMDL's most detailed faces: first face plus the level's first, and its count); bones no
-  draw had are read again at the kick. Diagnostics, **Character bones from the snapshot (old)**, brings
-  the lag back for comparison; the log counts the draws placed. A character whose refit finds no scratch
+  draw had are read again at the kick; the log counts the draws placed. A character whose refit finds no scratch
   is left out of that frame. Its instances carry `GI_INSTANCE_MODEL | GI_INSTANCE_CHARACTER`. The props
   and weapons a character holds are skinned models of their own; the player's rifle and pistol were
   missing until 2026-10-23, left out for their rounded matrices (see "Characters"): found by logging the
@@ -1689,8 +1688,7 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   `84a120f9301becbe`, mesh 21) 7 cm behind the wall, with 61 of the wall's 64 global illumination rays on
   back faces. Main-view cut-out meshes and decals stay out: taken, crossed cards (model
   `84a1da1c1308e887`, mesh 3) 44 cm above a road, where the game showed nothing, cast a moon shadow.
-  Diagnostics, **Main view meshes left out (old)**, brings the old scene back; the scene starts over and
-  reads its models again when it changes. Open: a tarp on a fence (model `84a1bc5b4702c16b`) is a
+  Open: a tarp on a fence (model `84a1bc5b4702c16b`) is a
   main-view cut-out (mesh 2) cast in the game by a flat 4-triangle stand-in (mesh 3, shadow bit 1) up
   to 25 cm off it, so its shadow rays start on the stand-in or meet it, in patches that change with the
   distance; taking a rigid model as its main view shows it, as a character is, would fix it, untried
@@ -1774,7 +1772,6 @@ traced here (see "Ray-traced lights").
   copies of the surface just above it ("Copies of a surface" in `gi_common.hlsli`). Until 2026-10-24
   every ray left that way: a lamp's hard shadow showed the skip taking a character pressed to a wall
   for a copy of the wall, light through his back in patches ragged along the wall's bumpy normals.
-  Diagnostics, **Shadow rays from the depth (old)**, brings that back for comparison.
 - **Cut-out meshes.** A model mesh the game alpha-tests (FMDL alpha bits 5 and 7, see "Scene objects",
   mesh flags) is cut-out geometry: non-opaque in its structure, so only it reaches the rays' candidate
   code. In the captured-mesh era the shadow rays' alpha test on the captured grass and bushes' cards (5

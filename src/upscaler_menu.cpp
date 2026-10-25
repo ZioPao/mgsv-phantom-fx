@@ -554,24 +554,6 @@ void drawDiagnostics(const Status& state)
             "depth, magenta where it lacks what the game drew, yellow where it has something in the sky.");
         if (const auto scene = global_illumination::status(); options.showTracedScene && !scene.empty()) fxui::note(Tone::Dim, scene);
     }
-
-    if (const fxui::Item item({.id = "oldPaths", .name = "Old paths", .summary = "How the ray tracing worked before, to compare.",
-            .keywords = "shadow rays depth bones snapshot leaves main view meshes walls log"});
-        item)
-    {
-        changed |= fxui::checkbox("Shadow rays from the depth", options.shadowsFromDepth,
-            "With ray-traced shadows or lights on, every shadow ray leaves from the depth's point and the G-buffer's normal, skipping what lies close "
-            "above, as before: a character pressed to a wall lets light through. Off, rays leave the scene's own surface at each pixel.");
-        changed |= fxui::checkbox("Character bones from the snapshot", options.bonesFromSnapshot,
-            "The ray-traced scene's characters take their bones from the frame's first visibility test, before the game animates them, as before: a "
-            "frame behind what is drawn, so their ray-traced shadows trail their movement. Off, they take the bones the frame's draws had.");
-        changed |= fxui::checkbox("Leaves without light through them", options.opaqueLeaves,
-            "With global illumination on, the leaves of bushes and grass light what is around them only from the side the light falls on, as "
-            "before: a bush is black inside. Off, they also let through half of the light on their far side.");
-        changed |= fxui::checkbox("Main view meshes left out", options.mainViewMeshesLeftOut,
-            "The ray-traced scene leaves out the opaque meshes the game draws only in the main view, never into its shadow maps, as before: a "
-            "room's inner walls, so shadow rays leave them from the building's outer shell behind. The scene starts over when this changes.");
-    }
     if (changed) applyDiagnostics(options);
 
     if (const fxui::Item item({.id = "upscalerState", .name = "Upscaler", .keywords = "frames render output jitter fallback LOD bias"}); item)
