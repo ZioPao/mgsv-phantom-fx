@@ -142,6 +142,7 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/log.cpp`, `src/log.hpp` | `PhantomFX.log` beside the add-on, one per game session |
 | `src/hresult.hpp` | `check`: a failed Direct3D or Windows call as an exception naming the step |
 | `src/d3d11_helpers.hpp` | Direct3D 11 helpers for the effects: shader compiles, dynamic constant buffers, compute textures, texture sizes |
+| `src/d3d12_helpers.hpp` | Direct3D 12 helpers for the global illumination, FSR and the presenter: barriers, the device on Direct3D 11's GPU behind ReShade's proxy, shared textures and fences opened in Direct3D 12 |
 | `src/version.rc.in` | Version resource template: name, author and version from `CMakeLists.txt` |
 
 ## Game version

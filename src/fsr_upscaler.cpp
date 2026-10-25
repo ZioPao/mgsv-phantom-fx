@@ -1,8 +1,8 @@
 // FSR upscaling on Direct3D 12 for the Direct3D 11 game; fsr_upscaler.hpp describes the route.
 #include "fsr_upscaler.hpp"
 
+#include "d3d12_helpers.hpp"
 #include "fidelityfx.hpp"
-#include "hresult.hpp"
 #include "log.hpp"
 
 #include <Windows.h>
@@ -24,23 +24,7 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 
-// ReShade's proxies return their native object for this interface (IID_UnwrappedObject).
-constexpr GUID UnwrappedObject{0x7f2c9a11, 0x3b4e, 0x4d6a, {0x81, 0x2f, 0x5e, 0x9c, 0xd3, 0x7a, 0x1b, 0x42}};
 constexpr std::size_t ListsInFlight = 3;
-constexpr DWORD FenceTimeout = 10'000;
-
-struct HandleCloser
-{
-    void operator()(HANDLE handle) const { CloseHandle(handle); }
-};
-
-// Direct3D 12's view of a texture Direct3D 11 shares, opened again when the upscaler replaces it.
-// Holding the texture keeps its address from being reused by another.
-struct SharedTexture
-{
-    ComPtr<ID3D11Texture2D> texture;
-    ComPtr<ID3D12Resource> resource;
-};
 
 // What the FSR context was created for.
 struct ContextKey
@@ -72,7 +56,7 @@ struct State
     ffxContext context{};
     ContextKey key;
     std::string version;
-    SharedTexture color, depth, motion, output;
+    OpenedTexture color, depth, motion, output;
 };
 std::unique_ptr<State> state;
 
@@ -83,40 +67,10 @@ void logMessage(uint32_t type, const wchar_t* message)
     log(text);
 }
 
-template<class Interface> ComPtr<Interface> openShared(ID3D12Device* device, HANDLE handle, const char* what)
+ID3D12Resource* open(State& s, OpenedTexture& shared, ID3D11Texture2D* texture, const char* what)
 {
-    ComPtr<Interface> opened;
-    const auto result = device->OpenSharedHandle(handle, IID_PPV_ARGS(&opened));
-    CloseHandle(handle);
-    check(result, what);
-
-    return opened;
-}
-
-ID3D12Resource* open(State& s, SharedTexture& shared, ID3D11Texture2D* texture, const char* what)
-{
-    if (shared.texture.Get() == texture) return shared.resource.Get();
-
-    ComPtr<IDXGIResource1> resource;
-    check(texture->QueryInterface(IID_PPV_ARGS(&resource)), what);
-    HANDLE handle{};
-    check(resource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &handle), what);
-    shared.resource = openShared<ID3D12Resource>(s.device12.Get(), handle, what);
-    shared.texture = texture;
-
+    check(shared.open(s.device12.Get(), texture), what);
     return shared.resource.Get();
-}
-
-D3D12_RESOURCE_BARRIER transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
-{
-    D3D12_RESOURCE_BARRIER barrier{};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = resource;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = before;
-    barrier.Transition.StateAfter = after;
-
-    return barrier;
 }
 
 void waitFor(State& s, UINT64 value)
@@ -198,14 +152,9 @@ void start(ID3D11Device* device, const std::filesystem::path& directory)
     check(context.As(&s->context11), "Finding the Direct3D 11.4 context");
     check(device11->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&s->fence11)), "Creating the shared fence");
 
-    ComPtr<IDXGIDevice> dxgi;
-    check(device11.As(&dxgi), "Finding the DXGI device");
-    ComPtr<IDXGIAdapter> adapter;
-    check(dxgi->GetAdapter(adapter.GetAddressOf()), "Finding the GPU");
-    ComPtr<ID3D12Device> created;
-    check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&created)), "Creating the Direct3D 12 device");
-    if (SUCCEEDED(created->QueryInterface(UnwrappedObject, reinterpret_cast<void**>(s->device12.GetAddressOf())))) s->wrapper = created;
-    else s->device12 = created;
+    const auto d3d12 = createDevice12(device11.Get());
+    s->wrapper = d3d12.wrapper;
+    s->device12 = d3d12.native;
 
     const D3D12_COMMAND_QUEUE_DESC queue{D3D12_COMMAND_LIST_TYPE_DIRECT};
     check(s->device12->CreateCommandQueue(&queue, IID_PPV_ARGS(&s->queue)), "Creating the Direct3D 12 queue");
@@ -217,7 +166,7 @@ void start(ID3D11Device* device, const std::filesystem::path& directory)
     check(s->list->Close(), "Closing the command list");
     HANDLE fence{};
     check(s->fence11->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &fence), "Sharing the fence");
-    s->fence12 = openShared<ID3D12Fence>(s->device12.Get(), fence, "Opening the shared fence");
+    check(openSharedHandle(s->device12.Get(), fence, s->fence12), "Opening the shared fence");
     s->event.reset(CreateEventW(nullptr, FALSE, FALSE, nullptr));
     if (!s->event) throw std::runtime_error("Creating the fence event failed.");
 
