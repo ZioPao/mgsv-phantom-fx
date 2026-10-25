@@ -398,11 +398,10 @@ float3 HitAlbedo(float3 world, HashGridCache_Visibility visibility)
     return learnt.w ? float3(learnt.xyz) / (255.0f * learnt.w) : g_Frame.nearFar.z;
 }
 
-// Leaves (GI_GEOMETRY_LEAF) let light through, unless the diagnostics keep them opaque.
+// Leaves (GI_GEOMETRY_LEAF) let light through.
 bool HitIsLeaf(HashGridCache_Visibility visibility)
 {
-    return (g_Geometries[FirstGeometry(g_Instances[visibility.instanceIndex]) + visibility.geometryIndex].flags & GI_GEOMETRY_LEAF) != 0
-        && !g_Frame.lightDiagnostics.x;
+    return (g_Geometries[FirstGeometry(g_Instances[visibility.instanceIndex]) + visibility.geometryIndex].flags & GI_GEOMETRY_LEAF) != 0;
 }
 
 // The light at a hit from one of the frame's point and spot lights, chosen by its light here without

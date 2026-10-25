@@ -68,10 +68,6 @@ using gi_scene::MaxInstances;
 
 static_assert(MaxInstances <= (1u << GI_HIT_INSTANCE_BITS));
 
-// ReShade's proxies return their native object for this interface (IID_UnwrappedObject).
-constexpr GUID UnwrappedObject{0x7f2c9a11, 0x3b4e, 0x4d6a, {0x81, 0x2f, 0x5e, 0x9c, 0xd3, 0x7a, 0x1b, 0x42}};
-constexpr DWORD FenceTimeout = 10'000;
-
 // The renderer's own upload buffer holds the frame's constants, its new geometries' rows, and its
 // characters' skin records and palettes.
 constexpr std::uint64_t UploadBytes = 8ull << 20;
@@ -157,13 +153,7 @@ struct TerrainRing
     std::uint32_t refreshed{};
 };
 
-// Direct3D 12's view of a texture Direct3D 11 shares, opened again when Direct3D 11 replaces it.
-// Holding the texture keeps its address from being reused by another.
-struct Shared
-{
-    ComPtr<ID3D11Texture2D> texture;
-    ComPtr<ID3D12Resource> resource;
-};
+using Shared = OpenedTexture;
 
 // One of the game's textures (SceneTexture) and its descriptor in the scene's texture range
 // (g_SceneTextures); the models whose meshes use it.
@@ -294,20 +284,8 @@ std::uint64_t lastProbeLog{};
 
 ComPtr<ID3D12Resource> openShared(State& s, Shared& shared, ID3D11Texture2D* texture, const char* what)
 {
-    if (shared.texture.Get() == texture) return shared.resource;
-
-    ComPtr<IDXGIResource1> resource;
-    check(texture->QueryInterface(IID_PPV_ARGS(&resource)), what);
-    HANDLE handle{};
-    check(resource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &handle), what);
-    ComPtr<ID3D12Resource> opened;
-    const auto result = s.device->OpenSharedHandle(handle, IID_PPV_ARGS(&opened));
-    CloseHandle(handle);
-    check(result, what);
-    shared.texture = texture;
-    shared.resource = opened;
-
-    return opened;
+    check(shared.open(s.device.Get(), texture), what);
+    return shared.resource;
 }
 
 void createPipelines(State& s)
@@ -979,16 +957,9 @@ void start(ID3D11Device* device11, HANDLE sharedFence)
     if (state) return;
 
     auto s = std::make_unique<State>();
-    ComPtr<IDXGIDevice> dxgi;
-    check(device11->QueryInterface(IID_PPV_ARGS(&dxgi)), "Finding the DXGI device");
-    ComPtr<IDXGIAdapter> adapter;
-    check(dxgi->GetAdapter(adapter.GetAddressOf()), "Finding the GPU");
-    ComPtr<ID3D12Device> created, native;
-    check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&created)), "Creating the Direct3D 12 device");
-    if (SUCCEEDED(created->QueryInterface(UnwrappedObject, reinterpret_cast<void**>(native.GetAddressOf())))) s->wrapper = created;
-    else native = created;
-
-    check(native.As(&s->device), "Finding Direct3D 12 ray tracing");
+    const auto d3d12 = createDevice12(device11);
+    s->wrapper = d3d12.wrapper;
+    check(d3d12.native.As(&s->device), "Finding Direct3D 12 ray tracing");
     D3D12_FEATURE_DATA_D3D12_OPTIONS5 options{};
     s->device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options, sizeof(options));
     if (options.RaytracingTier < D3D12_RAYTRACING_TIER_1_1) throw std::runtime_error("The GPU or its driver cannot trace rays from compute shaders (DXR 1.1).");
@@ -1705,8 +1676,8 @@ Result render(const Frame& frame)
         if (traceLight) s.light->fill(constants, frame.verticalFov, parity);
         if (traceShadows) s.shadows->fill(constants);
         constants.objectMotion = {velocity ? 1u : 0u, 0, 0, 0};
-        constants.shadowDiagnostics = {frame.shadowsFromDepth ? 1u : 0u, frame.shadowStarts ? 1u : 0u, 0, 0};
-        constants.lightDiagnostics = {frame.opaqueLeaves ? 1u : 0u, 0, lightDebug ? 1u : 0u, 0};
+        constants.shadowDiagnostics = {0, frame.shadowStarts ? 1u : 0u, 0, 0};
+        constants.lightDiagnostics = {0, 0, lightDebug ? 1u : 0u, 0};
         constants.lightRays = {frame.lightRays, 0, 0, 0};
         std::memcpy(uploads.data + constantsOffset, &constants, sizeof(constants));
 

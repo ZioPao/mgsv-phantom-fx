@@ -1,5 +1,7 @@
 #include "device_check.hpp"
 
+#include "game_code.hpp"
+
 #include <Windows.h>
 #include <cstdint>
 #include <cstring>
@@ -28,24 +30,19 @@ bool knownBuild(const std::uint8_t* base)
 
 bool supportedBuild() noexcept
 {
-    return knownBuild(reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr)));
+    return knownBuild(game_code::image());
 }
 
 std::string passDeviceCheck() noexcept
 {
-    auto* base = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
+    auto* base = game_code::image();
     if (!knownBuild(base)) return "Unknown game build; the start-up device check is left alone.";
 
     auto* check = base + CheckRva;
     if (!std::memcmp(check, Pass, sizeof(Pass))) return "The start-up device check already passes.";
     if (std::memcmp(check, Original, sizeof(Original))) return "The start-up device check has unexpected code; left alone.";
 
-    DWORD protection{};
-    if (!VirtualProtect(check, sizeof(Pass), PAGE_EXECUTE_READWRITE, &protection)) return "Could not unprotect the start-up device check.";
-
-    std::memcpy(check, Pass, sizeof(Pass));
-    VirtualProtect(check, sizeof(Pass), protection, &protection);
-    FlushInstructionCache(GetCurrentProcess(), check, sizeof(Pass));
+    if (!game_code::patch(check, Pass)) return "Could not unprotect the start-up device check.";
 
     return "The start-up device check now passes.";
 }

@@ -326,44 +326,8 @@ std::optional<Role> roleOf(IUnknown* shader)
     return found != roles.end() ? std::optional(found->second) : std::nullopt;
 }
 
-// The game's compute bindings on a deferred context, put back when this goes out of scope.
-class SavedComputeState
-{
-public:
-    explicit SavedComputeState(ID3D11DeviceContext* context) : context(context)
-    {
-        context->CSGetShader(shader.GetAddressOf(), nullptr, nullptr);
-        context->CSGetConstantBuffers(0, Slots, buffers);
-        context->CSGetShaderResources(0, Slots, views);
-        context->CSGetUnorderedAccessViews(0, Slots, accesses);
-    }
-
-    ~SavedComputeState()
-    {
-        context->CSSetShader(shader.Get(), nullptr, 0);
-        context->CSSetConstantBuffers(0, Slots, buffers);
-        context->CSSetShaderResources(0, Slots, views);
-        context->CSSetUnorderedAccessViews(0, Slots, accesses, nullptr);
-        for (UINT i = 0; i < Slots; ++i)
-        {
-            if (buffers[i]) buffers[i]->Release();
-            if (views[i]) views[i]->Release();
-            if (accesses[i]) accesses[i]->Release();
-        }
-    }
-
-    SavedComputeState(const SavedComputeState&) = delete;
-    SavedComputeState& operator=(const SavedComputeState&) = delete;
-
-private:
-    static constexpr UINT Slots = 5;
-
-    ID3D11DeviceContext* context;
-    ComPtr<ID3D11ComputeShader> shader;
-    ID3D11Buffer* buffers[Slots]{};
-    ID3D11ShaderResourceView* views[Slots]{};
-    ID3D11UnorderedAccessView* accesses[Slots]{};
-};
+// The game's compute slots the passes bind, saved around them.
+constexpr ComputeSlots PassSlots{.buffers = 5, .views = 5, .accesses = 5};
 
 void writeParameters(ID3D11DeviceContext* context, UINT width, UINT height, float radius, const Options& options)
 {
@@ -418,7 +382,7 @@ void computeOcclusion(ID3D11DeviceContext* context, ID3D11ShaderResourceView* de
     const auto width = visibility[0].width, height = visibility[0].height;
     writeParameters(context, width, height, options.occlusionRadius, options);
 
-    SavedComputeState saved(context);
+    SavedComputeState saved(context, PassSlots);
     ID3D11Buffer* buffers[]{parameterBuffer.Get(), scene};
     context->CSSetConstantBuffers(0, 2, buffers);
     performance::Timed timed(context, performance::Pass::OcclusionPrefilter);
@@ -445,7 +409,7 @@ void computeLight(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth,
     const auto width = diffuseWithLight.width, height = diffuseWithLight.height;
     writeParameters(context, width, height, options.lightRadius, options);
 
-    SavedComputeState saved(context);
+    SavedComputeState saved(context, PassSlots);
     ID3D11Buffer* buffers[]{parameterBuffer.Get(), scene};
     context->CSSetConstantBuffers(0, 2, buffers);
     performance::Timed timed(context, performance::Pass::LightPrefilter);
@@ -754,7 +718,7 @@ bool drawResolveForGlobal(ID3D11DeviceContext* context, const ui_redirect::DrawC
     writeParameters(context, size.first, size.second, 0, options);
     {
         const performance::Timed timed(context, performance::Pass::GiCombine);
-        SavedComputeState saved(context);
+        SavedComputeState saved(context, PassSlots);
         context->CSSetConstantBuffers(0, 1, parameterBuffer.GetAddressOf());
         ID3D11ShaderResourceView* inputs[]{diffuse.Get(), light, hasProbeLight ? gameProbeLight.view.Get() : nullptr};
         auto* output = diffuseWithLight.access.Get();

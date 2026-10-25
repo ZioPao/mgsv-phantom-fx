@@ -1,6 +1,7 @@
 #include "character.hpp"
 
 #include "device_check.hpp"
+#include "game_code.hpp"
 #include "log.hpp"
 
 #include <Windows.h>
@@ -30,13 +31,7 @@ constexpr unsigned char TypeCode[]{0x4C, 0x8B, 0x05, 0x3B, 0xE8, 0x27, 0x02, 0x4
 constexpr unsigned char FaceIdCode[]{0x4C, 0x8B, 0x05, 0xD0, 0xE7, 0x27, 0x02, 0x49, 0x81, 0xC0, 0xFC, 0x00, 0x00, 0x00};
 constexpr unsigned char FaceEquipIdCode[]{0x4C, 0x8B, 0x05, 0x65, 0xE7, 0x27, 0x02, 0x49, 0x81, 0xC0, 0xFE, 0x00, 0x00, 0x00};
 
-struct Expected
-{
-    std::uintptr_t rva;
-    std::span<const unsigned char> code;
-};
-
-const Expected Checked[]{{0x996FB8, MissionCodeCode}, {0x997F9D, PartsTypeCode}, {0x998008, CamoTypeCode}, {0x9980DE, TypeCode},
+const game_code::Expected Checked[]{{0x996FB8, MissionCodeCode}, {0x997F9D, PartsTypeCode}, {0x998008, CamoTypeCode}, {0x9980DE, TypeCode},
     {0x998149, FaceIdCode}, {0x9981B4, FaceEquipIdCode}};
 
 // The player update (0x9CD030) reads vars.playerType and keeps Ocelot or Quiet only while one of two
@@ -191,11 +186,6 @@ std::mutex mutex;
 Pending pending;
 State published;
 
-std::uint8_t* base()
-{
-    return reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
-}
-
 template<class Value> Value& at(std::uint8_t* object, std::size_t offset)
 {
     return *reinterpret_cast<Value*>(object + offset);
@@ -247,26 +237,17 @@ std::string allowFobCharacters() noexcept
 {
     if (!supportedBuild()) return "Unknown game build; Ocelot and Quiet stay FOB characters.";
 
-    auto* const check = base() + FobCheckRva;
+    auto* const check = game_code::image() + FobCheckRva;
     if (std::memcmp(check, FobCheckCode, sizeof(FobCheckCode))) return "The player update has unexpected code; Ocelot and Quiet stay FOB characters.";
 
-    auto* const jump = check + FobJumpOffset;
-    DWORD protection{};
-    if (!VirtualProtect(jump, sizeof(KeepFobCharacter), PAGE_EXECUTE_READWRITE, &protection))
-        return "Could not unprotect the player update; Ocelot and Quiet stay FOB characters.";
-
-    std::memcpy(jump, KeepFobCharacter, sizeof(KeepFobCharacter));
-    VirtualProtect(jump, sizeof(KeepFobCharacter), protection, &protection);
-    FlushInstructionCache(GetCurrentProcess(), jump, sizeof(KeepFobCharacter));
+    if (!game_code::patch(check + FobJumpOffset, KeepFobCharacter)) return "Could not unprotect the player update; Ocelot and Quiet stay FOB characters.";
 
     return "Ocelot and Quiet can be played outside FOB.";
 }
 
 bool supported() noexcept
 {
-    static const bool expected = supportedBuild() && std::ranges::all_of(Checked, [](const Expected& expected) {
-        return std::memcmp(base() + expected.rva, expected.code.data(), expected.code.size()) == 0;
-    });
+    static const bool expected = supportedBuild() && game_code::matches(Checked);
 
     return expected;
 }
@@ -315,7 +296,7 @@ void onFrameStart() noexcept
         wanted = std::exchange(pending, {});
     }
 
-    auto* const vars = at<std::uint8_t*>(base(), VarsRva);
+    auto* const vars = at<std::uint8_t*>(game_code::image(), VarsRva);
     State now;
     if (vars && inMissionOrFreeRoam(at<std::uint16_t>(vars, MissionCode)))
     {

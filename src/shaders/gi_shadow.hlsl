@@ -59,8 +59,6 @@ ShadowSurface ShadowSurfaceAt(float3 position, float3 gbufferNormal)
     surface.normal = gbufferNormal;
     surface.exact = false;
     surface.hit = (SceneHit)0;
-    // Diagnostics: every ray from the depth, as before.
-    if (g_Frame.shadowDiagnostics.x) return surface;
 
     // Only the stretch around the depth's point: the game hides what comes between the camera and the player
     // (a bush the camera backs into) and the scene keeps it. Searched from the eye, the ray stopped on its

@@ -4,6 +4,8 @@
 
 - The menu and the Budget page name each effect the same way: global illumination shows NRD on
   both, and the upscaler's item shows DLSS or FSR beside its name.
+- Remove **Old paths** from the Diagnostics page: the ray tracing's earlier behaviour, kept to compare
+  against, is gone. The ray-traced shadows, lights and global illumination are unchanged.
 - **Sun size** now also sets the sun's disc for the ray-traced global illumination, which had a
   fixed 0.54 degrees, and shows under **Global illumination** too. At the default 0.53 degrees it
   looks as before.

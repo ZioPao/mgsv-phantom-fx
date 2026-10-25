@@ -48,8 +48,6 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 
-// Any GUID identifies a custom-engine NGX project.
-constexpr char NgxProjectId[] = "3f6c2a91-7d4e-4b8a-a1c5-9e0d2b7f4c68";
 constexpr UINT SceneConstantsSize = sizeof(camera::SceneConstants);
 
 // The game's pixel shaders the add-on looks for, each drawn as one full-screen triangle. From Copy on
@@ -346,8 +344,7 @@ void configureIndirectLight()
         .localLights = tracedLights, .lightRays = settings.rayQuality, .sunSize = settings.sunSize, .lightPixelRays = settings.globalIlluminationRays,
         .showScene = diagnostics.showTracedScene,
         .debugShadows = diagnostics.debugView == ShadowRaysView || diagnostics.debugView == ShadowStartsView,
-        .shadowStarts = diagnostics.debugView == ShadowStartsView, .shadowsFromDepth = diagnostics.shadowsFromDepth, .bonesFromSnapshot = diagnostics.bonesFromSnapshot,
-        .opaqueLeaves = diagnostics.opaqueLeaves, .mainViewMeshesLeftOut = diagnostics.mainViewMeshesLeftOut, .debugHistory = diagnostics.debugView == LightHistoryView,
+        .shadowStarts = diagnostics.debugView == ShadowStartsView, .debugHistory = diagnostics.debugView == LightHistoryView,
         .logOften = diagnostics.logGlobalIlluminationOften, .light = !leftOut.globalLight});
     local_lights::configure({.enabled = tracedLights, .flashlightBrightness = settings.flashlightBrightness});
 }
@@ -756,7 +753,7 @@ void initializeNgx()
     info.LoggingInfo.LoggingCallback = ngxLog;
     info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
     info.LoggingInfo.DisableOtherLoggingSinks = true;
-    auto result = NVSDK_NGX_D3D11_Init_with_ProjectID(NgxProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "Fox Engine 1.0.15", dataDirectory.c_str(),
+    auto result = NVSDK_NGX_D3D11_Init_with_ProjectID(frame_generation::NgxProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "Fox Engine 1.0.15", dataDirectory.c_str(),
         ngxDevice.Get(), &info);
     if (NVSDK_NGX_FAILED(result))
         throw std::runtime_error("NVIDIA NGX could not start (" + hex(static_cast<std::uint32_t>(result))
