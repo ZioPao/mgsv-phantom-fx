@@ -98,6 +98,7 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/performance.cpp`, `src/performance.hpp` | The passes' GPU costs: timestamp queries, the averages, the real cost measurement, `PhantomFX-performance.txt` (see "Costs") |
 | `src/performance_menu.cpp` | The budget page, the costs over the game, and the costs as text |
 | `src/device_check.cpp`, `src/device_check.hpp` | Lets the game start under ReShade (see below); the build check |
+| `src/game_code.hpp` | The game's image, checks of its code, hooks (MinHook) and code patches |
 | `src/motion_blur.cpp`, `src/motion_blur.hpp` | Hooks on the motion blur plugin: velocity passes every frame, no blur |
 | `src/fxaa.cpp`, `src/fxaa.hpp` | Hook on the FXAA plugin: the FXAA pass at any post processing setting |
 | `src/frame_rate.cpp`, `src/frame_rate.hpp` | Hook on the frame wait setter: the optional 60 fps unlock |
@@ -113,12 +114,12 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/dev_tools.hpp` | Whether the build has the Developer page (the dev preset) |
 | `src/game_lua.cpp`, `src/game_lua.hpp` | Lua in the game's script state, and the Developer page's console (see "Game Lua") |
 | `src/travel.cpp`, `src/travel.hpp` | The Developer page's travel: free roam in another map (see "Travel") |
-| `src/sun_shadows.cpp`, `src/sun_shadows.hpp` | Soft shadows and Bend Studio's screen-space shadows on the sun: the trace and the sun pass's replacement draw |
-| `src/sun_shadows_shaders.hpp` | HLSL: Bend's trace ported to FXC, the game's sun light shaders rebuilt with soft shadows and the screen-space shadow |
+| `src/shadows.cpp`, `src/shadows.hpp` | Soft shadows and Bend Studio's screen-space shadows on the sun and the lamps: the traces and the light passes' replacement draws |
+| `src/shadows_shaders.hpp` | HLSL: Bend's trace ported to FXC, the game's sun light shaders rebuilt with soft shadows and the screen-space shadow |
 | `third_party/bend_sss/bend_sss_cpu.h` | Bend Studio's dispatch layout, unchanged (Apache License 2.0) |
 | `src/gi_scene.cpp`, `src/gi_scene.hpp` | The ray-traced scene on Direct3D 12: the geometry pool, bottom-level structures (a geometry per mesh, compacted), the geometry table, the frame's instances and top level (see "Ray-traced scene") |
 | `src/engine_scene.cpp`, `src/engine_scene.hpp` | The game's loaded models from its visibility managers, its characters from its model list, their FMDL meshes and base textures, its texture manager, the terrain's heightmap inputs (see "Scene objects") |
-| `src/gi_inputs.cpp`, `src/gi_inputs.hpp` | What the ray tracing takes from the game's draws: the constants it writes, the main camera of the frame drawn, the terrain's inputs |
+| `src/gi_inputs.cpp`, `src/gi_inputs.hpp` | What the ray tracing takes from the game's draws: the constants it writes (also the screen-space shadows' light pass constants), the main camera of the frame drawn, the terrain's inputs |
 | `src/engine_brush.cpp`, `src/engine_brush.hpp` | The game's object brush: its loaded blocks' vegetation and props, read from their placement records (see "Scene objects") |
 | `src/game_memory.hpp` | Guarded reads of the game's objects |
 | `src/gi_textures.cpp`, `src/gi_textures.hpp` | Shared copies of the game's textures the ray-traced scene's meshes use, from its texture manager (see "Ray-traced scene") |
@@ -127,6 +128,7 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/shaders/gi_light.hlsl` | HLSL: the light's rays, their hits' light, the hash grid cache, the denoiser's inputs and the render size |
 | `src/gi_shadow.cpp`, `src/gi_shadow.hpp` | Ray-traced shadows on the global illumination's Direct3D 12 device: the denoiser's memory and passes |
 | `src/local_lights.cpp`, `src/local_lights.hpp` | Ray-traced lights: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights") |
+| `src/game_lights.hpp` | The game's point and spot light shaders and their constants, for lamp contact shadows and the ray-traced lights: the checksums, a light's range, its sphere on screen |
 | `src/shaders/gi_shadow.hlsl`, `gi_shadow_filter.hlsl`, `gi_shadow.hlsli` | HLSL: the sun's shadow rays, and the FidelityFX Shadow Denoiser's data access, temporal pass and filters |
 | `third_party/ffx_denoiser_shadows/` | AMD's FidelityFX Shadow Denoiser headers, unchanged (MIT; `licenses/AMD-FidelityFX-LICENSE.txt`) |
 | `src/indirect_light.cpp`, `src/indirect_light.hpp` | GTVBAO in place of the game's SSAO, on the indirect light, and SSILVB's bounce light: pass recognition, the compute passes, the multiply, the resolve's white occlusion and diffuse light |
@@ -143,6 +145,7 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/clock.hpp` | `QueryPerformanceCounter` ticks and the milliseconds between them |
 | `src/hresult.hpp` | `check`: a failed Direct3D or Windows call as an exception naming the step |
 | `src/d3d11_helpers.hpp` | Direct3D 11 helpers for the effects: shader compiles, dynamic constant buffers, compute textures, texture sizes |
+| `src/d3d12_helpers.hpp` | Direct3D 12 helpers for the global illumination, FSR and the presenter: barriers, the device on Direct3D 11's GPU behind ReShade's proxy, shared textures and fences opened in Direct3D 12 |
 | `src/version.rc.in` | Version resource template: name, author and version from `CMakeLists.txt` |
 
 ## Game version
@@ -1418,7 +1421,7 @@ every point and spot light (`drawLocalLight` in `src/shadows.cpp`), one trace pe
 are a toggle of their own: the sun's is one trace a frame, the lamps' grows with the lights on
 screen.
 
-- **Replacement shaders** (`src/sun_shadows_shaders.hpp`). `SunLight_DL_CS_ES` and
+- **Replacement shaders** (`src/shadows_shaders.hpp`). `SunLight_DL_CS_ES` and
   `SunLight_DL_ES`, and their rain pair without the sky reflection (`SKY_REFLECTION 0`),
   rebuilt in HLSL from their disassembly, with the same bindings, plus the
   options in `b6` (soft shadows, the sun's tangent, the noise frame, screen-space shadows) and the
@@ -1436,9 +1439,9 @@ screen.
   from `cPSScene` `c21` (`1 / P00`, `1 / P11`, B, A) and `c28` (the jitter, while DLSS jitters), so
   it matches the depth. The direction is `cPSLight` `c0`. Both buffers are kept per thread as the
   game writes them (Map, memcpy, Unmap on the recording thread, after the upscaler has added the
-  jitter) and looked up by the buffers the draw binds. Depth is reversed (near 1, far 0, the border
-  colour). Bend's starting values: 60 samples, surface thickness 0.5%, bilinear threshold 2%,
-  contrast 4, early-out on.
+  jitter; `gi_inputs.cpp` keeps them, as for the ray tracing) and looked up by the buffers the draw
+  binds. Depth is reversed (near 1, far 0, the border colour). Bend's starting values: 60 samples,
+  surface thickness 0.5%, bilinear threshold 2%, contrast 4, early-out on.
 - **Foliage casts no shadow.** The trace reads the material from the pass's specular target
   (`t1`, `z` x 255; foliage is 43, as in "GTVBAO") and skips foliage samples as Bend skips edge
   pixels. Taken as solid surfaces 0.5% deep, a clump's blades shaded each other: in a sunlit
@@ -1666,8 +1669,7 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   rows, a mesh's palette through its bone group), its model found by its place (the view's inverse
   times `m_viewWorld`'s translation, within 2 cm of the character's matrix) and its mesh by its index
   range (the FMDL's most detailed faces: first face plus the level's first, and its count); bones no
-  draw had are read again at the kick. Diagnostics, **Character bones from the snapshot (old)**, brings
-  the lag back for comparison; the log counts the draws placed. A character whose refit finds no scratch
+  draw had are read again at the kick; the log counts the draws placed. A character whose refit finds no scratch
   is left out of that frame. Its instances carry `GI_INSTANCE_MODEL | GI_INSTANCE_CHARACTER`. The props
   and weapons a character holds are skinned models of their own; the player's rifle and pistol were
   missing until 2026-10-23, left out for their rounded matrices (see "Characters"): found by logging the
@@ -1692,8 +1694,7 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   `84a120f9301becbe`, mesh 21) 7 cm behind the wall, with 61 of the wall's 64 global illumination rays on
   back faces. Main-view cut-out meshes and decals stay out: taken, crossed cards (model
   `84a1da1c1308e887`, mesh 3) 44 cm above a road, where the game showed nothing, cast a moon shadow.
-  Diagnostics, **Main view meshes left out (old)**, brings the old scene back; the scene starts over and
-  reads its models again when it changes. Open: a tarp on a fence (model `84a1bc5b4702c16b`) is a
+  Open: a tarp on a fence (model `84a1bc5b4702c16b`) is a
   main-view cut-out (mesh 2) cast in the game by a flat 4-triangle stand-in (mesh 3, shadow bit 1) up
   to 25 cm off it, so its shadow rays start on the stand-in or meet it, in patches that change with the
   distance; taking a rigid model as its main view shows it, as a character is, would fix it, untried
@@ -1777,7 +1778,6 @@ traced here (see "Ray-traced lights").
   copies of the surface just above it ("Copies of a surface" in `gi_common.hlsli`). Until 2026-10-24
   every ray left that way: a lamp's hard shadow showed the skip taking a character pressed to a wall
   for a copy of the wall, light through his back in patches ragged along the wall's bumpy normals.
-  Diagnostics, **Shadow rays from the depth (old)**, brings that back for comparison.
 - **Cut-out meshes.** A model mesh the game alpha-tests (FMDL alpha bits 5 and 7, see "Scene objects",
   mesh flags) is cut-out geometry: non-opaque in its structure, so only it reaches the rays' candidate
   code. In the captured-mesh era the shadow rays' alpha test on the captured grass and bushes' cards (5
@@ -1906,7 +1906,7 @@ their shadow maps or of none, and lights without specular get the game's. The sc
 its own if neither the light nor the sun's shadows run. Lamp contact shadows are off while it is on.
 
 - **The game's lights** (24 pixel shaders, `SSLighting2_*` and `Lighting_*_NA`, point or spot, with or
-  without a mask, specular and a shadow map; their checksums in `local_lights.cpp`). Two draws a light
+  without a mask, specular and a shadow map; their checksums in `game_lights.hpp`). Two draws a light
   in the light pass: the light's volume marks the stencil (colour writes off), then lights where it
   marked (ONE, ONE into both light targets). Their vertex shaders are one and the same: the volume
   comes in clip space. Every one reads `cPSLight` (`b3`, the light passes' view space) alike: `c3` the

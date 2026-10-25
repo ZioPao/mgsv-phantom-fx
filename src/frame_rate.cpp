@@ -1,6 +1,7 @@
 #include "frame_rate.hpp"
 
 #include "device_check.hpp"
+#include "game_code.hpp"
 
 #include <Windows.h>
 #include <MinHook.h>
@@ -44,19 +45,13 @@ std::string hook() noexcept
 {
     if (!supportedBuild()) return "Unknown game build; the frame rate is left to the game.";
 
-    auto* base = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
+    auto* base = game_code::image();
     auto* target = base + SetWaitTypeRva;
     if (std::memcmp(target, SetWaitTypeStart, sizeof(SetWaitTypeStart)))
         return "The frame wait setter has unexpected code; the frame rate is left to the game.";
 
-    auto status = MH_CreateHook(target, reinterpret_cast<void*>(&setWaitType), reinterpret_cast<void**>(&originalSetWaitType));
-    if (status == MH_OK) status = MH_EnableHook(target);
-    if (status != MH_OK)
-    {
-        MH_RemoveHook(target);
-        originalSetWaitType = nullptr;
+    if (const auto status = game_code::hookAt(target, &setWaitType, originalSetWaitType); status != MH_OK)
         return std::string("Hooking the frame wait setter failed (") + MH_StatusToString(status) + "); the frame rate is left to the game.";
-    }
 
     // The game may have chosen its wait before ReShade loaded the add-on.
     std::lock_guard lock(waitMutex);

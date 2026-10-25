@@ -1,6 +1,7 @@
 #include "render_scale.hpp"
 
 #include "device_check.hpp"
+#include "game_code.hpp"
 
 #include <Windows.h>
 #include <MinHook.h>
@@ -87,16 +88,11 @@ std::string hook() noexcept
 {
     if (!supportedBuild()) return "Unknown game build; the engine renders at the display size.";
 
-    auto* target = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr)) + RendererStepRva;
+    auto* target = game_code::image() + RendererStepRva;
     if (std::memcmp(target, RendererStepStart, sizeof(RendererStepStart))) return "The renderer has unexpected code; upscaling is unavailable.";
 
-    auto status = MH_CreateHook(target, reinterpret_cast<void*>(&rendererStep), reinterpret_cast<void**>(&originalRendererStep));
-    if (status == MH_OK) status = MH_EnableHook(target);
-    if (status != MH_OK)
-    {
-        MH_RemoveHook(target);
+    if (const auto status = game_code::hookAt(target, &rendererStep, originalRendererStep); status != MH_OK)
         return std::string("Hooking the renderer failed (") + MH_StatusToString(status) + "); upscaling is unavailable.";
-    }
 
     installed = true;
 

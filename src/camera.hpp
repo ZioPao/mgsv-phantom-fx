@@ -18,6 +18,10 @@ struct SceneConstants
 // Row-major 4x4 in the engine's convention.
 using Matrix = std::array<double, 16>;
 
+// Gauss-Jordan with partial pivoting. A matrix with no inverse gives a wrong but finite result, as a
+// zero pivot scales its row by 0.
+Matrix inverse(Matrix matrix);
+
 enum class SceneView : std::uint8_t
 {
     Other,

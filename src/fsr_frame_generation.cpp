@@ -2,6 +2,7 @@
 #include "fsr_frame_generation.hpp"
 
 #include "clock.hpp"
+#include "d3d12_helpers.hpp"
 #include "fidelityfx.hpp"
 #include "log.hpp"
 
@@ -45,18 +46,6 @@ ComPtr<ID3D12Resource> hudlessCopy;
 bool generating{}, hdrOutput{};
 std::string version, failure;
 LONGLONG lastFrame{};
-
-D3D12_RESOURCE_BARRIER transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
-{
-    D3D12_RESOURCE_BARRIER barrier{};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = resource;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = before;
-    barrier.Transition.StateAfter = after;
-
-    return barrier;
-}
 
 // The SDR hudless texture is typeless, so its sRGB view can draw it (upscaler.cpp, "hudless"); FSR
 // reads its copy as the real swap chain holds the bits.

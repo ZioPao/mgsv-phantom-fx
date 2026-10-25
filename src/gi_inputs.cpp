@@ -48,7 +48,7 @@ constexpr std::size_t UseWeightCount = 8 * 4;
 // The skinned meshes noted between kicks at most.
 constexpr std::size_t MaxDrawnBones = 2048;
 
-std::atomic<bool> active{};
+std::atomic<bool> active{}, lightPassKept{};
 
 // Known vertex shaders, by the object the game binds. Holding them keeps their addresses from being reused.
 std::shared_mutex shaderMutex;
@@ -59,11 +59,12 @@ std::vector<ComPtr<IUnknown>> shaderOwners;
 thread_local ID3D11DeviceContext* boundContext{};
 thread_local Kind boundKind{};
 
-// What the thread last wrote to each kept constant buffer; for scene constants, whether they are the
-// main camera's, worked out once a write.
+// What the thread last wrote to each kept constant buffer, and its size in bytes; for scene constants,
+// whether they are the main camera's, worked out once a write while active.
 struct Written
 {
     std::array<float, LargestConstants> values{};
+    UINT size{};
     bool mainCamera{};
 };
 
@@ -184,6 +185,11 @@ void detach() noexcept
     shaderOwners.clear();
 }
 
+void keepLightPassConstants(bool keep) noexcept
+{
+    lightPassKept = keep;
+}
+
 void setActive(bool on) noexcept
 {
     if (on == active.load()) return;
@@ -227,7 +233,8 @@ void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept
 
 void bufferMapped(ID3D11Resource* buffer, void* data) noexcept
 {
-    if (!active.load(std::memory_order_relaxed) || !data) return;
+    const bool tracing = active.load(std::memory_order_relaxed);
+    if ((!tracing && !lightPassKept.load(std::memory_order_relaxed)) || !data) return;
 
     D3D11_RESOURCE_DIMENSION dimension{};
     buffer->GetType(&dimension);
@@ -235,9 +242,10 @@ void bufferMapped(ID3D11Resource* buffer, void* data) noexcept
 
     D3D11_BUFFER_DESC desc{};
     static_cast<ID3D11Buffer*>(buffer)->GetDesc(&desc);
-    const bool kept = desc.ByteWidth == SceneConstantsSize || desc.ByteWidth == ObjectConstantsSize || desc.ByteWidth == LightConstantsSize
-        || desc.ByteWidth == ProbeConstantsSize || desc.ByteWidth == MaterialConstantsSize || desc.ByteWidth == BonesConstantsSize;
-    if (!kept || !(desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER)) return;
+    const UINT size = desc.ByteWidth;
+    const bool lightPass = size == SceneConstantsSize || size == LightConstantsSize;
+    const bool rayTracingOnly = size == ObjectConstantsSize || size == ProbeConstantsSize || size == MaterialConstantsSize || size == BonesConstantsSize;
+    if (!(lightPass || (tracing && rayTracingOnly)) || !(desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER)) return;
 
     mappedBuffer = buffer;
     mappedData = data;
@@ -253,7 +261,8 @@ void bufferUnmapped(ID3D11Resource* buffer) noexcept
     {
         auto& written = contents[buffer];
         std::memcpy(written.values.data(), mappedData, mappedSize);
-        if (mappedSize == SceneConstantsSize) written.mainCamera = mainCamera(written.values);
+        written.size = mappedSize;
+        if (mappedSize == SceneConstantsSize) written.mainCamera = active.load(std::memory_order_relaxed) && mainCamera(written.values);
     }
     catch (...)
     {
@@ -267,6 +276,15 @@ bool written(ID3D11Buffer* buffer, std::span<float> into) noexcept
 {
     const auto* found = writtenTo(buffer);
     if (!found || into.size() > found->values.size()) return false;
+
+    std::copy_n(found->values.begin(), into.size(), into.begin());
+    return true;
+}
+
+bool writtenExactly(ID3D11Buffer* buffer, std::span<float> into) noexcept
+{
+    const auto* found = writtenTo(buffer);
+    if (!found || into.size_bytes() != found->size) return false;
 
     std::copy_n(found->values.begin(), into.size(), into.begin());
     return true;

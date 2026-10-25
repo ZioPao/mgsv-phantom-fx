@@ -203,38 +203,8 @@ float linearToSrgb(float value)
     return value <= 0.0031308f ? value * 12.92f : 1.055f * std::pow(value, 1 / 2.4f) - 0.055f;
 }
 
-// The compute bindings the add-on's passes touch, put back after them.
-class SavedComputeState
-{
-public:
-    explicit SavedComputeState(ID3D11DeviceContext* context) : context(context)
-    {
-        context->CSGetShader(shader.GetAddressOf(), nullptr, nullptr);
-        context->CSGetConstantBuffers(1, 1, buffer.GetAddressOf());
-        context->CSGetShaderResources(0, 1, view.GetAddressOf());
-        context->CSGetUnorderedAccessViews(0, 1, access.GetAddressOf());
-    }
-
-    ~SavedComputeState()
-    {
-        ID3D11UnorderedAccessView* const none[1]{};
-        context->CSSetUnorderedAccessViews(0, 1, none, nullptr);
-        context->CSSetShader(shader.Get(), nullptr, 0);
-        context->CSSetConstantBuffers(1, 1, buffer.GetAddressOf());
-        context->CSSetShaderResources(0, 1, view.GetAddressOf());
-        context->CSSetUnorderedAccessViews(0, 1, access.GetAddressOf(), nullptr);
-    }
-
-    SavedComputeState(const SavedComputeState&) = delete;
-    SavedComputeState& operator=(const SavedComputeState&) = delete;
-
-private:
-    ID3D11DeviceContext* context;
-    ComPtr<ID3D11ComputeShader> shader;
-    ComPtr<ID3D11Buffer> buffer;
-    ComPtr<ID3D11ShaderResourceView> view;
-    ComPtr<ID3D11UnorderedAccessView> access;
-};
+// The compute slots the add-on's passes touch (b1, t0 and u0), saved around them.
+constexpr ComputeSlots PassSlots{.buffers = 2, .views = 1, .accesses = 1};
 
 // At a deferred resolve: its tonemap curve, which the grading and DLSS read later in the frame.
 void captureCurve(ID3D11DeviceContext* context)
@@ -243,7 +213,7 @@ void captureCurve(ID3D11DeviceContext* context)
     context->PSGetConstantBuffers(MaterialSlot, 1, material.GetAddressOf());
     if (!material || !captureShader) return;
 
-    SavedComputeState saved(context);
+    SavedComputeState saved(context, PassSlots);
     context->CSSetConstantBuffers(1, 1, material.GetAddressOf());
     context->CSSetUnorderedAccessViews(0, 1, curveAccess.GetAddressOf(), nullptr);
     context->CSSetShader(captureShader.Get(), nullptr, 0);
@@ -776,7 +746,7 @@ void encode(ID3D11DeviceContext* context) noexcept
         // The target cannot be a render target and an unordered access view at once.
         context->OMSetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
         {
-            SavedComputeState saved(context);
+            SavedComputeState saved(context, PassSlots);
             const performance::Timed timed(context, performance::Pass::HdrEncode);
             context->CSSetUnorderedAccessViews(0, 1, access.GetAddressOf(), nullptr);
             context->CSSetShader(encodeShader.Get(), nullptr, 0);
@@ -876,7 +846,7 @@ bool copy(ID3D11DeviceContext* context, ID3D11Resource* source, ID3D11Resource* 
 
         const performance::Timed timed(context, performance::Pass::HdrDecode);
         context->CopyResource(destination, source);
-        SavedComputeState saved(context);
+        SavedComputeState saved(context, PassSlots);
         context->CSSetShaderResources(0, 1, sourceView.GetAddressOf());
         context->CSSetUnorderedAccessViews(0, 1, twinAccess.GetAddressOf(), nullptr);
         context->CSSetShader(decodeShader.Get(), nullptr, 0);

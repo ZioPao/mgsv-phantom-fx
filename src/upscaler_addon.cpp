@@ -15,6 +15,7 @@
 // a game's own DLSS.
 #include "atmosphere.hpp"
 #include "character.hpp"
+#include "d3d12_helpers.hpp"
 #include "device_check.hpp"
 #include "draw_distance.hpp"
 #include "frame_log.hpp"
@@ -59,9 +60,6 @@ namespace
 {
 using namespace phantom_fx;
 using namespace reshade::api;
-
-// ReShade's proxies return their native object for this interface (IID_UnwrappedObject).
-constexpr GUID UnwrappedObject{0x7f2c9a11, 0x3b4e, 0x4d6a, {0x81, 0x2f, 0x5e, 0x9c, 0xd3, 0x7a, 0x1b, 0x42}};
 
 HMODULE self{};
 command_list* immediateList{};
@@ -427,7 +425,6 @@ void onMapBuffer(device*, resource buffer, uint64_t, uint64_t, map_access access
     if (access == map_access::read_only || !data) return;
 
     upscaler::bufferMapped(reinterpret_cast<ID3D11Resource*>(buffer.handle), *data);
-    shadows::bufferMapped(reinterpret_cast<ID3D11Resource*>(buffer.handle), *data);
     global_illumination::bufferMapped(reinterpret_cast<ID3D11Resource*>(buffer.handle), *data);
 }
 
@@ -436,7 +433,6 @@ void onMapBuffer(device*, resource buffer, uint64_t, uint64_t, map_access access
 void onUnmapBuffer(device*, resource buffer)
 {
     upscaler::bufferUnmapped(reinterpret_cast<ID3D11Resource*>(buffer.handle));
-    shadows::bufferUnmapped(reinterpret_cast<ID3D11Resource*>(buffer.handle));
     global_illumination::bufferUnmapped(reinterpret_cast<ID3D11Resource*>(buffer.handle));
 }
 

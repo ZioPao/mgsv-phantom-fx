@@ -1,6 +1,7 @@
 #include "draw_distance.hpp"
 
 #include "device_check.hpp"
+#include "game_code.hpp"
 #include "game_memory.hpp"
 #include "log.hpp"
 
@@ -78,11 +79,6 @@ int gameLodResolution{};
 std::array<float, Lengths.size()> gameLength{};
 std::array<bool, Lengths.size()> lengthUnread{};
 
-std::uint8_t* image()
-{
-    return reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
-}
-
 int& field(std::uint8_t* description, std::size_t offset)
 {
     return *reinterpret_cast<int*>(description + offset);
@@ -132,7 +128,7 @@ void* createController(std::uint8_t* description)
 
 std::uint8_t* settingOf(const Length& length)
 {
-    return image() + length.rva;
+    return game_code::image() + length.rva;
 }
 
 float& applied(const Length& length)
@@ -163,30 +159,17 @@ int select(std::uint8_t* setting, void* request)
 
     return originalSelect(setting, request);
 }
-
-template<class Function> MH_STATUS hookAt(std::uint8_t* target, void* detour, Function& original)
-{
-    auto status = MH_CreateHook(target, detour, reinterpret_cast<void**>(&original));
-    if (status == MH_OK) status = MH_EnableHook(target);
-    if (status != MH_OK)
-    {
-        MH_RemoveHook(target);
-        original = nullptr;
-    }
-
-    return status;
-}
 }
 
 std::string hook() noexcept
 {
     if (!supportedBuild()) return "Unknown game build; the draw distance stays the game's.";
 
-    auto* base = image();
+    auto* base = game_code::image();
     std::string result;
     if (std::memcmp(base + CreateControllerRva, CreateControllerCode, sizeof(CreateControllerCode)))
         result = "The stream controller's creation has unexpected code; the loading distance stays the game's.";
-    else if (const auto status = hookAt(base + CreateControllerRva, reinterpret_cast<void*>(&createController), originalCreateController); status != MH_OK)
+    else if (const auto status = game_code::hookAt(base + CreateControllerRva, &createController, originalCreateController); status != MH_OK)
         result = std::string("Hooking the stream controller's creation failed (") + MH_StatusToString(status) + "); the loading distance stays the game's.";
     else
         result = "The stream controller's creation is hooked: the loading distance can change.";
@@ -198,7 +181,7 @@ std::string hook() noexcept
             && game_memory::isA(reinterpret_cast<std::uintptr_t>(settingOf(length)), reinterpret_cast<std::uintptr_t>(base + length.vtable));
     if (!settingsFound) return result + " The level of detail's settings are not as expected; it stays the game's.";
 
-    if (const auto status = hookAt(base + SelectRva, reinterpret_cast<void*>(&select), originalSelect); status != MH_OK)
+    if (const auto status = game_code::hookAt(base + SelectRva, &select, originalSelect); status != MH_OK)
         return result + " Hooking the graphics quality selection failed (" + MH_StatusToString(status) + "); the level of detail stays the game's.";
 
     detailAvailable = true;
@@ -218,7 +201,7 @@ void onFrameStart() noexcept
     if (!detailAvailable) return;
 
     std::lock_guard lock(detailMutex);
-    auto& resolution = *reinterpret_cast<int*>(image() + LodResolutionRva);
+    auto& resolution = *reinterpret_cast<int*>(game_code::image() + LodResolutionRva);
     if (!wantedFarDetail && !detailRaised) return;
 
     if (!detailRaised) lengthUnread.fill(true);

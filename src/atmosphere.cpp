@@ -317,50 +317,6 @@ bool copyConstants(ID3D11DeviceContext* context, ID3D11Buffer* copy, ID3D11Buffe
     return true;
 }
 
-// The game's compute bindings, put back when this goes out of scope.
-class SavedComputeState
-{
-public:
-    explicit SavedComputeState(ID3D11DeviceContext* context) : context(context)
-    {
-        context->CSGetShader(shader.GetAddressOf(), nullptr, nullptr);
-        context->CSGetConstantBuffers(0, Buffers, buffers);
-        context->CSGetShaderResources(0, Views, views);
-        context->CSGetUnorderedAccessViews(0, Accesses, accesses);
-        context->CSGetSamplers(0, Samplers, samplers);
-    }
-
-    ~SavedComputeState()
-    {
-        context->CSSetShader(shader.Get(), nullptr, 0);
-        context->CSSetConstantBuffers(0, Buffers, buffers);
-        context->CSSetShaderResources(0, Views, views);
-        context->CSSetUnorderedAccessViews(0, Accesses, accesses, nullptr);
-        context->CSSetSamplers(0, Samplers, samplers);
-        for (auto* buffer : buffers)
-            if (buffer) buffer->Release();
-        for (auto* view : views)
-            if (view) view->Release();
-        for (auto* access : accesses)
-            if (access) access->Release();
-        for (auto* sampler : samplers)
-            if (sampler) sampler->Release();
-    }
-
-    SavedComputeState(const SavedComputeState&) = delete;
-    SavedComputeState& operator=(const SavedComputeState&) = delete;
-
-private:
-    static constexpr UINT Buffers = 10, Views = 8, Accesses = 3, Samplers = 2;
-
-    ID3D11DeviceContext* context;
-    ComPtr<ID3D11ComputeShader> shader;
-    ID3D11Buffer* buffers[Buffers]{};
-    ID3D11ShaderResourceView* views[Views]{};
-    ID3D11UnorderedAccessView* accesses[Accesses]{};
-    ID3D11SamplerState* samplers[Samplers]{};
-};
-
 // Runs `shader` over `x` x `y` x `z` groups with `output` as its only unordered access, unbinding it after.
 void dispatch(ID3D11DeviceContext* context, ID3D11ComputeShader* shader, ID3D11UnorderedAccessView* output, UINT x, UINT y, UINT z)
 {
@@ -521,7 +477,7 @@ void fill(ID3D11DeviceContext* context, bool physical)
     ID3D11UnorderedAccessView* const noAccess[3]{};
     context->PSSetShaderResources(FogSlot, 1, none);
     {
-        SavedComputeState saved(context);
+        SavedComputeState saved(context, {.buffers = 10, .views = 8, .accesses = 3, .samplers = 2});
         const auto last = visibilityWritten, next = 1 - visibilityWritten;
         ID3D11Buffer* const buffers[]{constantBuffer.Get(), copies.scene.Get(), copies.material.Get(), copies.object.Get(), copies.system.Get(),
             copies.sunScene.Get(), copies.sunLight.Get(), copies.lastSunScene.Get(), copies.skyMaterial.Get(), copies.skyObject.Get()};

@@ -17,6 +17,10 @@ struct IUnknown;
 // (presenter.hpp). Streamline is loaded from the add-on's directory, and only when the setting is on.
 namespace phantom_fx::frame_generation
 {
+// The NGX project DLSS and DLSS Frame Generation run under: the two must match. Any GUID identifies a
+// custom-engine NGX project.
+inline constexpr char NgxProjectId[] = "3f6c2a91-7d4e-4b8a-a1c5-9e0d2b7f4c68";
+
 // What frame generation needs from the frame about to be presented. The textures are Direct3D 11's,
 // shared with Direct3D 12: depth and motion at render size, motion in render pixels toward the
 // previous frame without the jitter, and the frame before the HUD at output size, as the back buffer

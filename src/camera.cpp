@@ -51,45 +51,6 @@ Matrix multiply(const Matrix& left, const Matrix& right)
     return result;
 }
 
-// Gauss-Jordan with partial pivoting; a projection-view is always invertible.
-Matrix inverse(Matrix matrix)
-{
-    Matrix result{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-    for (int column = 0; column < 4; ++column)
-    {
-        int pivot = column;
-        for (int row = column + 1; row < 4; ++row)
-            if (std::abs(matrix[row * 4 + column]) > std::abs(matrix[pivot * 4 + column])) pivot = row;
-
-        for (int k = 0; k < 4; ++k)
-        {
-            std::swap(matrix[column * 4 + k], matrix[pivot * 4 + k]);
-            std::swap(result[column * 4 + k], result[pivot * 4 + k]);
-        }
-
-        const double scale = 1 / matrix[column * 4 + column];
-        for (int k = 0; k < 4; ++k)
-        {
-            matrix[column * 4 + k] *= scale;
-            result[column * 4 + k] *= scale;
-        }
-
-        for (int row = 0; row < 4; ++row)
-        {
-            if (row == column) continue;
-
-            const double factor = matrix[row * 4 + column];
-            for (int k = 0; k < 4; ++k)
-            {
-                matrix[row * 4 + k] -= factor * matrix[column * 4 + k];
-                result[row * 4 + k] -= factor * result[column * 4 + k];
-            }
-        }
-    }
-
-    return result;
-}
-
 Matrix transpose(const Matrix& matrix)
 {
     Matrix result{};
@@ -116,6 +77,44 @@ std::array<float, 3> axis(const Matrix& view, int row, double sign)
 
     return {static_cast<float>(sign * x / length), static_cast<float>(sign * y / length), static_cast<float>(sign * z / length)};
 }
+}
+
+Matrix inverse(Matrix matrix)
+{
+    Matrix result{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    for (int column = 0; column < 4; ++column)
+    {
+        int pivot = column;
+        for (int row = column + 1; row < 4; ++row)
+            if (std::abs(matrix[row * 4 + column]) > std::abs(matrix[pivot * 4 + column])) pivot = row;
+
+        for (int k = 0; k < 4; ++k)
+        {
+            std::swap(matrix[column * 4 + k], matrix[pivot * 4 + k]);
+            std::swap(result[column * 4 + k], result[pivot * 4 + k]);
+        }
+
+        const double scale = matrix[column * 4 + column] != 0 ? 1 / matrix[column * 4 + column] : 0;
+        for (int k = 0; k < 4; ++k)
+        {
+            matrix[column * 4 + k] *= scale;
+            result[column * 4 + k] *= scale;
+        }
+
+        for (int row = 0; row < 4; ++row)
+        {
+            if (row == column) continue;
+
+            const double factor = matrix[row * 4 + column];
+            for (int k = 0; k < 4; ++k)
+            {
+                matrix[row * 4 + k] -= factor * matrix[column * 4 + k];
+                result[row * 4 + k] -= factor * result[column * 4 + k];
+            }
+        }
+    }
+
+    return result;
 }
 
 SceneView classify(const SceneConstants& scene)

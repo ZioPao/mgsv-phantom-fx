@@ -6,15 +6,11 @@ namespace phantom_fx::gi_shadow
 {
 namespace
 {
+using gi_d3d12::groups;
 using gi_d3d12::Kernel;
 
 // The denoiser's tiles: the ray masks' 8x4 pixels, the tile classification's 8x8.
 constexpr UINT MaskTileWidth = 8, MaskTileHeight = 4, Tile = 8;
-
-std::uint32_t groups(std::uint64_t threads, std::uint32_t size)
-{
-    return static_cast<std::uint32_t>((threads + size - 1) / size);
-}
 }
 
 Shadows::Shadows(ID3D12Device* device, UINT width, UINT height) : renderWidth(width), renderHeight(height)

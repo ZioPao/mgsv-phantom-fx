@@ -1,6 +1,7 @@
 #include "fxaa.hpp"
 
 #include "device_check.hpp"
+#include "game_code.hpp"
 
 #include <Windows.h>
 #include <MinHook.h>
@@ -46,16 +47,11 @@ std::string hook() noexcept
 {
     if (!supportedBuild()) return "Unknown game build; FXAA is left to the game.";
 
-    auto* target = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr)) + ExecRva;
+    auto* target = game_code::image() + ExecRva;
     if (std::memcmp(target, ExecStart, sizeof(ExecStart))) return "The FXAA plugin has unexpected code; FXAA is left to the game.";
 
-    auto status = MH_CreateHook(target, reinterpret_cast<void*>(&exec), reinterpret_cast<void**>(&originalExec));
-    if (status == MH_OK) status = MH_EnableHook(target);
-    if (status != MH_OK)
-    {
-        MH_RemoveHook(target);
+    if (const auto status = game_code::hookAt(target, &exec, originalExec); status != MH_OK)
         return std::string("Hooking the FXAA plugin failed (") + MH_StatusToString(status) + "); FXAA is left to the game.";
-    }
 
     return "The FXAA plugin is hooked: with DLSS on, the engine draws its FXAA pass whatever the post processing setting.";
 }

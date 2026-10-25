@@ -3,6 +3,7 @@
 #include "clock.hpp"
 #include "device_check.hpp"
 #include "focus.hpp"
+#include "game_code.hpp"
 #include "log.hpp"
 
 #include <Windows.h>
@@ -301,22 +302,13 @@ bool rawInput(void* devices, HRAWINPUT input, HWND window)
 
     return originalRawInput(devices, input, window);
 }
-
-template<class Function> MH_STATUS hookAt(std::uint8_t* target, void* detour, Function& original)
-{
-    auto status = MH_CreateHook(target, detour, reinterpret_cast<void**>(&original));
-    if (status == MH_OK) status = MH_EnableHook(target);
-    if (status != MH_OK) MH_RemoveHook(target);
-
-    return status;
-}
 }
 
 std::string hook() noexcept
 {
     if (!supportedBuild()) return "Unknown game build; photo mode is unavailable.";
 
-    auto* base = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
+    auto* base = game_code::image();
     auto* manager = base + PauseManagerRva;
     if (std::memcmp(base + SelectorUpdateRva, SelectorUpdateStart, sizeof(SelectorUpdateStart))
         || std::memcmp(base + RawInputRva, RawInputStart, sizeof(RawInputStart))
@@ -327,10 +319,10 @@ std::string hook() noexcept
     pauseManager = manager;
     createPause = reinterpret_cast<CreatePause>(base + CreatePauseRva);
     if (!std::memcmp(base + WeatherPauseTestsRva, WeatherPauseTests, sizeof(WeatherPauseTests))) weatherPauseTests = base + WeatherPauseTestsRva;
-    auto status = hookAt(base + SelectorUpdateRva, reinterpret_cast<void*>(&selectorUpdate), originalSelectorUpdate);
+    auto status = game_code::hookAt(base + SelectorUpdateRva, &selectorUpdate, originalSelectorUpdate);
     if (status == MH_OK)
     {
-        status = hookAt(base + RawInputRva, reinterpret_cast<void*>(&rawInput), originalRawInput);
+        status = game_code::hookAt(base + RawInputRva, &rawInput, originalRawInput);
         if (status != MH_OK) MH_RemoveHook(base + SelectorUpdateRva);
     }
 

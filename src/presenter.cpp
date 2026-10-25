@@ -1,7 +1,9 @@
 // The game's stand-in swap chain; presenter.hpp describes the route.
 #include "presenter.hpp"
 
+#include "d3d12_helpers.hpp"
 #include "fsr_frame_generation.hpp"
+#include "game_code.hpp"
 #include "log.hpp"
 
 #include <Windows.h>
@@ -31,14 +33,11 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 
-// ReShade's proxies return their native object for this interface (IID_UnwrappedObject).
-constexpr GUID UnwrappedObject{0x7f2c9a11, 0x3b4e, 0x4d6a, {0x81, 0x2f, 0x5e, 0x9c, 0xd3, 0x7a, 0x1b, 0x42}};
 // IDXGIFactory::CreateSwapChain in the factory's virtual function table. The game makes its swap
 // chain with it, not with CreateSwapChainForHwnd.
 constexpr std::size_t CreateSwapChainSlot = 10;
 // Command allocators in rotation; the swap chain lets at most three frames queue.
 constexpr std::size_t FramesInFlight = 4;
-constexpr DWORD FenceTimeout = 10'000;
 
 using CreateSwapChain = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory* factory, IUnknown* device, DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** chain);
 
@@ -103,36 +102,18 @@ template<class Interface> ComPtr<Interface> upgraded(IUnknown* native, const cha
     return result;
 }
 
-template<class Interface> ComPtr<Interface> openShared(ID3D12Device* device, HANDLE handle, const char* what)
+ComPtr<ID3D12Resource> openTexture(ID3D12Device* device, ID3D11Texture2D* texture, const char* what)
 {
-    ComPtr<Interface> opened;
-    const auto result = device->OpenSharedHandle(handle, IID_PPV_ARGS(&opened));
-    CloseHandle(handle);
-    check(result, what);
-
+    ComPtr<ID3D12Resource> opened;
+    check(openInD3D12(device, texture, opened), what);
     return opened;
 }
 
-ComPtr<ID3D12Resource> openTexture(ID3D12Device* device, ID3D11Texture2D* texture, const char* what)
+// Direct3D 12's view of a texture the upscaler shares, opened again when the upscaler replaces it.
+ID3D12Resource* openInput(ID3D12Device* device, OpenedTexture& input, ID3D11Texture2D* texture)
 {
-    ComPtr<IDXGIResource1> resource;
-    check(texture->QueryInterface(IID_PPV_ARGS(&resource)), what);
-    HANDLE shared{};
-    check(resource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &shared), what);
-
-    return openShared<ID3D12Resource>(device, shared, what);
-}
-
-D3D12_RESOURCE_BARRIER transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
-{
-    D3D12_RESOURCE_BARRIER barrier{};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = resource;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = before;
-    barrier.Transition.StateAfter = after;
-
-    return barrier;
+    check(input.open(device, texture), "Opening a frame generation input");
+    return input.resource.Get();
 }
 
 // Flip model swap chains take no sRGB formats; the game's back buffer keeps its own, and the copy
@@ -146,29 +127,6 @@ DXGI_FORMAT presentable(DXGI_FORMAT format)
     default: return format;
     }
 }
-
-struct HandleCloser
-{
-    void operator()(HANDLE handle) const { CloseHandle(handle); }
-};
-
-// Direct3D 12's view of a texture the upscaler shares, opened again when the upscaler replaces it.
-struct SharedInput
-{
-    ComPtr<ID3D11Texture2D> texture;
-    ComPtr<ID3D12Resource> resource;
-
-    ID3D12Resource* open(ID3D12Device* device, ID3D11Texture2D* replacement)
-    {
-        if (texture.Get() != replacement)
-        {
-            resource = openTexture(device, replacement, "Opening a frame generation input");
-            texture = replacement;
-        }
-
-        return resource.Get();
-    }
-};
 
 // What the game holds in place of its swap chain. The game renders into `backBuffer`; calls that do
 // not concern the back buffer pass on to the real swap chain.
@@ -287,7 +245,7 @@ private:
     // The game renders here; Direct3D 12 copies from its view of the same texture.
     ComPtr<ID3D11Texture2D> backBuffer;
     ComPtr<ID3D12Resource> sharedBackBuffer;
-    SharedInput depth, motion, hudless;
+    OpenedTexture depth, motion, hudless;
 };
 
 SwapChain::SwapChain(IDXGIFactory* factory, IUnknown* device, const DXGI_SWAP_CHAIN_DESC& requested)
@@ -301,12 +259,9 @@ SwapChain::SwapChain(IDXGIFactory* factory, IUnknown* device, const DXGI_SWAP_CH
     check(context.As(&context11), "Finding the Direct3D 11.4 context");
     check(device11->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence11)), "Creating the shared fence");
 
-    ComPtr<IDXGIDevice> dxgiDevice;
-    check(device11.As(&dxgiDevice), "Finding the DXGI device");
-    ComPtr<IDXGIAdapter> adapter;
-    check(dxgiDevice->GetAdapter(adapter.GetAddressOf()), "Finding the GPU");
-    check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&wrappedDevice)), "Creating the Direct3D 12 device");
-    device12 = unwrapped<ID3D12Device>(wrappedDevice.Get());
+    const auto d3d12 = createDevice12(device11.Get());
+    wrappedDevice = d3d12.wrapper;
+    device12 = d3d12.native;
     const D3D12_COMMAND_QUEUE_DESC queueDesc{D3D12_COMMAND_LIST_TYPE_DIRECT};
     if (presentRoute == Route::Streamline)
     {
@@ -323,7 +278,7 @@ SwapChain::SwapChain(IDXGIFactory* factory, IUnknown* device, const DXGI_SWAP_CH
     if (presentRoute == Route::Fsr) presentQueue = copyQueue;
     HANDLE sharedFence{};
     check(fence11->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &sharedFence), "Sharing the fence");
-    fence12 = openShared<ID3D12Fence>(device12.Get(), sharedFence, "Opening the shared fence");
+    check(openSharedHandle(device12.Get(), sharedFence, fence12), "Opening the shared fence");
 
     for (auto& allocator : allocators)
         check(device12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "Creating a command allocator");
@@ -591,9 +546,9 @@ void SwapChain::copyFrame(const frame_generation::Inputs& inputs)
         ID3D12Resource *depthResource{}, *motionResource{}, *hudlessResource{};
         if (inputs.valid)
         {
-            depthResource = depth.open(device12.Get(), inputs.depth);
-            motionResource = motion.open(device12.Get(), inputs.motion);
-            hudlessResource = hudless.open(device12.Get(), inputs.hudless);
+            depthResource = openInput(device12.Get(), depth, inputs.depth);
+            motionResource = openInput(device12.Get(), motion, inputs.motion);
+            hudlessResource = openInput(device12.Get(), hudless, inputs.hudless);
         }
 
         // FSR also hears of frames without inputs, to stop generating.
@@ -780,9 +735,8 @@ void install(const std::filesystem::path& directory, Route route) noexcept
         if (!factory) throw std::runtime_error("The DXGI factory lacks IDXGIFactory.");
 
         auto* target = originalEntry(&(*reinterpret_cast<void***>(factory.Get()))[CreateSwapChainSlot]);
-        auto status = MH_CreateHook(target, reinterpret_cast<void*>(&createSwapChain), reinterpret_cast<void**>(&originalCreate));
-        if (status == MH_OK) status = MH_EnableHook(target);
-        if (status != MH_OK) throw std::runtime_error(std::string("Hooking DXGI's CreateSwapChain failed: ") + MH_StatusToString(status) + ".");
+        if (const auto status = game_code::hookAt(target, &createSwapChain, originalCreate); status != MH_OK)
+            throw std::runtime_error(std::string("Hooking DXGI's CreateSwapChain failed: ") + MH_StatusToString(status) + ".");
 
         setStatus("Waiting for the game's swap chain.");
     }

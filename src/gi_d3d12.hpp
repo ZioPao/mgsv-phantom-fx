@@ -1,5 +1,6 @@
 #pragma once
 
+#include "d3d12_helpers.hpp"
 #include "log.hpp"
 #include "performance.hpp"
 
@@ -38,31 +39,10 @@ using Pipelines = std::array<ComPtr<ID3D12PipelineState>, static_cast<std::size_
 // The descriptor tables (gi_common.hlsli, gi_light.hlsl, gi_shadow.hlsli).
 constexpr UINT SrvCount = 32, UavCount = 112, TableSize = SrvCount + UavCount;
 
-inline void check(HRESULT result, const char* what)
-{
-    if (FAILED(result)) throw std::runtime_error(what + std::string(" failed (") + hex(static_cast<std::uint32_t>(result)) + ").");
-}
-
-inline D3D12_RESOURCE_BARRIER transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
-{
-    D3D12_RESOURCE_BARRIER barrier{};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = resource;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = before;
-    barrier.Transition.StateAfter = after;
-
-    return barrier;
-}
-
-inline D3D12_RESOURCE_BARRIER uavBarrier(ID3D12Resource* resource = nullptr)
-{
-    D3D12_RESOURCE_BARRIER barrier{};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    barrier.UAV.pResource = resource;
-
-    return barrier;
-}
+// The GI files call these as gi_d3d12::check and so on (d3d12_helpers.hpp, hresult.hpp).
+using phantom_fx::check;
+using phantom_fx::transition;
+using phantom_fx::uavBarrier;
 
 inline ComPtr<ID3D12Resource> createBuffer(ID3D12Device* device, std::uint64_t size, D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES initial,
     D3D12_RESOURCE_FLAGS flags, const char* what)
@@ -284,4 +264,17 @@ private:
     ID3D12Resource* arguments;
     std::uint32_t nextSlot{};
 };
+
+// ---- Rounding ----
+
+// Thread groups of `size` that cover `threads`.
+inline std::uint32_t groups(std::uint64_t threads, std::uint32_t size)
+{
+    return static_cast<std::uint32_t>((threads + size - 1) / size);
+}
+
+inline std::uint64_t aligned(std::uint64_t value, std::uint64_t alignment)
+{
+    return (value + alignment - 1) / alignment * alignment;
+}
 }

@@ -1,14 +1,13 @@
 #include "weather.hpp"
 
 #include "device_check.hpp"
+#include "game_code.hpp"
 
 #include <Windows.h>
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <initializer_list>
 #include <mutex>
-#include <span>
 #include <utility>
 
 namespace phantom_fx::weather
@@ -85,13 +84,7 @@ constexpr unsigned char CancelCode[]{0x48, 0x63, 0xC2, 0x48, 0x03, 0xC0, 0x44, 0
 constexpr unsigned char ListenersCode[]{0x48, 0x83, 0xEC, 0x38, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF, 0x48, 0x8B, 0x05,
     0xEC, 0xB8, 0x03, 0x02, 0x48, 0x85, 0xC0};
 
-struct Expected
-{
-    std::uintptr_t rva;
-    std::span<const unsigned char> code;
-};
-
-const Expected Checked[]{{0x536450, RestoreCode}, {0x5352A0, ClockCode}, {0x550C90, TypeCode}, {SetClockRva, SetClockCode},
+const game_code::Expected Checked[]{{0x536450, RestoreCode}, {0x5352A0, ClockCode}, {0x550C90, TypeCode}, {SetClockRva, SetClockCode},
     {RequestRva, RequestCode}, {FogDensityRva, FogDensityCode}, {FogTypeRva, FogTypeCode}, {CancelRva, CancelCode},
     {0xBFEFA0, ListenersCode}};
 
@@ -108,11 +101,6 @@ struct Pending
 std::mutex mutex;
 Pending pending;
 State published;
-
-std::uint8_t* base()
-{
-    return reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
-}
 
 template<class Value> Value& at(std::uint8_t* object, std::size_t offset)
 {
@@ -135,7 +123,7 @@ std::uint8_t* follow(std::uint8_t* object, std::initializer_list<std::size_t> of
 // Outside a mission or free roam, the objects the clock and requests reach are missing.
 bool ready(std::uint8_t* manager)
 {
-    auto* listeners = at<std::uint8_t*>(base(), ListenersRva);
+    auto* listeners = at<std::uint8_t*>(game_code::image(), ListenersRva);
 
     return follow(manager, {Requests}) && follow(manager, {Clock}) && follow(manager, {Requests, Effects})
         && follow(listeners, {0x8, 0x98, 0x78, 0x8}) && follow(listeners, {0x8, 0x98, 0x10});
@@ -165,7 +153,7 @@ std::uint8_t* gameRequest(std::uint8_t* requests)
 
 void apply(std::uint8_t* manager, const Pending& wanted)
 {
-    auto* const engine = base();
+    auto* const engine = game_code::image();
     auto* const requests = at<std::uint8_t*>(manager, Requests);
     if (wanted.clock)
         reinterpret_cast<SetClock>(engine + SetClockRva)(manager, static_cast<std::uint32_t>(std::clamp(*wanted.clock, 0.0f, LastSecond)));
@@ -210,9 +198,7 @@ State read(std::uint8_t* manager)
 
 bool supported() noexcept
 {
-    static const bool expected = supportedBuild() && std::ranges::all_of(Checked, [](const Expected& expected) {
-        return std::memcmp(base() + expected.rva, expected.code.data(), expected.code.size()) == 0;
-    });
+    static const bool expected = supportedBuild() && game_code::matches(Checked);
 
     return expected;
 }
@@ -268,7 +254,7 @@ void onFrameStart() noexcept
         wanted = std::exchange(pending, {});
     }
 
-    auto* const manager = at<std::uint8_t*>(base(), ManagerRva);
+    auto* const manager = at<std::uint8_t*>(game_code::image(), ManagerRva);
     State now;
     if (manager && ready(manager))
     {
