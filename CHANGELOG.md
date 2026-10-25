@@ -1,6 +1,6 @@
 # Phantom FX changelog
 
-## Unreleased
+## 1.7.0
 
 - Add **presets** on the Budget page: **Screen-space** (soft and contact shadows, GTVBAO, SSILVB)
   or **Ray-traced** (ray-traced shadows, lights and global illumination). Both unlock the frame
