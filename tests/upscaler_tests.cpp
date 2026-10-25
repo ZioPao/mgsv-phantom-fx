@@ -117,13 +117,13 @@ void settingsPersist(const fs::path& root)
 
 void effectPresets()
 {
-    Settings settings{.mode = Mode::Performance, .depthOfField = true, .hdr = true};
+    Settings settings{.mode = Mode::Performance, .hdr = true};
     settings.softShadows = true;
     settings.globalIlluminationRays = 4;
     applyPreset(settings, EffectPreset::RayTraced);
-    expect(presetOf(settings) == EffectPreset::RayTraced && !settings.softShadows && !settings.depthOfField && settings.volumetricFog
+    expect(presetOf(settings) == EffectPreset::RayTraced && !settings.softShadows && settings.volumetricFog
             && settings.atmosphereLook == AtmosphereLook::Physical && settings.unlockFps,
-        "The ray-traced preset switches the screen-space effects and depth of field off, the fog on.");
+        "The ray-traced preset switches the screen-space effects off, the fog on.");
     expect(settings.mode == Mode::Performance && settings.hdr && settings.globalIlluminationRays == 4,
         "A preset keeps the upscaler, HDR and the effects' own settings.");
 
@@ -382,33 +382,28 @@ void jitterSequence()
     expect(close(camera::jitterPixels(0, 8)[0], 0) && close(camera::jitterPixels(0, 8)[1], 1.0 / 3 - 0.5), "It is Halton(2, 3) from index 1.");
 }
 
-void depthOfFieldSettingsPersist(const fs::path& root)
+void photoModeSettingsPersist(const fs::path& root)
 {
-    const auto path = root / L"PhantomFX-depth-of-field.ini";
-    const Settings chosen{.depthOfField = true, .apertureBlades = 7, .fNumber = 2.8f};
+    const auto path = root / L"PhantomFX-photo-mode.ini";
+    const Settings chosen{.fNumber = 2.8f};
     saveSettings(path, chosen);
-    expect(loadSettings(path) == chosen, "Restart restores the depth of field, its aperture and the f-stop.");
+    expect(loadSettings(path) == chosen, "Restart restores photo mode's f-stop.");
 
-    write(path, "depth_of_field=on\naperture_blades=4\nf_number=0.1\n");
-    const auto read = loadSettings(path);
-    expect(!read.depthOfField && read.apertureBlades == 0 && read.fNumber == Settings::MinFNumber,
-        "An invalid toggle leaves the gather off, an aperture of 4 blades stays round, and the f-stop is clamped.");
+    write(path, "f_number=0.1\n");
+    expect(loadSettings(path).fNumber == Settings::MinFNumber, "An f-stop out of range is clamped.");
 
-    for (const auto& invalid : {Settings{.apertureBlades = 3}, Settings{.fNumber = 64}})
+    saveSettings(path, chosen);
+    bool rejected = false;
+    try
     {
-        saveSettings(path, chosen);
-        bool rejected = false;
-        try
-        {
-            saveSettings(path, invalid);
-        }
-        catch (const std::exception&)
-        {
-            rejected = true;
-        }
-
-        expect(rejected && loadSettings(path) == chosen, "Invalid depth of field settings cannot replace valid saved ones.");
+        saveSettings(path, Settings{.fNumber = 64});
     }
+    catch (const std::exception&)
+    {
+        rejected = true;
+    }
+
+    expect(rejected && loadSettings(path) == chosen, "An invalid f-stop cannot replace a valid saved one.");
 }
 
 void hdrSettingsPersist(const fs::path& root)
@@ -580,7 +575,7 @@ int main()
         streamlineCamera();
         modeMaths();
         jitterSequence();
-        depthOfFieldSettingsPersist(root);
+        photoModeSettingsPersist(root);
         hdrSettingsPersist(root);
         outputSaturation();
         globalIlluminationSettingsPersist(root);

@@ -321,45 +321,20 @@ void drawAtmosphere(Settings& wanted)
                        "are always at full thickness."});
 }
 
-// The aperture's shape in its button, as the blur's highlights take it.
-void roundAperture(ImDrawList* draw, ImVec2 centre, float radius, ImU32 colour)
-{
-    draw->AddCircle(centre, radius, colour, 0, std::max(1.0f, radius / 5));
-}
-
-template<int Blades>
-void bladedAperture(ImDrawList* draw, ImVec2 centre, float radius, ImU32 colour)
-{
-    draw->AddNgon(centre, radius, colour, Blades, std::max(1.0f, radius / 5));
-}
-
 void drawCamera(Settings& wanted)
 {
-    const fxui::Page page(Section::Camera, "Depth of field, and the lens of photo mode.");
+    const fxui::Page page(Section::Camera, "The lens of photo mode.");
     if (!page) return;
-
-    if (const fxui::Item item({.id = "depthOfField",
-            .name = "Depth of field",
-            .tip = "A gather in place of the game's depth of field, in cutscenes, gameplay and photo mode. Slight blur stays smooth at full "
-                   "resolution, what lies in front of the focus spreads over what lies behind it, and lights are blurred before the game's tonemap, "
-                   "so they stay bright. It needs Depth of Field on in the game's graphics settings. Off leaves the game's own.",
-            .summary = "Smooth blur in front of and behind the focus, with bright lights kept bright. Needs Depth of Field on in the game's settings.",
-            .keywords = "DOF bokeh aperture blades"});
-        item)
-    {
-        constexpr Choice<int> apertures[]{{0, "Round", roundAperture}, {5, "5", bladedAperture<5>}, {6, "6", bladedAperture<6>},
-            {7, "7", bladedAperture<7>}, {8, "8", bladedAperture<8>}, {9, "9", bladedAperture<9>}};
-        fxui::segmented("Aperture", wanted.apertureBlades, apertures, "The shape of out-of-focus lights: a round aperture, or one with 5 to 9 blades.");
-    }
 
     if (const fxui::Item item({.id = "photoMode",
             .name = "Photo mode",
             .summary = "F2 opens it. Fly with WASD and the mouse, Space and Ctrl for up and down, Shift for faster. F3 hides the HUD, F4 the blur.",
-            .keywords = "f-stop aperture blur camera"});
+            .keywords = "f-stop aperture blur camera depth of field DOF"});
         item)
         fxui::slider("f-stop", wanted.fNumber,
             {.min = Settings::MinFNumber, .max = Settings::MaxFNumber, .standard = Defaults.fNumber, .format = "f/%.1f", .logarithmic = true,
-                .tip = "Photo mode's aperture: a lower f-stop blurs more of what is out of focus. F4 turns the blur off."});
+                .tip = "Photo mode's aperture, for the game's depth of field: a lower f-stop blurs more of what is out of focus. It needs Depth of "
+                       "Field on in the game's graphics settings. F4 turns the blur off."});
 }
 
 void drawDisplay(Settings& wanted)

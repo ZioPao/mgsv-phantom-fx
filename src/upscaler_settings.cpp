@@ -128,11 +128,6 @@ bool validPreset(int value)
     return value == 0 || (value >= static_cast<int>(Preset::J) && value <= static_cast<int>(Preset::M));
 }
 
-bool validApertureBlades(int value)
-{
-    return value == 0 || (value >= 5 && value <= 9);
-}
-
 bool validRayQuality(int value)
 {
     return value == 1 || value == 2 || value == 4 || value == 8;
@@ -187,7 +182,6 @@ void applyPreset(Settings& settings, EffectPreset preset)
     settings.unlockFps = true;
     settings.volumetricFog = true;
     settings.atmosphereLook = AtmosphereLook::Physical;
-    settings.depthOfField = false;
 }
 
 std::optional<EffectPreset> presetOf(const Settings& settings)
@@ -374,15 +368,6 @@ Settings loadSettings(const std::filesystem::path& path)
             int rays{};
             if (number(value, rays) && validGlobalIlluminationRays(rays)) settings.globalIlluminationRays = rays;
         }
-        else if (key == "depth_of_field")
-        {
-            if (value == "0" || value == "1") settings.depthOfField = value == "1";
-        }
-        else if (key == "aperture_blades")
-        {
-            int blades{};
-            if (number(value, blades) && validApertureBlades(blades)) settings.apertureBlades = blades;
-        }
         else if (key == "f_number")
         {
             float fNumber{};
@@ -423,7 +408,7 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
         || !within(settings.indirectLightRadius, Settings::MinIndirectLightRadius, Settings::MaxIndirectLightRadius)
         || !within(settings.indirectLightStrength, 0, Settings::MaxIndirectLightStrength) || !within(settings.atmosphereHaze, 0, 1)
         || !within(settings.globalIlluminationStrength, 0, Settings::MaxGlobalIlluminationStrength)
-        || !validApertureBlades(settings.apertureBlades) || !validRayQuality(settings.rayQuality)
+        || !validRayQuality(settings.rayQuality)
         || !validGlobalIlluminationRays(settings.globalIlluminationRays)
         || !within(settings.flashlightBrightness, Settings::MinFlashlightBrightness, Settings::MaxFlashlightBrightness)
         || !within(settings.fNumber, Settings::MinFNumber, Settings::MaxFNumber)
@@ -455,9 +440,7 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
                << "\nglobal_illumination_rays=" << settings.globalIlluminationRays << "\nvolumetric_fog=" << settings.volumetricFog
                << "\natmosphere_look=" << AtmosphereLookKeys[static_cast<std::size_t>(settings.atmosphereLook)]
                << "\natmosphere_haze=" << settings.atmosphereHaze
-               << "\ndraw_distance=" << DrawDistanceKeys[static_cast<std::size_t>(settings.drawDistance)]
-               << "\ndepth_of_field=" << settings.depthOfField
-               << "\naperture_blades=" << settings.apertureBlades << "\nf_number=" << settings.fNumber
+               << "\ndraw_distance=" << DrawDistanceKeys[static_cast<std::size_t>(settings.drawDistance)] << "\nf_number=" << settings.fNumber
                << "\nhdr=" << settings.hdr << "\nhdr_peak_nits=" << settings.peakNits
                << "\nhdr_paper_white_nits=" << settings.paperWhiteNits << '\n';
         output.close();

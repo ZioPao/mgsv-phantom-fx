@@ -1,21 +1,20 @@
-// ReShade add-on (PhantomFX.addon64): NVIDIA DLSS or AMD FSR in place of the game's FXAA (upscaler.hpp,
-// fsr_upscaler.hpp), as DLAA or upscaling from a lower render size (render_scale.hpp, ui_redirect.hpp).
-// It lets the game start under ReShade (device_check.hpp), trades the game's motion blur for its
-// velocity passes (motion_blur.hpp), keeps the FXAA pass that DLSS replaces with post processing down
-// (fxaa.hpp), can lift its 60 fps cap (frame_rate.hpp), adds DLSS Frame Generation with Reflex or FSR
-// frame generation (presenter.hpp, game_loop.hpp, fsr_frame_generation.hpp), can give the sun soft
-// shadows and every light Bend Studio's screen-space shadows (shadows.hpp), can replace the game's
-// ambient occlusion with GTVBAO and add SSILVB's screen-space indirect lighting (indirect_light.hpp),
-// or replace the game's indirect light with ray-traced global illumination (global_illumination.hpp),
-// can replace the game's depth of field with a gather (depth_of_field.hpp), adds volumetric fog with
-// light shafts (atmosphere.hpp), has a photo mode (photo_mode.hpp), can output HDR10
-// (hdr.hpp) and has an optional pipeline recorder (frame_log.hpp), the GPU costs of its passes
-// (performance.hpp) and weather and time control (weather.hpp) for development.
+// ReShade add-on (PhantomFX.addon64): NVIDIA DLSS or AMD FSR before the game's grading, in place of
+// its FXAA (upscaler.hpp, fsr_upscaler.hpp), as DLAA or upscaling from a lower render size
+// (render_scale.hpp, ui_redirect.hpp). It lets the game start under ReShade (device_check.hpp), trades
+// the game's motion blur for its velocity passes (motion_blur.hpp), keeps the FXAA pass with post
+// processing down (fxaa.hpp), can lift its 60 fps cap (frame_rate.hpp), adds DLSS Frame Generation
+// with Reflex or FSR frame generation (presenter.hpp, game_loop.hpp, fsr_frame_generation.hpp), can
+// give the sun soft shadows and every light Bend Studio's screen-space shadows (shadows.hpp), can
+// replace the game's ambient occlusion with GTVBAO and add SSILVB's screen-space indirect lighting
+// (indirect_light.hpp), or replace the game's indirect light with ray-traced global illumination
+// (global_illumination.hpp), adds volumetric fog with light shafts (atmosphere.hpp), has a photo mode
+// (photo_mode.hpp), can output HDR10 (hdr.hpp) and has an optional pipeline recorder (frame_log.hpp),
+// the GPU costs of its passes (performance.hpp) and weather and time control (weather.hpp) for
+// development.
 // NGX receives ReShade's wrapped context, so other add-ons that follow DLSS evaluations see it like
 // a game's own DLSS.
 #include "atmosphere.hpp"
 #include "character.hpp"
-#include "depth_of_field.hpp"
 #include "device_check.hpp"
 #include "draw_distance.hpp"
 #include "frame_log.hpp"
@@ -151,7 +150,6 @@ void onInitCommandQueue(command_queue* queue)
     global_illumination::attach(device, context);
     local_lights::attach(device, context);
     atmosphere::attach(device);
-    depth_of_field::attach(device);
     performance::attach(device, context, dataDirectory() / "PhantomFX-performance.txt");
     log("Immediate context " + hex(reinterpret_cast<std::uintptr_t>(context)) + ", ReShade wrapper "
         + hex(reinterpret_cast<std::uintptr_t>(wrapper)) + ".");
@@ -169,7 +167,6 @@ void onDestroyCommandQueue(command_queue* queue)
     global_illumination::detach();
     local_lights::detach();
     atmosphere::detach();
-    depth_of_field::detach();
     focus::detach();
     hdr::detach();
     immediateList = nullptr;
@@ -195,7 +192,6 @@ void onInitPipeline(device* device, pipeline_layout, uint32_t count, const pipel
             global_illumination::pixelShaderCreated(code, size, created);
             local_lights::pixelShaderCreated(code, size, created);
             atmosphere::shaderCreated(code, size, created);
-            depth_of_field::shaderCreated(code, size, created);
             hdr::shaderCreated(code, size, created);
         }
         else if (subobjects[i].type == pipeline_subobject_type::vertex_shader)
@@ -224,11 +220,19 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
     const bool encode = hdr::beforeDraw(context, call);
     // The global illumination only notes what it needs (the sky's probe constants).
     global_illumination::draw(context, call);
-    // The fog notes the sun pass and fills its texture before the resolve, whoever draws them. The
-    // depth of field reads the resolve's tonemap before SSILVB may draw the resolve itself. GTVBAO
+    // While upscaling, the game's grading draws at the output size, whoever draws it.
+    if (upscaler::beforePostDraw(context, call))
+    {
+        if (!hdr::draw(context, call)) context->DrawInstanced(vertices, instances, first, firstInstance);
+        upscaler::afterPostDraw(context);
+
+        return true;
+    }
+
+    // The fog notes the sun pass and fills its texture before the resolve, whoever draws them. GTVBAO
     // notes the sun pass's G-buffer before the sun shadows may draw that pass themselves.
-    const bool drawn = atmosphere::draw(context, call) || depth_of_field::draw(context, call) || indirect_light::draw(context, call)
-        || shadows::draw(context, call) || hdr::draw(context, call) || upscaler::draw(context, call);
+    const bool drawn = atmosphere::draw(context, call) || indirect_light::draw(context, call) || shadows::draw(context, call)
+        || hdr::draw(context, call) || upscaler::draw(context, call);
     if (!encode) return drawn;
 
     if (!drawn) context->DrawInstanced(vertices, instances, first, firstInstance);
@@ -243,8 +247,7 @@ bool onDrawIndexed(command_list* list, uint32_t indices, uint32_t instances, uin
     // The global illumination notes the camera and the terrain's inputs from the draws; it never takes one.
     global_illumination::draw(native(list), call);
     // The point and spot lights' draws before the lamps' contact shadows, which leave a light the rays shadow alone.
-    return hiddenUi(list) || depth_of_field::draw(native(list), call) || local_lights::draw(native(list), call) || shadows::draw(native(list), call)
-        || upscaler::draw(native(list), call);
+    return hiddenUi(list) || local_lights::draw(native(list), call) || shadows::draw(native(list), call) || upscaler::draw(native(list), call);
 }
 
 bool onClearRenderTarget(command_list* list, resource_view view, const float color[4], uint32_t rects, const rect*)
@@ -490,7 +493,6 @@ void onPresent(command_queue* queue, swapchain*, const rect*, const rect*, uint3
     global_illumination::present();
     local_lights::present();
     atmosphere::present(native(queue->get_immediate_command_list()));
-    depth_of_field::present();
     performance::present();
 }
 
@@ -620,7 +622,6 @@ extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshade
     global_illumination::detach();
     local_lights::detach();
     atmosphere::detach();
-    depth_of_field::detach();
     focus::detach();
     hdr::detach();
     photo_mode::leave();

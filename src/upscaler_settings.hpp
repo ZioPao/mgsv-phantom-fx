@@ -103,10 +103,6 @@ struct Settings
     float atmosphereHaze{};
     // Whatever the mode. The loading distance takes effect when a location loads, the rest at once.
     DrawDistance drawDistance{DrawDistance::Vanilla};
-    // The depth of field's gather in place of the game's (depth_of_field.hpp), whatever the mode.
-    bool depthOfField{};
-    // The aperture's blades, the shape of the blur's highlights: 0 is round, otherwise 5 to 9.
-    int apertureBlades{};
     // Photo mode's aperture, as an f-number.
     float fNumber{DefaultFNumber};
     // HDR10 output (hdr.hpp). Turning it on or off takes a restart: the swap chain and the scene targets
@@ -128,7 +124,6 @@ std::string_view label(DrawDistance distance);
 // 2 to 6 for the fixed DLSS modes, 0 for Off, Dynamic and FSR.
 unsigned multiplier(FrameGeneration mode);
 bool validPreset(int value);
-bool validApertureBlades(int value);
 bool validRayQuality(int value);
 bool validGlobalIlluminationRays(int value);
 // Quality, Balanced, Performance, Ultra Performance and Custom render below the output size.
@@ -141,8 +136,8 @@ float nominalScale(Upscaler upscaler, Mode mode, float customScale);
 float mipBias(float scale, float offset);
 
 // Switches the preset's effects on and the others off. Both presets also unlock the frame rate and turn
-// on the volumetric fog in the physical look, and neither has depth of field. The upscaler, HDR and the
-// effects' own settings (radius, strength, ray quality) stay as they are.
+// on the volumetric fog in the physical look. The upscaler, HDR and the effects' own settings (radius,
+// strength, ray quality) stay as they are.
 void applyPreset(Settings& settings, EffectPreset preset);
 // The preset the effects are switched as, if any.
 std::optional<EffectPreset> presetOf(const Settings& settings);

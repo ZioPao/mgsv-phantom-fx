@@ -3,12 +3,15 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <cstddef>
+#include <cstdint>
+#include <initializer_list>
 
-// While the engine renders below the output size, its 2D pass (HUD, menus, subtitles) would draw
-// into the small scene target and be stretched with it. The add-on keeps an output-size copy of the
-// scene target instead: the upscaler fills it each frame before the UI draws, the 2D pass's draws
-// and clears are made on it at the output size, and GammaControl reads it in place of the scene
-// target. docs/DEVELOPMENT.md, "The UI at the output size".
+// While the engine renders below the output size, its grading and 2D pass (HUD, menus, subtitles)
+// would draw into the small scene target and be stretched with it. The add-on keeps an output-size
+// copy of the scene target instead: the upscaler fills it each frame before the grading, the
+// grading's full-size draws and the 2D pass's draws and clears are made on it at the output size,
+// and GammaControl reads it in place of the scene target. docs/DEVELOPMENT.md, "The UI at the
+// output size".
 namespace phantom_fx::ui_redirect
 {
 struct DrawCall
@@ -18,14 +21,62 @@ struct DrawCall
     bool indexed{};
 };
 
-// What the upscaler fills before the UI draws.
+// What the upscaler fills before the grading.
 struct Output
 {
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> target;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view; // The target, read as it is drawn
     // The engine's scene target the 2D pass meant, at the render size.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> scene;
     unsigned width{}, height{};
 };
+
+// The output-size surfaces the game's grading draws with.
+enum class Surface : std::uint8_t
+{
+    Scene, // The output target, in place of the scene target
+    Copy,  // In place of the scene target's copy that the grading reads
+};
+
+// One draw of the game's at the output size, on a recording context: `target` in place of its render
+// target (without a depth-stencil), `inputs` in place of its shader resources, its viewports and
+// scissors scaled and cPSSystem (b0) at the output size. Destroying it puts the game's bindings back.
+// False when there are no output-size surfaces; the draw then stays as the game made it.
+class OutputSizeDraw
+{
+public:
+    struct Input
+    {
+        UINT slot;
+        Surface surface;
+    };
+
+    OutputSizeDraw(ID3D11DeviceContext* context, Surface target, std::initializer_list<Input> inputs) noexcept;
+    ~OutputSizeDraw();
+    OutputSizeDraw(const OutputSizeDraw&) = delete;
+    OutputSizeDraw& operator=(const OutputSizeDraw&) = delete;
+
+    explicit operator bool() const noexcept { return context != nullptr; }
+
+private:
+    static constexpr std::size_t MaxInputs = 2;
+
+    ID3D11DeviceContext* context{};
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> depth;
+    D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    D3D11_RECT rects[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    UINT viewportCount{}, rectCount{};
+    Microsoft::WRL::ComPtr<ID3D11Buffer> system;
+    UINT inputSlots[MaxInputs]{};
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> inputViews[MaxInputs];
+    std::size_t inputCount{};
+};
+
+// Copies one output-size surface into the other on a recording context.
+void copySurface(ID3D11DeviceContext* context, Surface to, Surface from) noexcept;
+// The view's texture has the render size, while the engine renders below the output size.
+bool renderSized(ID3D11View* view) noexcept;
 
 void attach(ID3D11Device* device) noexcept;
 void detach() noexcept;

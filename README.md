@@ -33,7 +33,6 @@ More comparisons: [Previews](docs/PREVIEWS.md)
 - **Indirect lighting** (SSILVB)
 - **Volumetric fog** with light shafts and a physical sky
 - **Draw distance:** loads full detail and the distant world farther, with more detail at a distance
-- **Depth of field**
 - **Photo mode**
 - **Weather and time of day controls**
 - **Character swapper:** Snake, the avatar, soldiers, Ocelot or Quiet, in any outfit

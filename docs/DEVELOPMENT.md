@@ -86,9 +86,9 @@ and local settings are left out. ReShade is installed separately by the player.
 | File | Purpose |
 | --- | --- |
 | `src/upscaler_addon.cpp` | ReShade add-on: exports, events, build line, MinHook set-up, NGX's wrapped context |
-| `src/upscaler.cpp`, `src/upscaler.hpp` | DLSS or FSR in place of FXAA: pass recognition, jitter, frames, render size plan, NGX, composite, texture LOD bias |
+| `src/upscaler.cpp`, `src/upscaler.hpp` | DLSS or FSR before the grading, in place of FXAA: pass recognition, jitter, frames, render size plan, NGX, composite, the grading at the output size, texture LOD bias |
 | `src/render_scale.cpp`, `src/render_scale.hpp` | Hook on the renderer's per-frame step: the engine renders at the requested size |
-| `src/ui_redirect.cpp`, `src/ui_redirect.hpp` | The 2D pass and `GammaControl` on an output-size target while the engine renders below it |
+| `src/ui_redirect.cpp`, `src/ui_redirect.hpp` | The grading, the 2D pass and `GammaControl` on output-size targets while the engine renders below them |
 | `src/upscaler_shaders.hpp` | HLSL: the upscaler's inputs and motion vectors, composite with RCAS and debug views, stretch fallback |
 | `src/camera.cpp`, `src/camera.hpp` | Scene constants: main-view recognition, jitter, reprojection, camera cuts |
 | `src/upscaler_settings.cpp`, `src/upscaler_settings.hpp` | Upscaler, mode, custom scale, preset, texture bias, sharpening, frame rate unlock, frame generation, soft shadows, sun and lamp contact shadows, ambient occlusion, indirect lighting, volumetric fog, draw distance; `PhantomFX.ini` |
@@ -250,7 +250,9 @@ reads state; the frame renders unchanged. Its files go into that folder:
   in `frame-<n>/` once their command list has run, so a list's textures are as it left them, not as
   each of its calls saw them. ` constants` after the count leaves the textures out. An indexed call
   also saves `<call>-vertices.txt`: each index's vertex (its first four floats) and the bounds in NDC
-  of those in front of the eye.
+  of those in front of the eye; and `<call>-streams.txt`: every other bound vertex buffer slot from
+  its offset, an element a line as floats (an instanced draw's per-instance data, such as the clone
+  shaders' matrix rows).
 - With Ray-traced lights on, a dev build's redraw of the lights saves what it draws from into the same
   folder, for each batch it draws: `lights-<n>-before-diffuse.dds` and `-specular` (the light targets),
   `-after-` the same once drawn, `-share.dds` (the rays' share, R16), `-depth.dds` (64 bits a pixel, the
@@ -291,9 +293,9 @@ made.
   over the larger texture. Frame generation runs on Direct3D 12 and is not timed; FSR's upscale
   shows as the Direct3D 11 time around it.
 - **Real cost.** The timed passes miss what they change in the game's work: GTVBAO leaves the
-  game's SSAO out, the gather the game's depth of field, the physical look its sky. **Measure the
-  real cost** times the GPU frame with everything on, then leaves out, one more at a time and only
-  where on: the depth of field, the volumetric fog, SSILVB, GTVBAO, the lamp and the sun contact
+  game's SSAO out, the physical look the game's sky. **Measure the real cost** times the GPU frame
+  with everything on, then leaves out, one more at a time and only where on: the volumetric fog,
+  SSILVB, GTVBAO, the lamp and the sun contact
   shadows, the soft shadows, the sharpening and last the upscaler (the game's FXAA at the same
   render size, as the Diagnostics comparison). 1.5 s to settle and 2.5 s timed per step; the
   difference between steps is what the effect left out costs. The steps run through
@@ -900,7 +902,7 @@ level at Camp Omega's cliffs. No names in the exe: the class names here are desc
   the camera, name their brush at `+0xA0` (the brush's name object), keep their id at `+0xB8` (row x 64 +
   column) and their placements at `+0x98`: a range (begin, end), then 16-byte groups from begin + 24
   (the records' address, their count (16 bits), the plugin index (8), 1 (8), a type (32)), each record 24
-  bytes: Y (float), X and Z (16-bit, 256 a metre around the block's centre), the rotation (four halves,
+  bytes: Y (float), X and Z (16-bit, 255 a metre around the block's centre), the rotation (four halves,
   x y z w), the block's id, the plugin index and a scale byte (across the plugin's range), an id. The list
   ends in other data; only records naming their block and their group's plugin count. The grid was
   fitted in Afghanistan: 128 m blocks from (-4096, -4096); with it the placements' heights match across
@@ -908,7 +910,13 @@ level at Camp Omega's cliffs. No names in the exe: the class names here are desc
   point sit 1.6 m from it. Read in game 2026-10-23: 46,359 records in 234 groups of 25 blocks, each
   naming its block and group's plugin, none repeated. The first reading took the groups from begin + 16,
   which paired each count with the group before's records: 8,750 records were read twice and about
-  21,500 not at all (the shadow probe listed every bush crossed twice).
+  21,500 not at all (the shadow probe listed every bush crossed twice). The 255 to the metre was
+  measured 2026-10-25 in Africa against the game's own draws: a frame record with the clone shader's
+  draws dumped (their per-instance stream, `<call>-streams.txt`: three matrix rows, then 0 1 0 0) gave
+  794 instances, each with a record of the same rotation, scale and height; read as 255 to the metre,
+  all 794 sat where the game drew them (within the dump's 6 digits), read as 256, 2 did and the rest
+  up to 34 cm nearer the block's centre: the ray-traced scene's rocks missed the drawn ones, and sun
+  rays from a drawn rock's top started inside the scene's copy of it.
 - **Texture manager** (found 2026-10-23): the global `0x2B79B18` points to it (vtable `0x21046E8`). It
   keeps an array of 0x78-byte texture records, as many as its capacity (`+0x28`, 4881 in that run, `+0x2C`
   the count, 2649); a record's handle (`+0x40`, vtable `0x2104710`, 0x50 bytes) has the texture's path
@@ -971,29 +979,45 @@ level at Camp Omega's cliffs. No names in the exe: the class names here are desc
 
 ## What the add-on changes
 
-DLSS replaces FXAA, at native resolution (DLAA) or from a lower render size (Quality, Balanced,
-Performance, Ultra Performance, Custom). Everything runs from ReShade events, apart from the
-start-up device check, two hooks on the motion blur plugin, the hook on the renderer's per-frame
-step, the optional frame rate unlock (see "Frame rate"), the photo mode hooks (see "Photo mode"),
-the game loop hooks (see "Frame generation" and "Weather and time") and, with frame generation,
-the swap chain detour.
+DLSS runs after the game's depth of field and before the rest of its post processing, in the place
+of its FXAA, at native resolution (DLAA) or from a lower render size (Quality, Balanced,
+Performance, Ultra Performance, Custom): the lens flare layer, bloom's composite and the grading then
+work on its image, as NVIDIA's guide asks. The depth of field stays before it, as in Unreal Engine's
+order: its blur radius comes from the jittered depth, and drawn after DLSS its focus edges flickered
+with the jitter (2026-10-25: gone with **Jitter off**, still there at DLAA, where DLSS's image was
+its colour). Bloom and exposure are still measured from the scene before DLSS, as the game measured
+them before FXAA.
+Everything runs from ReShade events, apart from the start-up device check, two hooks on the motion
+blur plugin, the hook on the renderer's per-frame step, the optional frame rate unlock (see "Frame
+rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame generation" and
+"Weather and time") and, with frame generation, the swap chain detour.
 
-- **Shaders.** `init_pipeline` identifies three pixel shaders by DXBC checksum: `Fxaa`,
-  `MotionBlurCameraVelocity` and `GammaControl`. All are drawn as one full-screen triangle, so `draw`
-  only looks at the bound pixel shader for 3-vertex draws. The 2D pass's vertex shaders are known
-  by their source path (see "The 2D pass").
+- **Shaders.** `init_pipeline` identifies pixel shaders by DXBC checksum: `Fxaa`,
+  `MotionBlurCameraVelocity`, `GammaControl` and the grading's `CopyRenderBuffer`,
+  `ColorCorrection_BlndLut_Tex_Gen` and `Tonemap`. All are drawn as one full-screen triangle, so
+  `draw` only looks at the bound pixel shader for 3-vertex draws. The 2D pass's vertex shaders are
+  known by their source path (see "The 2D pass").
 - **Command lists.** The game records a whole frame on its worker threads, finishes about 44
   command lists, and only then executes them on the immediate context in one burst, followed by
   Present (measured over 200 frames: never a finish after the first execute of a frame). What a
-  deferred context records that matters (the FXAA pass, the velocity texture) is kept by context,
-  moved to the command list at `FinishCommandList` (ReShade's `execute_secondary_command_list`
-  with the new list and the deferred context) and taken at its `ExecuteCommandList`. That event
-  fires before the real call, so DLSS runs at the immediate context's *next* execute, the UI's
-  list: by then the FXAA list has run and the UI has not.
-- **FXAA stays.** FXAA reads a copy of the scene target (`CopyResource` just before it) and writes
-  the scene target. The copy still holds the graded, pre-FXAA image after the list has run, so
-  DLSS reads the copy and overwrites FXAA's output. Nothing is skipped in the recorded list: a
-  frame DLSS cannot handle simply keeps FXAA's result. FXAA costs well under a millisecond.
+  deferred context records that matters (the grading, the FXAA pass, the velocity texture) is
+  kept by context, moved to the command list at `FinishCommandList` (ReShade's
+  `execute_secondary_command_list` with the new list and the deferred context) and taken at its
+  `ExecuteCommandList`. That event fires before the real call.
+- **Where DLSS runs.** Post processing starts its own command list: in all 126 F10 records (SDR and
+  HDR, DLAA and upscaling, render sizes 1280x720 to 3840x2160) the list before it ends with a draw
+  into the scene (particles, forward geometry), and it opens with exposure (a `CopyRenderBuffer` from
+  the light target to a quarter size), then `CopyReductionX4` and the depth of field. Lens flares
+  into the half-size layer may follow in lists of their own; the next list holds the half-size
+  layer's composite, the LUT build, `Tonemap` and `Fxaa`; then come the UI's list and
+  `GammaControl`'s. A list that records the LUT build, `Tonemap` or `Fxaa` holds the grading, and
+  DLSS runs at the frame's first such execute, before the list. The FXAA hook always keeps that
+  list (below).
+- **FXAA skipped.** The `Fxaa` draw is recorded for its bindings (the scene target and the depth
+  copy, which DLSS reads) and then skipped: FXAA would only blur DLSS's image. The frame is recorded
+  before it executes, so the frame's own FXAA pass is known when its grading starts. The
+  skip is decided while recording, so a frame DLSS cannot handle (a mode change) shows without
+  anti-aliasing.
 - **Frames and jitter.** A frame starts with the first main-view scene upload after the immediate
   context executed anything; all of its main-view uploads get that frame's jitter. The FXAA pass
   carries the frame it was recorded in, and DLSS runs only if that is still the latest frame and
@@ -1025,14 +1049,18 @@ the swap chain detour.
   this happened only in the title's first 15 seconds (about 40 resets), never later while the
   menu showed.
 - **Evaluation.** In the add-on's own `ID3DDeviceContextState`: the inputs pass copies the colour
-  (sRGB-encoded LDR, `R8G8B8A8_UNORM`), depth (`R32_FLOAT`) and motion (`R16G16_FLOAT`); NGX
-  evaluates through ReShade's wrapped immediate context with `DepthInverted | MVLowRes`, no
-  `IsHDR`, MV scale 1 and a 1x1 exposure texture holding 1. NGX is only ever called on the
-  immediate context. With HDR the colour is linear light in `R16G16B16A16_FLOAT` and the feature has
-  `IsHDR` (see "HDR").
+  (the scene target with the depth of field, through a view of FXAA's render target format:
+  sRGB-encoded LDR, as the resolve tonemapped it, into `R8G8B8A8_UNORM`), depth (`R32_FLOAT`) and
+  motion (`R16G16_FLOAT`); NGX evaluates through ReShade's wrapped immediate context with
+  `DepthInverted | MVLowRes`, no `IsHDR`, MV scale 1 and a 1x1 exposure texture holding 1. NGX is
+  only ever called on the immediate context. With HDR the colour is the scene's linear light before
+  any tonemap or grading, in `R16G16B16A16_FLOAT`, and the feature has `IsHDR` (see "HDR").
 - **Composite.** A full-screen draw writes the DLSS output with RCAS (AMD FidelityFX, MIT; 33% by
-  default) and alpha 0, as FXAA writes: at DLAA into the scene target's `B8G8R8A8_UNORM` view, where
-  the UI then draws unchanged; when upscaling into the UI target (below).
+  default) and alpha 0: at DLAA over the scene target, through FXAA's view; when upscaling into the
+  UI target (below). The grading reads only the colour and writes its own alpha (luminance, for
+  FXAA). RCAS and the debug views therefore come before the grading.
+- **Frame generation's hudless colour** is copied from the same target at the immediate context's
+  next execute after the `Fxaa` list, once the grading has drawn and before the UI does.
 - **Render size.** `render_scale.cpp` checks the build and the per-frame step's first bytes
   (`40 53 48 83 EC 20 48 8B D9 8B 89 98 01 00 00`) and detours it with MinHook. Before the step runs
   it writes the requested size to the wanted size and sets flag 2, so the engine rebuilds its targets
@@ -1048,12 +1076,26 @@ the swap chain detour.
   targets every frame. The feature is created for render -> output with the mode's quality value.
   Jitter phases follow the ratio, `ceil(8 x (output / render)^2)` (32 at Performance).
 - **The UI at the output size** (`ui_redirect.cpp`). While the engine's targets are smaller than
-  the swap chain, the add-on keeps a `B8G8R8A8_TYPELESS` target at the output size with a
-  `D24_UNORM_S8_UINT` depth-stencil:
+  the swap chain, the add-on keeps a target in the scene's format (`B8G8R8A8_TYPELESS`, float with
+  HDR) at the output size, a second one for copies, and a `D24_UNORM_S8_UINT` depth-stencil:
   - Before the first command list that draws on it runs, it is filled: DLSS composites into it, or
     when DLSS did not run this frame (menus without a 3D view, loading screens, fallbacks) the
-    render-size scene target is stretched into it bilinearly, as `GammaControl` would have. The UI
-    never draws over a stale frame.
+    render-size scene target is stretched into it bilinearly, as `GammaControl` would have. The
+    grading and the UI never draw over a stale frame.
+  - The grading's full-size draws go to it too, whoever draws them (the game, or HDR's grading).
+    Their render target is swapped, without the depth-stencil; viewports and scissors are scaled by
+    output / render; slot b0 gets a copy of the game's `cPSSystem`, made on the context before each
+    draw, with `m_renderInfo` and `m_renderBuffer` at the output size (partial copies, as for
+    `cPSScene` below); the game's bindings come back after. The shaders address their inputs by
+    texture coordinate (`CopyRenderBuffer` from the clip position through `cPSObject` c12, `Tonemap`
+    at `SV_Position x m_renderBuffer.zw`), so smaller inputs still line up.
+  - In every F10 record the only `CopyRenderBuffer` draws into a render-size target are the depth of
+    field's copy of the scene (its input has the render size; it stays, before DLSS) and the
+    half-size layer's composite over the scene (lens flares): that one goes to the output target.
+  - `Tonemap` (the grading): the output target is copied into the second target on the context, and
+    the grading reads it (slot 0) and writes the output target. The graded image is then stretched
+    back into the render-size scene target, which the game copies next for its 2D filters
+    (chromatic aberration, radial blur, water drops).
   - A draw with a `Draw2D` vertex shader bound (tracked per context from `bind_pipeline`) into the
     render-size scene target is made by the add-on on the output target instead, with viewports and
     scissors scaled by output / render and its own `cPSSystem` (`c1` and `c2` at the output size)
@@ -1107,13 +1149,13 @@ the swap chain detour.
   `AddonInit`. While DLSS replaces FXAA, the detour keeps the view test and runs the filter without
   testing the post processing dword, so DLSS has its pass at every setting. Off and the comparison
   give the pass back to the game's setting from the next frame. Checked on the title menu with post
-  processing Low and DLAA: DLSS ran on every frame.
+  processing Low and DLAA: DLSS ran on every frame (before DLSS moved ahead of post processing).
 - **Fallbacks.** Missing or mismatched FXAA bindings, sizes that differ, a frame recorded out of
-  step, a second FXAA pass in a frame, no list after FXAA, no plan yet, a render size the engine has
-  not reached yet after a mode change, or an FXAA pass sharing a list with the UI keep FXAA (stretched
-  into the UI target when upscaling) and log the reason once. An exception or NGX error stops DLSS
-  until a mode is chosen again; the engine then renders at native resolution. A size change
-  recreates the feature and textures.
+  step, no FXAA pass, no plan yet or a render size the engine has not reached yet after a mode
+  change leave the frame without DLSS and without FXAA (stretched into the UI target when
+  upscaling, where the grading still draws), and log the reason once. An exception or NGX error
+  stops DLSS until a mode is chosen again; the engine then renders at native resolution. A size
+  change recreates the feature and textures.
 
 Not handled:
 
@@ -1124,10 +1166,10 @@ Not handled:
   wind have no motion vectors. None was seen to ghost in the tested scenes; a DLSS
   bias-current-colour mask drawn with the same vertex shaders would be the fix if one does.
 - The title screen's resets (see "Camera cuts"): only in its first 15 seconds, so left alone.
-- A `Draw2D` draw into the scene target before FXAA would be redirected and then covered by the
-  DLSS image. None was seen (see "The 2D pass"); the situational camera filters were not recorded.
 - 2D filters that redraw the whole screen from the scene copy (chromatic aberration, radial blur)
   read the render-size copy, so while one is on, the image under it has the render size.
+- Bloom and the lens flares start from the scene before DLSS, jitter included; at a quarter of its
+  size it averages out. The game's motion blur stays off while DLSS runs.
 
 ## Frame generation
 
@@ -1287,10 +1329,10 @@ grading, as RenoDX's mods do, and the grading and output follow RenoDX's and Lum
   and the lens flares start from, draws with a shader that puts each of its four taps through
   TppTonemap and the clamp to 1, so bloom is as the game had it. The depth of field's
   `CopyRenderBuffer` from the scene into its 8-bit copy is followed by a copy of the scene into a
-  float texture, which `DOF_ScatterCompositeFinal` (and the gather's composite) reads in its place.
+  float texture, which `DOF_ScatterCompositeFinal` reads in its place.
   The reflections' twin is not clamped: `LocalReflectionAddBuffer` rewrites the whole scene from it.
   The game's depth of field takes its highlights' luminance from the resolve's alpha (`a^2 x 32`),
-  which is unchanged; the gather skips its inverse tonemap.
+  which is unchanged.
 - **The 2D pass.** Its pixel shaders (`\Draw2D*_ps.hlsl` in their debug data, 67) write alpha above 1,
   which the 8-bit target clamped and a float one does not (black boxes behind subtitles): every write
   to `o0` gets the saturate modifier.
@@ -1299,7 +1341,8 @@ grading, as RenoDX's mods do, and the grading and output follow RenoDX's and Lum
   game's grading as its shader does it (bloom screened in gamma 2, the 16x16x16 LUT), then RenoDX's
   `UpgradeToneMap`: the luminance the tonemap took is added to the graded luminance, and the graded
   colour scaled to it. Below the knee (0.6) the image is the game's. Alpha keeps the game's luma.
-- **DLSS** runs with `IsHDR` on the linear light; RCAS sharpens through x / (1 + x).
+- **DLSS** runs with `IsHDR` on the linear light, after the depth of field and before the grading;
+  RCAS sharpens through x / (1 + x).
 - **Output.** `GammaControl` draws with the add-on's shader: the game's brightness setting as it
   applies it, the 0 to 1 range decoded with gamma 2.2 (the SDR look on 2.2 displays, Luma's and
   RenoDX's default) and above it with sRGB, then RenoDX's Neutwo on the brightest channel, which puts
@@ -2294,46 +2337,10 @@ with the game's Depth of Field option on runs the `DOF_Scatter*` passes; `DOF_0_
 - Weak points: everything is half size or less, so slight blur turns blocky and shimmers at focus
   edges; one depth splits near from far; the HDR lights are not tonemapped back, so they clip.
 
-With **Depth of field** on, the add-on runs a gather in its place (`src/depth_of_field.*`), after
-Call of Duty: Advanced Warfare's scatter-as-gather (Jimenez, SIGGRAPH 2014) and Unreal Engine's
-Diaphragm DOF (Abadie, SIGGRAPH 2018). Off, it only checks a flag on each draw.
-
-- **Where.** At `DOF_ScatterBakeFirst`'s draw, from its scene (`t0`), depth (`t1`), `cPSScene`
-  (`b2`) and `cPSObject` (`b5`): compute passes recorded on its deferred context, with the game's
-  compute bindings saved and restored. The game's draws from there to `DOF_ScatterCompositeFinal`
-  are left out, sprites included; that one the add-on draws with its own pixel shader, from the
-  game's scene copy (`t1`) and depth (`t2`). Unexpected sizes leave the game's own depth of field,
-  logged once.
-- **Tonemap.** The resolves with TppTonemap (`DR_VolFog_TppTonemap`, `_MD`, `DR_TonemapRainFilter`,
-  `_NoIR`) take `cPSMaterial` c0 = (a, b, c): `x` up to `b`, then `b + c - 1 / (a (x - b + c))`. A
-  one-thread pass at each copies it. The blur undoes the curve per channel (capped at 64), blurs,
-  and applies it again: sharp pixels come back as they were, even areas keep their brightness, and
-  lights stay bright in the blur. Other resolves (`DeferredRendering*`) leave colours as they are.
-- **Setup** (half size): each pixel's four render pixels, their colours through the inverse tonemap
-  and their blur radii from the game's constants, its unit taken as pixels of a 1920-wide image.
-  The pixel keeps the blur furthest from sharp (the foreground's on a tie) and the colours near it,
-  so a sharp edge does not seep into the blur beside it. Also the largest blur of each 8x8 tile, and
-  the lens for the later passes. `GenerateMips` gives the colour three more levels.
-- **Dilate:** per tile, the largest blur that reaches it from the tiles around.
-- **Gather** (half size): up to 64 samples on a Vogel spiral within the tile's radius, from the mip
-  whose texels match their spacing. A sample counts where its blur covers the pixel (a soft edge;
-  the polygon of **Aperture**'s blades), weighted 1 / r^2, its light spread over its blur. In front
-  of the focus it goes into a foreground layer, whose coverage is its weights times R^2 / samples;
-  behind, into the background, where a sample behind the centre reaches only as far as the centre's
-  own blur.
-- **Composite** (full size): a sharp pixel without foreground over it is written back as it was.
-  Blurs up to 3 pixels are gathered at full size from 12 taps, wider ones come from the half-size
-  background (bilinear, weighted by how close the blur is); the foreground goes over both; then
-  the tonemap and sRGB.
-- **Limits.** The largest blur radius is 5% of the render height.
-- **Photo mode** blurs with its own lens instead of the game's constants: radius
-  `W / 4 x |P00| x aperture x (1 / focus - 1 / z)`, aperture = focal length (the active camera's
-  `+0x3C`, millimetres) / f-number (the overlay's **f-stop**).
-
-Not handled:
-
-- Screen space: the gather cannot show what a blurred foreground hides.
-- Lights are as bright as 8 bits and the inverse tonemap's cap of 64 allow.
+The add-on draws the game's depth of field as it is, before DLSS (see "What the add-on changes").
+Photo mode blurs with it: it sets the active camera's focus distance (`+0x38`), f-number (`+0x44`,
+the overlay's **f-stop**, or f/64 with the blur off) and the byte that allows any aperture
+(`+0xEA`) for the selector's update, which copies them into `GrCamera` (see "Photo mode").
 
 ## Draw distance
 

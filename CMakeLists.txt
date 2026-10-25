@@ -190,7 +190,7 @@ add_custom_target(gi_kernels DEPENDS ${GI_SHADER_HEADERS})
 add_library(phantom_fx SHARED src/upscaler_addon.cpp src/upscaler.cpp src/upscaler_menu.cpp src/menu_budget.cpp src/fxui/fxui.cpp src/upscaler_settings.cpp src/camera.cpp
     src/device_check.cpp src/motion_blur.cpp src/fxaa.cpp src/frame_rate.cpp src/render_scale.cpp src/ui_redirect.cpp src/frame_log.cpp src/resource_dump.cpp
     src/log.cpp src/shader_bytecode.cpp src/presenter.cpp src/frame_generation.cpp src/game_loop.cpp src/shadows.cpp
-    src/indirect_light.cpp src/photo_mode.cpp src/focus.cpp src/depth_of_field.cpp src/draw_distance.cpp src/hdr.cpp src/weather.cpp src/character.cpp src/game_lua.cpp src/travel.cpp src/atmosphere.cpp src/sun_movement.cpp
+    src/indirect_light.cpp src/photo_mode.cpp src/focus.cpp src/draw_distance.cpp src/hdr.cpp src/weather.cpp src/character.cpp src/game_lua.cpp src/travel.cpp src/atmosphere.cpp src/sun_movement.cpp
     src/fidelityfx.cpp src/fsr_upscaler.cpp src/fsr_frame_generation.cpp src/performance.cpp src/performance_menu.cpp
     src/global_illumination.cpp src/engine_scene.cpp src/engine_brush.cpp src/gi_inputs.cpp src/local_lights.cpp src/gi_renderer.cpp src/gi_scene.cpp src/gi_textures.cpp src/gi_light.cpp src/gi_denoiser.cpp src/gi_lighting.cpp src/gi_shadow.cpp
     "${CMAKE_BINARY_DIR}/version.rc")

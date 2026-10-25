@@ -4,10 +4,19 @@
 
 - Add **presets** on the Budget page: **Screen-space** (soft and contact shadows, GTVBAO, SSILVB)
   or **Ray-traced** (ray-traced shadows, lights and global illumination). Both unlock the frame
-  rate and turn on the volumetric fog with the physical sky, without depth of field.
+  rate and turn on the volumetric fog with the physical sky.
 - A first start, without a settings file, uses the Screen-space preset at Quality: DLSS on NVIDIA,
   FSR on other GPUs.
 - The left-hand list scrolls with the mouse wheel when the window is too short for it.
+- Fix scattered rocks and stones in the ray-traced scene sitting up to 34 cm from where the game
+  draws them: a rock's ray-traced shadow fell on its own top, and rocks cast shadows from empty
+  ground.
+- DLSS and FSR now run before most of the game's post processing, as NVIDIA recommends: the lens
+  flares, bloom and the colour grading go over the clean, anti-aliased image, and when upscaling they
+  draw at the output resolution. The depth of field stays before DLSS, which keeps its focus edges
+  steady. With HDR, DLSS gets the scene's light before any grading.
+- Remove **Depth of field** and its **Aperture** shapes. The game's own depth of field stays, and
+  photo mode blurs with it: **f-stop**, F4 and the autofocus work as before.
 
 ## 1.6.0
 

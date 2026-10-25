@@ -36,20 +36,33 @@ DXGI_FORMAT gammaFormat()
     return hdr::active() ? hdr::sceneFormat() : DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
 }
 
+// The output-size textures, by Surface.
+struct Texture
+{
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11RenderTargetView> target;
+    ComPtr<ID3D11ShaderResourceView> view;
+};
+
 struct Targets
 {
     unsigned width{}, height{};
-    ComPtr<ID3D11RenderTargetView> target;
+    Texture surfaces[2]; // Scene, Copy
     ComPtr<ID3D11ShaderResourceView> srgbView;
     // The 2D pass masks with stencil; it does not test depth.
     ComPtr<ID3D11DepthStencilView> depth;
     // cPSSystem (slot b0) for the output size. The 2D pass's pixel shaders read only m_renderInfo (c1)
     // and m_renderBuffer (c2) from it, to place screen-space effects.
     ComPtr<ID3D11Buffer> systemConstants;
+    // cPSSystem for a grading draw: the game's, copied before each, with c1 and c2 from
+    // `systemConstants`. The grading samples the scene by pixel position over m_renderBuffer.zw.
+    ComPtr<ID3D11Buffer> postSystemConstants;
     // cPSScene (slot b2): the game's, copied before each draw, with m_viewportSize.xy (c22) set to
     // the output size from `viewportSize`. The camera filters measure the screen with it, and the
     // sandstorm's vignette (Draw2D_TppNoiseFilter) is placed by pixel position over it.
     ComPtr<ID3D11Buffer> sceneConstants, viewportSize;
+
+    const Texture& operator[](Surface surface) const { return surfaces[static_cast<std::size_t>(surface)]; }
 };
 
 // Whether each recording context has a 2D pass vertex shader bound, by the context ReShade reports
@@ -122,14 +135,23 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    ComPtr<ID3D11Texture2D> color, depth;
-    if (FAILED(device->CreateTexture2D(&desc, nullptr, color.GetAddressOf()))) return nullptr;
+    D3D11_RENDER_TARGET_VIEW_DESC targetDesc{drawFormat(), D3D11_RTV_DIMENSION_TEXTURE2D};
+    D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{drawFormat(), D3D11_SRV_DIMENSION_TEXTURE2D};
+    viewDesc.Texture2D.MipLevels = 1;
+    for (auto& surface : created->surfaces)
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, surface.texture.GetAddressOf()))
+            || FAILED(device->CreateRenderTargetView(surface.texture.Get(), &targetDesc, surface.target.GetAddressOf()))
+            || FAILED(device->CreateShaderResourceView(surface.texture.Get(), &viewDesc, surface.view.GetAddressOf())))
+            return nullptr;
 
     const float system[16]{0, 0, 0, 0, static_cast<float>(width), static_cast<float>(height), 0, 0, static_cast<float>(width),
         static_cast<float>(height), 1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height)};
     const D3D11_BUFFER_DESC systemDesc{sizeof(system), D3D11_USAGE_IMMUTABLE, D3D11_BIND_CONSTANT_BUFFER};
     const D3D11_SUBRESOURCE_DATA systemData{system};
-    if (FAILED(device->CreateBuffer(&systemDesc, &systemData, created->systemConstants.GetAddressOf()))) return nullptr;
+    const D3D11_BUFFER_DESC postSystemDesc{sizeof(system), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
+    if (FAILED(device->CreateBuffer(&systemDesc, &systemData, created->systemConstants.GetAddressOf()))
+        || FAILED(device->CreateBuffer(&postSystemDesc, nullptr, created->postSystemConstants.GetAddressOf())))
+        return nullptr;
 
     const D3D11_BUFFER_DESC sceneDesc{sizeof(camera::SceneConstants), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
     const float viewport[4]{static_cast<float>(width), static_cast<float>(height)};
@@ -139,13 +161,11 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
         || FAILED(device->CreateBuffer(&viewportDesc, &viewportData, created->viewportSize.GetAddressOf())))
         return nullptr;
 
-    D3D11_RENDER_TARGET_VIEW_DESC targetDesc{drawFormat(), D3D11_RTV_DIMENSION_TEXTURE2D};
-    D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{gammaFormat(), D3D11_SRV_DIMENSION_TEXTURE2D};
-    viewDesc.Texture2D.MipLevels = 1;
+    viewDesc.Format = gammaFormat();
     desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
     desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    if (FAILED(device->CreateRenderTargetView(color.Get(), &targetDesc, created->target.GetAddressOf()))
-        || FAILED(device->CreateShaderResourceView(color.Get(), &viewDesc, created->srgbView.GetAddressOf()))
+    ComPtr<ID3D11Texture2D> depth;
+    if (FAILED(device->CreateShaderResourceView((*created)[Surface::Scene].texture.Get(), &viewDesc, created->srgbView.GetAddressOf()))
         || FAILED(device->CreateTexture2D(&desc, nullptr, depth.GetAddressOf()))
         || FAILED(device->CreateDepthStencilView(depth.Get(), nullptr, created->depth.GetAddressOf())))
         return nullptr;
@@ -192,6 +212,41 @@ void issue(ID3D11DeviceContext* context, const DrawCall& call)
 LONG scaled(LONG value, double scale)
 {
     return static_cast<LONG>(std::lround(value * scale));
+}
+
+// The game's viewports and scissors, from the render size to the output size.
+void scale(const D3D11_VIEWPORT* viewports, D3D11_VIEWPORT* scaledViewports, UINT count, double scaleX, double scaleY)
+{
+    for (UINT i = 0; i < count; ++i)
+    {
+        scaledViewports[i] = viewports[i];
+        scaledViewports[i].TopLeftX = static_cast<float>(viewports[i].TopLeftX * scaleX);
+        scaledViewports[i].TopLeftY = static_cast<float>(viewports[i].TopLeftY * scaleY);
+        scaledViewports[i].Width = static_cast<float>(viewports[i].Width * scaleX);
+        scaledViewports[i].Height = static_cast<float>(viewports[i].Height * scaleY);
+    }
+}
+
+void scale(const D3D11_RECT* rects, D3D11_RECT* scaledRects, UINT count, double scaleX, double scaleY)
+{
+    for (UINT i = 0; i < count; ++i)
+        scaledRects[i] = {scaled(rects[i].left, scaleX), scaled(rects[i].top, scaleY), scaled(rects[i].right, scaleX), scaled(rects[i].bottom, scaleY)};
+}
+
+// Fills the output's grading cPSSystem from the game's on `context`: the game's values, with
+// m_renderInfo (c1) and m_renderBuffer (c2) at the output size.
+bool copySystem(ID3D11DeviceContext* context, const Targets& output, ID3D11Buffer* gameSystem)
+{
+    D3D11_BUFFER_DESC desc{};
+    if (gameSystem) gameSystem->GetDesc(&desc);
+    if (!gameSystem || desc.ByteWidth != 4 * sizeof(float[4])) return false;
+
+    constexpr UINT renderInfoOffset = sizeof(float[4]);
+    const D3D11_BOX sizes{renderInfoOffset, 0, 0, 3 * sizeof(float[4]), 1, 1};
+    context->CopyResource(output.postSystemConstants.Get(), gameSystem);
+    context->CopySubresourceRegion(output.postSystemConstants.Get(), 0, renderInfoOffset, 0, 0, output.systemConstants.Get(), 0, &sizes);
+
+    return true;
 }
 
 // Fills the output's cPSScene from the game's on `context`. The game's m_viewportSize.xy is the
@@ -330,24 +385,14 @@ bool draw2D(ID3D11DeviceContext* context, const DrawCall& call) noexcept
         UINT viewportCount = static_cast<UINT>(std::size(viewports)), rectCount = viewportCount;
         context->RSGetViewports(&viewportCount, viewports);
         context->RSGetScissorRects(&rectCount, rects);
-        for (UINT i = 0; i < viewportCount; ++i)
-        {
-            scaledViewports[i] = viewports[i];
-            scaledViewports[i].TopLeftX = static_cast<float>(viewports[i].TopLeftX * scaleX);
-            scaledViewports[i].TopLeftY = static_cast<float>(viewports[i].TopLeftY * scaleY);
-            scaledViewports[i].Width = static_cast<float>(viewports[i].Width * scaleX);
-            scaledViewports[i].Height = static_cast<float>(viewports[i].Height * scaleY);
-        }
-
-        for (UINT i = 0; i < rectCount; ++i)
-            scaledRects[i] = {scaled(rects[i].left, scaleX), scaled(rects[i].top, scaleY), scaled(rects[i].right, scaleX),
-                scaled(rects[i].bottom, scaleY)};
+        scale(viewports, scaledViewports, viewportCount, scaleX, scaleY);
+        scale(rects, scaledRects, rectCount, scaleX, scaleY);
 
         ComPtr<ID3D11Buffer> system, gameScene;
         context->PSGetConstantBuffers(0, 1, system.GetAddressOf());
         context->PSGetConstantBuffers(2, 1, gameScene.GetAddressOf());
         const bool sceneCopied = copyScene(context, *output, gameScene.Get());
-        context->OMSetRenderTargetsAndUnorderedAccessViews(1, output->target.GetAddressOf(), depth ? output->depth.Get() : nullptr, 0,
+        context->OMSetRenderTargetsAndUnorderedAccessViews(1, (*output)[Surface::Scene].target.GetAddressOf(), depth ? output->depth.Get() : nullptr, 0,
             D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
         context->RSSetViewports(viewportCount, scaledViewports);
         context->RSSetScissorRects(rectCount, scaledRects);
@@ -387,7 +432,7 @@ bool clearTarget(ID3D11DeviceContext* context, ID3D11RenderTargetView* view, con
         const auto output = currentTargets();
         if (!output) return false;
 
-        context->ClearRenderTargetView(output->target.Get(), color);
+        context->ClearRenderTargetView((*output)[Surface::Scene].target.Get(), color);
         rememberScene(view);
 
         return true;
@@ -435,12 +480,90 @@ bool drawGamma(ID3D11DeviceContext* context, const DrawCall& call) noexcept
     }
 }
 
+OutputSizeDraw::OutputSizeDraw(ID3D11DeviceContext* drawing, Surface target, std::initializer_list<Input> inputs) noexcept
+{
+    try
+    {
+        const auto output = currentTargets();
+        if (!output || inputs.size() > MaxInputs) return;
+
+        ID3D11RenderTargetView* bound[std::size(targets)]{};
+        drawing->OMGetRenderTargets(static_cast<UINT>(std::size(bound)), bound, depth.GetAddressOf());
+        for (std::size_t i = 0; i < std::size(bound); ++i) targets[i].Attach(bound[i]);
+
+        const auto gameTarget = textureDesc(targets[0].Get());
+        if (!gameTarget.Width || !gameTarget.Height) return;
+
+        viewportCount = rectCount = static_cast<UINT>(std::size(viewports));
+        drawing->RSGetViewports(&viewportCount, viewports);
+        drawing->RSGetScissorRects(&rectCount, rects);
+        drawing->PSGetConstantBuffers(0, 1, system.GetAddressOf());
+        for (const auto& input : inputs)
+        {
+            inputSlots[inputCount] = input.slot;
+            drawing->PSGetShaderResources(input.slot, 1, inputViews[inputCount].GetAddressOf());
+            ++inputCount;
+        }
+
+        const double scaleX = static_cast<double>(output->width) / gameTarget.Width, scaleY = static_cast<double>(output->height) / gameTarget.Height;
+        D3D11_VIEWPORT scaledViewports[std::size(viewports)]{};
+        D3D11_RECT scaledRects[std::size(rects)]{};
+        scale(viewports, scaledViewports, viewportCount, scaleX, scaleY);
+        scale(rects, scaledRects, rectCount, scaleX, scaleY);
+        if (target == Surface::Scene) rememberScene(targets[0].Get());
+
+        context = drawing;
+        if (copySystem(drawing, *output, system.Get())) drawing->PSSetConstantBuffers(0, 1, output->postSystemConstants.GetAddressOf());
+        for (const auto& input : inputs) drawing->PSSetShaderResources(input.slot, 1, (*output)[input.surface].view.GetAddressOf());
+        drawing->OMSetRenderTargetsAndUnorderedAccessViews(1, (*output)[target].target.GetAddressOf(), nullptr, 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
+            nullptr, nullptr);
+        drawing->RSSetViewports(viewportCount, scaledViewports);
+        drawing->RSSetScissorRects(rectCount, scaledRects);
+    }
+    catch (...)
+    {
+    }
+}
+
+OutputSizeDraw::~OutputSizeDraw()
+{
+    if (!context) return;
+
+    ID3D11RenderTargetView* bound[std::size(targets)]{};
+    for (std::size_t i = 0; i < std::size(targets); ++i) bound[i] = targets[i].Get();
+    context->OMSetRenderTargetsAndUnorderedAccessViews(static_cast<UINT>(std::size(bound)), bound, depth.Get(), 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
+        nullptr, nullptr);
+    context->RSSetViewports(viewportCount, viewports);
+    context->RSSetScissorRects(rectCount, rects);
+    context->PSSetConstantBuffers(0, 1, system.GetAddressOf());
+    for (std::size_t i = 0; i < inputCount; ++i) context->PSSetShaderResources(inputSlots[i], 1, inputViews[i].GetAddressOf());
+}
+
+void copySurface(ID3D11DeviceContext* context, Surface to, Surface from) noexcept
+{
+    if (const auto output = currentTargets()) context->CopyResource((*output)[to].texture.Get(), (*output)[from].texture.Get());
+}
+
+bool renderSized(ID3D11View* view) noexcept
+{
+    try
+    {
+        return renderSized(textureDesc(view));
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
 Output output() noexcept
 {
     const auto current = currentTargets();
     std::lock_guard lock(mutex);
     if (!current) return {};
 
-    return {current->target, sceneView, current->width, current->height};
+    const auto& target = (*current)[Surface::Scene];
+
+    return {target.target, target.view, sceneView, current->width, current->height};
 }
 }
