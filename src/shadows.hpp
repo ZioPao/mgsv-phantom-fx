@@ -48,9 +48,6 @@ bool failed() noexcept;
 
 // ---- Recording, on the game's render and worker threads ----
 void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
-// Keeps what each thread writes to the light passes' constants: the light and the projection.
-void bufferMapped(ID3D11Resource* buffer, void* data) noexcept;
-void bufferUnmapped(ID3D11Resource* buffer) noexcept;
 // Before a draw. The sun pass and the local lights' draws, while an option is on, are drawn here
 // instead; returns true when the game's draw must be skipped.
 bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
