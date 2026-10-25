@@ -1,6 +1,7 @@
 #include "shadows.hpp"
 
 #include "game_lights.hpp"
+#include "gi_inputs.hpp"
 #include "global_illumination.hpp"
 #include "log.hpp"
 #include "performance.hpp"
@@ -100,8 +101,6 @@ static_assert(sizeof(ShaderOptions) % 16 == 0);
 std::mutex optionsMutex;
 Options wanted, current;
 std::atomic<bool> active{}, pipelineFailed{};
-// Only the screen-space trace reads the constants bufferMapped keeps.
-std::atomic<bool> tracing{};
 // Counts presents, to turn the soft shadows' samples.
 std::atomic<std::uint32_t> frame{};
 
@@ -116,13 +115,6 @@ std::array<std::array<ComPtr<IUnknown>, CopiesPerShader>, std::size(SunChecksums
 std::shared_mutex lightShaderMutex;
 std::unordered_map<IUnknown*, Falloff> lightShaders;
 std::vector<ComPtr<IUnknown>> lightShaderOwners;
-
-// What a thread last wrote to each constant buffer of the two sizes: the game writes them with
-// Map, memcpy and Unmap right before the draw that reads them, on the thread recording it.
-thread_local ID3D11Resource* mappedBuffer{};
-thread_local void* mappedData{};
-thread_local UINT mappedSize{};
-thread_local std::unordered_map<ID3D11Resource*, std::vector<float>> written;
 
 // The depth a context's recording traced the sun from since its last FinishCommandList: both parts
 // of the sun pass read the same shadow. And the light whose shadow a context's last stencil-marking
@@ -299,24 +291,25 @@ std::optional<Falloff> falloffOf(IUnknown* shader)
     return found->second;
 }
 
-// What this thread last wrote to `buffer`, when it has the expected size.
-const float* writtenTo(ID3D11Buffer* buffer, UINT size)
+// What this thread wrote to the light pass's cPSScene (b2) and cPSLight (b3), each at its full size.
+struct PassConstants
 {
-    const auto found = buffer ? written.find(buffer) : written.end();
-    return found != written.end() && found->second.size() * sizeof(float) == size ? found->second.data() : nullptr;
-}
+    std::array<float, SceneConstantsSize / 4> scene{};
+    std::array<float, LightConstantsSize / 4> light{};
+};
 
-// What this thread wrote to the light pass's cPSScene (b2) and cPSLight (b3), null where unknown.
-std::pair<const float*, const float*> passConstants(ID3D11DeviceContext* context)
+// None where unknown.
+std::optional<PassConstants> passConstants(ID3D11DeviceContext* context)
 {
     std::array<ID3D11Buffer*, 2> constants{};
     context->PSGetConstantBuffers(2, 2, constants.data());
-    const auto* scene = writtenTo(constants[0], SceneConstantsSize);
-    const auto* light = writtenTo(constants[1], LightConstantsSize);
+    PassConstants written;
+    const bool known = gi_inputs::writtenExactly(constants[0], written.scene) && gi_inputs::writtenExactly(constants[1], written.light);
     for (auto* buffer : constants)
         if (buffer) buffer->Release();
+    if (!known) return std::nullopt;
 
-    return {scene, light};
+    return written;
 }
 
 // Bend's inLightProjection: a view-space point (w 1) or direction (w 0) through the pass's own
@@ -559,14 +552,14 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
     // Beyond the shadow range there is no shadow map to soften.
     if (!options.screenSpaceSun && !(options.soft && shadowMapped(sun)) && !rayTraced) return false;
 
-    const auto [scene, light] = passConstants(context);
+    const auto constants = passConstants(context);
 
     std::lock_guard lock(resourceMutex);
     if (!ensurePipeline()) return false;
 
     if (options.screenSpaceSun)
     {
-        if (!depth || !scene || !light)
+        if (!depth || !constants)
         {
             logOnce("a sun pass without its depth or constants keeps the game's shadows.");
             return false;
@@ -575,8 +568,9 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
         if (!tracedFrom(context, depth.Get()))
         {
             const performance::Timed timed(context, performance::Pass::SunTrace);
-            const float* direction = light + LightDirection;
-            const auto where = describe(trace(context, depth.Get(), specular.Get(), project(scene, {direction[0], direction[1], direction[2], 0}), {}, sunShadow));
+            const float* direction = &constants->light[LightDirection];
+            const auto lightProjection = project(constants->scene.data(), {direction[0], direction[1], direction[2], 0});
+            const auto where = describe(trace(context, depth.Get(), specular.Get(), lightProjection, {}, sunShadow));
             noteTraced(context, depth.Get());
             if (!tracedSunOnce)
             {
@@ -631,13 +625,16 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     D3D11_BLEND_DESC blend{};
     gameBlend->GetDesc(&blend);
     const bool marking = blend.RenderTarget[0].RenderTargetWriteMask == 0;
-    const auto [scene, light] = passConstants(context);
-    if (!scene || !light)
+    const auto constants = passConstants(context);
+    if (!constants)
     {
         std::lock_guard lock(resourceMutex);
         logOnce("a light without its constants keeps the game's shadows.");
         return false;
     }
+
+    const float* scene = constants->scene.data();
+    const float* light = constants->light.data();
 
     const std::array position{light[LightPosition], light[LightPosition + 1], light[LightPosition + 2]};
     if (!marking)
@@ -832,41 +829,6 @@ void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcep
     }
 }
 
-void bufferMapped(ID3D11Resource* buffer, void* data) noexcept
-{
-    if (!tracing.load(std::memory_order_relaxed) || !data) return;
-
-    D3D11_RESOURCE_DIMENSION dimension{};
-    buffer->GetType(&dimension);
-    if (dimension != D3D11_RESOURCE_DIMENSION_BUFFER) return;
-
-    D3D11_BUFFER_DESC desc{};
-    static_cast<ID3D11Buffer*>(buffer)->GetDesc(&desc);
-    if ((desc.ByteWidth != LightConstantsSize && desc.ByteWidth != SceneConstantsSize) || !(desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER)) return;
-
-    mappedBuffer = buffer;
-    mappedData = data;
-    mappedSize = desc.ByteWidth;
-}
-
-void bufferUnmapped(ID3D11Resource* buffer) noexcept
-{
-    if (!mappedBuffer || buffer != mappedBuffer) return;
-
-    try
-    {
-        auto& contents = written[buffer];
-        contents.resize(mappedSize / sizeof(float));
-        std::memcpy(contents.data(), mappedData, mappedSize);
-    }
-    catch (...)
-    {
-    }
-
-    mappedBuffer = nullptr;
-    mappedData = nullptr;
-}
-
 bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
 {
     if (!active.load(std::memory_order_relaxed) || call.instances != 1 || (!call.indexed && call.count != 3)) return false;
@@ -920,6 +882,6 @@ void present() noexcept
     std::lock_guard lock(optionsMutex);
     current = wanted;
     active = (current.soft || current.screenSpaceSun || current.screenSpaceLights || current.rayTraced) && !pipelineFailed;
-    tracing = active && (current.screenSpaceSun || current.screenSpaceLights);
+    gi_inputs::keepLightPassConstants(active && (current.screenSpaceSun || current.screenSpaceLights));
 }
 }
