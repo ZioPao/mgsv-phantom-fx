@@ -52,10 +52,6 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 // The shadow probe's global illumination rays, one a thread of its group.
 #define GI_PROBE_LIGHT_RAYS 64u
 
-// Debug views, in GIFrameConstants.counts.z.
-#define GI_VIEW_OFF   0u
-#define GI_VIEW_SCENE 1u // The traced scene from the camera: its normals, red where it misses the depth
-
 // Counters in the counter buffer.
 #define GI_COUNTER_PACKED_TILES   0u // Two, by GIFrameConstants.hashMisc.y
 #define GI_COUNTER_UPDATE_TILES   2u
@@ -122,15 +118,13 @@ struct GIFrameConstants
     GI_ROW_MAJOR float4x4 viewProjection; // World to clip, jittered as the depth was drawn
     GI_ROW_MAJOR float4x4 viewProjectionInverse;
     GI_ROW_MAJOR float4x4 previousViewProjection;
-    GI_ROW_MAJOR float4x4 previousViewProjectionInverse;
     float4 eye;          // xyz: the camera in the world
-    float4 previousEye;
     float4 sunDirection; // xyz: towards the sun, world space; w: tangent of its angular radius
     float4 sunColor;     // rgb: the sun's diffuse light at normal incidence, in the game's units
     float4 skySH[9];     // rgb: the sky's radiance as L2 spherical harmonics, world space
     uint4 dimensions;    // xy: render size; z: frame index; w: instance count
     float4 nearFar;      // x: near plane; y: far plane; z: albedo where none is known; w: output scale (the exposure)
-    uint4 counts;        // x: the frame's new geometries (ClearNewGeometries); z: debug view
+    uint4 counts;        // x: the frame's new geometries (ClearNewGeometries)
     // The light (gi_light.hlsl): its rays, from a grid half the render size each way, and the hash grid
     // cache (AMD Capsaicin's HashGridCacheConstants).
     uint4 lightLayout;        // xy: the light's size; z: its pixels; w: frame parity

@@ -179,7 +179,7 @@ function(add_gi_kernels source)
     set(GI_SHADER_HEADERS ${GI_SHADER_HEADERS} PARENT_SCOPE)
 endfunction()
 file(MAKE_DIRECTORY "${GI_SHADER_DIR}")
-add_gi_kernels(gi_scene.hlsl ClearNewGeometries DebugScene ClearOutput TerrainGrid Skin)
+add_gi_kernels(gi_scene.hlsl ClearNewGeometries DebugScene TerrainGrid Skin)
 add_gi_kernels(gi_light.hlsl ClearCounters GenerateDispatch PrepareGuides TraceLight LearnAlbedo PurgeTiles PopulateMultibounceCells PopulateCells
     UpdateTiles UpdateMultibounceCells ResolveLight UpdateFoliageMemory CompositeLight)
 add_gi_kernels(gi_shadow.hlsl TraceSunShadows ClassifyShadowTiles DebugShadows ProbeShadows TraceLocalLightShadows FilterLocalLightShadows)

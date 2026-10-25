@@ -150,7 +150,7 @@ struct Frame
     Matrix view{}, projection{}, previousView{}, previousProjection{}; // The engine's m_view and m_projection (cPSScene c8, c4)
     std::array<float, 4> jitter{}; // The projection's jitter in NDC (cPSScene c28): xy this frame's, zw the last frame's
     bool cameraCut{}; // The light's denoiser drops its history (camera::cameraCut)
-    std::array<float, 3> eye{}, previousEye{};
+    std::array<float, 3> eye{};
     float nearPlane{}, farPlane{};
     float verticalFov{}; // Radians
     float outputScale{}; // From the light as given (sun, sky) to the game's diffuse light units: the exposure

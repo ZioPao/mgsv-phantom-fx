@@ -1,5 +1,6 @@
 #include "shadows.hpp"
 
+#include "d3d11_helpers.hpp"
 #include "global_illumination.hpp"
 #include "log.hpp"
 #include "performance.hpp"
@@ -7,7 +8,6 @@
 #include "shadows_shaders.hpp"
 
 #include <bend_sss/bend_sss_cpu.h>
-#include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <algorithm>
 #include <array>
@@ -15,7 +15,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <map>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -176,13 +175,7 @@ std::unordered_map<ID3D11DeviceContext*, ID3D11ShaderResourceView*> traced;
 std::unordered_map<ID3D11DeviceContext*, std::array<float, 3>> marked;
 
 // A screen-space shadow, 1 where the light reaches, at the depth buffer's size.
-struct ShadowTarget
-{
-    ComPtr<ID3D11Texture2D> texture;
-    ComPtr<ID3D11ShaderResourceView> view;
-    ComPtr<ID3D11UnorderedAccessView> access;
-    UINT width{}, height{};
-};
+using ShadowTarget = ComputeTexture;
 
 // ---- Direct3D, guarded by resourceMutex ----
 std::mutex resourceMutex;
@@ -201,30 +194,6 @@ std::unordered_map<ID3D11BlendState*, std::pair<ComPtr<ID3D11BlendState>, ComPtr
 ShadowTarget sunShadow, lightShadow;
 bool tracedSunOnce{};
 std::array<bool, 2> tracedLightOnce{}; // By falloff
-std::map<std::string, bool, std::less<>> loggedOnce;
-
-void logOnce(const std::string& message)
-{
-    if (loggedOnce.emplace(message, true).second) log("Shadows: " + message);
-}
-
-void check(HRESULT result, const char* what)
-{
-    if (FAILED(result)) throw std::runtime_error(std::string(what) + " failed (" + hex(static_cast<std::uint32_t>(result)) + ").");
-}
-
-ComPtr<ID3DBlob> compile(const char* source, const char* name, const char* profile, const D3D_SHADER_MACRO* defines = nullptr)
-{
-    ComPtr<ID3DBlob> code, errors;
-    const auto result = D3DCompile(source, std::strlen(source), name, defines, nullptr, "main", profile, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-        code.GetAddressOf(), errors.GetAddressOf());
-    if (FAILED(result))
-        throw std::runtime_error(std::string("Shader ") + name + " did not compile: "
-            + (errors ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize())
-                      : hex(static_cast<std::uint32_t>(result))));
-
-    return code;
-}
 
 // Compiles the shaders once; call with resourceMutex held. Returns false when they are unavailable.
 bool ensurePipeline()
@@ -234,22 +203,16 @@ bool ensurePipeline()
 
     try
     {
-        auto code = compile(shaders::BendShadow, "bend-screen-space-shadows", "cs_5_0");
-        check(device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, traceShader.ReleaseAndGetAddressOf()),
-            "Creating the shadow trace");
+        traceShader = computeShader(device.Get(), shaders::BendShadow, "bend-screen-space-shadows");
 
         for (std::size_t index = 0; index < replacements.size(); ++index)
         {
             const auto sun = static_cast<Sun>(index);
             const D3D_SHADER_MACRO defines[]{{"SHADOW_MAP", shadowMapped(sun) ? "1" : "0"}, {"SKY_REFLECTION", reflectsSky(sun) ? "1" : "0"}, {}};
-            code = compile(shaders::SunLight, "sun-light", "ps_5_0", defines);
-            check(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, replacements[index].ReleaseAndGetAddressOf()),
-                "Creating a sun light shader");
+            replacements[index] = pixelShader(device.Get(), shaders::SunLight, "sun-light", defines);
         }
 
-        code = compile(shaders::LightShadow, "light-shadow", "ps_5_0");
-        check(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, lightShadowShader.ReleaseAndGetAddressOf()),
-            "Creating the light shadow shader");
+        lightShadowShader = pixelShader(device.Get(), shaders::LightShadow, "light-shadow");
 
         D3D11_SAMPLER_DESC sampler{};
         sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
@@ -258,14 +221,8 @@ bool ensurePipeline()
         sampler.MaxLOD = D3D11_FLOAT32_MAX;
         check(device->CreateSamplerState(&sampler, borderSampler.ReleaseAndGetAddressOf()), "Creating the shadow trace sampler");
 
-        D3D11_BUFFER_DESC buffer{};
-        buffer.ByteWidth = sizeof(Parameters);
-        buffer.Usage = D3D11_USAGE_DYNAMIC;
-        buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        check(device->CreateBuffer(&buffer, nullptr, parameterBuffer.ReleaseAndGetAddressOf()), "Creating the shadow trace constants");
-        buffer.ByteWidth = sizeof(ShaderOptions);
-        check(device->CreateBuffer(&buffer, nullptr, optionsBuffer.ReleaseAndGetAddressOf()), "Creating the sun shadow options");
+        parameterBuffer = makeConstantBuffer(device.Get(), sizeof(Parameters), "Creating the shadow trace constants");
+        optionsBuffer = makeConstantBuffer(device.Get(), sizeof(ShaderOptions), "Creating the sun shadow options");
 
         D3D11_BLEND_DESC blend{};
         blend.RenderTarget[0].SrcBlend = blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
@@ -304,21 +261,8 @@ void ensureShadowTarget(ShadowTarget& target, UINT width, UINT height)
 {
     if (target.texture && target.width == width && target.height == height) return;
 
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = width;
-    desc.Height = height;
-    desc.MipLevels = desc.ArraySize = 1;
-    desc.Format = DXGI_FORMAT_R8_UNORM;
-    desc.SampleDesc.Count = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-    ShadowTarget created{.width = width, .height = height};
-    check(device->CreateTexture2D(&desc, nullptr, created.texture.GetAddressOf()), "Creating the screen-space shadow");
-    check(device->CreateShaderResourceView(created.texture.Get(), nullptr, created.view.GetAddressOf()), "Creating the screen-space shadow view");
-    check(device->CreateUnorderedAccessView(created.texture.Get(), nullptr, created.access.GetAddressOf()),
-        "Creating the screen-space shadow output");
     // Command lists that still use the previous texture hold their own references.
-    target = std::move(created);
+    target = makeComputeTexture(device.Get(), width, height, DXGI_FORMAT_R8_UNORM, "Creating the screen-space shadow");
     log("Screen-space shadows at " + std::to_string(width) + "x" + std::to_string(height) + ".");
 }
 
@@ -384,17 +328,14 @@ float rangeOf(const float* light, Falloff falloff)
     return reach - std::min(fade[0], 0.0f);
 }
 
-// The width and height of the texture `view` shows.
-std::array<int, 2> sizeOf(ID3D11ShaderResourceView* view)
+// The width and height of the depth buffer `view` shows; throws when it is not a 2D texture, as the
+// trace needs one.
+std::array<int, 2> depthSize(ID3D11ShaderResourceView* view)
 {
-    ComPtr<ID3D11Resource> resource;
-    view->GetResource(resource.GetAddressOf());
-    ComPtr<ID3D11Texture2D> texture;
-    check(resource.As(&texture), "Reading the depth buffer");
-    D3D11_TEXTURE2D_DESC desc{};
-    texture->GetDesc(&desc);
+    const auto [width, height] = sizeOf(view);
+    if (!width) throw std::runtime_error("Reading the depth buffer failed: it is not a 2D texture.");
 
-    return {static_cast<int>(desc.Width), static_cast<int>(desc.Height)};
+    return {static_cast<int>(width), static_cast<int>(height)};
 }
 
 // What a light at view-space `center` that reaches `range` can light on a screen of `size`: its
@@ -447,7 +388,7 @@ std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 
 Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* specular,
     std::array<float, 4> lightProjection, const std::optional<TraceBounds>& bounds, ShadowTarget& target)
 {
-    auto size = sizeOf(depth);
+    auto size = depthSize(depth);
     ensureShadowTarget(target, static_cast<UINT>(size[0]), static_cast<UINT>(size[1]));
 
     // Bend's default depth bounds skip the sky.
@@ -481,9 +422,6 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
     for (int i = 0; i < dispatches.DispatchCount; ++i)
     {
         const auto& dispatch = dispatches.Dispatch[i];
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        if (FAILED(context->Map(parameterBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) break;
-
         Parameters parameters{};
         std::memcpy(parameters.lightCoordinate, dispatches.LightCoordinate_Shader, sizeof(parameters.lightCoordinate));
         parameters.waveOffset[0] = dispatch.WaveOffset_Shader[0];
@@ -497,8 +435,8 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
         parameters.depthBounds[1] = covered.depthMax;
         std::memcpy(parameters.boundsMin, covered.min, sizeof(parameters.boundsMin));
         std::memcpy(parameters.boundsMax, covered.max, sizeof(parameters.boundsMax));
-        std::memcpy(mapped.pData, &parameters, sizeof(parameters));
-        context->Unmap(parameterBuffer.Get(), 0);
+        if (FAILED(write(context, parameterBuffer.Get(), parameters))) break;
+
         context->Dispatch(static_cast<UINT>(dispatch.WaveCount[0]), static_cast<UINT>(dispatch.WaveCount[1]), static_cast<UINT>(dispatch.WaveCount[2]));
     }
 
@@ -557,15 +495,11 @@ bool takeMarked(ID3D11DeviceContext* context, const std::array<float, 3>& positi
 // ray-traced shadow, the shadow map's part is always soft.
 void writeOptions(ID3D11DeviceContext* context, const Options& options, bool rayTraced)
 {
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    check(context->Map(optionsBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Writing the sun shadow options");
-
     constexpr float DegreesToRadians = 3.14159265f / 180;
     const ShaderOptions values{options.soft || rayTraced ? 1.0f : 0.0f, std::tan(options.sunSize * 0.5f * DegreesToRadians),
         options.turnPattern ? static_cast<float>(frame.load(std::memory_order_relaxed) % PatternTurns) : 0.0f, options.screenSpaceSun ? 1.0f : 0.0f,
         rayTraced ? 1.0f : 0.0f, {}};
-    std::memcpy(mapped.pData, &values, sizeof(values));
-    context->Unmap(optionsBuffer.Get(), 0);
+    check(write(context, optionsBuffer.Get(), values), "Writing the sun shadow options");
 }
 
 // The game's additive light blend (ONE, ONE) with its light scaled by the target's alpha, which it
@@ -613,7 +547,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
     ID3D11ShaderResourceView* rayTraced{};
     if (options.rayTraced && depth)
     {
-        const auto size = sizeOf(depth.Get());
+        const auto size = depthSize(depth.Get());
         rayTraced = global_illumination::sunShadow(static_cast<UINT>(size[0]), static_cast<UINT>(size[1]));
     }
 
@@ -629,7 +563,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
     {
         if (!depth || !scene || !light)
         {
-            logOnce("a sun pass without its depth or constants keeps the game's shadows.");
+            logOnce("Shadows: a sun pass without its depth or constants keeps the game's shadows.");
             return false;
         }
 
@@ -671,8 +605,8 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
     context->PSSetShaderResources(ShadowSlot, 1, gameView.GetAddressOf());
     context->PSSetShaderResources(RayTracedSlot, 1, gameRayTracedView.GetAddressOf());
     context->PSSetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
-    if (options.soft) logOnce("the sun pass draws with soft shadows.");
-    if (rayTraced) logOnce("the sun pass draws with ray-traced shadows.");
+    if (options.soft) logOnce("Shadows: the sun pass draws with soft shadows.");
+    if (rayTraced) logOnce("Shadows: the sun pass draws with ray-traced shadows.");
 
     return true;
 }
@@ -696,7 +630,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     if (!scene || !light)
     {
         std::lock_guard lock(resourceMutex);
-        logOnce("a light without its constants keeps the game's shadows.");
+        logOnce("Shadows: a light without its constants keeps the game's shadows.");
         return false;
     }
 
@@ -709,7 +643,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         auto* shadowed = shadowedBlend(gameBlend.Get());
         if (!shadowed)
         {
-            logOnce("a light with another blend than (one, one) keeps the game's shadows.");
+            logOnce("Shadows: a light with another blend than (one, one) keeps the game's shadows.");
             return false;
         }
 
@@ -728,13 +662,13 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
 
     if (!depth)
     {
-        logOnce("a light without its depth keeps the game's shadows.");
+        logOnce("Shadows: a light without its depth keeps the game's shadows.");
         return false;
     }
 
     // A light that cannot reach the screen keeps the game's draws.
     const float range = rangeOf(light, falloff);
-    const auto bounds = boundsOf(scene, position, range, sizeOf(depth.Get()));
+    const auto bounds = boundsOf(scene, position, range, depthSize(depth.Get()));
     if (!bounds) return false;
 
     float point[4]{position[0], position[1], position[2], 1};
@@ -953,7 +887,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
     catch (const std::exception& error)
     {
         std::lock_guard lock(resourceMutex);
-        logOnce(std::string("a light pass kept the game's shadows: ") + error.what());
+        logOnce(std::string("Shadows: a light pass kept the game's shadows: ") + error.what());
     }
     catch (...)
     {

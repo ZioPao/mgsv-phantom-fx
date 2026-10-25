@@ -2,6 +2,7 @@
 
 #include "camera.hpp"
 #include "atmosphere.hpp"
+#include "d3d11_helpers.hpp"
 #include "draw_distance.hpp"
 #include "focus.hpp"
 #include "frame_rate.hpp"
@@ -23,7 +24,6 @@
 
 #include <Windows.h>
 #include <d3d11_1.h>
-#include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_helpers.h>
@@ -285,18 +285,6 @@ struct Presented
 std::atomic<bool> failed{};
 std::string failure, lastFallback;
 std::uint64_t presents{}, lastEvaluatedPresent{}, evaluations{}, fallbacks{}, resets{}, cameraCuts{};
-std::map<std::string, bool, std::less<>> loggedOnce;
-
-void logOnce(const std::string& key, std::string_view message)
-{
-    if (loggedOnce.emplace(key, true).second) log(message);
-}
-
-void check(HRESULT result, const char* what)
-{
-    if (FAILED(result)) throw std::runtime_error(std::string(what) + " failed (" + hex(static_cast<std::uint32_t>(result)) + ").");
-}
-
 void updateReplacing()
 {
     replacing = supported && !failed && settings.mode != Mode::Off && !diagnostics.gameFxaa && !leftOut.upscaler;
@@ -385,7 +373,7 @@ void configureEffects()
 // Call with settingsMutex held.
 void configurePhotoMode()
 {
-    photo_mode::configure({.fNumber = settings.fNumber});
+    photo_mode::setFNumber(settings.fNumber);
 }
 
 // Call with settingsMutex held. Whether HDR runs is decided at start.
@@ -409,7 +397,7 @@ void configureDrawDistance()
 bool fallback(std::string reason)
 {
     ++fallbacks;
-    logOnce("fallback:" + reason, "Not upscaled this frame: " + reason + ".");
+    logOnce("Not upscaled this frame: " + reason + ".");
     lastFallback = std::move(reason);
     return false;
 }
@@ -467,23 +455,6 @@ Pass passOf(IUnknown* shader)
             if (copy.load(std::memory_order_relaxed) == shader) return static_cast<Pass>(pass);
 
     return Pass::None;
-}
-
-ComPtr<ID3D11Resource> resourceOf(ID3D11View* view)
-{
-    ComPtr<ID3D11Resource> resource;
-    if (view) view->GetResource(resource.GetAddressOf());
-
-    return resource;
-}
-
-D3D11_TEXTURE2D_DESC textureDesc(ID3D11View* view)
-{
-    D3D11_TEXTURE2D_DESC desc{};
-    ComPtr<ID3D11Texture2D> texture;
-    if (SUCCEEDED(resourceOf(view).As(&texture))) texture->GetDesc(&desc);
-
-    return desc;
 }
 
 // ---- Recording ----
@@ -592,19 +563,6 @@ void drawHudless(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
 
 // ---- Resources ----
 
-ComPtr<ID3DBlob> compile(const char* source, const char* name, const char* profile)
-{
-    ComPtr<ID3DBlob> code, errors;
-    const auto result = D3DCompile(source, std::strlen(source), name, nullptr, nullptr, "main", profile, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-        code.GetAddressOf(), errors.GetAddressOf());
-    if (FAILED(result))
-        throw std::runtime_error(std::string("Shader ") + name + " did not compile: "
-            + (errors ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize())
-                      : hex(static_cast<std::uint32_t>(result))));
-
-    return code;
-}
-
 ComPtr<ID3D11Buffer> constantBuffer(UINT size)
 {
     D3D11_BUFFER_DESC desc{};
@@ -620,12 +578,8 @@ void ensurePipeline()
 {
     if (ownState) return;
 
-    auto code = compile(shaders::Inputs, "dlss-inputs", "cs_5_0");
-    check(device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, inputShader.GetAddressOf()),
-        "Creating the DLSS input shader");
-    code = compile(shaders::Composite, "dlss-composite", "ps_5_0");
-    check(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, compositeShader.GetAddressOf()),
-        "Creating the DLSS composite shader");
+    inputShader = computeShader(device.Get(), shaders::Inputs, "dlss-inputs");
+    compositeShader = pixelShader(device.Get(), shaders::Composite, "dlss-composite");
     inputConstants = constantBuffer(sizeof(InputConstants));
     compositeConstants = constantBuffer(sizeof(CompositeConstants));
 
@@ -645,22 +599,8 @@ void ensureTarget(Target& target, UINT width, UINT height, DXGI_FORMAT format, c
     if (target.texture && target.width == width && target.height == height && target.shared == shared) return;
 
     target = {};
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = width;
-    desc.Height = height;
-    desc.MipLevels = 1;
-    desc.ArraySize = 1;
-    desc.Format = format;
-    desc.SampleDesc.Count = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-    if (shared) desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-    check(device->CreateTexture2D(&desc, nullptr, target.texture.GetAddressOf()), name);
-    check(device->CreateShaderResourceView(target.texture.Get(), nullptr, target.view.GetAddressOf()), name);
-    check(device->CreateUnorderedAccessView(target.texture.Get(), nullptr, target.access.GetAddressOf()), name);
-    target.width = width;
-    target.height = height;
-    target.shared = shared;
+    auto made = makeComputeTexture(device.Get(), width, height, format, name, shared ? SharedWithD3D12 : 0);
+    target = {std::move(made.texture), std::move(made.view), std::move(made.access), width, height, shared};
 }
 
 // Frame generation's hudless texture for the output size, made at a present before the frames that
@@ -1002,12 +942,10 @@ std::shared_ptr<const StretchShaders> ensureStretch()
     if (stretchShaders || !device) return stretchShaders;
 
     auto made = std::make_shared<StretchShaders>();
-    auto code = compile(shaders::StretchVertex, "stretch-vertex", "vs_5_0");
+    const auto code = compile(shaders::StretchVertex, "stretch-vertex", "vs_5_0");
     check(device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, made->vertex.GetAddressOf()),
         "Creating the stretch vertex shader");
-    code = compile(shaders::Stretch, "stretch", "ps_5_0");
-    check(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, made->pixel.GetAddressOf()),
-        "Creating the stretch shader");
+    made->pixel = pixelShader(device.Get(), shaders::Stretch, "stretch");
     D3D11_SAMPLER_DESC sampler{};
     sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -1127,7 +1065,7 @@ void runInputs(const Frame& current, const camera::Matrix& previousFromCurrent, 
     immediate->CSSetConstantBuffers(0, 1, inputConstants.GetAddressOf());
     immediate->CSSetShaderResources(0, static_cast<UINT>(std::size(inputs)), inputs);
     immediate->CSSetUnorderedAccessViews(0, static_cast<UINT>(std::size(outputs)), outputs, nullptr);
-    immediate->Dispatch((colorTarget.width + 7) / 8, (colorTarget.height + 7) / 8, 1);
+    immediate->Dispatch(groups(colorTarget.width), groups(colorTarget.height), 1);
     immediate->ClearState();
 }
 
@@ -1400,7 +1338,7 @@ void fillUiTarget()
     const auto output = ui_redirect::output();
     if (!output.target || !output.scene)
     {
-        logOnce("ui-target", "The UI target is not ready; a frame shows only the UI.");
+        logOnce("The UI target is not ready; a frame shows only the UI.");
         return;
     }
 

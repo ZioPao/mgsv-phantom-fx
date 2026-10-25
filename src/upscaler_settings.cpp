@@ -41,6 +41,24 @@ template<class T> bool number(std::string_view text, T& result)
 
     return true;
 }
+
+// Each leaves the setting as it is when the text is not valid.
+void readFlag(std::string_view value, bool& result)
+{
+    if (value == "0" || value == "1") result = value == "1";
+}
+
+void readFloat(std::string_view value, float& result, float low, float high)
+{
+    float parsed{};
+    if (number(value, parsed) && std::isfinite(parsed)) result = std::clamp(parsed, low, high);
+}
+
+template<class T, std::size_t N> void readKey(std::string_view value, const std::string_view (&keys)[N], T& result)
+{
+    const auto found = std::find(std::begin(keys), std::end(keys), value);
+    if (found != std::end(keys)) result = static_cast<T>(found - std::begin(keys));
+}
 }
 
 std::string_view label(Upscaler upscaler)
@@ -223,172 +241,57 @@ Settings loadSettings(const std::filesystem::path& path)
 
         const auto key = trim(std::string_view(line).substr(0, separator));
         const auto value = trim(std::string_view(line).substr(separator + 1));
-        if (key == "upscaler")
-        {
-            const auto found = std::find(std::begin(UpscalerKeys), std::end(UpscalerKeys), value);
-            if (found != std::end(UpscalerKeys)) settings.upscaler = static_cast<Upscaler>(found - std::begin(UpscalerKeys));
-        }
-        else if (key == "mode")
-        {
-            const auto found = std::find(std::begin(ModeKeys), std::end(ModeKeys), value);
-            if (found != std::end(ModeKeys)) settings.mode = static_cast<Mode>(found - std::begin(ModeKeys));
-        }
+        if (key == "upscaler") readKey(value, UpscalerKeys, settings.upscaler);
+        else if (key == "mode") readKey(value, ModeKeys, settings.mode);
         else if (key == "preset")
         {
             int preset{};
             if (number(value, preset) && validPreset(preset)) settings.preset = static_cast<Preset>(preset);
         }
-        else if (key == "sharpness")
-        {
-            float sharpness{};
-            if (number(value, sharpness) && std::isfinite(sharpness)) settings.sharpness = std::clamp(sharpness, 0.0f, Settings::MaxSharpness);
-        }
-        else if (key == "custom_scale")
-        {
-            float scale{};
-            if (number(value, scale) && std::isfinite(scale)) settings.customScale = std::clamp(scale, Settings::MinScale, Settings::MaxScale);
-        }
-        else if (key == "mip_bias_offset")
-        {
-            float offset{};
-            if (number(value, offset) && std::isfinite(offset))
-                settings.mipBiasOffset = std::clamp(offset, Settings::MinMipBias, Settings::MaxMipBias);
-        }
-        else if (key == "unlock_fps")
-        {
-            if (value == "0" || value == "1") settings.unlockFps = value == "1";
-        }
-        else if (key == "soft_shadows")
-        {
-            if (value == "0" || value == "1") settings.softShadows = value == "1";
-        }
-        else if (key == "sun_size")
-        {
-            float size{};
-            if (number(value, size) && std::isfinite(size)) settings.sunSize = std::clamp(size, Settings::MinSunSize, Settings::MaxSunSize);
-        }
-        else if (key == "sun_screen_space_shadows")
-        {
-            if (value == "0" || value == "1") settings.sunScreenSpaceShadows = value == "1";
-        }
-        else if (key == "light_screen_space_shadows")
-        {
-            if (value == "0" || value == "1") settings.lightScreenSpaceShadows = value == "1";
-        }
-        else if (key == "ray_traced_shadows")
-        {
-            if (value == "0" || value == "1") settings.rayTracedShadows = value == "1";
-        }
-        else if (key == "vanilla_shadows_with_ray_tracing")
-        {
-            if (value == "0" || value == "1") settings.vanillaShadowsWithRayTracing = value == "1";
-        }
-        else if (key == "ray_traced_lights")
-        {
-            if (value == "0" || value == "1") settings.rayTracedLights = value == "1";
-        }
+        else if (key == "sharpness") readFloat(value, settings.sharpness, 0.0f, Settings::MaxSharpness);
+        else if (key == "custom_scale") readFloat(value, settings.customScale, Settings::MinScale, Settings::MaxScale);
+        else if (key == "mip_bias_offset") readFloat(value, settings.mipBiasOffset, Settings::MinMipBias, Settings::MaxMipBias);
+        else if (key == "unlock_fps") readFlag(value, settings.unlockFps);
+        else if (key == "soft_shadows") readFlag(value, settings.softShadows);
+        else if (key == "sun_size") readFloat(value, settings.sunSize, Settings::MinSunSize, Settings::MaxSunSize);
+        else if (key == "sun_screen_space_shadows") readFlag(value, settings.sunScreenSpaceShadows);
+        else if (key == "light_screen_space_shadows") readFlag(value, settings.lightScreenSpaceShadows);
+        else if (key == "ray_traced_shadows") readFlag(value, settings.rayTracedShadows);
+        else if (key == "vanilla_shadows_with_ray_tracing") readFlag(value, settings.vanillaShadowsWithRayTracing);
+        else if (key == "ray_traced_lights") readFlag(value, settings.rayTracedLights);
         else if (key == "ray_quality")
         {
             int rays{};
             if (number(value, rays) && validRayQuality(rays)) settings.rayQuality = rays;
         }
-        else if (key == "flashlight_brightness")
-        {
-            float brightness{};
-            if (number(value, brightness) && std::isfinite(brightness))
-                settings.flashlightBrightness = std::clamp(brightness, Settings::MinFlashlightBrightness, Settings::MaxFlashlightBrightness);
-        }
-        else if (key == "frame_generation")
-        {
-            const auto found = std::find(std::begin(FrameGenerationKeys), std::end(FrameGenerationKeys), value);
-            if (found != std::end(FrameGenerationKeys)) settings.frameGeneration = static_cast<FrameGeneration>(found - std::begin(FrameGenerationKeys));
-        }
-        else if (key == "ambient_occlusion")
-        {
-            if (value == "0" || value == "1") settings.ambientOcclusion = value == "1";
-        }
-        else if (key == "occlusion_radius")
-        {
-            float radius{};
-            if (number(value, radius) && std::isfinite(radius))
-                settings.occlusionRadius = std::clamp(radius, Settings::MinOcclusionRadius, Settings::MaxOcclusionRadius);
-        }
-        else if (key == "occlusion_strength")
-        {
-            float strength{};
-            if (number(value, strength) && std::isfinite(strength)) settings.occlusionStrength = std::clamp(strength, 0.0f, Settings::MaxOcclusionStrength);
-        }
-        else if (key == "volumetric_fog")
-        {
-            if (value == "0" || value == "1") settings.volumetricFog = value == "1";
-        }
-        else if (key == "atmosphere_look")
-        {
-            const auto found = std::find(std::begin(AtmosphereLookKeys), std::end(AtmosphereLookKeys), value);
-            if (found != std::end(AtmosphereLookKeys)) settings.atmosphereLook = static_cast<AtmosphereLook>(found - std::begin(AtmosphereLookKeys));
-        }
-        else if (key == "atmosphere_haze")
-        {
-            float haze{};
-            if (number(value, haze) && std::isfinite(haze)) settings.atmosphereHaze = std::clamp(haze, 0.0f, 1.0f);
-        }
-        else if (key == "draw_distance")
-        {
-            const auto found = std::find(std::begin(DrawDistanceKeys), std::end(DrawDistanceKeys), value);
-            if (found != std::end(DrawDistanceKeys)) settings.drawDistance = static_cast<DrawDistance>(found - std::begin(DrawDistanceKeys));
-        }
-        else if (key == "indirect_light")
-        {
-            if (value == "0" || value == "1") settings.indirectLight = value == "1";
-        }
-        else if (key == "indirect_light_radius")
-        {
-            float radius{};
-            if (number(value, radius) && std::isfinite(radius))
-                settings.indirectLightRadius = std::clamp(radius, Settings::MinIndirectLightRadius, Settings::MaxIndirectLightRadius);
-        }
-        else if (key == "indirect_light_strength")
-        {
-            float strength{};
-            if (number(value, strength) && std::isfinite(strength))
-                settings.indirectLightStrength = std::clamp(strength, 0.0f, Settings::MaxIndirectLightStrength);
-        }
-        else if (key == "global_illumination")
-        {
-            if (value == "0" || value == "1") settings.globalIllumination = value == "1";
-        }
-        else if (key == "global_illumination_strength")
-        {
-            float strength{};
-            if (number(value, strength) && std::isfinite(strength))
-                settings.globalIlluminationStrength = std::clamp(strength, 0.0f, Settings::MaxGlobalIlluminationStrength);
-        }
+        else if (key == "flashlight_brightness") readFloat(value, settings.flashlightBrightness, Settings::MinFlashlightBrightness, Settings::MaxFlashlightBrightness);
+        else if (key == "frame_generation") readKey(value, FrameGenerationKeys, settings.frameGeneration);
+        else if (key == "ambient_occlusion") readFlag(value, settings.ambientOcclusion);
+        else if (key == "occlusion_radius") readFloat(value, settings.occlusionRadius, Settings::MinOcclusionRadius, Settings::MaxOcclusionRadius);
+        else if (key == "occlusion_strength") readFloat(value, settings.occlusionStrength, 0.0f, Settings::MaxOcclusionStrength);
+        else if (key == "volumetric_fog") readFlag(value, settings.volumetricFog);
+        else if (key == "atmosphere_look") readKey(value, AtmosphereLookKeys, settings.atmosphereLook);
+        else if (key == "atmosphere_haze") readFloat(value, settings.atmosphereHaze, 0.0f, 1.0f);
+        else if (key == "draw_distance") readKey(value, DrawDistanceKeys, settings.drawDistance);
+        else if (key == "indirect_light") readFlag(value, settings.indirectLight);
+        else if (key == "indirect_light_radius") readFloat(value, settings.indirectLightRadius, Settings::MinIndirectLightRadius, Settings::MaxIndirectLightRadius);
+        else if (key == "indirect_light_strength") readFloat(value, settings.indirectLightStrength, 0.0f, Settings::MaxIndirectLightStrength);
+        else if (key == "global_illumination") readFlag(value, settings.globalIllumination);
+        else if (key == "global_illumination_strength") readFloat(value, settings.globalIlluminationStrength, 0.0f, Settings::MaxGlobalIlluminationStrength);
         else if (key == "global_illumination_rays")
         {
             int rays{};
             if (number(value, rays) && validGlobalIlluminationRays(rays)) settings.globalIlluminationRays = rays;
         }
-        else if (key == "f_number")
-        {
-            float fNumber{};
-            if (number(value, fNumber) && std::isfinite(fNumber)) settings.fNumber = std::clamp(fNumber, Settings::MinFNumber, Settings::MaxFNumber);
-        }
-        else if (key == "hdr")
-        {
-            if (value == "0" || value == "1") settings.hdr = value == "1";
-        }
+        else if (key == "f_number") readFloat(value, settings.fNumber, Settings::MinFNumber, Settings::MaxFNumber);
+        else if (key == "hdr") readFlag(value, settings.hdr);
         else if (key == "hdr_peak_nits")
         {
             float nits{};
             if (number(value, nits) && std::isfinite(nits))
                 settings.peakNits = nits == 0 ? 0 : std::clamp(nits, Settings::MinPeakNits, Settings::MaxPeakNits);
         }
-        else if (key == "hdr_paper_white_nits")
-        {
-            float nits{};
-            if (number(value, nits) && std::isfinite(nits))
-                settings.paperWhiteNits = std::clamp(nits, Settings::MinPaperWhiteNits, Settings::MaxPaperWhiteNits);
-        }
+        else if (key == "hdr_paper_white_nits") readFloat(value, settings.paperWhiteNits, Settings::MinPaperWhiteNits, Settings::MaxPaperWhiteNits);
     }
 
     if (input.bad()) throw std::runtime_error("Cannot read the DLSS settings.");
