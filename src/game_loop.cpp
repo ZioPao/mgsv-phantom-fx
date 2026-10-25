@@ -5,6 +5,7 @@
 #include "device_check.hpp"
 #include "draw_distance.hpp"
 #include "frame_generation.hpp"
+#include "game_code.hpp"
 #include "game_lua.hpp"
 #include "travel.hpp"
 #include "weather.hpp"
@@ -65,29 +66,20 @@ void frameEnd(std::uint8_t* loop)
     frame_generation::beginRender(frame);
     originalFrameEnd(loop);
 }
-
-template<class Function> MH_STATUS hookAt(std::uint8_t* target, void* detour, Function& original)
-{
-    auto status = MH_CreateHook(target, detour, reinterpret_cast<void**>(&original));
-    if (status == MH_OK) status = MH_EnableHook(target);
-    if (status != MH_OK) MH_RemoveHook(target);
-
-    return status;
-}
 }
 
 std::string hook() noexcept
 {
     if (!supportedBuild()) return "Unknown game build; the game loop is not hooked.";
 
-    auto* base = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
+    auto* base = game_code::image();
     if (std::memcmp(base + FrameStartRva, FrameStartCode, sizeof(FrameStartCode)) || std::memcmp(base + FrameEndRva, FrameEndCode, sizeof(FrameEndCode)))
         return "The game loop has unexpected code; Reflex marks frames at the present and the weather and character menus are unavailable.";
 
-    auto status = hookAt(base + FrameStartRva, reinterpret_cast<void*>(&frameStart), originalFrameStart);
+    auto status = game_code::hookAt(base + FrameStartRva, &frameStart, originalFrameStart);
     if (status == MH_OK)
     {
-        status = hookAt(base + FrameEndRva, reinterpret_cast<void*>(&frameEnd), originalFrameEnd);
+        status = game_code::hookAt(base + FrameEndRva, &frameEnd, originalFrameEnd);
         if (status != MH_OK) MH_RemoveHook(base + FrameStartRva);
     }
 

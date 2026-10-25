@@ -1,6 +1,7 @@
 #include "sun_movement.hpp"
 
 #include "device_check.hpp"
+#include "game_code.hpp"
 
 #include <Windows.h>
 #include <cstdint>
@@ -27,17 +28,9 @@ std::string makeSmooth() noexcept
 {
     if (!supportedBuild()) return "Unknown game build; the sun moves in the game's steps.";
 
-    auto* const test = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr)) + StepTestRva;
+    auto* const test = game_code::image() + StepTestRva;
     if (std::memcmp(test, StepTestCode, sizeof(StepTestCode))) return "The sun's update has unexpected code; the sun moves in the game's steps.";
-
-    auto* const jump = test + JumpOffset;
-    DWORD protection{};
-    if (!VirtualProtect(jump, sizeof(NeverStepped), PAGE_EXECUTE_READWRITE, &protection))
-        return "Could not unprotect the sun's update; the sun moves in the game's steps.";
-
-    std::memcpy(jump, NeverStepped, sizeof(NeverStepped));
-    VirtualProtect(jump, sizeof(NeverStepped), protection, &protection);
-    FlushInstructionCache(GetCurrentProcess(), jump, sizeof(NeverStepped));
+    if (!game_code::patch(test + JumpOffset, NeverStepped)) return "Could not unprotect the sun's update; the sun moves in the game's steps.";
 
     return "The sun and moon move smoothly, not in the game's steps.";
 }

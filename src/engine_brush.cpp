@@ -1,6 +1,7 @@
 // The game's object brush; engine_brush.hpp describes it.
 #include "engine_brush.hpp"
 
+#include "game_code.hpp"
 #include "game_memory.hpp"
 
 #include <MinHook.h>
@@ -238,12 +239,9 @@ std::string hook(std::uintptr_t base) noexcept
 
     for (std::size_t i = 0; i < std::size(Functions); ++i)
     {
-        auto* target = reinterpret_cast<void*>(base + Functions[i]);
-        auto status = MH_CreateHook(target, reinterpret_cast<void*>(Detours[i]), reinterpret_cast<void**>(&originals[i]));
-        if (status == MH_OK) status = MH_EnableHook(target);
-        if (status != MH_OK)
+        if (const auto status = game_code::hookAt(reinterpret_cast<void*>(base + Functions[i]), Detours[i], originals[i]); status != MH_OK)
         {
-            for (std::size_t j = 0; j <= i; ++j) MH_RemoveHook(reinterpret_cast<void*>(base + Functions[j]));
+            for (std::size_t j = 0; j < i; ++j) MH_RemoveHook(reinterpret_cast<void*>(base + Functions[j]));
             return std::string(" Hooking the object brush failed (") + MH_StatusToString(status) + "): its vegetation is left out of the ray-traced scene.";
         }
     }

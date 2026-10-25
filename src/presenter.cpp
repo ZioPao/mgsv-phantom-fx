@@ -2,6 +2,7 @@
 #include "presenter.hpp"
 
 #include "fsr_frame_generation.hpp"
+#include "game_code.hpp"
 #include "log.hpp"
 
 #include <Windows.h>
@@ -780,9 +781,8 @@ void install(const std::filesystem::path& directory, Route route) noexcept
         if (!factory) throw std::runtime_error("The DXGI factory lacks IDXGIFactory.");
 
         auto* target = originalEntry(&(*reinterpret_cast<void***>(factory.Get()))[CreateSwapChainSlot]);
-        auto status = MH_CreateHook(target, reinterpret_cast<void*>(&createSwapChain), reinterpret_cast<void**>(&originalCreate));
-        if (status == MH_OK) status = MH_EnableHook(target);
-        if (status != MH_OK) throw std::runtime_error(std::string("Hooking DXGI's CreateSwapChain failed: ") + MH_StatusToString(status) + ".");
+        if (const auto status = game_code::hookAt(target, &createSwapChain, originalCreate); status != MH_OK)
+            throw std::runtime_error(std::string("Hooking DXGI's CreateSwapChain failed: ") + MH_StatusToString(status) + ".");
 
         setStatus("Waiting for the game's swap chain.");
     }
