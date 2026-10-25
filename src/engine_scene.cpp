@@ -103,13 +103,15 @@ constexpr std::uint64_t ParseBytesPerTake = 8ull << 20;
 // read, every decal is taken as a cut-out caster (the user's call, 2026-10-23: see what breaks). Alpha
 // bit 5 (32): cut out, the shadow pass testing its alpha (m_param.w 1, measured per draw), as it does
 // a shadow-only decal's; alpha 16 (glass) is drawn into the shadow maps without the test (m_param.w 0):
-// solid. Shadow bit 1: drawn into the shadow maps only, a stand-in for what the main view shows.
+// solid. Glass the game draws in the main view only stays out, for any model: taken, a helicopter's
+// windows (alpha 16, shadow 5) kept the sun out of its cabin (the shadow probe, 2026-10-25).
+// Shadow bit 1: drawn into the shadow maps only, a stand-in for what the main view shows.
 // A character (a skinned model) is taken as the main view shows it instead: its stand-ins left out
 // (2026-10-24: one of 40 triangles on a woman's outfit lay on her skin and blocked her chest's sun
 // rays at once), its meshes the shadow maps leave out taken (her hair: the rays saw her bald, low-poly
 // head's outline across it), see-through ones (alpha bit 6) cut out by their alpha.
 constexpr std::uint8_t CastsNoShadow = 0x01, ShadowMapsOnly = 0x02;
-constexpr std::uint8_t CutOutAlpha = 0x20, TranslucentAlpha = 0x40, DecalAlpha = 0x80;
+constexpr std::uint8_t GlassAlpha = 0x10, CutOutAlpha = 0x20, TranslucentAlpha = 0x40, DecalAlpha = 0x80;
 // The StrCode64s of a material's texture parameters "Base_Tex_SRGB" (the colour, and a cut-out mesh's
 // alpha) and "Mask_Tex_LIN" (a shadow-only mesh's mask, its only texture, often the visible mesh's
 // colour: the shadow pass cuts by its alpha, as ModelForward_Shadow's pixel shader samples t0.w):
@@ -414,7 +416,9 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
         const bool character = model->bones != 0;
         const bool mainViewOnly = (shadow & CastsNoShadow) && !vegetation;
         const bool mainViewTaken = mainViewMeshes.load() && !(alpha & (CutOutAlpha | DecalAlpha));
-        const bool leftOut = character ? (shadow & ShadowMapsOnly) != 0 : (mainViewOnly && !mainViewTaken) || (alpha & TranslucentAlpha);
+        const bool mainViewGlass = mainViewOnly && (alpha & GlassAlpha);
+        const bool leftOut = mainViewGlass
+            || (character ? (shadow & ShadowMapsOnly) != 0 : (mainViewOnly && !mainViewTaken) || (alpha & TranslucentAlpha));
         if (leftOut)
         {
             ++shadowlessMeshes;

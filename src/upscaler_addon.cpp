@@ -37,6 +37,7 @@
 #include "presenter.hpp"
 #include "render_scale.hpp"
 #include "shadows.hpp"
+#include "sun_movement.hpp"
 #include "upscaler.hpp"
 #include "weather.hpp"
 
@@ -547,6 +548,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     log(draw_distance::hook());
     log(engine_scene::hook());
     log(character::allowFobCharacters());
+    log(sun_movement::makeSmooth());
     if (supportedBuild() && !weather::supported()) log("The weather manager has unexpected code; the weather menu is unavailable.");
 
     frame_log::install(directory);

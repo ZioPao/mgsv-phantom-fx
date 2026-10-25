@@ -109,6 +109,7 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/game_loop.cpp`, `src/game_loop.hpp` | Hooks on the main loop's frame start and end, for Reflex, the weather menu and the draw distance |
 | `src/draw_distance.cpp`, `src/draw_distance.hpp` | Draw distance: wider streaming windows at a location's load, the level of detail and the models' and vegetation's cull lengths (see "Draw distance") |
 | `src/weather.cpp`, `src/weather.hpp` | The overlay's weather and time control, in Utility (see "Weather and time") |
+| `src/sun_movement.cpp`, `src/sun_movement.hpp` | The sun and moon move every frame instead of in the game's steps (see "Sun movement") |
 | `src/dev_tools.hpp` | Whether the build has the Developer page (the dev preset) |
 | `src/game_lua.cpp`, `src/game_lua.hpp` | Lua in the game's script state, and the Developer page's console (see "Game Lua") |
 | `src/travel.cpp`, `src/travel.hpp` | The Developer page's travel: free roam in another map (see "Travel") |
@@ -718,6 +719,29 @@ The normal decode adds `1e-7` inside its `rsqrt`, which the disassembly prints a
 `fxc /dumpbin /Lx` shows every literal in hex. It keeps a normal that faces the camera exactly from
 dividing by zero.
 
+### Sun movement
+
+The game moves its sun and moon light in steps, so shadows tick forward about once a second. Found
+2026-10-25 at Mother Base from the outside (`ReadProcessMemory`, Frida hardware watchpoints; scripts in
+`%TEMP%\mgsv-sunstep`). `src/sun_movement.cpp` patches the step out at start-up.
+
+- **The light's update** (`0x79D330`, every frame) takes the sky's sun or moon direction (`+0x60`,
+  `+0x70` of the light's settings; `+0xC8` 1 for the sun, 2 for the moon) and clamps it to its limit
+  angle (`+0x88` sun, `+0x8C` moon). With the stepped flag (`+0xCC` bit 3) it keeps the light at the
+  last step (`+0xF0`, the one before at `+0xE0`) until the sky's direction is `(90 - limit) / steps`
+  degrees away (steps at `+0xD0`), then blends from the old step to the new over `+0xBC` seconds with
+  a Hermite ease, marking the light as moving only while it blends. Without the flag it takes the sky's
+  direction every frame.
+- **Where the values come from.** `TppAtmosphere` has properties for this
+  (`divisonNumOfDirLightSteppedMove`, `interpolateTimeInSecondOfDirLightSteppedMove` and the
+  `localFlags` bit 11), but every frame `0x6B96E0` overwrites them from the weather's parameters
+  (`0x550410`): `0x23A` above 0 turns steps on, `0x238` is the blend time, `0x239` the step count.
+  Seen at Mother Base: 1000 steps, limit 29 degrees, blend 0: a jump of 0.061 degrees every 1.2 s
+  (the clock runs 20 times real time).
+- **Patch.** The flag's test at `0x79D51D` ends in `je` to the unstepped path; the add-on turns it
+  into `nop; jmp` to the same place. The light then counts as moving every frame, as it already did
+  between steps in the weather seen (`+0x54` bit `0x800` of the light was clear there too).
+
 ### Ambient occlusion
 
 How the game's SSAO works, from frame records at 3840x2160 with SSAO Off, Low and Extra High, and
@@ -807,6 +831,8 @@ the shaders' disassembly.
 | `0x2B73434` | The level of detail's reference resolution, set by `GrTools.SetLodFactorResolution` (`0x1BB2D0`); 0 uses each view's width |
 | `0x2B74330`, `0x2B77FB0` | The models' and the vegetation's `RejectionLengthBias` settings; `+0x64` the value the draw jobs read |
 | `0x205AF0` | Selects those two settings' value by a graphics quality's name, hooked for the draw distance |
+| `0x79D330` | Sun and moon light update (see "Sun movement"); its stepped test at `0x79D51D`, patched |
+| `0x6B96E0` | Sets the light's settings from the weather's parameters every frame (`0x550410` reads one) |
 
 ### Scene objects
 
@@ -939,7 +965,9 @@ level at Camp Omega's cliffs. No names in the exe: the class names here are desc
   scene", "Characters"). Which of them the shadow pass
   alpha-tests was measured per draw (its `cPSSystem` `m_param.w`, 1 testing, 0 not): alpha 32 (bit 5)
   and the shadow-only decal (alpha 128, shadow 66) test; alpha 16 (glass, shadow 4) does not and casts a
-  solid shadow. The scene takes alpha bits 5 and 7 as cut out, the rest as opaque.
+  solid shadow. The scene takes alpha bits 5 and 7 as cut out, the rest as opaque. Glass with shadow
+  bit 0 (a helicopter's windows, alpha 16 with shadow 5) the game never casts, and the scene leaves it
+  out for every model (2026-10-25): taken, it kept the sun out of the helicopter's cabin.
 
 ## What the add-on changes
 
@@ -1602,12 +1630,15 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   A character's meshes are taken as the main view shows them, not as its shadow maps do (2026-10-24):
   its meshes with shadow bit 1 (drawn into the shadow maps only: stand-ins) are left out, those with
   shadow bit 0 (main view only) and see-through ones (alpha bit 6) taken, the see-through ones cut out
-  by their alpha. Before, the shadow probe on a woman in the sun found her hair missing (every mesh of
+  by their alpha; its main-view glass (alpha bit 4 with shadow bit 0) stays out. The helicopter's
+  windows (model `84a12883d81ea5e3`, meshes 12, 13, 17, 21, 22 and 25) were taken until 2026-10-25 and
+  shaded its cabin: the shadow probe found the cabin's sunward surfaces blocked by mesh 13 0.2 to 1.8 m
+  away, and the camera's ray meeting it at the window, 2.7 m before the game's surface. Before, the shadow probe on a woman in the sun found her hair missing (every mesh of
   its model left out: the rays saw her bald, 1,270-triangle head, and its outline crossed her hair as a
   jagged shadow) and a 40-triangle stand-in of her outfit lying on her skin, blocking her neck's and
   chest's sun rays within a centimetre. Rigid models keep the shadow maps' meshes (a pylon's lattice is
   a stand-in, its visible mesh is not cast), and since 2026-10-25 also take the opaque meshes the main
-  view alone shows (shadow bit 0, no alpha bits 5 or 7): a building casts its shadows with an outer
+  view alone shows (shadow bit 0, no alpha bits 4, 5 or 7): a building casts its shadows with an outer
   shell, and a room's inner walls, floor and ceiling have shadow bit 0. Without them a shelf's shadow
   hung below it, a lit line between, and a dark line crossed the wall above a door frame: the debug view
   "Shadow ray starts" showed the room's walls farther than the game's by 3 cm or more, its floor and

@@ -1,5 +1,23 @@
 # Phantom FX changelog
 
+## 1.6.0
+
+- **Global illumination** rebuilt: rays from the pixels, each hit lit afresh every frame, with
+  NVIDIA's NRD denoiser (RELAX). Light no longer lingers for a second or leaves blotches as the
+  camera moves, and grass and bushes no longer boil.
+- Add **Ray quality** to global illumination: Low 1, Medium 2 or High 4 rays (Medium by default).
+- Fix wires, fences and grass blades flickering in global illumination with the upscaler's jitter.
+- Ray-traced lights: light stays inside the game's light volumes, so it no longer leaks through
+  walls and floors where no ray was stopped. Spot light beams (moonlight through a vent) stay the
+  game's.
+- Ray-traced lights: softer, cleaner lamp shadow edges.
+- Ray-traced shadows: rooms' inner walls, floors and ceilings are now in the scene. Indoors, a
+  shelf's shadow no longer hangs below it, and no dark line crosses the wall above a door.
+- Ray-traced shadows: a helicopter's windows no longer keep the sun out of its cabin.
+- The sun and moon move smoothly. The game moved them in steps, so shadows ticked forward about once
+  a second.
+- Physical sky: no grey band between the sea and the horizon at Mother Base.
+
 ## 1.5.1
 
 - Ray-traced shadows: fix characters' own shadows. Hair cast none, the bald head under it cast a

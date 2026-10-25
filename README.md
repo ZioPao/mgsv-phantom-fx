@@ -26,7 +26,7 @@ More comparisons: [Previews](docs/PREVIEWS.md)
 - **Unlock frame rate:** lifts the 60 fps cap
 - **Ray-traced shadows** for the sun (needs DXR 1.1)
 - **Ray-traced lights:** shadows for every lamp, spot light and flashlight (needs DXR 1.1)
-- **Ray-traced global illumination** (AMD GI-1.2, needs DXR 1.1)
+- **Ray-traced global illumination** (NVIDIA NRD denoiser, needs DXR 1.1)
 - **Soft shadows** (PCSS)
 - **Contact shadows** (Bend Studio's screen-space shadows)
 - **Ambient occlusion** (GTVBAO)
