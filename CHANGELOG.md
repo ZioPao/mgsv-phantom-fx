@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The menu and the Budget page name each effect the same way: global illumination shows NRD on
+  both, and the upscaler's item shows DLSS or FSR beside its name.
 - Remove **Old paths** from the Diagnostics page: the ray tracing's earlier behaviour, kept to compare
   against, is gone. The ray-traced shadows, lights and global illumination are unchanged.
 

@@ -140,6 +140,8 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/hdr_shaders.hpp` | HLSL: the encode and decode of the float scene, bloom's reduction, the grading, the output to PQ |
 | `src/shader_bytecode.cpp`, `src/shader_bytecode.hpp` | DXBC checksum (bytes 4 to 20 of the container), the instruction walk, the output saturation patch |
 | `src/log.cpp`, `src/log.hpp` | `PhantomFX.log` beside the add-on, one per game session |
+| `src/hresult.hpp` | `check`: a failed Direct3D or Windows call as an exception naming the step |
+| `src/d3d11_helpers.hpp` | Direct3D 11 helpers for the effects: shader compiles, dynamic constant buffers, compute textures, texture sizes |
 | `src/version.rc.in` | Version resource template: name, author and version from `CMakeLists.txt` |
 
 ## Game version

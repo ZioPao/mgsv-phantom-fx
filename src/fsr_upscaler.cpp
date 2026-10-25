@@ -2,6 +2,7 @@
 #include "fsr_upscaler.hpp"
 
 #include "fidelityfx.hpp"
+#include "hresult.hpp"
 #include "log.hpp"
 
 #include <Windows.h>
@@ -27,11 +28,6 @@ using Microsoft::WRL::ComPtr;
 constexpr GUID UnwrappedObject{0x7f2c9a11, 0x3b4e, 0x4d6a, {0x81, 0x2f, 0x5e, 0x9c, 0xd3, 0x7a, 0x1b, 0x42}};
 constexpr std::size_t ListsInFlight = 3;
 constexpr DWORD FenceTimeout = 10'000;
-
-void check(HRESULT result, const char* what)
-{
-    if (FAILED(result)) throw std::runtime_error(what + std::string(" failed (") + hex(static_cast<std::uint32_t>(result)) + ").");
-}
 
 struct HandleCloser
 {
@@ -227,11 +223,6 @@ void start(ID3D11Device* device, const std::filesystem::path& directory)
 
     state = std::move(s);
     log("FSR started on Direct3D 12.");
-}
-
-bool started() noexcept
-{
-    return state != nullptr;
 }
 
 bool evaluate(const Inputs& inputs)

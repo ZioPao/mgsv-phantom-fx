@@ -1,6 +1,7 @@
 #include "atmosphere.hpp"
 
 #include "atmosphere_shaders.hpp"
+#include "d3d11_helpers.hpp"
 #include "device_check.hpp"
 #include "hdr.hpp"
 #include "log.hpp"
@@ -8,13 +9,11 @@
 #include "shader_bytecode.hpp"
 
 #include <Windows.h>
-#include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
-#include <map>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -172,48 +171,6 @@ std::uint32_t fills{};
 bool lastFillShadowed{};
 ComPtr<ID3D11UnorderedAccessView> fogAccess; // Of gameFog
 ID3D11Resource* fogAccessOf{};
-std::map<std::string, bool, std::less<>> loggedOnce;
-
-void logOnce(const std::string& message)
-{
-    if (loggedOnce.emplace(message, true).second) log("Volumetric fog: " + message);
-}
-
-void check(HRESULT result, const char* what)
-{
-    if (FAILED(result)) throw std::runtime_error(std::string(what) + " failed (" + hex(static_cast<std::uint32_t>(result)) + ").");
-}
-
-ComPtr<ID3DBlob> compile(const char* source, const char* name, const char* profile, const D3D_SHADER_MACRO* defines = nullptr)
-{
-    ComPtr<ID3DBlob> code, errors;
-    const auto result = D3DCompile(source, std::strlen(source), name, defines, nullptr, "main", profile, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-        code.GetAddressOf(), errors.GetAddressOf());
-    if (FAILED(result))
-        throw std::runtime_error(std::string("Shader ") + name + " did not compile: "
-            + (errors ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize())
-                      : hex(static_cast<std::uint32_t>(result))));
-
-    return code;
-}
-
-ComPtr<ID3D11ComputeShader> computeShader(const char* source, const char* name)
-{
-    const auto code = compile(source, name, "cs_5_0");
-    ComPtr<ID3D11ComputeShader> shader;
-    check(device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader.GetAddressOf()), name);
-
-    return shader;
-}
-
-ComPtr<ID3D11PixelShader> pixelShader(const char* source, const char* name, const D3D_SHADER_MACRO* defines)
-{
-    const auto code = compile(source, name, "ps_5_0", defines);
-    ComPtr<ID3D11PixelShader> shader;
-    check(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader.GetAddressOf()), name);
-
-    return shader;
-}
 
 ComPtr<ID3D11Buffer> constantCopy(UINT size)
 {
@@ -229,21 +186,8 @@ ComPtr<ID3D11Buffer> constantCopy(UINT size)
 
 Target target2d(UINT width, UINT height, DXGI_FORMAT format, const char* what)
 {
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = width;
-    desc.Height = height;
-    desc.MipLevels = desc.ArraySize = 1;
-    desc.Format = format;
-    desc.SampleDesc.Count = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-    ComPtr<ID3D11Texture2D> texture;
-    Target made;
-    check(device->CreateTexture2D(&desc, nullptr, texture.GetAddressOf()), what);
-    check(device->CreateShaderResourceView(texture.Get(), nullptr, made.view.GetAddressOf()), what);
-    check(device->CreateUnorderedAccessView(texture.Get(), nullptr, made.access.GetAddressOf()), what);
-
-    return made;
+    auto made = makeComputeTexture(device.Get(), width, height, format, what);
+    return {std::move(made.view), std::move(made.access)};
 }
 
 // A froxel volume.
@@ -275,25 +219,20 @@ bool ensurePipeline()
 
     try
     {
-        integrateShader = computeShader(shaders::FogIntegrate, "fog-integrate");
-        visibilityShader = computeShader(shaders::FogVisibility, "fog-visibility");
-        transmittanceShader = computeShader(shaders::AtmosphereTransmittance, "atmosphere-transmittance");
-        multipleScatteringShader = computeShader(shaders::AtmosphereMultipleScattering, "atmosphere-multiple-scattering");
-        parameterShader = computeShader(shaders::SkyParameterPass, "sky-parameters");
-        skyViewShader = computeShader(shaders::SkyView, "sky-view");
-        ambientShader = computeShader(shaders::SkyAmbient, "sky-ambient");
+        integrateShader = computeShader(device.Get(), shaders::FogIntegrate, "fog-integrate");
+        visibilityShader = computeShader(device.Get(), shaders::FogVisibility, "fog-visibility");
+        transmittanceShader = computeShader(device.Get(), shaders::AtmosphereTransmittance, "atmosphere-transmittance");
+        multipleScatteringShader = computeShader(device.Get(), shaders::AtmosphereMultipleScattering, "atmosphere-multiple-scattering");
+        parameterShader = computeShader(device.Get(), shaders::SkyParameterPass, "sky-parameters");
+        skyViewShader = computeShader(device.Get(), shaders::SkyView, "sky-view");
+        ambientShader = computeShader(device.Get(), shaders::SkyAmbient, "sky-ambient");
         // HDR takes TppTonemap out of the scene for the session.
         const char* hdr = hdr::active() ? "1" : "0";
         const D3D_SHADER_MACRO withoutSprite[]{{"MOON", "0"}, {"HDR", hdr}, {}}, withSprite[]{{"MOON", "1"}, {"HDR", hdr}, {}};
-        skyShaders[0] = pixelShader(shaders::SkyDraw, "sky", withoutSprite);
-        skyShaders[1] = pixelShader(shaders::SkyDraw, "sky-sprite", withSprite);
+        skyShaders[0] = pixelShader(device.Get(), shaders::SkyDraw, "sky", withoutSprite);
+        skyShaders[1] = pixelShader(device.Get(), shaders::SkyDraw, "sky-sprite", withSprite);
 
-        D3D11_BUFFER_DESC buffer{};
-        buffer.ByteWidth = sizeof(Constants);
-        buffer.Usage = D3D11_USAGE_DYNAMIC;
-        buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        check(device->CreateBuffer(&buffer, nullptr, constantBuffer.ReleaseAndGetAddressOf()), "Creating the fog constants");
+        constantBuffer = makeConstantBuffer(device.Get(), sizeof(Constants), "Creating the fog constants");
         copies = {constantCopy(SystemSize), constantCopy(SceneSize), constantCopy(MaterialSize), constantCopy(ObjectSize), constantCopy(SceneSize),
             constantCopy(LightSize), constantCopy(SceneSize), constantCopy(MaterialSize), constantCopy(ObjectSize)};
 
@@ -327,7 +266,7 @@ bool ensurePipeline()
         check(device->CreateTexture2D(&readback, nullptr, skyParameterReadback.ReleaseAndGetAddressOf()), "Creating the sky parameters' readback");
 
         // Last, so it marks a complete pipeline.
-        mediaShader = computeShader(shaders::FogMedia, "fog-media");
+        mediaShader = computeShader(device.Get(), shaders::FogMedia, "fog-media");
         log("Volumetric fog ready.");
 
         return true;
@@ -363,14 +302,6 @@ std::optional<Role> roleOf(IUnknown* shader)
     const auto found = roles.find(shader);
 
     return found != roles.end() ? std::optional(found->second) : std::nullopt;
-}
-
-ID3D11Resource* resourceOf(ID3D11View* view)
-{
-    ComPtr<ID3D11Resource> resource;
-    if (view) view->GetResource(resource.GetAddressOf());
-
-    return resource.Get();
 }
 
 // Copies the game's constant buffer `source` into `copy` on `context`, when it has the expected size.
@@ -429,11 +360,6 @@ private:
     ID3D11SamplerState* samplers[Samplers]{};
 };
 
-UINT groups(UINT texels)
-{
-    return (texels + 7) / 8;
-}
-
 // The Halton sequence in `base`, from 0 to 1.
 float halton(std::uint32_t index, std::uint32_t base)
 {
@@ -470,7 +396,7 @@ void noteFogPass(ID3D11DeviceContext* context)
                 && copyConstants(context, copies.scene.Get(), buffers[SceneSlot], SceneSize)
                 && copyConstants(context, copies.material.Get(), buffers[MaterialSlot], MaterialSize)
                 && copyConstants(context, copies.object.Get(), buffers[ObjectSlot], ObjectSize);
-            if (!copied) logOnce("the game's fog pass binds unexpected constants; the game's fog stays.");
+            if (!copied) logOnce("Volumetric fog: the game's fog pass binds unexpected constants; the game's fog stays.");
         }
     }
 
@@ -488,7 +414,7 @@ bool drawFogPass(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
 {
     ComPtr<ID3D11RenderTargetView> target;
     context->OMGetRenderTargets(1, target.GetAddressOf(), nullptr);
-    if (!target || resourceOf(target.Get()) != gameFog.load()) return false;
+    if (!target || resourceOf(target.Get()).Get() != gameFog.load()) return false;
 
     D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
     D3D11_RECT scissors[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
@@ -594,10 +520,7 @@ void fill(ID3D11DeviceContext* context, bool physical)
     const float history = shadowed && lastFillShadowed ? HistoryWeight : 0;
     const Constants constants{{TileWidth, TileHeight}, shadowed ? 1u : 0u, ShadowSamples, {halton(step, 2) - 0.5f, halton(step, 3) - 0.5f},
         halton(step, 5), history, physical ? 1u : 0u, skySun ? 1u : 0u, haze.load(std::memory_order_relaxed), {}};
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    check(context->Map(constantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Writing the fog constants");
-    std::memcpy(mapped.pData, &constants, sizeof(constants));
-    context->Unmap(constantBuffer.Get(), 0);
+    check(write(context, constantBuffer.Get(), constants), "Writing the fog constants");
 
     // The resolve reads the fog texture; it cannot be bound for reading while the fill writes it.
     ComPtr<ID3D11ShaderResourceView> readers;
@@ -646,8 +569,8 @@ void fill(ID3D11DeviceContext* context, bool physical)
     lastFillShadowed = shadowed;
 
     lastFill = GetTickCount64();
-    logOnce(shadowed ? "the first fill, with the sun's shadow map." : "the first fill without a sun pass before it.");
-    if (physical) logOnce("the first physical fill.");
+    logOnce(shadowed ? "Volumetric fog: the first fill, with the sun's shadow map." : "Volumetric fog: the first fill without a sun pass before it.");
+    if (physical) logOnce("Volumetric fog: the first physical fill.");
 }
 
 // Every SkyLogInterval of the physical look: the sky parameters, for the log, read a frame after
@@ -729,7 +652,7 @@ bool drawSky(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, bo
     }
 
     std::lock_guard lock(resourceMutex);
-    logOnce("the physical sky draws in place of the game's.");
+    logOnce("Volumetric fog: the physical sky draws in place of the game's.");
 
     return true;
 }
@@ -922,7 +845,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
     catch (const std::exception& error)
     {
         std::lock_guard lock(resourceMutex);
-        logOnce(std::string("a pass kept the game's fog: ") + error.what());
+        logOnce(std::string("Volumetric fog: a pass kept the game's fog: ") + error.what());
     }
     catch (...)
     {

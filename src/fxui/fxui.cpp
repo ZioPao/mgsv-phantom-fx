@@ -156,6 +156,35 @@ std::string milliseconds(float ms)
     return ms >= 0.005f ? formatted("%.2f", ms) : "-";
 }
 
+// A section's colour; dim for a section without timed lines, or an index outside `sections`.
+ImU32 hueOf(std::span<const Section> sections, int section)
+{
+    const bool known = section >= 0 && section < static_cast<int>(sections.size());
+    return known && sections[static_cast<std::size_t>(section)].hue ? sections[static_cast<std::size_t>(section)].hue : colour::TextDim;
+}
+
+struct FrameRate
+{
+    std::string shown;    // "107 fps", or "- fps" before a frame is timed
+    std::string rendered; // " (54 rendered)" with frame generation, else empty
+};
+
+FrameRate frameRateOf(const Budget& budget)
+{
+    const float rendered = budget.frameMs > 0 ? 1000 / budget.frameMs : 0;
+    if (rendered <= 0) return {"- fps", {}};
+
+    return {formatted("%.0f fps", rendered * static_cast<float>(budget.presented)), budget.presented > 1 ? formatted(" (%.0f rendered)", rendered) : std::string()};
+}
+
+// A colour square centred on a line of text at `textTop`. Returns where the text beside it starts.
+float swatch(float left, float textTop, ImU32 colour)
+{
+    const float size = px(7), top = textTop + std::round((ImGui::GetFontSize() - size) / 2);
+    drawList()->AddRectFilled({left, top}, {left + size, top + size}, tint(colour));
+    return left + size + px(8);
+}
+
 // Whether `text` holds every word of `search`, in any case.
 bool containsWords(std::string_view text, std::string_view search)
 {
@@ -401,7 +430,7 @@ void frameBar(ImVec2 min, ImVec2 max)
         at += ms;
     };
     slice(game, colour::Game, Kind::Game, nullptr);
-    for (const auto& line : budget.lines) slice(line.ms, frame.sections[line.section].hue ? frame.sections[line.section].hue : colour::TextDim, Kind::Line, &line);
+    for (const auto& line : budget.lines) slice(line.ms, hueOf(frame.sections, line.section), Kind::Line, &line);
     slice(idle, colour::LineStrong, Kind::Idle, nullptr);
 
     const Slice* under{};
@@ -477,6 +506,17 @@ void frameBar(ImVec2 min, ImVec2 max)
     }
 }
 
+// A rule across the whole window at `rule`, under a strip drawn from `start`, then the cursor under it.
+void endStrip(ImVec2 start, float rule)
+{
+    auto* list = drawList();
+    list->PushClipRect({frame.windowLeft, start.y}, {frame.windowRight, frame.windowBottom}, false);
+    list->AddRectFilled({frame.windowLeft, rule}, {frame.windowRight, rule + 1}, colour::Line);
+    list->PopClipRect();
+    ImGui::SetCursorScreenPos(start);
+    ImGui::Dummy({1, rule + 1 - start.y});
+}
+
 void drawStrip(const Chrome& chrome)
 {
     const ImVec2 start = ImGui::GetCursorScreenPos();
@@ -500,13 +540,12 @@ void drawStrip(const Chrome& chrome)
     using Readout = std::vector<std::pair<std::string, ImU32>>;
     const Budget& budget = *frame.budget;
     // With frame generation, the frames shown, and the ones rendered beside them.
-    const float rendered = budget.frameMs > 0 ? 1000 / budget.frameMs : 0;
-    const auto fps = rendered > 0 ? formatted("%.0f fps", rendered * static_cast<float>(budget.presented)) : std::string("- fps");
+    const auto fps = frameRateOf(budget);
     Readout full{{std::string(frame.name) + " ", colour::TextDim}, {formatted("%.2f ms", budget.total()), colour::Text}, {" of ", colour::TextDim},
-        {formatted("%.2f ms", budget.gpuMs), colour::Text}, {" GPU \xC2\xB7 ", colour::TextDim}, {fps, colour::Text}};
-    if (budget.presented > 1 && rendered > 0) full.push_back({formatted(" (%.0f rendered)", rendered), colour::TextDim});
+        {formatted("%.2f ms", budget.gpuMs), colour::Text}, {" GPU \xC2\xB7 ", colour::TextDim}, {fps.shown, colour::Text}};
+    if (!fps.rendered.empty()) full.push_back({fps.rendered, colour::TextDim});
     const Readout brief{{formatted("%.2f", budget.total()), colour::Text}, {" / ", colour::TextDim}, {formatted("%.2f ms", budget.gpuMs), colour::Text},
-        {" \xC2\xB7 ", colour::TextDim}, {fps, colour::Text}};
+        {" \xC2\xB7 ", colour::TextDim}, {fps.shown, colour::Text}};
     const auto widthOf = [](const Readout& readout) {
         float width{};
         for (const auto& [text, colour] : readout) width += textWidth(text);
@@ -531,13 +570,7 @@ void drawStrip(const Chrome& chrome)
     const float barTop = readoutTop + px(15 + 11);
     frameBar({left, barTop}, {right, barTop + px(12)});
 
-    const float rule = barTop + px(12 + 6 + 13 + 8);
-    auto* list = drawList();
-    list->PushClipRect({frame.windowLeft, start.y}, {frame.windowRight, frame.windowBottom}, false);
-    list->AddRectFilled({frame.windowLeft, rule}, {frame.windowRight, rule + 1}, colour::Line);
-    list->PopClipRect();
-    ImGui::SetCursorScreenPos(start);
-    ImGui::Dummy({1, rule + 1 - start.y});
+    endStrip(start, barTop + px(12 + 6 + 13 + 8));
 }
 
 void searchBox(float width)
@@ -666,13 +699,7 @@ void drawPicker()
     ImGui::SetCursorScreenPos({left + comboWidth + px(6), top});
     searchBox(right - left - comboWidth - px(6));
 
-    const float rule = top + ImGui::GetFrameHeight() + px(8);
-    auto* list = drawList();
-    list->PushClipRect({frame.windowLeft, start.y}, {frame.windowRight, frame.windowBottom}, false);
-    list->AddRectFilled({frame.windowLeft, rule}, {frame.windowRight, rule + 1}, colour::Line);
-    list->PopClipRect();
-    ImGui::SetCursorScreenPos(start);
-    ImGui::Dummy({1, rule + 1 - start.y});
+    endStrip(start, top + ImGui::GetFrameHeight() + px(8));
 }
 
 void drawRail(std::span<const Key> keys)
@@ -774,10 +801,12 @@ void searchHeading()
     gap(8);
 }
 
-bool matches(const ItemSpec& spec)
+bool matches(const ItemSpec& spec, std::string_view name, std::string_view tech)
 {
     std::string text;
-    for (const char* part : {spec.name, spec.tech, spec.tag, spec.summary, spec.keywords, frame.sections[static_cast<std::size_t>(frame.page)].name})
+    for (const std::string_view part : {name, tech})
+        (text += part) += ' ';
+    for (const char* part : {spec.tag, spec.summary, spec.keywords, frame.sections[static_cast<std::size_t>(frame.page)].name})
         if (part) (text += part) += ' ';
 
     return containsWords(text, nav.search);
@@ -950,7 +979,12 @@ Page::~Page()
 Item::Item(const ItemSpec& spec) : id(spec.id)
 {
     if (frame.page < 0 || frame.inItem || !spec.id) return;
-    if (frame.searching && !matches(spec)) return;
+
+    const Line* line = frame.budget->find(spec.id);
+    // A timed item takes the name and technical name its spec leaves out from its budget line.
+    const std::string_view name = spec.name ? spec.name : line ? line->name : std::string_view{};
+    const std::string_view tech = spec.tech ? spec.tech : line ? line->tech : std::string_view{};
+    if (frame.searching && !matches(spec, name, tech)) return;
 
     if (frame.headingPending) searchHeading();
     drawn = true;
@@ -958,11 +992,10 @@ Item::Item(const ItemSpec& spec) : id(spec.id)
     frame.matched = true;
     ImGui::PushID(spec.id);
 
-    const Line* line = frame.budget->find(spec.id);
     bool* toggle = line ? line->toggle : spec.toggle;
     const std::optional<State> state = line ? std::optional(line->state) : spec.state;
     const std::string_view message = line ? std::string_view(line->message) : spec.message;
-    const ImU32 hue = frame.sections[static_cast<std::size_t>(frame.page)].hue ? frame.sections[static_cast<std::size_t>(frame.page)].hue : colour::TextDim;
+    const ImU32 hue = hueOf(frame.sections, frame.page);
     const bool replaced = state == State::Replaced;
     held = state == State::Held;
     hot = line && line->ms > 0;
@@ -1003,17 +1036,17 @@ Item::Item(const ItemSpec& spec) : id(spec.id)
     ImGui::PushClipRect({left, row - px(2)}, {nameRight, row + rowHeight + px(4)}, true);
     ImGui::SetCursorScreenPos({left + px(Gutter), textTop});
     const bool idle = state == State::Off || held || replaced;
-    textLine(spec.name, idle ? colour::TextDim : colour::Text);
+    textLine(name, idle ? colour::TextDim : colour::Text);
     if (spec.tip)
     {
         dottedUnderline(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
         tooltip(spec.tip);
     }
     float x = ImGui::GetItemRectMax().x;
-    if (spec.tech && x + px(8) + textWidth(spec.tech) <= nameRight)
+    if (!tech.empty() && x + px(8) + textWidth(tech) <= nameRight)
     {
-        addText({x + px(8), textTop}, colour::TextDim, spec.tech);
-        x += px(8) + textWidth(spec.tech);
+        addText({x + px(8), textTop}, colour::TextDim, tech);
+        x += px(8) + textWidth(tech);
     }
     if (spec.tag && x + px(16) + textWidth(spec.tag) <= nameRight)
     {
@@ -1480,7 +1513,7 @@ bool ledger()
     const float rowHeight = px(25), passHeight = px(19);
     for (const auto& line : budget.lines)
     {
-        const ImU32 hue = frame.sections[static_cast<std::size_t>(line.section)].hue ? frame.sections[static_cast<std::size_t>(line.section)].hue : colour::TextDim;
+        const ImU32 hue = hueOf(frame.sections, line.section);
         const std::string key(line.id);
         const bool open = nav.open.contains(key);
         const float top = ImGui::GetCursorScreenPos().y, textTop = top + std::round((rowHeight - textHeight) / 2);
@@ -1507,9 +1540,7 @@ bool ledger()
         }
 
         // The name goes to its item.
-        const float swatch = px(7);
-        drawList()->AddRectFilled({nameLeft, textTop + std::round((textHeight - swatch) / 2)}, {nameLeft + swatch, textTop + std::round((textHeight - swatch) / 2) + swatch}, tint(hue));
-        const float nameX = nameLeft + swatch + px(8);
+        const float nameX = swatch(nameLeft, textTop, hue);
         const float nameWidth = std::min(textWidth(line.name), nameRight - nameX);
         ImGui::SetCursorScreenPos({nameX, textTop});
         if (ImGui::InvisibleButton("##name", {std::max(1.0f, nameWidth), textHeight})) goTo(line.id);
@@ -1552,9 +1583,7 @@ bool ledger()
         float nameX = nameLeft;
         if (colour)
         {
-            const float swatch = px(7);
-            drawList()->AddRectFilled({nameLeft, textTop + std::round((textHeight - swatch) / 2)}, {nameLeft + swatch, textTop + std::round((textHeight - swatch) / 2) + swatch}, tint(colour));
-            nameX += swatch + px(8);
+            nameX = swatch(nameLeft, textTop, colour);
             costBar({barLeft, top}, rowHeight, ms, colour, barMax);
         }
         addText({nameX, textTop}, colour::Text, name);
@@ -1617,18 +1646,11 @@ CostOverlay::CostOverlay(std::span<const Section> sections, const Budget& budget
     open = ImGui::Begin(title.c_str(), nullptr, flags);
     if (!open) return;
 
-    const float rendered = budget.frameMs > 0 ? 1000 / budget.frameMs : 0;
-    auto headline = formatted("GPU frame %.2f ms, ", budget.gpuMs)
-        + (rendered > 0 ? formatted("%.0f fps", rendered * static_cast<float>(budget.presented)) : std::string("- fps"));
-    if (budget.presented > 1 && rendered > 0) headline += formatted(" (%.0f rendered)", rendered);
-    textLine(headline, colour::TextDim);
+    const auto fps = frameRateOf(budget);
+    textLine(formatted("GPU frame %.2f ms, ", budget.gpuMs) + fps.shown + fps.rendered, colour::TextDim);
     gap(4);
     for (const auto& line : budget.lines)
-        if (line.ms > 0)
-        {
-            const bool known = line.section >= 0 && line.section < static_cast<int>(sections.size());
-            costRow(line.name, line.ms, known && sections[static_cast<std::size_t>(line.section)].hue ? sections[static_cast<std::size_t>(line.section)].hue : colour::TextDim);
-        }
+        if (line.ms > 0) costRow(line.name, line.ms, hueOf(sections, line.section));
     costRow(std::string(name) + " total", budget.total(), 0);
 }
 

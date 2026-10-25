@@ -77,7 +77,6 @@ struct Capabilities
     bool dynamic{};
 };
 Capabilities capabilities() noexcept;
-bool running() noexcept;
 // One line for the overlay: generating, or why not.
 std::string status();
 // Frames presented per rendered frame, as Streamline last reported it: 1 while it does not generate.

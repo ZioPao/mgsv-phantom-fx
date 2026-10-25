@@ -1,6 +1,7 @@
 #include "ui_redirect.hpp"
 
 #include "camera.hpp"
+#include "d3d11_helpers.hpp"
 #include "hdr.hpp"
 #include "log.hpp"
 #include "render_scale.hpp"
@@ -89,19 +90,6 @@ std::shared_ptr<const Targets> targets;
 ComPtr<ID3D11Resource> scene;
 ComPtr<ID3D11ShaderResourceView> sceneView;
 bool creationFailed{};
-
-D3D11_TEXTURE2D_DESC textureDesc(ID3D11View* view)
-{
-    D3D11_TEXTURE2D_DESC desc{};
-    if (!view) return desc;
-
-    ComPtr<ID3D11Resource> resource;
-    view->GetResource(resource.GetAddressOf());
-    ComPtr<ID3D11Texture2D> texture;
-    if (SUCCEEDED(resource.As(&texture))) texture->GetDesc(&desc);
-
-    return desc;
-}
 
 bool belowOutput(render_scale::Size render)
 {

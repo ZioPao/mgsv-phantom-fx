@@ -128,10 +128,3 @@ void TerrainGrid(uint2 did : SV_DispatchThreadID)
     g_GeometryPoolOut.Store4(first + 64, asuint(float4(p01, 1.0f)));
     g_GeometryPoolOut.Store4(first + 80, asuint(float4(p11, 1.0f)));
 }
-
-// No light yet: the resolve adds nothing.
-[numthreads(8, 8, 1)]
-void ClearOutput(uint2 did : SV_DispatchThreadID)
-{
-    if (all(did < g_Frame.dimensions.xy)) g_Output[did] = 0.0f;
-}
