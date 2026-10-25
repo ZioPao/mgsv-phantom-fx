@@ -119,7 +119,7 @@ struct GIFrameConstants
     GI_ROW_MAJOR float4x4 viewProjectionInverse;
     GI_ROW_MAJOR float4x4 previousViewProjection;
     float4 eye;          // xyz: the camera in the world
-    float4 sunDirection; // xyz: towards the sun, world space; w: tangent of its angular radius
+    float4 sunDirection; // xyz: towards the sun, world space
     float4 sunColor;     // rgb: the sun's diffuse light at normal incidence, in the game's units
     float4 skySH[9];     // rgb: the sky's radiance as L2 spherical harmonics, world space
     uint4 dimensions;    // xy: render size; z: frame index; w: instance count
@@ -138,7 +138,7 @@ struct GIFrameConstants
     float4 hashSamples;       // x: most samples; y: chance a multibounce ray is not traced; z: most multibounce samples; w: tile cell ratio
     // The sun's ray-traced shadows (gi_shadow.hlsl).
     float4 shadowRange;  // The game's shadow map range (cPSLight): x: centre depth (c8.x); y: start distance (c8.y); z: fade rate (c6.x); w: 1 once known
-    float4 shadowParams; // x: tangent of the sun's angular radius; y: how much sun an alpha-tested mesh blocks; z: ray length; w: 1 on a fresh start
+    float4 shadowParams; // x: tangent of the sun's angular radius (SunSample); y: how much sun an alpha-tested mesh blocks; z: ray length; w: 1 on a fresh start
     uint4 objectMotion;  // x: 1 when g_ObjectVelocity (gi_common.hlsli) holds this frame's velocity of the game's moving meshes
     uint4 shadowDiagnostics; // x: 1 to start every shadow ray from the depth and the G-buffer's normal, as before 2026-10-24 (ShadowSurfaceAt);
                              // y: 1 for the debug view of where they leave (ShadowStartColor)

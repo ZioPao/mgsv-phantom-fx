@@ -77,8 +77,6 @@ constexpr DWORD FenceTimeout = 10'000;
 constexpr std::uint64_t UploadBytes = 8ull << 20;
 // Where no albedo is known yet: MGSV's materials are dark.
 constexpr float DefaultAlbedo = 0.2f;
-// Tangent of the sun's angular radius, 0.27 degrees.
-constexpr float SunRadius = 0.0047f;
 // The sun's ray-traced shadows: how much of the sun cut-out geometry without its texture (not copied
 // yet, or a mesh without texture coordinates) blocks beyond the game's shadow map, and how far the rays
 // look for what blocks the sun.
@@ -911,7 +909,7 @@ GIFrameConstants constantsOf(const Frame& frame, std::uint32_t newGeometries, st
     copyMatrix(constants.viewProjectionInverse, inverse(frame.viewProjection));
     copyMatrix(constants.previousViewProjection, frame.previousViewProjection);
     constants.eye = {frame.eye[0], frame.eye[1], frame.eye[2], 0};
-    constants.sunDirection = {frame.sunDirection[0], frame.sunDirection[1], frame.sunDirection[2], SunRadius};
+    constants.sunDirection = {frame.sunDirection[0], frame.sunDirection[1], frame.sunDirection[2], 0};
     constants.sunColor = {frame.sunColor[0], frame.sunColor[1], frame.sunColor[2], 0};
     for (int i = 0; i < 9; ++i) constants.skySH[i] = {frame.skyRadiance[i][0], frame.skyRadiance[i][1], frame.skyRadiance[i][2], 0};
     constants.dimensions = {frame.width, frame.height, frame.frameIndex, instanceCount};

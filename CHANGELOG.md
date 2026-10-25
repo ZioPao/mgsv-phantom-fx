@@ -1,5 +1,10 @@
 # Phantom FX changelog
 
+## Unreleased
+
+- **Sun size** now also sets the sun's disc for the ray-traced global illumination, which had a
+  fixed 0.54 degrees. At the default 0.53 degrees it looks as before.
+
 ## 1.7.0
 
 - Add **presets** on the Budget page: **Screen-space** (soft and contact shadows, GTVBAO, SSILVB)

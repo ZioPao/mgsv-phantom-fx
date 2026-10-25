@@ -70,7 +70,6 @@ RWStructuredBuffer<uint> g_HashGridCache_LightBuffer : register(u29); // Hits to
 #define g_Eye g_Frame.eye.xyz
 #define g_NearFar g_Frame.nearFar.xy
 #define g_ViewProjection g_Frame.viewProjection
-#define g_ViewProjectionInverse g_Frame.viewProjectionInverse
 #define g_PreviousViewProjection g_Frame.previousViewProjection
 #define HASH_CELL_SIZE g_Frame.cellSizes.y
 #define HASH_MIN_CELL_SIZE g_Frame.cellSizes.z
@@ -88,11 +87,6 @@ RWStructuredBuffer<uint> g_HashGridCache_LightBuffer : register(u29); // Hits to
 #define PREVIOUS_PACKED_TILE_COUNT (GI_COUNTER_PACKED_TILES + 1 - g_Frame.hashMisc.y)
 
 // ---- The game's frame and the light's grid ----
-
-float3 DepthPosition(uint2 pixel, float depth)
-{
-    return transformPointProjection((pixel + 0.5f) / g_BufferDimensions, depth, g_ViewProjectionInverse);
-}
 
 uint2 LightSize()
 {
@@ -253,6 +247,17 @@ float4 HashGridCache_RecoverRadiance(uint4 quantized)
     return float4(quantized.xyz / kHashGridCache_FloatQuantize, quantized.w);
 }
 
+// The four sums from `first` (rgb quantised, and the samples), zeroed for the next frame's adds.
+uint4 TakeQuantizedRadiance(RWStructuredBuffer<uint> sums, uint first)
+{
+    uint4 taken = uint4(sums[first + 0], sums[first + 1], sums[first + 2], sums[first + 3]);
+    sums[first + 0] = 0;
+    sums[first + 1] = 0;
+    sums[first + 2] = 0;
+    sums[first + 3] = 0;
+    return taken;
+}
+
 float4 HashGridCache_PackVisibility(HashGridCache_Visibility visibility)
 {
     return float4(asfloat(visibility.instanceIndex | (visibility.geometryIndex << GI_HIT_INSTANCE_BITS)), asfloat(packNormal(visibility.direction)),
@@ -359,12 +364,8 @@ uint HashGridCache_Keep(uint counter, uint first, HashGridCache_Visibility visib
 void HitSurface(HashGridCache_Visibility visibility, out float3 world, out float3 normal)
 {
     SceneTriangle t = LoadTriangle(visibility.instanceIndex, visibility.geometryIndex, visibility.primitiveIndex);
-    float2 b = visibility.barycentrics;
-    world = (1.0f - b.x - b.y) * t.v0 + b.x * t.v1 + b.y * t.v2;
-    normal = cross(t.v1 - t.v0, t.v2 - t.v0);
-    float lengthSquared = dot(normal, normal);
-    normal = lengthSquared > 0.0f ? normal * rsqrt(lengthSquared) : -visibility.direction;
-    if (dot(normal, visibility.direction) > 0.0f) normal = -normal;
+    world = TrianglePoint(t, visibility.barycentrics);
+    normal = FacingNormal(t, visibility.direction);
 }
 
 // A hit's albedo: the G-buffer's where the camera sees the hit; otherwise its mesh's albedo texture,
@@ -458,12 +459,7 @@ float3 SunLight(float3 world, float3 normal, float3 origin, float tolerance, boo
     float cosine = dot(sunSide, towardsSun);
     if (!(cosine > 0.0f) || dot(g_Frame.sunColor.rgb, 1.0f) <= 0.0f) return 0.0f;
 
-    float3 b1, b2;
-    GetOrthoVectors(towardsSun, b1, b2);
-    float2 disc = random.rand2();
-    float radius = sqrt(disc.x) * g_Frame.sunDirection.w;
-    float angle = TWO_PI * disc.y;
-    float3 direction = normalize(towardsSun + radius * (cos(angle) * b1 + sin(angle) * b2));
+    float3 direction = SunSample(random.rand2());
     float3 sunOrigin = sunFar ? OffsetFromTriangle(world, sunSide) : origin;
     if (!VisibleFromSurface(sunOrigin, sunSide, tolerance, direction, 1e4f)) return 0.0f;
 
@@ -819,19 +815,14 @@ groupshared uint2 lds_UpdateTiles_ValueIndirectBuffer[8][8];
 float4 AccumulateCell(RWStructuredBuffer<uint2> values, RWStructuredBuffer<uint> updates, uint cellIndex, float maxSamples, uint frameSamples)
 {
     float4 radiance = unpackHalf4(values[cellIndex]);
-    float4 added = HashGridCache_RecoverRadiance(uint4(updates[4 * cellIndex + 0], updates[4 * cellIndex + 1], updates[4 * cellIndex + 2],
-        min(updates[4 * cellIndex + 3], frameSamples)));
+    uint4 sums = TakeQuantizedRadiance(updates, 4 * cellIndex);
+    float4 added = HashGridCache_RecoverRadiance(uint4(sums.xyz, min(sums.w, frameSamples)));
     float sampleCount = min(radiance.w + added.w, maxSamples);
     radiance /= max(radiance.w, 1.0f);
     added /= max(added.w, 1.0f);
     radiance = radiance.w <= 0.0f ? added : lerp(radiance, added, 1.0f / sampleCount);
     // The sample count rides along as a hint for how far to filter.
     radiance *= sampleCount;
-
-    updates[4 * cellIndex + 0] = 0;
-    updates[4 * cellIndex + 1] = 0;
-    updates[4 * cellIndex + 2] = 0;
-    updates[4 * cellIndex + 3] = 0;
     return radiance;
 }
 
@@ -974,9 +965,7 @@ void UpdateFoliageMemory(uint did : SV_DispatchThreadID)
 {
     if (did >= GI_FOLIAGE_MEMORY_SLOTS || g_FoliageMemory_Keys[did] == 0u) return;
 
-    uint4 added = uint4(g_FoliageMemory_Added[4 * did + 0], g_FoliageMemory_Added[4 * did + 1], g_FoliageMemory_Added[4 * did + 2],
-        g_FoliageMemory_Added[4 * did + 3]);
-    if (added.w == 0u)
+    if (g_FoliageMemory_Added[4 * did + 3] == 0u)
     {
         if (g_FrameIndex - g_FoliageMemory_Touched[did] > FOLIAGE_MEMORY_IDLE_FRAMES)
         {
@@ -986,14 +975,11 @@ void UpdateFoliageMemory(uint did : SV_DispatchThreadID)
         return;
     }
 
+    uint4 added = TakeQuantizedRadiance(g_FoliageMemory_Added, 4 * did);
     float4 kept = unpackHalf4(g_FoliageMemory_Light[did]);
     float frames = min(kept.w + 1.0f, FOLIAGE_MEMORY_FRAMES);
     float3 light = HashGridCache_RecoverRadiance(added).rgb / added.w;
     g_FoliageMemory_Light[did] = packHalf4(float4(lerp(kept.rgb, light, 1.0f / frames), frames));
-    g_FoliageMemory_Added[4 * did + 0] = 0u;
-    g_FoliageMemory_Added[4 * did + 1] = 0u;
-    g_FoliageMemory_Added[4 * did + 2] = 0u;
-    g_FoliageMemory_Added[4 * did + 3] = 0u;
 }
 
 // ---- Denoising and the render size ----

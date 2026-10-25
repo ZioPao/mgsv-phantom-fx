@@ -163,7 +163,7 @@ void sunSize(Settings& wanted)
 {
     fxui::slider("Sun size", wanted.sunSize,
         {.min = Settings::MinSunSize, .max = Settings::MaxSunSize, .standard = Defaults.sunSize, .format = "%.2f\xC2\xB0",
-            .tip = "The sun's angular diameter, which sets how fast shadows soften with distance. 0.53 is the real sun."});
+            .tip = "The sun's angular diameter, which sets how fast shadows soften with distance. It also sets the sun for the global illumination. 0.53 is the real sun."});
 }
 
 void drawShadows(Settings& wanted)

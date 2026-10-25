@@ -72,13 +72,12 @@ void DebugScene(uint2 did : SV_DispatchThreadID)
 {
     if (any(did >= g_Frame.dimensions.xy)) return;
 
-    float2 uv = (did + 0.5f) / g_Frame.dimensions.xy;
-    float3 farPoint = transformPointProjection(uv, 1e-6f, g_Frame.viewProjectionInverse);
+    float3 farPoint = DepthPosition(did, 1e-6f);
     float3 direction = normalize(farPoint - g_Frame.eye.xyz);
     SceneHit hit = TraceClosest(g_Frame.eye.xyz, direction, 1e5f);
 
     float depth = g_Depth.Load(int3(did, 0));
-    float gameDistance = depth > 0.0f ? distance(transformPointProjection(uv, depth, g_Frame.viewProjectionInverse), g_Frame.eye.xyz) : FLT_MAX;
+    float gameDistance = depth > 0.0f ? distance(DepthPosition(did, depth), g_Frame.eye.xyz) : FLT_MAX;
 
     float3 color = float3(0.02f, 0.03f, 0.08f);
     if (hit.hit)
