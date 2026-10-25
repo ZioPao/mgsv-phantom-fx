@@ -1,6 +1,7 @@
 #include "upscaler.hpp"
 
 #include "camera.hpp"
+#include "clock.hpp"
 #include "atmosphere.hpp"
 #include "draw_distance.hpp"
 #include "focus.hpp"
@@ -274,7 +275,7 @@ struct PendingHudless
 std::optional<PendingHudless> pendingHudless;
 std::optional<ObjectVelocity> velocity;
 std::optional<Frame> lastEvaluated;
-LARGE_INTEGER lastEvaluation{};
+LONGLONG lastEvaluation{};
 
 // What frame generation gets from the frame being presented, filled as it executes.
 struct Presented
@@ -1247,12 +1248,8 @@ bool upscale(const FxaaPass& pass, const Frame& current)
     auto* objectVelocity = velocity && velocity->frame == current.index ? velocity->view.Get() : nullptr;
     if (objectVelocity && textureDesc(objectVelocity).Width != width) objectVelocity = nullptr;
 
-    LARGE_INTEGER now{}, frequency{};
-    QueryPerformanceCounter(&now);
-    QueryPerformanceFrequency(&frequency);
-    const auto frameTime = lastEvaluation.QuadPart
-        ? static_cast<float>(static_cast<double>(now.QuadPart - lastEvaluation.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart))
-        : 16.7f;
+    const auto now = clock::ticksNow();
+    const auto frameTime = lastEvaluation ? static_cast<float>(clock::millisecondsOf(now - lastEvaluation)) : 16.7f;
 
     // Frame generation's hudless colour is the graded image there, before the UI draws over it.
     const auto destination = upscaled ? uiTarget.target : pass.sceneTarget;

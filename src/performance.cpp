@@ -1,4 +1,5 @@
 #include "performance.hpp"
+#include "clock.hpp"
 #include "log.hpp"
 #include "upscaler.hpp"
 
@@ -85,22 +86,6 @@ struct
 
 std::mutex statusMutex;
 Status published;
-
-LONGLONG ticksNow()
-{
-    LARGE_INTEGER now{};
-    QueryPerformanceCounter(&now);
-
-    return now.QuadPart;
-}
-
-float millisecondsOf(LONGLONG ticks)
-{
-    LARGE_INTEGER frequency{};
-    QueryPerformanceFrequency(&frequency);
-
-    return static_cast<float>(static_cast<double>(ticks) * 1000.0 / static_cast<double>(frequency.QuadPart));
-}
 
 // Call with timerMutex held. Null when the device refuses.
 ComPtr<ID3D11Query> query(D3D11_QUERY type)
@@ -257,7 +242,7 @@ void average(LONGLONG now, const std::optional<Sample>& sample)
 {
     if (lastPresent)
     {
-        const float frame = millisecondsOf(now - lastPresent);
+        const float frame = static_cast<float>(clock::millisecondsOf(now - lastPresent));
         costs.frame += (frame - costs.frame) * (1 - std::exp(-frame / AverageMilliseconds));
     }
 
@@ -265,7 +250,7 @@ void average(LONGLONG now, const std::optional<Sample>& sample)
     if (!sample) return;
 
     // The first sample after the timing began replaces whatever was left from before.
-    const float weight = averaging ? 1 - std::exp(-millisecondsOf(now - lastSample) / AverageMilliseconds) : 1;
+    const float weight = averaging ? 1 - std::exp(-static_cast<float>(clock::millisecondsOf(now - lastSample)) / AverageMilliseconds) : 1;
     averaging = true;
     lastSample = now;
     costs.gpuFrame += (sample->gpuFrame - costs.gpuFrame) * weight;
@@ -356,7 +341,7 @@ std::optional<upscaler::LeftOut> advanceMeasurement(LONGLONG now, const std::opt
 {
     auto& m = measurement;
     if (measurementRequested.exchange(false) && !m.running) return startMeasurement(now);
-    if (!m.running || millisecondsOf(now - m.stepStart) < SettleSeconds * 1000) return std::nullopt;
+    if (!m.running || clock::millisecondsOf(now - m.stepStart) < SettleSeconds * 1000) return std::nullopt;
 
     if (!m.timingStart)
     {
@@ -372,7 +357,7 @@ std::optional<upscaler::LeftOut> advanceMeasurement(LONGLONG now, const std::opt
         ++m.gpuFrames;
     }
 
-    if (millisecondsOf(now - m.timingStart) < TimedSeconds * 1000) return std::nullopt;
+    if (clock::millisecondsOf(now - m.timingStart) < TimedSeconds * 1000) return std::nullopt;
 
     m.results.push_back({m.steps[m.step].removed, m.gpuFrames ? static_cast<float>(m.gpuSum / m.gpuFrames) : 0.0f});
     m.timingStart = 0;
@@ -561,7 +546,7 @@ void present() noexcept
 {
     try
     {
-        const auto now = ticksNow();
+        const auto now = clock::ticksNow();
         const auto sample = closeAndRead();
         average(now, sample);
         // Not under a lock: the effects' settings take theirs.

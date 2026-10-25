@@ -1,6 +1,7 @@
 // FSR frame generation through AMD's swap chain; fsr_frame_generation.hpp describes the route.
 #include "fsr_frame_generation.hpp"
 
+#include "clock.hpp"
 #include "fidelityfx.hpp"
 #include "log.hpp"
 
@@ -44,7 +45,7 @@ ContextKey key;
 ComPtr<ID3D12Resource> hudlessCopy;
 bool generating{}, hdrOutput{};
 std::string version, failure;
-LARGE_INTEGER lastFrame{};
+LONGLONG lastFrame{};
 
 void logOnce(const std::string& message)
 {
@@ -176,9 +177,7 @@ void prepare(ID3D12GraphicsCommandList* list, const frame_generation::Inputs& in
     std::swap(barriers[1].Transition.StateBefore, barriers[1].Transition.StateAfter);
     list->ResourceBarrier(1, &barriers[1]);
 
-    LARGE_INTEGER now{}, frequency{};
-    QueryPerformanceCounter(&now);
-    QueryPerformanceFrequency(&frequency);
+    const auto now = clock::ticksNow();
     const auto& camera = inputs.camera;
     ffxDispatchDescFrameGenerationPrepareV2 dispatch{};
     dispatch.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
@@ -187,9 +186,7 @@ void prepare(ID3D12GraphicsCommandList* list, const frame_generation::Inputs& in
     dispatch.renderSize = {inputs.renderWidth, inputs.renderHeight};
     dispatch.jitterOffset = {inputs.jitter[0], inputs.jitter[1]};
     dispatch.motionVectorScale = {1, 1};
-    dispatch.frameTimeDelta = lastFrame.QuadPart
-        ? static_cast<float>(static_cast<double>(now.QuadPart - lastFrame.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart))
-        : 16.7f;
+    dispatch.frameTimeDelta = lastFrame ? static_cast<float>(clock::millisecondsOf(now - lastFrame)) : 16.7f;
     dispatch.reset = inputs.reset;
     dispatch.cameraNear = camera.nearPlane;
     dispatch.cameraFar = camera.farPlane;
