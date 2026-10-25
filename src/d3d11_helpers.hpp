@@ -145,4 +145,61 @@ inline UINT groups(UINT texels)
 {
     return (texels + 7) / 8;
 }
+
+// How many of the compute stage's first slots of each kind a SavedComputeState keeps.
+struct ComputeSlots
+{
+    UINT buffers{}, views{}, accesses{}, samplers{};
+};
+
+// The game's compute shader and its first slots, put back when this goes out of scope.
+class SavedComputeState
+{
+public:
+    SavedComputeState(ID3D11DeviceContext* context, ComputeSlots slots) : context(context), slots(slots)
+    {
+        context->CSGetShader(shader.GetAddressOf(), nullptr, nullptr);
+        context->CSGetConstantBuffers(0, slots.buffers, buffers);
+        context->CSGetShaderResources(0, slots.views, views);
+        context->CSGetUnorderedAccessViews(0, slots.accesses, accesses);
+        context->CSGetSamplers(0, slots.samplers, samplers);
+    }
+
+    ~SavedComputeState()
+    {
+        // The add-on's outputs go first, so none is bound for writing while the game's views of the
+        // same texture are bound for reading.
+        ID3D11UnorderedAccessView* const none[D3D11_1_UAV_SLOT_COUNT]{};
+        context->CSSetUnorderedAccessViews(0, slots.accesses, none, nullptr);
+        context->CSSetShader(shader.Get(), nullptr, 0);
+        context->CSSetConstantBuffers(0, slots.buffers, buffers);
+        context->CSSetShaderResources(0, slots.views, views);
+        context->CSSetUnorderedAccessViews(0, slots.accesses, accesses, nullptr);
+        context->CSSetSamplers(0, slots.samplers, samplers);
+        release(buffers, slots.buffers);
+        release(views, slots.views);
+        release(accesses, slots.accesses);
+        release(samplers, slots.samplers);
+    }
+
+    SavedComputeState(const SavedComputeState&) = delete;
+    SavedComputeState& operator=(const SavedComputeState&) = delete;
+
+private:
+    template<class Object> static void release(Object* const* objects, UINT count)
+    {
+        for (UINT i = 0; i < count; ++i)
+            if (objects[i]) objects[i]->Release();
+    }
+
+    ID3D11DeviceContext* context;
+    ComputeSlots slots;
+
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> shader;
+    // Up to Direct3D 11.1's slot counts.
+    ID3D11Buffer* buffers[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT]{};
+    ID3D11ShaderResourceView* views[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT]{};
+    ID3D11UnorderedAccessView* accesses[D3D11_1_UAV_SLOT_COUNT]{};
+    ID3D11SamplerState* samplers[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT]{};
+};
 }
