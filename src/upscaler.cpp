@@ -287,13 +287,6 @@ struct Presented
 std::atomic<bool> failed{};
 std::string failure, lastFallback;
 std::uint64_t presents{}, lastEvaluatedPresent{}, evaluations{}, fallbacks{}, resets{}, cameraCuts{};
-std::map<std::string, bool, std::less<>> loggedOnce;
-
-void logOnce(const std::string& key, std::string_view message)
-{
-    if (loggedOnce.emplace(key, true).second) log(message);
-}
-
 void updateReplacing()
 {
     replacing = supported && !failed && settings.mode != Mode::Off && !diagnostics.gameFxaa && !leftOut.upscaler;
@@ -396,7 +389,7 @@ void configureDrawDistance()
 bool fallback(std::string reason)
 {
     ++fallbacks;
-    logOnce("fallback:" + reason, "Not upscaled this frame: " + reason + ".");
+    logOnce("Not upscaled this frame: " + reason + ".");
     lastFallback = std::move(reason);
     return false;
 }
@@ -1346,7 +1339,7 @@ void fillUiTarget()
     const auto output = ui_redirect::output();
     if (!output.target || !output.scene)
     {
-        logOnce("ui-target", "The UI target is not ready; a frame shows only the UI.");
+        logOnce("The UI target is not ready; a frame shows only the UI.");
         return;
     }
 

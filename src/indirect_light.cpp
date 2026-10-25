@@ -13,7 +13,6 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
-#include <map>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -164,13 +163,6 @@ Target diffuseWithLight;           // The game's diffuse light with SSILVB's or 
 DrawTarget gameProbeLight;
 MipTarget distances;               // shaders::PrefilterDepths' output, written before each march
 Progress occlusionProgress{"GTVBAO"}, lightProgress{"SSILVB"}, globalProgress{"Global illumination"};
-std::map<std::string, bool, std::less<>> loggedOnce;
-
-void logOnce(const std::string& message)
-{
-    if (loggedOnce.emplace(message, true).second) log(message);
-}
-
 // Compiles the shaders and makes the fixed resources once; call with resourceMutex held. Returns
 // false when GTVBAO and SSILVB are unavailable.
 bool ensurePipeline()

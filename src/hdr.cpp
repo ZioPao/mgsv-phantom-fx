@@ -144,15 +144,6 @@ std::vector<ComPtr<IUnknown>> shaderOwners;
 std::map<DxbcHash, Patched> patchedShaders;
 std::unordered_map<const void*, const Patched*> patchedByCode;
 
-std::mutex logMutex;
-std::map<std::string, bool, std::less<>> loggedOnce;
-
-void logOnce(const std::string& message)
-{
-    std::lock_guard lock(logMutex);
-    if (loggedOnce.emplace(message, true).second) log(message);
-}
-
 // Compiles the shaders and makes the fixed buffers; call with the mutex held.
 void createPipeline()
 {

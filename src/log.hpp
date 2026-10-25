@@ -19,5 +19,7 @@ inline constexpr bool DiagnosticLog = PHANTOM_FX_DIAGNOSTIC_LOG != 0;
 void openLog(const std::filesystem::path& file);
 // Appends a line to the log, from any thread.
 void log(std::string_view message);
+// The same, only the first time the message comes.
+void logOnce(std::string_view message);
 std::string hex(std::uint64_t value);
 }

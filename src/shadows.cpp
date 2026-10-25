@@ -15,7 +15,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <map>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -195,12 +194,6 @@ std::unordered_map<ID3D11BlendState*, std::pair<ComPtr<ID3D11BlendState>, ComPtr
 ShadowTarget sunShadow, lightShadow;
 bool tracedSunOnce{};
 std::array<bool, 2> tracedLightOnce{}; // By falloff
-std::map<std::string, bool, std::less<>> loggedOnce;
-
-void logOnce(const std::string& message)
-{
-    if (loggedOnce.emplace(message, true).second) log("Shadows: " + message);
-}
 
 // Compiles the shaders once; call with resourceMutex held. Returns false when they are unavailable.
 bool ensurePipeline()
@@ -570,7 +563,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
     {
         if (!depth || !scene || !light)
         {
-            logOnce("a sun pass without its depth or constants keeps the game's shadows.");
+            logOnce("Shadows: a sun pass without its depth or constants keeps the game's shadows.");
             return false;
         }
 
@@ -612,8 +605,8 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
     context->PSSetShaderResources(ShadowSlot, 1, gameView.GetAddressOf());
     context->PSSetShaderResources(RayTracedSlot, 1, gameRayTracedView.GetAddressOf());
     context->PSSetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
-    if (options.soft) logOnce("the sun pass draws with soft shadows.");
-    if (rayTraced) logOnce("the sun pass draws with ray-traced shadows.");
+    if (options.soft) logOnce("Shadows: the sun pass draws with soft shadows.");
+    if (rayTraced) logOnce("Shadows: the sun pass draws with ray-traced shadows.");
 
     return true;
 }
@@ -637,7 +630,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     if (!scene || !light)
     {
         std::lock_guard lock(resourceMutex);
-        logOnce("a light without its constants keeps the game's shadows.");
+        logOnce("Shadows: a light without its constants keeps the game's shadows.");
         return false;
     }
 
@@ -650,7 +643,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         auto* shadowed = shadowedBlend(gameBlend.Get());
         if (!shadowed)
         {
-            logOnce("a light with another blend than (one, one) keeps the game's shadows.");
+            logOnce("Shadows: a light with another blend than (one, one) keeps the game's shadows.");
             return false;
         }
 
@@ -669,7 +662,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
 
     if (!depth)
     {
-        logOnce("a light without its depth keeps the game's shadows.");
+        logOnce("Shadows: a light without its depth keeps the game's shadows.");
         return false;
     }
 
@@ -894,7 +887,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
     catch (const std::exception& error)
     {
         std::lock_guard lock(resourceMutex);
-        logOnce(std::string("a light pass kept the game's shadows: ") + error.what());
+        logOnce(std::string("Shadows: a light pass kept the game's shadows: ") + error.what());
     }
     catch (...)
     {

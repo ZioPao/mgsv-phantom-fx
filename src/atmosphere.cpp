@@ -14,7 +14,6 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
-#include <map>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -172,12 +171,6 @@ std::uint32_t fills{};
 bool lastFillShadowed{};
 ComPtr<ID3D11UnorderedAccessView> fogAccess; // Of gameFog
 ID3D11Resource* fogAccessOf{};
-std::map<std::string, bool, std::less<>> loggedOnce;
-
-void logOnce(const std::string& message)
-{
-    if (loggedOnce.emplace(message, true).second) log("Volumetric fog: " + message);
-}
 
 ComPtr<ID3D11Buffer> constantCopy(UINT size)
 {
@@ -403,7 +396,7 @@ void noteFogPass(ID3D11DeviceContext* context)
                 && copyConstants(context, copies.scene.Get(), buffers[SceneSlot], SceneSize)
                 && copyConstants(context, copies.material.Get(), buffers[MaterialSlot], MaterialSize)
                 && copyConstants(context, copies.object.Get(), buffers[ObjectSlot], ObjectSize);
-            if (!copied) logOnce("the game's fog pass binds unexpected constants; the game's fog stays.");
+            if (!copied) logOnce("Volumetric fog: the game's fog pass binds unexpected constants; the game's fog stays.");
         }
     }
 
@@ -576,8 +569,8 @@ void fill(ID3D11DeviceContext* context, bool physical)
     lastFillShadowed = shadowed;
 
     lastFill = GetTickCount64();
-    logOnce(shadowed ? "the first fill, with the sun's shadow map." : "the first fill without a sun pass before it.");
-    if (physical) logOnce("the first physical fill.");
+    logOnce(shadowed ? "Volumetric fog: the first fill, with the sun's shadow map." : "Volumetric fog: the first fill without a sun pass before it.");
+    if (physical) logOnce("Volumetric fog: the first physical fill.");
 }
 
 // Every SkyLogInterval of the physical look: the sky parameters, for the log, read a frame after
@@ -659,7 +652,7 @@ bool drawSky(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, bo
     }
 
     std::lock_guard lock(resourceMutex);
-    logOnce("the physical sky draws in place of the game's.");
+    logOnce("Volumetric fog: the physical sky draws in place of the game's.");
 
     return true;
 }
@@ -852,7 +845,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
     catch (const std::exception& error)
     {
         std::lock_guard lock(resourceMutex);
-        logOnce(std::string("a pass kept the game's fog: ") + error.what());
+        logOnce(std::string("Volumetric fog: a pass kept the game's fog: ") + error.what());
     }
     catch (...)
     {
