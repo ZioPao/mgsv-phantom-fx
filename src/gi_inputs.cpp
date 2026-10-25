@@ -1,6 +1,7 @@
 // The ray tracing's inputs from the game's draws; gi_inputs.hpp describes them.
 #include "gi_inputs.hpp"
 
+#include "clock.hpp"
 #include "engine_scene.hpp"
 #include "game_loop.hpp"
 #include "log.hpp"
@@ -392,8 +393,6 @@ std::optional<Camera> takeCamera() noexcept
 
 Work takeWork() noexcept
 {
-    LARGE_INTEGER frequency{};
-    QueryPerformanceFrequency(&frequency);
-    return {static_cast<double>(hookTicks.exchange(0)) * 1000.0 / static_cast<double>(frequency.QuadPart), workDraws.exchange(0)};
+    return {clock::millisecondsOf(hookTicks.exchange(0)), workDraws.exchange(0)};
 }
 }

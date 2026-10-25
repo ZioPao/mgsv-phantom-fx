@@ -40,18 +40,6 @@ bool projectsWithProjection(const SceneConstants& scene)
         && near(depthRow[2], a * wRow[2], scale) && near(depthRow[3], a * wRow[3] + b, scale);
 }
 
-double halton(std::uint64_t index, unsigned base)
-{
-    double result = 0, fraction = 1;
-    for (; index; index /= base)
-    {
-        fraction /= base;
-        result += fraction * static_cast<double>(index % base);
-    }
-
-    return result;
-}
-
 Matrix multiply(const Matrix& left, const Matrix& right)
 {
     Matrix result{};
@@ -202,6 +190,18 @@ void applyJitter(SceneConstants& scene, std::array<float, 2> ndc)
 std::array<float, 2> jitterNdc(std::array<float, 2> pixels, float width, float height)
 {
     return {2 * pixels[0] / width, -2 * pixels[1] / height};
+}
+
+double halton(std::uint64_t index, unsigned base)
+{
+    double result = 0, fraction = 1;
+    for (; index; index /= base)
+    {
+        fraction /= base;
+        result += fraction * static_cast<double>(index % base);
+    }
+
+    return result;
 }
 
 std::array<float, 2> jitterPixels(std::uint64_t frame, int phases)

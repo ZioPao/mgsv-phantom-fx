@@ -57,6 +57,9 @@ std::array<float, 2> jitterPixels(std::uint64_t frame, int phases);
 // DLSS asks for 8 x (output / render)^2 phases; DLAA renders at output size.
 int jitterPhases(float renderScale);
 
+// The Halton sequence in `base`, from 0 to 1; index 0 gives 0.
+double halton(std::uint64_t index, unsigned base);
+
 // Maps this frame's unjittered NDC and depth to the previous frame's clip position.
 Matrix previousFromCurrent(const View& previous, const View& current);
 

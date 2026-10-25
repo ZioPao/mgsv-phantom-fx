@@ -2,6 +2,7 @@
 #include "global_illumination.hpp"
 
 #include "camera.hpp"
+#include "clock.hpp"
 #include "d3d11_helpers.hpp"
 #include "engine_scene.hpp"
 #include "gi_inputs.hpp"
@@ -396,10 +397,8 @@ void logStatus()
         + std::to_string(kicksWithObjectVelocity.exchange(0)) + " frames, not in " + std::to_string(kicksWithoutObjectVelocity.exchange(0)));
 
     const auto work = gi_inputs::takeWork();
-    LARGE_INTEGER frequency{};
-    QueryPerformanceFrequency(&frequency);
     const double frames = static_cast<double>(std::max<std::uint64_t>(kicksSinceLog.exchange(0), 1));
-    const auto milliseconds = [&](std::atomic<std::int64_t>& ticks) { return static_cast<double>(ticks.exchange(0)) * 1000.0 / static_cast<double>(frequency.QuadPart); };
+    const auto milliseconds = [](std::atomic<std::int64_t>& ticks) { return clock::millisecondsOf(ticks.exchange(0)); };
     const auto perFrame = [&](double value) { return std::to_string(value / frames); };
     const double kick = milliseconds(kickTicks);
     std::string steps;

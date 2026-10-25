@@ -2,6 +2,7 @@
 #include "gi_renderer.hpp"
 
 #include "camera.hpp"
+#include "clock.hpp"
 #include "gi_d3d12.hpp"
 #include "gi_light.hpp"
 #include "gi_scene.hpp"
@@ -1469,15 +1470,11 @@ void logTally(State& s)
 Result render(const Frame& frame)
 {
     auto& s = *state;
-    LARGE_INTEGER started{}, frequency{};
-    QueryPerformanceCounter(&started);
-    QueryPerformanceFrequency(&frequency);
-
+    const auto started = clock::ticksNow();
     auto lapStarted = started;
     const auto lap = [&](CpuStep step) {
-        LARGE_INTEGER now{};
-        QueryPerformanceCounter(&now);
-        s.tally.cpuSteps[step] += static_cast<double>(now.QuadPart - lapStarted.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart);
+        const auto now = clock::ticksNow();
+        s.tally.cpuSteps[step] += clock::millisecondsOf(now - lapStarted);
         lapStarted = now;
     };
 
@@ -1837,9 +1834,7 @@ Result render(const Frame& frame)
     s.submitted[slot] = frame.signalValue;
     lap(RecordStep);
 
-    LARGE_INTEGER finished{};
-    QueryPerformanceCounter(&finished);
-    const double cpu = static_cast<double>(finished.QuadPart - started.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart);
+    const double cpu = clock::millisecondsOf(clock::ticksNow() - started);
     const auto stats = scene.stats();
     auto& t = s.tally;
     ++t.frames;

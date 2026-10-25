@@ -1,5 +1,6 @@
 #include "photo_mode.hpp"
 
+#include "clock.hpp"
 #include "device_check.hpp"
 #include "focus.hpp"
 #include "game_code.hpp"
@@ -111,7 +112,7 @@ std::atomic<std::uint32_t*> pauseRequest{};
 
 // Game thread only.
 FreeCamera freeCamera;
-LARGE_INTEGER lastStep{};
+LONGLONG lastStep{};
 
 enum Key : std::uint8_t { Forward = 1, Back = 2, Left = 4, Right = 8, Up = 16, Down = 32, Fast = 64 };
 
@@ -222,12 +223,10 @@ void pause(bool on)
     letWeatherRun(on);
 }
 
-double secondsSince(LARGE_INTEGER& last)
+double secondsSince(LONGLONG& last)
 {
-    LARGE_INTEGER now{}, frequency{};
-    QueryPerformanceCounter(&now);
-    QueryPerformanceFrequency(&frequency);
-    const double seconds = static_cast<double>(now.QuadPart - last.QuadPart) / static_cast<double>(frequency.QuadPart);
+    const auto now = clock::ticksNow();
+    const double seconds = clock::millisecondsOf(now - last) / 1000;
     last = now;
 
     return std::min(seconds, MaxStep);
