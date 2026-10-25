@@ -171,13 +171,52 @@ float mipBias(float scale, float offset)
     return std::log2(std::min(scale, 1.0f)) + std::clamp(offset, Settings::MinMipBias, Settings::MaxMipBias);
 }
 
+void applyPreset(Settings& settings, EffectPreset preset)
+{
+    const bool screenSpace = preset == EffectPreset::ScreenSpace;
+    settings.softShadows = screenSpace;
+    settings.sunScreenSpaceShadows = screenSpace;
+    settings.lightScreenSpaceShadows = screenSpace;
+    settings.ambientOcclusion = screenSpace;
+    settings.indirectLight = screenSpace;
+
+    settings.rayTracedShadows = !screenSpace;
+    settings.rayTracedLights = !screenSpace;
+    settings.globalIllumination = !screenSpace;
+
+    settings.unlockFps = true;
+    settings.volumetricFog = true;
+    settings.atmosphereLook = AtmosphereLook::Physical;
+    settings.depthOfField = false;
+}
+
+std::optional<EffectPreset> presetOf(const Settings& settings)
+{
+    for (const auto preset : {EffectPreset::ScreenSpace, EffectPreset::RayTraced})
+    {
+        auto switched = settings;
+        applyPreset(switched, preset);
+        if (switched == settings) return preset;
+    }
+
+    return std::nullopt;
+}
+
+Settings firstLaunchSettings()
+{
+    Settings settings{.mode = Mode::Quality};
+    applyPreset(settings, EffectPreset::ScreenSpace);
+
+    return settings;
+}
+
 Settings loadSettings(const std::filesystem::path& path)
 {
     Settings settings;
     std::ifstream input(path);
     if (!input)
     {
-        if (!std::filesystem::exists(path)) return settings;
+        if (!std::filesystem::exists(path)) return firstLaunchSettings();
 
         throw std::runtime_error("Cannot read the DLSS settings.");
     }

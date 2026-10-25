@@ -173,6 +173,7 @@ struct Ngx
 // ---- Shared state ----
 std::filesystem::path dataDirectory, settingsPath;
 bool supported{};
+bool firstLaunch{}; // No settings file yet: the upscaler follows the GPU once attach sees it
 std::mutex settingsMutex;
 Settings settings;
 Diagnostics diagnostics;
@@ -386,6 +387,19 @@ bool fallback(std::string reason)
     logOnce("fallback:" + reason, "FXAA kept this frame: " + reason + ".");
     lastFallback = std::move(reason);
     return false;
+}
+
+// An unreadable adapter counts as NVIDIA's, which keeps the default.
+bool nvidiaGpu(ID3D11Device* gameDevice)
+{
+    constexpr UINT Nvidia = 0x10DE;
+    ComPtr<IDXGIDevice> dxgiDevice;
+    ComPtr<IDXGIAdapter> adapter;
+    DXGI_ADAPTER_DESC description{};
+    if (FAILED(gameDevice->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) || FAILED(dxgiDevice->GetAdapter(&adapter)) || FAILED(adapter->GetDesc(&description)))
+        return true;
+
+    return description.VendorId == Nvidia;
 }
 
 void fail(std::string_view reason)
@@ -1327,6 +1341,8 @@ void initialize(const std::filesystem::path& directory, bool supportedBuild) noe
     dataDirectory = directory;
     settingsPath = directory / "PhantomFX.ini";
     supported = supportedBuild;
+    std::error_code ignored;
+    firstLaunch = !std::filesystem::exists(settingsPath, ignored);
 
     std::lock_guard lock(settingsMutex);
     try
@@ -1359,6 +1375,14 @@ void attach(ID3D11Device* gameDevice, ID3D11DeviceContext* context, ID3D11Device
     ngxContext->GetDevice(ngxDevice.ReleaseAndGetAddressOf());
     if (FAILED(immediate.As(&context1))) fail("Direct3D 11.1 is not available.");
     ui_redirect::attach(gameDevice);
+
+    // DLSS runs only on NVIDIA's GPUs; FSR on any.
+    if (std::exchange(firstLaunch, false) && !nvidiaGpu(gameDevice))
+    {
+        std::lock_guard settingsLock(settingsMutex);
+        settings.upscaler = Upscaler::Fsr;
+        log("First start on a GPU other than NVIDIA's: FSR in place of DLSS.");
+    }
 }
 
 void detach() noexcept

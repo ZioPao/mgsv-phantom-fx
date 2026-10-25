@@ -50,7 +50,7 @@ More comparisons: [Previews](docs/PREVIEWS.md)
 
 1. Install ReShade for `mgsvtpp.exe` with DirectX 10/11/12. Skip the effects.
 2. Extract the ZIP into the game folder.
-3. In game, press Home and open **Phantom FX**. DLAA is on, the rest is off. Not on NVIDIA? Set **Upscaler** to FSR.
+3. In game, press Home and open **Phantom FX**. The screen-space effects are on, upscaled at Quality: DLSS on NVIDIA, FSR on other GPUs. With a ray-tracing GPU, try the **Ray-traced** preset on the Budget page.
 
 ReShade alone crashes the game at start-up. Phantom FX fixes that, so keep both installed.
 

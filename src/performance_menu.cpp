@@ -8,7 +8,9 @@
 #include <Windows.h>
 #include <imgui.h>
 #include <reshade.hpp> // Routes ImGui calls through ReShade's overlay.
+#include <algorithm>
 #include <format>
+#include <iterator>
 
 namespace phantom_fx::performance
 {
@@ -30,15 +32,38 @@ void drawRealCost(const Measurement& m, bool explained)
     for (std::size_t i = 1; i < m.steps.size(); ++i) fxui::costRow(m.steps[i].removed, m.steps[i - 1].gpuFrame - m.steps[i].gpuFrame);
     fxui::costRow("All of these", m.steps.front().gpuFrame - m.steps.back().gpuFrame, 0);
 }
+
+// The effects switched together; neither lights up while they are switched otherwise.
+void drawPresets(upscaler::Settings& wanted)
+{
+    using upscaler::EffectPreset;
+
+    constexpr EffectPreset presets[]{EffectPreset::ScreenSpace, EffectPreset::RayTraced};
+    constexpr fxui::Option options[]{
+        {.label = "Screen-space",
+            .tip = "Soft shadows, sun and lamp contact shadows, GTVBAO and SSILVB. No ray tracing, so it runs on any GPU."},
+        {.label = "Ray-traced",
+            .tip = "Ray-traced shadows, lights and global illumination in place of the screen-space effects. Needs a GPU that traces rays (DXR 1.1)."},
+    };
+    const auto current = upscaler::presetOf(wanted);
+    const int selected = current ? static_cast<int>(std::ranges::find(presets, *current) - std::begin(presets)) : -1;
+    const int pressed = fxui::segmented("Preset", selected, options,
+        "Switches the effects in every section at once. Both also unlock the frame rate and turn on the volumetric fog in the physical look; "
+        "neither has depth of field. The upscaler, HDR and each effect's own settings stay as they are.");
+    if (pressed >= 0) upscaler::applyPreset(wanted, presets[pressed]);
+}
 }
 
-void drawBudget()
+void drawBudget(upscaler::Settings& wanted)
 {
     const fxui::Page page(menu::Section::Budget,
         "Where the GPU's frame goes, effect by effect, on the same scale as every bar in this window. Timed on the GPU, averaged over about half a "
         "second. Each ray-traced effect counts its own rays; the scene they trace and the hand-over to Direct3D 12 split evenly between "
         "those working.");
     if (!page) return;
+
+    drawPresets(wanted);
+    fxui::gap(8);
 
     const auto state = status();
     if (fxui::button("Measure the real cost",

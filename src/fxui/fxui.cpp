@@ -688,8 +688,7 @@ void drawRail(std::span<const Key> keys)
     // The rail reaches the window's edge, so its padding makes up what ReShade's leaves.
     const float padding = std::max(0.0f, px(8) - (start.x - frame.windowLeft));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(padding, px(10)));
-    ImGui::BeginChild("##fxui-rail", {width, 0}, ImGuiChildFlags_AlwaysUseWindowPadding,
-        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground);
+    ImGui::BeginChild("##fxui-rail", {width, 0}, ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
     ImGui::PopStyleVar();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(px(8), px(2)));
 

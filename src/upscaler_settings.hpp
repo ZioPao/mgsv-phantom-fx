@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string_view>
 
 namespace phantom_fx::upscaler
@@ -22,6 +23,8 @@ enum class DrawDistance : std::uint8_t { Vanilla, Extended, Far, Count };
 // Frames presented per rendered frame, by DLSS Frame Generation up to Dynamic, which chooses them to
 // reach the display's refresh rate. Fsr is FSR frame generation, 2x on any GPU.
 enum class FrameGeneration : std::uint8_t { Off, X2, X3, X4, X5, X6, Dynamic, Fsr, Count };
+// The effects switched together: the screen-space ones, or the ray-traced ones in their place.
+enum class EffectPreset : std::uint8_t { ScreenSpace, RayTraced, Count };
 
 struct Settings
 {
@@ -137,7 +140,16 @@ float nominalScale(Upscaler upscaler, Mode mode, float customScale);
 // Texture LOD bias that keeps output-resolution texture detail when rendering below it.
 float mipBias(float scale, float offset);
 
-// Missing files and invalid fields keep their defaults; I/O failures throw.
+// Switches the preset's effects on and the others off. Both presets also unlock the frame rate and turn
+// on the volumetric fog in the physical look, and neither has depth of field. The upscaler, HDR and the
+// effects' own settings (radius, strength, ray quality) stay as they are.
+void applyPreset(Settings& settings, EffectPreset preset);
+// The preset the effects are switched as, if any.
+std::optional<EffectPreset> presetOf(const Settings& settings);
+// A first launch, without a settings file: the screen-space preset, upscaled at Quality.
+Settings firstLaunchSettings();
+
+// A missing file gives the first launch's settings; invalid fields keep their defaults; I/O failures throw.
 Settings loadSettings(const std::filesystem::path& path);
 void saveSettings(const std::filesystem::path& path, const Settings& settings);
 }

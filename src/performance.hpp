@@ -1,5 +1,7 @@
 #pragma once
 
+#include "upscaler_settings.hpp"
+
 #include <d3d11.h>
 #include <wrl/client.h>
 
@@ -125,8 +127,9 @@ void watch() noexcept;
 void showOverlay(bool show) noexcept;
 // Starts measuring each effect's real cost, unless a measurement is running.
 void measure() noexcept;
-// The settings window's budget page, and the costs over the game, drawn every frame.
-void drawBudget();
+// The settings window's budget page, whose presets switch `wanted`, and the costs over the game, drawn
+// every frame.
+void drawBudget(upscaler::Settings& wanted);
 void drawOverlay();
 // The costs as plain text, for PhantomFX-performance.txt.
 std::string report(const Status& state);

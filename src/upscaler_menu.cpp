@@ -703,7 +703,7 @@ void drawMenu()
                              "Off shows the game's own lighting for comparison; F1 toggles it at any time. Not saved: each start begins with them on.",
                 .masterOff = "Off: the game's own lighting.",
                 .keys = keys});
-        performance::drawBudget();
+        performance::drawBudget(wanted);
         drawUpscaling(state, wanted);
         drawShadows(wanted);
         drawLighting(wanted);

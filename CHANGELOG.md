@@ -1,5 +1,14 @@
 # Phantom FX changelog
 
+## Unreleased
+
+- Add **presets** on the Budget page: **Screen-space** (soft and contact shadows, GTVBAO, SSILVB)
+  or **Ray-traced** (ray-traced shadows, lights and global illumination). Both unlock the frame
+  rate and turn on the volumetric fog with the physical sky, without depth of field.
+- A first start, without a settings file, uses the Screen-space preset at Quality: DLSS on NVIDIA,
+  FSR on other GPUs.
+- The left-hand list scrolls with the mouse wheel when the window is too short for it.
+
 ## 1.6.0
 
 - **Global illumination** rebuilt: rays from the pixels, each hit lit afresh every frame, with

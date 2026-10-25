@@ -45,7 +45,10 @@ void write(const fs::path& path, std::string_view text)
 void settingsPersist(const fs::path& root)
 {
     const auto path = root / L"PhantomFX.ini";
-    expect(loadSettings(path) == Settings{}, "A first launch uses DLAA with the default preset and sharpening.");
+    const auto first = loadSettings(path);
+    expect(first == firstLaunchSettings() && first.upscaler == Upscaler::Dlss && first.mode == Mode::Quality
+            && presetOf(first) == EffectPreset::ScreenSpace,
+        "A first launch upscales with DLSS Quality and the screen-space preset.");
     expect(!fs::exists(path), "Loading defaults must not create a settings file.");
 
     const Settings chosen{.upscaler = Upscaler::Fsr, .mode = Mode::Off, .preset = Preset::J, .sharpness = 0.5f, .unlockFps = true, .frameGeneration = FrameGeneration::X3,
@@ -110,6 +113,22 @@ void settingsPersist(const fs::path& root)
 
         expect(rejected && loadSettings(path) == chosen, "Invalid settings cannot replace valid saved ones.");
     }
+}
+
+void effectPresets()
+{
+    Settings settings{.mode = Mode::Performance, .depthOfField = true, .hdr = true};
+    settings.softShadows = true;
+    settings.globalIlluminationRays = 4;
+    applyPreset(settings, EffectPreset::RayTraced);
+    expect(presetOf(settings) == EffectPreset::RayTraced && !settings.softShadows && !settings.depthOfField && settings.volumetricFog
+            && settings.atmosphereLook == AtmosphereLook::Physical && settings.unlockFps,
+        "The ray-traced preset switches the screen-space effects and depth of field off, the fog on.");
+    expect(settings.mode == Mode::Performance && settings.hdr && settings.globalIlluminationRays == 4,
+        "A preset keeps the upscaler, HDR and the effects' own settings.");
+
+    settings.indirectLight = true;
+    expect(!presetOf(settings), "One effect switched otherwise matches no preset.");
 }
 
 // The main view of a recorded frame (docs/DEVELOPMENT.md, "Constant buffers"): P00 = -1.75, P11 = 28/9,
@@ -553,6 +572,7 @@ int main()
     {
         fs::create_directories(root);
         settingsPersist(root);
+        effectPresets();
         mainViewRecognised();
         jitterShiftsTheImage();
         reprojection();
