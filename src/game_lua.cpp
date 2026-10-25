@@ -1,12 +1,10 @@
 #include "game_lua.hpp"
 
 #include "device_check.hpp"
+#include "game_code.hpp"
 
 #include <Windows.h>
-#include <algorithm>
-#include <cstring>
 #include <mutex>
-#include <span>
 #include <utility>
 
 namespace phantom_fx::game_lua
@@ -69,13 +67,7 @@ constexpr unsigned char PushStringCode[]{0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x8
 constexpr unsigned char PushBooleanCode[]{0x4C, 0x8B, 0x41, 0x10, 0x33, 0xC0, 0x85, 0xD2, 0x0F, 0x95, 0xC0, 0x41, 0xC7, 0x40, 0x08, 0x01,
     0x00, 0x00, 0x00, 0x41, 0x89, 0x00, 0x48, 0x83};
 
-struct Expected
-{
-    std::uintptr_t rva;
-    std::span<const unsigned char> code;
-};
-
-const Expected Checked[]{{BeginScopeRva, BeginScopeCode}, {EndScopeRva, EndScopeCode}, {LoadBufferRva, LoadBufferCode}, {CallRva, CallCode},
+const game_code::Expected Checked[]{{BeginScopeRva, BeginScopeCode}, {EndScopeRva, EndScopeCode}, {LoadBufferRva, LoadBufferCode}, {CallRva, CallCode},
     {ToStringRva, ToStringCode}, {PushStringRva, PushStringCode}, {PushBooleanRva, PushBooleanCode}};
 
 // Called with the code, its chunk name and whether to try it as an expression first. While the code
@@ -116,18 +108,11 @@ end
 std::mutex mutex;
 std::optional<std::string> pending;
 Console published;
-
-std::uint8_t* base()
-{
-    return reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
-}
 }
 
 bool supported() noexcept
 {
-    static const bool expected = supportedBuild() && std::ranges::all_of(Checked, [](const Expected& expected) {
-        return std::memcmp(base() + expected.rva, expected.code.data(), expected.code.size()) == 0;
-    });
+    static const bool expected = supportedBuild() && game_code::matches(Checked);
 
     return expected;
 }
@@ -136,7 +121,7 @@ std::optional<Outcome> run(std::string_view code, std::string_view name, bool ex
 {
     if (!supported()) return std::nullopt;
 
-    auto* const engine = base();
+    auto* const engine = game_code::image();
     auto* const system = *reinterpret_cast<std::uint8_t**>(engine + ScriptSystemRva);
     if (!system || !*reinterpret_cast<void**>(system + 8)) return std::nullopt;
 

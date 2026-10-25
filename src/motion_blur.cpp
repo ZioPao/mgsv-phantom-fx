@@ -1,6 +1,7 @@
 #include "motion_blur.hpp"
 
 #include "device_check.hpp"
+#include "game_code.hpp"
 
 #include <Windows.h>
 #include <MinHook.h>
@@ -46,22 +47,21 @@ std::string hook() noexcept
 {
     if (!supportedBuild()) return "Unknown game build; motion blur is left to the game.";
 
-    auto* base = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
+    auto* base = game_code::image();
     auto* preExecTarget = base + PreExecRva;
     auto* execTarget = base + ExecRva;
     if (std::memcmp(preExecTarget, PreExecStart, sizeof(PreExecStart)) || std::memcmp(execTarget, ExecStart, sizeof(ExecStart)))
         return "The motion blur plugin has unexpected code; motion blur is left to the game.";
 
-    auto status = MH_CreateHook(preExecTarget, reinterpret_cast<void*>(&preExec), reinterpret_cast<void**>(&originalPreExec));
-    if (status == MH_OK) status = MH_CreateHook(execTarget, reinterpret_cast<void*>(&exec), reinterpret_cast<void**>(&originalExec));
-    if (status == MH_OK) status = MH_EnableHook(preExecTarget);
-    if (status == MH_OK) status = MH_EnableHook(execTarget);
-    if (status != MH_OK)
+    auto status = game_code::hookAt(preExecTarget, &preExec, originalPreExec);
+    if (status == MH_OK)
     {
-        MH_RemoveHook(preExecTarget);
-        MH_RemoveHook(execTarget);
-        return std::string("Hooking the motion blur plugin failed (") + MH_StatusToString(status) + "); motion blur is left to the game.";
+        status = game_code::hookAt(execTarget, &exec, originalExec);
+        if (status != MH_OK) MH_RemoveHook(preExecTarget);
     }
+
+    if (status != MH_OK)
+        return std::string("Hooking the motion blur plugin failed (") + MH_StatusToString(status) + "); motion blur is left to the game.";
 
     return "The motion blur plugin is hooked: with DLSS on, the engine draws velocity and no blur.";
 }

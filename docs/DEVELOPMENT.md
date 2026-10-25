@@ -98,6 +98,7 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/performance.cpp`, `src/performance.hpp` | The passes' GPU costs: timestamp queries, the averages, the real cost measurement, `PhantomFX-performance.txt` (see "Costs") |
 | `src/performance_menu.cpp` | The budget page, the costs over the game, and the costs as text |
 | `src/device_check.cpp`, `src/device_check.hpp` | Lets the game start under ReShade (see below); the build check |
+| `src/game_code.hpp` | The game's image, checks of its code, hooks (MinHook) and code patches |
 | `src/motion_blur.cpp`, `src/motion_blur.hpp` | Hooks on the motion blur plugin: velocity passes every frame, no blur |
 | `src/fxaa.cpp`, `src/fxaa.hpp` | Hook on the FXAA plugin: the FXAA pass at any post processing setting |
 | `src/frame_rate.cpp`, `src/frame_rate.hpp` | Hook on the frame wait setter: the optional 60 fps unlock |

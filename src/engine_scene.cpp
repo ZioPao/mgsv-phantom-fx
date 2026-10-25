@@ -2,6 +2,7 @@
 
 #include "device_check.hpp"
 #include "engine_brush.hpp"
+#include "game_code.hpp"
 #include "game_memory.hpp"
 #include "game_loop.hpp"
 
@@ -779,19 +780,16 @@ std::string hook() noexcept
 {
     if (!supportedBuild()) return "Unknown game build: the ray-traced scene has none of the game's models.";
 
-    base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    base = reinterpret_cast<std::uintptr_t>(game_code::image());
     for (const auto rva : VisibilityTestRvas)
         if (std::memcmp(reinterpret_cast<const void*>(base + rva), VisibilityTestStart, sizeof(VisibilityTestStart)))
             return "The visibility tests have unexpected code: the ray-traced scene has none of the game's models.";
 
     for (std::size_t i = 0; i < std::size(VisibilityTestRvas); ++i)
     {
-        auto* target = reinterpret_cast<void*>(base + VisibilityTestRvas[i]);
-        auto status = MH_CreateHook(target, reinterpret_cast<void*>(Detours[i]), reinterpret_cast<void**>(&originals[i]));
-        if (status == MH_OK) status = MH_EnableHook(target);
-        if (status != MH_OK)
+        if (const auto status = game_code::hookAt(reinterpret_cast<void*>(base + VisibilityTestRvas[i]), Detours[i], originals[i]); status != MH_OK)
         {
-            for (std::size_t j = 0; j <= i; ++j) MH_RemoveHook(reinterpret_cast<void*>(base + VisibilityTestRvas[j]));
+            for (std::size_t j = 0; j < i; ++j) MH_RemoveHook(reinterpret_cast<void*>(base + VisibilityTestRvas[j]));
             return std::string("Hooking the visibility tests failed (") + MH_StatusToString(status) + "): the ray-traced scene has none of the game's models.";
         }
     }
