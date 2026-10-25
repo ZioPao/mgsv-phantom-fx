@@ -49,7 +49,7 @@ constexpr std::size_t PluginModel = 0x90, PluginScale = 0xA8;
 // 64 + column of the brush's grid). The placements start with their groups' range (begin, end), the
 // groups after 24 bytes in, 16 bytes each: the records' address (64 bits), their count (16), the plugin
 // index (8), 1 (8) and a type (32); each record 24 bytes: Y (float), X and Z (16 bits each, around the
-// block's centre, 256 a metre), the rotation (x, y, z, w, halves), the block's id (16 bits), the plugin
+// block's centre, 255 a metre), the rotation (x, y, z, w, halves), the block's id (16 bits), the plugin
 // index (8), the scale (8: 0 to 255 across the plugin's range) and an id (32). A group list ends with
 // others' data, so only records naming their block and group's plugin count (all do in game: 46,359
 // records in 234 groups of 25 blocks, none repeated).
@@ -57,9 +57,12 @@ constexpr std::size_t BlockName = 0xA0, BlockPlacements = 0x98, BlockId = 0xB8;
 constexpr std::size_t FirstGroup = 24, GroupSize = 16, RecordSize = 24;
 constexpr std::uint32_t MaxGroups = 1024, MaxGroupRecords = 65535;
 // The grid, measured in Afghanistan: block ids run 64 a row; 128 m blocks from (-4096, -4096) put the
-// placements on the loaded terrain (their heights match across block edges, median 0.36 m apart).
+// placements on the loaded terrain. X and Z run 255 to the metre, so a block's half is 16,320: every one
+// of 794 rock instances in the clone draws' instance buffers matched its record so (2026-10-25, Africa);
+// read as 256 to the metre, only 2 did, the rest up to 34 cm nearer the block's centre than the game
+// draws them, and the shadow rays met rocks the game shows elsewhere.
 constexpr int GridColumns = 64;
-constexpr float BlockSize = 128, GridOrigin = -4096, UnitsPerMetre = 256;
+constexpr float BlockSize = 128, GridOrigin = -4096, UnitsPerMetre = 255;
 
 using Function = std::uintptr_t (*)(std::uintptr_t, std::uintptr_t);
 std::array<Function, std::size(Functions)> originals{};

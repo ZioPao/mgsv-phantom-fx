@@ -61,14 +61,25 @@ struct Texture
     DXGI_FORMAT format{};
 };
 
+// A vertex buffer slot past the first, copied from its bound offset: an instanced draw's per-instance
+// data is in one of them (the clone shaders' matrix rows, TEXCOORD2 to 4).
+struct Stream
+{
+    UINT slot{}, stride{};
+    Microsoft::WRL::ComPtr<ID3D11Buffer> data;
+};
+
 // What a dumped indexed draw drew, copied into staging buffers on the context that drew it, in its
-// order: the draw's indices, and the vertex buffer from its bound offset. The light passes' volumes
-// are clip-space vertices the engine writes each frame, so only this shows their shape.
+// order: the draw's indices, the vertex buffer from its bound offset, and the other bound slots. The
+// light passes' volumes are clip-space vertices the engine writes each frame, so only this shows their
+// shape.
 struct Vertices
 {
     Microsoft::WRL::ComPtr<ID3D11Buffer> indices, vertices;
     UINT indexSize{}, stride{}, count{};
     INT base{};
+    std::vector<Stream> streams;
+    UINT instances{}, firstInstance{};
 };
 
 struct Line
@@ -443,6 +454,29 @@ void save(std::uint64_t call, const Vertices& drawn)
     }
 
     file << "in front: x " << low[0] << " to " << high[0] << ", y " << low[1] << " to " << high[1] << "; " << behind << " behind the eye\n";
+    if (drawn.streams.empty()) return;
+
+    // <call>-streams.txt: each other slot's elements from its bound offset as floats, a line each.
+    std::ofstream streams(dumpDirectory / (std::to_string(call) + "-streams.txt"), std::ios::trunc);
+    streams << drawn.instances << " instances from " << drawn.firstInstance << '\n';
+    for (const auto& stream : drawn.streams)
+    {
+        const auto bytes = read(stream.data.Get());
+        const std::size_t rows = bytes.size() / stream.stride;
+        streams << "slot " << stream.slot << ", stride " << stream.stride << ", " << rows << " elements\n";
+        for (std::size_t row = 0; row < rows; ++row)
+        {
+            streams << row << ':';
+            for (UINT at = 0; at + 4 <= stream.stride; at += 4)
+            {
+                float value{};
+                std::memcpy(&value, bytes.data() + row * stream.stride + at, 4);
+                streams << ' ' << value;
+            }
+
+            streams << '\n';
+        }
+    }
 }
 
 // Saves what executed command lists left; call with recordMutex held, on the immediate context.
@@ -545,6 +579,21 @@ Vertices copyVertices(ID3D11DeviceContext* context, UINT count, UINT first, INT 
         count, base};
     if (!drawn.indices || !drawn.vertices) return {};
 
+    for (UINT slot = 1; slot < D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT; ++slot)
+    {
+        Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
+        UINT slotStride{}, slotOffset{};
+        context->IAGetVertexBuffers(slot, 1, buffer.GetAddressOf(), &slotStride, &slotOffset);
+        if (!buffer || !slotStride) continue;
+
+        D3D11_BUFFER_DESC desc{};
+        buffer->GetDesc(&desc);
+        if (slotOffset >= desc.ByteWidth) continue;
+
+        if (auto copy = copyToStaging(context, buffer.Get(), slotOffset, std::min(MostVertexBytes, desc.ByteWidth - slotOffset)))
+            drawn.streams.push_back({slot, slotStride, std::move(copy)});
+    }
+
     return drawn;
 }
 
@@ -615,6 +664,7 @@ struct IndexRange
 {
     UINT count{}, first{};
     INT base{};
+    UINT instances{}, firstInstance{};
 };
 
 // One line per call: what it is, then the shaders and every bound input and output. Calls named
@@ -675,7 +725,12 @@ void recordCall(command_list* list, std::string line, bool compute, const IndexR
     if (dump != Dump::None)
     {
         entry.text += constantsOf("vs", vertexConstants, context) + constantsOf(stage, constants, context);
-        if (indexed) entry.vertices = copyVertices(context, indexed->count, indexed->first, indexed->base);
+        if (indexed)
+        {
+            entry.vertices = copyVertices(context, indexed->count, indexed->first, indexed->base);
+            entry.vertices.instances = indexed->instances;
+            entry.vertices.firstInstance = indexed->firstInstance;
+        }
     }
 
     if (dump == Dump::Everything)
@@ -821,7 +876,7 @@ bool onDrawIndexed(command_list* list, uint32_t indices, uint32_t instances, uin
 {
     if (capture != Capture::Off)
     {
-        const IndexRange range{indices, first, offset};
+        const IndexRange range{indices, first, offset, instances, firstInstance};
         recordCall(list, "draw_indexed " + std::to_string(indices) + " x" + std::to_string(instances) + " from " + std::to_string(first)
             + " base " + std::to_string(offset) + (firstInstance ? " instance " + std::to_string(firstInstance) : ""), false, &range);
     }
