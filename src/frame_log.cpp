@@ -620,25 +620,7 @@ std::string constantsOf(const char* stage, Bound<ID3D11Buffer, Count>& buffers, 
         {
             D3D11_BUFFER_DESC desc{};
             buffer->GetDesc(&desc);
-            D3D11_BUFFER_DESC stagingDesc{desc.ByteWidth, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ};
-            ID3D11Device* device{};
-            context->GetDevice(&device);
-            ID3D11Buffer* staging{};
-            if (SUCCEEDED(device->CreateBuffer(&stagingDesc, nullptr, &staging)))
-            {
-                context->CopyResource(staging, buffer);
-                D3D11_MAPPED_SUBRESOURCE mapped{};
-                if (SUCCEEDED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped)))
-                {
-                    const auto* data = static_cast<const std::uint8_t*>(mapped.pData);
-                    contents.assign(data, data + desc.ByteWidth);
-                    context->Unmap(staging, 0);
-                }
-
-                staging->Release();
-            }
-
-            device->Release();
+            if (const auto staging = copyToStaging(context, buffer, 0, desc.ByteWidth)) contents = read(staging.Get());
             text += " (read back)";
         }
 
@@ -1084,6 +1066,40 @@ void onDestroyCommandList(command_list* list)
 
     pending.erase(found);
 }
+
+template<reshade::addon_event Event> void subscribe(bool on, typename reshade::addon_event_traits<Event>::decl callback)
+{
+    if (on) reshade::register_event<Event>(callback);
+    else reshade::unregister_event<Event>(callback);
+}
+
+// One list for both, so what install registers is what uninstall removes.
+void subscribe(bool on)
+{
+    subscribe<reshade::addon_event::init_pipeline>(on, onInitPipeline);
+    subscribe<reshade::addon_event::destroy_pipeline>(on, onDestroyPipeline);
+    subscribe<reshade::addon_event::present>(on, onPresent);
+    subscribe<reshade::addon_event::reshade_present>(on, onReshadePresent);
+    subscribe<reshade::addon_event::draw>(on, onDraw);
+    subscribe<reshade::addon_event::draw_indexed>(on, onDrawIndexed);
+    subscribe<reshade::addon_event::dispatch>(on, onDispatch);
+    subscribe<reshade::addon_event::draw_or_dispatch_indirect>(on, onIndirect);
+    subscribe<reshade::addon_event::clear_render_target_view>(on, onClearRenderTarget);
+    subscribe<reshade::addon_event::clear_depth_stencil_view>(on, onClearDepthStencil);
+    subscribe<reshade::addon_event::clear_unordered_access_view_uint>(on, onClearUnorderedAccessUint);
+    subscribe<reshade::addon_event::clear_unordered_access_view_float>(on, onClearUnorderedAccessFloat);
+    subscribe<reshade::addon_event::copy_resource>(on, onCopyResource);
+    subscribe<reshade::addon_event::copy_buffer_region>(on, onCopyBufferRegion);
+    subscribe<reshade::addon_event::copy_texture_region>(on, onCopyTextureRegion);
+    subscribe<reshade::addon_event::resolve_texture_region>(on, onResolveTextureRegion);
+    subscribe<reshade::addon_event::update_texture_region_command>(on, onUpdateTextureRegion);
+    subscribe<reshade::addon_event::generate_mipmaps>(on, onGenerateMipmaps);
+    subscribe<reshade::addon_event::map_buffer_region>(on, onMapBuffer);
+    subscribe<reshade::addon_event::unmap_buffer_region>(on, onUnmapBuffer);
+    subscribe<reshade::addon_event::update_buffer_region_command>(on, onUpdateBufferRegion);
+    subscribe<reshade::addon_event::execute_secondary_command_list>(on, onExecuteSecondary);
+    subscribe<reshade::addon_event::destroy_command_list>(on, onDestroyCommandList);
+}
 }
 
 void install(const std::filesystem::path& addonDirectory)
@@ -1096,29 +1112,7 @@ void install(const std::filesystem::path& addonDirectory)
     saveShaders = std::filesystem::is_directory(outputDirectory / "shaders", error);
     log("Frame log on: F10 records a frame into PhantomFX-frame-log.");
 
-    reshade::register_event<reshade::addon_event::init_pipeline>(onInitPipeline);
-    reshade::register_event<reshade::addon_event::destroy_pipeline>(onDestroyPipeline);
-    reshade::register_event<reshade::addon_event::present>(onPresent);
-    reshade::register_event<reshade::addon_event::reshade_present>(onReshadePresent);
-    reshade::register_event<reshade::addon_event::draw>(onDraw);
-    reshade::register_event<reshade::addon_event::draw_indexed>(onDrawIndexed);
-    reshade::register_event<reshade::addon_event::dispatch>(onDispatch);
-    reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(onIndirect);
-    reshade::register_event<reshade::addon_event::clear_render_target_view>(onClearRenderTarget);
-    reshade::register_event<reshade::addon_event::clear_depth_stencil_view>(onClearDepthStencil);
-    reshade::register_event<reshade::addon_event::clear_unordered_access_view_uint>(onClearUnorderedAccessUint);
-    reshade::register_event<reshade::addon_event::clear_unordered_access_view_float>(onClearUnorderedAccessFloat);
-    reshade::register_event<reshade::addon_event::copy_resource>(onCopyResource);
-    reshade::register_event<reshade::addon_event::copy_buffer_region>(onCopyBufferRegion);
-    reshade::register_event<reshade::addon_event::copy_texture_region>(onCopyTextureRegion);
-    reshade::register_event<reshade::addon_event::resolve_texture_region>(onResolveTextureRegion);
-    reshade::register_event<reshade::addon_event::update_texture_region_command>(onUpdateTextureRegion);
-    reshade::register_event<reshade::addon_event::generate_mipmaps>(onGenerateMipmaps);
-    reshade::register_event<reshade::addon_event::map_buffer_region>(onMapBuffer);
-    reshade::register_event<reshade::addon_event::unmap_buffer_region>(onUnmapBuffer);
-    reshade::register_event<reshade::addon_event::update_buffer_region_command>(onUpdateBufferRegion);
-    reshade::register_event<reshade::addon_event::execute_secondary_command_list>(onExecuteSecondary);
-    reshade::register_event<reshade::addon_event::destroy_command_list>(onDestroyCommandList);
+    subscribe(true);
 }
 
 bool installed()
@@ -1142,29 +1136,7 @@ void uninstall()
     if (!active) return;
 
     active = false;
-    reshade::unregister_event<reshade::addon_event::init_pipeline>(onInitPipeline);
-    reshade::unregister_event<reshade::addon_event::destroy_pipeline>(onDestroyPipeline);
-    reshade::unregister_event<reshade::addon_event::present>(onPresent);
-    reshade::unregister_event<reshade::addon_event::reshade_present>(onReshadePresent);
-    reshade::unregister_event<reshade::addon_event::draw>(onDraw);
-    reshade::unregister_event<reshade::addon_event::draw_indexed>(onDrawIndexed);
-    reshade::unregister_event<reshade::addon_event::dispatch>(onDispatch);
-    reshade::unregister_event<reshade::addon_event::draw_or_dispatch_indirect>(onIndirect);
-    reshade::unregister_event<reshade::addon_event::clear_render_target_view>(onClearRenderTarget);
-    reshade::unregister_event<reshade::addon_event::clear_depth_stencil_view>(onClearDepthStencil);
-    reshade::unregister_event<reshade::addon_event::clear_unordered_access_view_uint>(onClearUnorderedAccessUint);
-    reshade::unregister_event<reshade::addon_event::clear_unordered_access_view_float>(onClearUnorderedAccessFloat);
-    reshade::unregister_event<reshade::addon_event::copy_resource>(onCopyResource);
-    reshade::unregister_event<reshade::addon_event::copy_buffer_region>(onCopyBufferRegion);
-    reshade::unregister_event<reshade::addon_event::copy_texture_region>(onCopyTextureRegion);
-    reshade::unregister_event<reshade::addon_event::resolve_texture_region>(onResolveTextureRegion);
-    reshade::unregister_event<reshade::addon_event::update_texture_region_command>(onUpdateTextureRegion);
-    reshade::unregister_event<reshade::addon_event::generate_mipmaps>(onGenerateMipmaps);
-    reshade::unregister_event<reshade::addon_event::map_buffer_region>(onMapBuffer);
-    reshade::unregister_event<reshade::addon_event::unmap_buffer_region>(onUnmapBuffer);
-    reshade::unregister_event<reshade::addon_event::update_buffer_region_command>(onUpdateBufferRegion);
-    reshade::unregister_event<reshade::addon_event::execute_secondary_command_list>(onExecuteSecondary);
-    reshade::unregister_event<reshade::addon_event::destroy_command_list>(onDestroyCommandList);
+    subscribe(false);
 
     std::lock_guard lock(recordMutex);
     record.close();

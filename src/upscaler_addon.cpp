@@ -153,11 +153,9 @@ void onInitCommandQueue(command_queue* queue)
         + hex(reinterpret_cast<std::uintptr_t>(wrapper)) + ".");
 }
 
-void onDestroyCommandQueue(command_queue* queue)
+// The performance measurement first: one running gives the effects back.
+void detachEffects()
 {
-    if (queue->get_immediate_command_list() != immediateList) return;
-
-    // First: a measurement running gives the effects back.
     performance::detach();
     upscaler::detach();
     shadows::detach();
@@ -167,6 +165,13 @@ void onDestroyCommandQueue(command_queue* queue)
     atmosphere::detach();
     focus::detach();
     hdr::detach();
+}
+
+void onDestroyCommandQueue(command_queue* queue)
+{
+    if (queue->get_immediate_command_list() != immediateList) return;
+
+    detachEffects();
     immediateList = nullptr;
 }
 
@@ -611,15 +616,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
 extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshadeModule)
 {
     // ReShade unloads add-ons when its last device goes; the next load reports the game's device again.
-    performance::detach();
-    upscaler::detach();
-    shadows::detach();
-    indirect_light::detach();
-    global_illumination::detach();
-    local_lights::detach();
-    atmosphere::detach();
-    focus::detach();
-    hdr::detach();
+    detachEffects();
     photo_mode::leave();
     // Removes every engine hook, so the game keeps running without the add-on.
     MH_Uninitialize();

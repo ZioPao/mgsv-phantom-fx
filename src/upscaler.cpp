@@ -246,9 +246,7 @@ ComPtr<ID3D11DeviceContext> immediate, ngxContext;
 ComPtr<ID3D11DeviceContext1> context1;
 ComPtr<ID3DDeviceContextState> ownState;
 ComPtr<ID3D11ComputeShader> inputShader;
-ComPtr<ID3D11VertexShader> fullScreenShader, stretchVertexShader;
-ComPtr<ID3D11PixelShader> compositeShader, stretchShader;
-ComPtr<ID3D11SamplerState> linearSampler;
+ComPtr<ID3D11PixelShader> compositeShader;
 ComPtr<ID3D11Buffer> inputConstants, compositeConstants;
 ComPtr<ID3D11Texture2D> exposureTexture; // 1x1, the constant 1 DLSS is told as the exposure
 Target colorTarget, depthTarget, motionTarget, outputTarget;
@@ -360,6 +358,16 @@ void configureAtmosphere()
     });
 }
 
+// Call with settingsMutex held. Everything the settings, the diagnostics, the left-out effects and the
+// enhancements switch decide together.
+void configureEffects()
+{
+    updateReplacing();
+    configureShadows();
+    configureIndirectLight();
+    configureAtmosphere();
+}
+
 // Call with settingsMutex held.
 void configurePhotoMode()
 {
@@ -411,6 +419,7 @@ void fail(std::string_view reason)
     failure = reason;
     {
         std::lock_guard lock(settingsMutex);
+        // Only the upscaler's own state changed, which the shadows' turn pattern follows.
         updateReplacing();
         configureShadows();
     }
@@ -568,19 +577,7 @@ void ensurePipeline()
     if (ownState) return;
 
     inputShader = computeShader(device.Get(), shaders::Inputs, "dlss-inputs");
-    auto code = compile(shaders::FullScreen, "dlss-full-screen", "vs_5_0");
-    check(device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, fullScreenShader.GetAddressOf()),
-        "Creating the DLSS full-screen shader");
     compositeShader = pixelShader(device.Get(), shaders::Composite, "dlss-composite");
-    code = compile(shaders::StretchVertex, "dlss-stretch-vertex", "vs_5_0");
-    check(device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, stretchVertexShader.GetAddressOf()),
-        "Creating the stretch vertex shader");
-    stretchShader = pixelShader(device.Get(), shaders::Stretch, "dlss-stretch");
-    D3D11_SAMPLER_DESC sampler{};
-    sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sampler.MaxLOD = D3D11_FLOAT32_MAX;
-    check(device->CreateSamplerState(&sampler, linearSampler.GetAddressOf()), "Creating the stretch sampler");
     inputConstants = constantBuffer(sizeof(InputConstants));
     compositeConstants = constantBuffer(sizeof(CompositeConstants));
 
@@ -926,34 +923,35 @@ struct PostDraw
 };
 thread_local PostDraw postDraw;
 
-// The stretch the recording threads draw with, made once.
-struct RecordingShaders
+// The full-screen triangle and the bilinear stretch, made once for the immediate context and the
+// recording threads. The composite draws with the triangle too: its pixel shader reads only SV_Position.
+struct StretchShaders
 {
     ComPtr<ID3D11VertexShader> vertex;
     ComPtr<ID3D11PixelShader> pixel;
     ComPtr<ID3D11SamplerState> sampler;
 };
-std::mutex recordingShaderMutex;
-std::shared_ptr<const RecordingShaders> recordingShaders;
+std::mutex stretchShaderMutex;
+std::shared_ptr<const StretchShaders> stretchShaders;
 
-std::shared_ptr<const RecordingShaders> stretchForRecording()
+std::shared_ptr<const StretchShaders> ensureStretch()
 {
-    std::lock_guard lock(recordingShaderMutex);
-    if (recordingShaders || !device) return recordingShaders;
+    std::lock_guard lock(stretchShaderMutex);
+    if (stretchShaders || !device) return stretchShaders;
 
-    auto made = std::make_shared<RecordingShaders>();
-    const auto code = compile(shaders::StretchVertex, "post-stretch-vertex", "vs_5_0");
+    auto made = std::make_shared<StretchShaders>();
+    const auto code = compile(shaders::StretchVertex, "stretch-vertex", "vs_5_0");
     check(device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, made->vertex.GetAddressOf()),
-        "Creating the post-processing stretch");
-    made->pixel = pixelShader(device.Get(), shaders::Stretch, "post-stretch");
+        "Creating the stretch vertex shader");
+    made->pixel = pixelShader(device.Get(), shaders::Stretch, "stretch");
     D3D11_SAMPLER_DESC sampler{};
     sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     sampler.MaxLOD = D3D11_FLOAT32_MAX;
-    check(device->CreateSamplerState(&sampler, made->sampler.GetAddressOf()), "Creating the post-processing stretch");
-    recordingShaders = std::move(made);
+    check(device->CreateSamplerState(&sampler, made->sampler.GetAddressOf()), "Creating the stretch sampler");
+    stretchShaders = std::move(made);
 
-    return recordingShaders;
+    return stretchShaders;
 }
 
 // The graded image at the output size, stretched into the render-size scene target on `context`. The
@@ -962,7 +960,7 @@ std::shared_ptr<const RecordingShaders> stretchForRecording()
 void drawGradedScene(ID3D11DeviceContext* context, ID3D11RenderTargetView* scene)
 {
     const auto output = ui_redirect::output();
-    const auto stretch = stretchForRecording();
+    const auto stretch = ensureStretch();
     if (!output.view || !stretch) return;
 
     ComPtr<ID3D11InputLayout> layout;
@@ -1082,7 +1080,7 @@ void runComposite(ID3D11RenderTargetView* destination, ID3D11ShaderResourceView*
                                                                : nullptr;
     ID3D11ShaderResourceView* inputs[]{outputTarget.view.Get(), motionTarget.view.Get(), objectVelocity, shadowRays};
     immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    immediate->VSSetShader(fullScreenShader.Get(), nullptr, 0);
+    immediate->VSSetShader(ensureStretch()->vertex.Get(), nullptr, 0);
     immediate->PSSetShader(compositeShader.Get(), nullptr, 0);
     immediate->PSSetConstantBuffers(0, 1, compositeConstants.GetAddressOf());
     immediate->PSSetShaderResources(0, static_cast<UINT>(std::size(inputs)), inputs);
@@ -1095,14 +1093,15 @@ void runComposite(ID3D11RenderTargetView* destination, ID3D11ShaderResourceView*
 // would have shown it, so the UI never draws over a stale frame.
 void stretchToUiTarget(const ui_redirect::Output& output)
 {
+    const auto stretch = ensureStretch();
     inOwnState([&]
     {
         const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(output.width), static_cast<float>(output.height), 0, 1};
         immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        immediate->VSSetShader(stretchVertexShader.Get(), nullptr, 0);
-        immediate->PSSetShader(stretchShader.Get(), nullptr, 0);
+        immediate->VSSetShader(stretch->vertex.Get(), nullptr, 0);
+        immediate->PSSetShader(stretch->pixel.Get(), nullptr, 0);
         immediate->PSSetShaderResources(0, 1, output.scene.GetAddressOf());
-        immediate->PSSetSamplers(0, 1, linearSampler.GetAddressOf());
+        immediate->PSSetSamplers(0, 1, stretch->sampler.GetAddressOf());
         immediate->OMSetRenderTargets(1, output.target.GetAddressOf(), nullptr);
         immediate->RSSetViewports(1, &viewport);
         immediate->Draw(3, 0);
@@ -1451,11 +1450,8 @@ void initialize(const std::filesystem::path& directory, bool supportedBuild) noe
         log(std::string("Could not load the DLSS settings: ") + error.what());
     }
 
-    updateReplacing();
+    configureEffects();
     frame_rate::setUnlocked(settings.unlockFps);
-    configureShadows();
-    configureIndirectLight();
-    configureAtmosphere();
     configurePhotoMode();
     configureHdr();
     configureDrawDistance();
@@ -1513,16 +1509,12 @@ void detach() noexcept
     sceneResource.Reset();
     sceneView.Reset();
     {
-        std::lock_guard shaderLock(recordingShaderMutex);
-        recordingShaders.reset();
+        std::lock_guard shaderLock(stretchShaderMutex);
+        stretchShaders.reset();
     }
 
     inputShader.Reset();
-    fullScreenShader.Reset();
     compositeShader.Reset();
-    stretchVertexShader.Reset();
-    stretchShader.Reset();
-    linearSampler.Reset();
     inputConstants.Reset();
     compositeConstants.Reset();
     ownState.Reset();
@@ -1953,11 +1945,8 @@ void applySettings(const Settings& wanted)
     std::lock_guard lock(settingsMutex);
     settings = wanted;
     unsavedChange = GetTickCount64();
-    updateReplacing();
+    configureEffects();
     frame_rate::setUnlocked(settings.unlockFps);
-    configureShadows();
-    configureIndirectLight();
-    configureAtmosphere();
     configurePhotoMode();
     configureHdr();
     configureDrawDistance();
@@ -1973,10 +1962,7 @@ void applyDiagnostics(const Diagnostics& options)
 {
     std::lock_guard lock(settingsMutex);
     diagnostics = options;
-    updateReplacing();
-    configureShadows();
-    configureIndirectLight();
-    configureAtmosphere();
+    configureEffects();
 }
 
 bool enhancementsOn()
@@ -1989,9 +1975,7 @@ void setEnhancements(bool on)
 {
     std::lock_guard lock(settingsMutex);
     enhancements = on;
-    configureShadows();
-    configureIndirectLight();
-    configureAtmosphere();
+    configureEffects();
     log(on ? "Visual enhancements on." : "Visual enhancements off.");
 }
 
@@ -2004,9 +1988,6 @@ void leaveOut(const LeftOut& effects)
 {
     std::lock_guard lock(settingsMutex);
     leftOut = effects;
-    updateReplacing();
-    configureShadows();
-    configureIndirectLight();
-    configureAtmosphere();
+    configureEffects();
 }
 }

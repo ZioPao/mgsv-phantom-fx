@@ -72,15 +72,6 @@ void main(uint2 pixel : SV_DispatchThreadID)
 }
 )";
 
-// A triangle that covers the render target.
-inline constexpr char FullScreen[] = R"(
-float4 main(uint vertex : SV_VertexID) : SV_Position
-{
-    float2 uv = float2((vertex << 1) & 2, vertex & 2);
-    return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
-}
-)";
-
 // Writes the upscaled output, sharpened with AMD FidelityFX RCAS (FsrRcasF in ffx_fsr1.h, MIT:
 // AMD-FidelityFX-LICENSE.txt), whose noise filter is left out. RCAS expects perceptual values in 0 to
 // 1, which the sRGB-encoded LDR colour is. Alpha is 0; the grading writes its own.
