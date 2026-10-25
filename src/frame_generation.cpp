@@ -24,8 +24,6 @@ namespace phantom_fx::frame_generation
 {
 namespace
 {
-// The NGX project the upscaler's DLSS runs under (upscaler.cpp).
-constexpr char ProjectId[] = "3f6c2a91-7d4e-4b8a-a1c5-9e0d2b7f4c68";
 const sl::ViewportHandle Viewport{0u};
 
 // The Streamline functions the add-on calls, from sl.interposer.dll and the plugins it loads.
@@ -299,7 +297,7 @@ bool start(const std::filesystem::path& directory, IDXGIAdapter* adapter) noexce
         preferences.numFeaturesToLoad = static_cast<std::uint32_t>(std::size(features));
         preferences.engine = sl::EngineType::eCustom;
         preferences.engineVersion = "Fox Engine 1.0.15";
-        preferences.projectId = ProjectId;
+        preferences.projectId = NgxProjectId;
         check(api.init(preferences, sl::kSDKVersion), "Starting Streamline");
         initialized = true;
 
