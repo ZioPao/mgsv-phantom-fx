@@ -30,7 +30,6 @@ struct Inputs
 // On the thread executing Direct3D work, as everything below. Loads AMD's runtime from `directory`
 // and makes the Direct3D 12 device on `device`'s GPU. Throws when FSR cannot run here.
 void start(ID3D11Device* device, const std::filesystem::path& directory);
-bool started() noexcept;
 // Upscales at this point of the device's immediate context: Direct3D 12 waits for the work recorded so
 // far, and the work recorded after waits for the output. Returns true when FSR started a new history
 // (a new context). Throws on failure.

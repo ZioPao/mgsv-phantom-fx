@@ -24,7 +24,7 @@ using Microsoft::WRL::ComPtr;
 enum class Kernel : std::uint8_t
 {
     // gi_scene.hlsl
-    ClearNewGeometries, DebugScene, ClearOutput, TerrainGrid, Skin,
+    ClearNewGeometries, DebugScene, TerrainGrid, Skin,
     // gi_light.hlsl
     ClearCounters, GenerateDispatch, PrepareGuides, TraceLight, LearnAlbedo, PurgeTiles, PopulateMultibounceCells, PopulateCells, UpdateTiles,
     UpdateMultibounceCells, ResolveLight, UpdateFoliageMemory, CompositeLight,
@@ -140,17 +140,6 @@ public:
         device->CreateShaderResourceView(resource, &desc, at(slot));
     }
 
-    void textureArray(UINT slot, ID3D12Resource* resource, DXGI_FORMAT format, UINT slices)
-    {
-        D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
-        desc.Format = format;
-        desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-        desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        desc.Texture2DArray.MipLevels = 1;
-        desc.Texture2DArray.ArraySize = slices;
-        device->CreateShaderResourceView(resource, &desc, at(slot));
-    }
-
     void buffer(UINT slot, ID3D12Resource* resource, std::uint64_t offset, std::uint64_t stride, std::uint64_t count)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
@@ -260,19 +249,6 @@ public:
     {
         const auto barrier = gi_d3d12::transition(resource, before, after);
         list.ResourceBarrier(1, &barrier);
-    }
-
-    // Copies between two buffers kept in the unordered access state.
-    void copyBuffer(ID3D12Resource* destination, ID3D12Resource* source, std::uint64_t bytes)
-    {
-        D3D12_RESOURCE_BARRIER before[]{
-            gi_d3d12::transition(destination, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST),
-            gi_d3d12::transition(source, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
-        };
-        list.ResourceBarrier(static_cast<UINT>(std::size(before)), before);
-        list.CopyBufferRegion(destination, 0, source, 0, bytes);
-        for (auto& barrier : before) std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-        list.ResourceBarrier(static_cast<UINT>(std::size(before)), before);
     }
 
     ID3D12GraphicsCommandList4& commands() { return list; }

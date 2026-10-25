@@ -469,11 +469,6 @@ Capabilities capabilities() noexcept
     return {maxMultiplier, dynamicSupported};
 }
 
-bool running() noexcept
-{
-    return attached;
-}
-
 std::string status()
 {
     std::lock_guard lock(statusMutex);

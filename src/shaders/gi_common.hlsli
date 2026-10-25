@@ -48,20 +48,11 @@ SamplerState g_WrapSampler : register(s2);
 
 // ---- Constants ----
 
-#define QUARTER_PI  0.78539816339744830961566084581988f
-#define HALF_PI     1.5707963267948966192313216916398f
-#define PI          3.1415926535897932384626433832795f
 #define TWO_PI      6.283185307179586476925286766559f
-#define FOUR_PI     12.566370614359172953850573533118f
-#define INV_PI      0.31830988618379067153776752674503f
-#define TWO_INV_PI  0.63661977236758134307553505349006f
 #define FLT_MAX     3.402823466e+38f
 
 // ---- Maths (Capsaicin) ----
 
-float hadd(float2 v) { return v.x + v.y; }
-float hmax(float2 v) { return max(v.x, v.y); }
-float hmin(float2 v) { return min(v.x, v.y); }
 float squared(float v) { return v * v; }
 
 float luminance(float3 color)
@@ -87,16 +78,6 @@ uint xxHash(uint value)
     return ret ^ (ret >> 16);
 }
 
-uint2 packHalf3(float3 value)
-{
-    return uint2(f32tof16(value.x) | (f32tof16(value.y) << 16), f32tof16(value.z));
-}
-
-float3 unpackHalf3(uint2 packed)
-{
-    return float3(f16tof32(packed.x & 0xFFFFu), f16tof32(packed.x >> 16), f16tof32(packed.y & 0xFFFFu));
-}
-
 uint2 packHalf4(float4 value)
 {
     return uint2(f32tof16(value.x) | (f32tof16(value.y) << 16), f32tof16(value.z) | (f32tof16(value.w) << 16));
@@ -119,43 +100,6 @@ float3 unpackNormal(uint packed)
     return float3(value) * (1.0f / 511.0f);
 }
 
-// An equal-area map of the unit square to the hemisphere around +z (Clarberg).
-float3 mapToHemiOctahedron(float2 samples)
-{
-    float2 st = 2.0f * samples - 1.0f;
-    st = float2(st.x + st.y, st.x - st.y) * 0.5f;
-
-    float2 absMapped = abs(st);
-    float distance = 1.0f - hadd(absMapped);
-    float radius = 1.0f - abs(distance);
-
-    float phi = (radius == 0.0f) ? 0.0f : QUARTER_PI * ((absMapped.y - absMapped.x) / radius + 1.0f);
-    float radiusSqr = radius * radius;
-    float sinTheta = radius * sqrt(2.0f - radiusSqr);
-    float sinPhi, cosPhi;
-    sincos(phi, sinPhi, cosPhi);
-    return float3(sinTheta * sign(st.x) * cosPhi, sinTheta * sign(st.y) * sinPhi, sign(distance) * (1.0f - radiusSqr));
-}
-
-float2 mapToHemiOctahedronInverse(float3 direction)
-{
-    float3 absDir = abs(direction);
-
-    float radius = sqrt(1.0f - absDir.z);
-    float a = hmax(absDir.xy);
-    float b = hmin(absDir.xy);
-    b = a == 0.0f ? 0.0f : b / a;
-
-    float phi = atan(b) * TWO_INV_PI;
-    phi = (absDir.x >= absDir.y) ? phi : 1.0f - phi;
-
-    float t = phi * radius;
-    float s = radius - t;
-    float2 st = float2(s, t) * sign(direction).xy;
-    st = float2(st.x + st.y, st.x - st.y);
-    return 0.5f * st + 0.5f;
-}
-
 void GetOrthoVectors(float3 n, out float3 b1, out float3 b2)
 {
     bool sel = abs(n.z) > 0;
@@ -164,18 +108,6 @@ void GetOrthoVectors(float3 n, out float3 b1, out float3 b2)
     b1 = float3(0.0f, -p2.z * k, n.y * k);
     b1 = sel ? b1 : b1.zyx;
     b2 = cross(n, b1);
-}
-
-float3x3 CreateTBN(float3 n)
-{
-    float3 u, v;
-    GetOrthoVectors(n, u, v);
-
-    float3x3 tbn;
-    tbn[0] = u;
-    tbn[1] = v;
-    tbn[2] = n;
-    return transpose(tbn);
 }
 
 // Cosine-weighted direction around `normal` (Shirley).
@@ -300,28 +232,6 @@ void SH_GetCoefficients(float3 direction, out float coefficients[9])
     float fTmpC = 0.5462742152960395f;
     coefficients[8] = fTmpC * fC1;
     coefficients[4] = fTmpC * fS1;
-}
-
-void SH_GetCoefficients_ClampedCosine_Cone(float3 lobe, float coneThetaMax, out float coefficients[9])
-{
-    float sinThetaMax, cosThetaMax;
-    sincos(coneThetaMax, sinThetaMax, cosThetaMax);
-    float sinThetaMax2 = sinThetaMax * sinThetaMax;
-    float sinThetaMax3 = sinThetaMax2 * sinThetaMax;
-    float cosThetaMax3 = cosThetaMax * cosThetaMax * cosThetaMax;
-
-    float band1 = 1.023326707946489f * (1.f - cosThetaMax3);
-    float band2 = (4.f - 3.f * sinThetaMax3) * sinThetaMax2;
-
-    coefficients[0] = 0.886226925452758f * sinThetaMax2;
-    coefficients[1] = -band1 * lobe.y;
-    coefficients[2] = +band1 * lobe.z;
-    coefficients[3] = -band1 * lobe.x;
-    coefficients[4] = +0.8580855308097834f * band2 * lobe.x * lobe.y;
-    coefficients[5] = -0.8580855308097834f * band2 * lobe.y * lobe.z;
-    coefficients[6] = +0.2477079561003757f * band2 * (3.f * lobe.z * lobe.z - 1.f);
-    coefficients[7] = -0.8580855308097834f * band2 * lobe.x * lobe.z;
-    coefficients[8] = +0.4290427654048917f * band2 * (lobe.x * lobe.x - lobe.y * lobe.y);
 }
 
 // ---- The game's motion ----
