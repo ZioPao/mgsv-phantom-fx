@@ -13,12 +13,6 @@ struct Controls
     bool forward{}, back{}, left{}, right{}, up{}, down{}, fast{};
 };
 
-// From the settings.
-struct LensSettings
-{
-    float fNumber{};
-};
-
 // Hooks the camera selector and the game's raw input on the supported build, with MinHook
 // initialised; returns what was done, for the log. Without the hooks photo mode is unavailable;
 // hiding the UI does not need them.
@@ -29,7 +23,8 @@ void toggleUi() noexcept;
 // Photo mode's depth of field blur (F4): on by default; off, everything is sharp. Photo mode sets the
 // game camera's lens, which the game's depth of field reads.
 void toggleBlur() noexcept;
-void configure(const LensSettings& settings) noexcept;
+// The lens's f-number, from the settings.
+void setFNumber(float fNumber) noexcept;
 void setControls(const Controls& controls) noexcept;
 // In photo mode, or hidden with F3: the 2D pass does not draw into the scene.
 bool uiHidden() noexcept;

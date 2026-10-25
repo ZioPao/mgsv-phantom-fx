@@ -216,7 +216,6 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc{};
         desc.Inputs = inputsOf(blas, build.update);
-        desc.Inputs.pGeometryDescs = blas.geometries.data();
         desc.DestAccelerationStructureData = address(blas);
         desc.SourceAccelerationStructureData = build.update ? address(blas) : 0;
         desc.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress() + build.scratch;
@@ -456,16 +455,6 @@ bool Scene::ready(BlasId id) const
     return blas.built;
 }
 
-std::uint32_t Scene::firstGeometry(BlasId id) const
-{
-    return structures[id].firstGeometry;
-}
-
-std::uint64_t Scene::size(BlasId id) const
-{
-    return structures[id].size;
-}
-
 std::vector<std::uint32_t> Scene::takeNewGeometries()
 {
     return std::exchange(newRows, {});
@@ -517,8 +506,7 @@ D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS Scene::inputsOf(const Blas&
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
     inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
     inputs.Flags = blas.use == Use::Static ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION
-        : blas.use == Use::Refit ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE
-                                 : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+                                           : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
     if (update) inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
     inputs.NumDescs = static_cast<UINT>(blas.geometries.size());
     inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;

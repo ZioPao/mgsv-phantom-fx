@@ -11,7 +11,6 @@
 #include <framegeneration/include/dx12/ffx_api_framegeneration_dx12.h>
 #include <atomic>
 #include <mutex>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -46,12 +45,6 @@ ComPtr<ID3D12Resource> hudlessCopy;
 bool generating{}, hdrOutput{};
 std::string version, failure;
 LONGLONG lastFrame{};
-
-void logOnce(const std::string& message)
-{
-    static std::set<std::string> logged;
-    if (logged.insert(message).second) log(message);
-}
 
 D3D12_RESOURCE_BARRIER transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
 {

@@ -133,8 +133,8 @@ UINT byteWidth(ID3D11Buffer* buffer)
 }
 
 // Notes a skinned mesh's draw: its model's place in the world, the view's inverse (cVSScene m_view, c8
-// to c10, a rotation and a translation) times m_viewWorld's translation, as m_world is not kept current
-// (gi_capture's worldOf until stage 5); the draw's index range; the bones it drew with.
+// to c10, a rotation and a translation) times m_viewWorld's translation, as m_world is not kept current;
+// the draw's index range; the bones it drew with.
 void noteBones(ID3D11DeviceContext* context, const float* scene, const float* object, const ui_redirect::DrawCall& call)
 {
     ComPtr<ID3D11Buffer> buffer;

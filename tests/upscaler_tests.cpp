@@ -42,6 +42,22 @@ void write(const fs::path& path, std::string_view text)
     expect(static_cast<bool>(output), "Write the test fixture.");
 }
 
+// Over a valid saved file, so a rejected save can be seen to leave it as it was.
+bool saveRejected(const fs::path& path, const Settings& saved, const Settings& invalid)
+{
+    saveSettings(path, saved);
+    try
+    {
+        saveSettings(path, invalid);
+    }
+    catch (const std::exception&)
+    {
+        return loadSettings(path) == saved;
+    }
+
+    return false;
+}
+
 void settingsPersist(const fs::path& root)
 {
     const auto path = root / L"PhantomFX.ini";
@@ -99,20 +115,7 @@ void settingsPersist(const fs::path& root)
              Settings{.sharpness = std::numeric_limits<float>::quiet_NaN()}, Settings{.sharpness = 2}, Settings{.customScale = 2},
              Settings{.mipBiasOffset = 3}, Settings{.frameGeneration = FrameGeneration::Count}, Settings{.occlusionRadius = 0},
              Settings{.sunSize = 0}, Settings{.occlusionStrength = 4}, Settings{.indirectLightRadius = 5}, Settings{.indirectLightStrength = -1}})
-    {
-        saveSettings(path, chosen);
-        bool rejected = false;
-        try
-        {
-            saveSettings(path, invalid);
-        }
-        catch (const std::exception&)
-        {
-            rejected = true;
-        }
-
-        expect(rejected && loadSettings(path) == chosen, "Invalid settings cannot replace valid saved ones.");
-    }
+        expect(saveRejected(path, chosen, invalid), "Invalid settings cannot replace valid saved ones.");
 }
 
 void effectPresets()
@@ -392,18 +395,7 @@ void photoModeSettingsPersist(const fs::path& root)
     write(path, "f_number=0.1\n");
     expect(loadSettings(path).fNumber == Settings::MinFNumber, "An f-stop out of range is clamped.");
 
-    saveSettings(path, chosen);
-    bool rejected = false;
-    try
-    {
-        saveSettings(path, Settings{.fNumber = 64});
-    }
-    catch (const std::exception&)
-    {
-        rejected = true;
-    }
-
-    expect(rejected && loadSettings(path) == chosen, "An invalid f-stop cannot replace a valid saved one.");
+    expect(saveRejected(path, chosen, Settings{.fNumber = 64}), "An invalid f-stop cannot replace a valid saved one.");
 }
 
 void hdrSettingsPersist(const fs::path& root)
@@ -422,20 +414,7 @@ void hdrSettingsPersist(const fs::path& root)
 
     for (const auto& invalid : {Settings{.peakNits = 100}, Settings{.peakNits = std::numeric_limits<float>::quiet_NaN()},
              Settings{.paperWhiteNits = std::numeric_limits<float>::infinity()}})
-    {
-        saveSettings(path, chosen);
-        bool rejected = false;
-        try
-        {
-            saveSettings(path, invalid);
-        }
-        catch (const std::exception&)
-        {
-            rejected = true;
-        }
-
-        expect(rejected && loadSettings(path) == chosen, "Invalid HDR settings cannot replace valid saved ones.");
-    }
+        expect(saveRejected(path, chosen, invalid), "Invalid HDR settings cannot replace valid saved ones.");
 }
 
 // HDR clamps the 2D pass's writes by patching its bytecode, which Direct3D takes only with a correct

@@ -356,9 +356,9 @@ void toggleBlur() noexcept
     blur = !blur;
 }
 
-void configure(const LensSettings& settings) noexcept
+void setFNumber(float number) noexcept
 {
-    fNumber = settings.fNumber;
+    fNumber = number;
 }
 
 void setControls(const Controls& controls) noexcept

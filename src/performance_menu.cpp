@@ -48,8 +48,8 @@ void drawPresets(upscaler::Settings& wanted)
     const auto current = upscaler::presetOf(wanted);
     const int selected = current ? static_cast<int>(std::ranges::find(presets, *current) - std::begin(presets)) : -1;
     const int pressed = fxui::segmented("Preset", selected, options,
-        "Switches the effects in every section at once. Both also unlock the frame rate and turn on the volumetric fog in the physical look; "
-        "neither has depth of field. The upscaler, HDR and each effect's own settings stay as they are.");
+        "Switches the effects in every section at once. Both also unlock the frame rate and turn on the volumetric fog in the physical look. "
+        "The upscaler, HDR and each effect's own settings stay as they are.");
     if (pressed >= 0) upscaler::applyPreset(wanted, presets[pressed]);
 }
 }

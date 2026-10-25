@@ -33,7 +33,6 @@
 #include "ClassifyShadowTiles.h"
 #include "ClearCounters.h"
 #include "ClearNewGeometries.h"
-#include "ClearOutput.h"
 #include "CompositeLight.h"
 #include "DebugScene.h"
 #include "DebugShadows.h"
@@ -105,7 +104,7 @@ constexpr std::uint32_t TerrainRefreshFrames = 120;
 constexpr std::uint32_t TerrainRingVertices = GI_TERRAIN_CELLS * GI_TERRAIN_CELLS * 6;
 
 // The kernels' DXIL in gi_d3d12::Kernel's order.
-constexpr std::span<const unsigned char> Bytecode[]{GI_ClearNewGeometries, GI_DebugScene, GI_ClearOutput, GI_TerrainGrid, GI_Skin,
+constexpr std::span<const unsigned char> Bytecode[]{GI_ClearNewGeometries, GI_DebugScene, GI_TerrainGrid, GI_Skin,
     GI_ClearCounters, GI_GenerateDispatch, GI_PrepareGuides, GI_TraceLight, GI_LearnAlbedo, GI_PurgeTiles, GI_PopulateMultibounceCells,
     GI_PopulateCells, GI_UpdateTiles, GI_UpdateMultibounceCells, GI_ResolveLight, GI_UpdateFoliageMemory, GI_CompositeLight, GI_TraceSunShadows, GI_ClassifyShadowTiles,
     GI_FilterShadows, GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows};
@@ -662,6 +661,7 @@ void updateModels(State& s, const Frame& frame, Result& result)
         if (const auto model = s.models.find(character.hash); model != s.models.end()) model->second.lastPlaced = frame.frameIndex;
 
     s.modelsWaiting = 0;
+    s.modelsTooLarge = 0;
     std::vector<std::uint8_t> bytes;
     for (auto it = s.models.begin(); it != s.models.end();)
     {
@@ -930,15 +930,13 @@ GIFrameConstants constantsOf(const Frame& frame, std::uint32_t newGeometries, st
     copyMatrix(constants.viewProjection, frame.viewProjection);
     copyMatrix(constants.viewProjectionInverse, inverse(frame.viewProjection));
     copyMatrix(constants.previousViewProjection, frame.previousViewProjection);
-    copyMatrix(constants.previousViewProjectionInverse, inverse(frame.previousViewProjection));
     constants.eye = {frame.eye[0], frame.eye[1], frame.eye[2], 0};
-    constants.previousEye = {frame.previousEye[0], frame.previousEye[1], frame.previousEye[2], 0};
     constants.sunDirection = {frame.sunDirection[0], frame.sunDirection[1], frame.sunDirection[2], SunRadius};
     constants.sunColor = {frame.sunColor[0], frame.sunColor[1], frame.sunColor[2], 0};
     for (int i = 0; i < 9; ++i) constants.skySH[i] = {frame.skyRadiance[i][0], frame.skyRadiance[i][1], frame.skyRadiance[i][2], 0};
     constants.dimensions = {frame.width, frame.height, frame.frameIndex, instanceCount};
     constants.nearFar = {frame.nearPlane, frame.farPlane, DefaultAlbedo, frame.outputScale};
-    constants.counts = {newGeometries, 0, frame.showScene ? GI_VIEW_SCENE : GI_VIEW_OFF, 0};
+    constants.counts = {newGeometries, 0, 0, 0};
     constants.shadowRange = {frame.shadowRange[0], frame.shadowRange[1], frame.shadowRange[2], frame.shadowRange[3]};
     constants.shadowParams = {frame.sunTangent, AlphaTestedBlocking, ShadowRayLength, 0};
     constants.rayCone = {2 * std::tan(frame.verticalFov / 2) / static_cast<float>(std::max(frame.height, 1u)), 0, 0, 0};
