@@ -596,8 +596,7 @@ gi_renderer::LocalLight forRays(const Light& light)
         .factor = sixteenth ? falloff[2] : falloff[3],
         .addedDistance = spot ? 0 : falloff[0],
         .leastDistance = spot ? 0 : light.material[LeastDistance],
-        .radius = !light.game->shadowMap && light.light[LightSize] > 0 ? light.light[LightSize] : BulbRadius,
-        .flashlight = light.game->flashlight};
+        .radius = !light.game->shadowMap && light.light[LightSize] > 0 ? light.light[LightSize] : BulbRadius};
 }
 
 // Drawn for the frame `camera` draws: the same eye, within a millimetre. Lists recorded before the kick

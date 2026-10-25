@@ -23,11 +23,12 @@ struct Textures
     ID3D11Texture2D* output{};   // R16G16B16A16_FLOAT, what Direct3D 11 reads back
     ID3D11Texture2D* shadow{};   // R16_FLOAT, the sun's ray-traced shadow; null while off
     ID3D11Texture2D* shadowDebug{}; // R8G8B8A8_UNORM, the shadow debug view (DebugShadows); null while off
-    // A copy of the game's velocity for its moving meshes, for the shadow denoiser (g_ObjectVelocity in
-    // gi_shadow.hlsli), as the game's view reads it; null when this frame's did not come before the kick.
+    // A copy of the game's velocity for its moving meshes, for the denoisers (g_ObjectVelocity in
+    // gi_common.hlsli), as the game's view reads it; null when this frame's did not come before the kick.
     ID3D11Texture2D* velocity{};
     DXGI_FORMAT velocityFormat{};
     ID3D11Texture2D* localLightShadow{}; // R16_FLOAT, the share of the point and spot lights' light that reaches; null without lights
+    ID3D11Texture2D* lightDebug{}; // R8G8B8A8_UNORM, the light's denoiser history (CompositeLight); null while off
 };
 
 // A point or spot light for its shadow rays and the global illumination's hits (GILocalLight), world
@@ -46,7 +47,6 @@ struct LocalLight
     float factor{};
     float addedDistance{}, leastDistance{}; // A point's: its distance is at least the least, plus the added
     float radius{};                         // Its shadow rays spread over a disc this wide around it
-    bool flashlight{};                      // Its bounce is lit afresh at each hit, not through the cache (gi_light.hlsl, FlashlightLight)
 };
 
 using Matrix = std::array<float, 16>; // Rows applied as dot(row, v), as the engine's
@@ -147,6 +147,9 @@ struct Frame
     Textures textures;
     std::uint32_t width{}, height{};
     Matrix viewProjection{}, previousViewProjection{};
+    Matrix view{}, projection{}, previousView{}, previousProjection{}; // The engine's m_view and m_projection (cPSScene c8, c4)
+    std::array<float, 4> jitter{}; // The projection's jitter in NDC (cPSScene c28): xy this frame's, zw the last frame's
+    bool cameraCut{}; // The light's denoiser drops its history (camera::cameraCut)
     std::array<float, 3> eye{}, previousEye{};
     float nearPlane{}, farPlane{};
     float verticalFov{}; // Radians
@@ -176,6 +179,7 @@ struct Frame
     bool debugShadows{};
     bool shadowsFromDepth{}; // Diagnostics: every shadow ray from the depth and the G-buffer's normal, as before 2026-10-24
     bool opaqueLeaves{};     // Diagnostics: leaves let no light through (GI_GEOMETRY_LEAF), as before 2026-10-24
+    std::uint32_t lightRays{2}; // The light's rays a light pixel, 1 to 4 (TraceLight)
     // The point and spot lights whose shadows go into textures.localLightShadow, at most GI_MAX_LOCAL_LIGHTS,
     // and the rays a pixel they take.
     std::vector<LocalLight> localLights;

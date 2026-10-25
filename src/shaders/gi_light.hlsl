@@ -1,98 +1,68 @@
-// GI-1.2's indirect light (docs/DEVELOPMENT.md, "Global illumination"): screen probes traced into
-// a two-level world-space hash grid cache, ported from AMD Capsaicin's gi1.comp,
-// screen_probes.hlsl, hash_grid_cache.hlsl and gi_denoiser.hlsl (MIT; licenses/Capsaicin-LICENSE.txt).
+// The global illumination's indirect light (docs/DEVELOPMENT.md, "Global illumination"), as path tracers
+// with a radiance cache work it out:
+// - Rays from each pixel of a grid half the render size each way (1, 2 or 4, the ray quality, twice on
+//   foliage), from one render pixel of its 2 x 2 chosen by depth (RenderPixelOf), cosine-weighted from the
+//   surface the depth buffer gives (TraceLight).
+// - Where it hits, the hit is lit afresh every frame: a shadow ray to a point of the sun's disc, and
+//   one to a point or spot light picked in proportion to its light there (weighted reservoir
+//   sampling). Its bounce ray takes the sky's light where it gets away, and otherwise the light of the
+//   surface it reaches from a world-space radiance cache: AMD's two-level hash grid of GI-1.2 (Capsaicin,
+//   MIT; licenses/Capsaicin-LICENSE.txt), whose cells hold the light at second hits and, through their
+//   own rays, one bounce more. The cache only ends the path, where NVIDIA's SHaRC sits in a path tracer:
+//   its lag (a cell takes 1 / 16 of a frame's light) and its coarseness come after a bounce, not in the
+//   light a pixel sees first.
+// - Foliage's light mostly from cells in the world that keep it over the frames (RememberFoliageLight).
+// - NVIDIA's RELAX denoiser in its spherical harmonics form (gi_denoiser.cpp) at the same grid, given the
+//   motion without the upscaler's jitter and the game's foliage as strands, then the render size from the four light pixels around each render pixel, weighed by how alike their surfaces
+//   are and resolved against the render pixel's own normal (CompositeLight).
 //
-// Where it deviates from Capsaicin, and why:
+// Where it deviates from a path tracer, and why:
 // - A hit's albedo is the G-buffer's where the hit is on screen; otherwise the game's albedo texture
 //   for a model's mesh (taken from its G-buffer draw, engine_scene.hpp), and the mesh's mean albedo,
 //   learnt from the screen (LearnAlbedo), for the rest.
 // - The lights are the sun and the sky, as the game's own sky light gives them, and the frame's point
-//   and spot lights: each cell takes a shadow ray to the sun, a cosine-weighted one to the sky and one
-//   to a light chosen by its light there (PopulateCells), in place of Capsaicin's light sampler and
-//   reservoirs. Emissive surfaces are left out. Flashlights skip the cache: every probe ray's hit
-//   takes their light afresh (ResolveCells), as they move faster than a cell lets go of light.
-// - Positions come from the depth buffer, not a visibility buffer, and the motion from the camera.
-// - The probes' spherical harmonics weigh each of a probe's 64 equal-area cells by its solid angle,
-//   2 pi / 64; Capsaicin's 1 / 8 gave 4 / pi too much light.
-// - Specular reflections (GI-1.1's glossy path) are left out: the game keeps its own.
+//   and spot lights. Emissive surfaces are left out. Specular light is left out: the game keeps its own.
 // - Rays from a surface skip copies of it just above (gi_common.hlsli, "Copies of a surface").
 // - A hash grid tile is keyed by the side of the surface a ray hits (the ray's main axis and its
 //   sign), not by its finely quantised direction: diffuse light needs no more, and the grid fills
 //   up far less (a hit without room gives no light).
-// - Only the first few hits of a cell each frame bring it light (HashGridCache_QueueLight);
-//   Capsaicin lights every hit, though dozens a frame land in most cells and a cell keeps 16 samples.
-// - A probe cell no ray went to keeps its history, or else takes the mean of the traced cells;
-//   Capsaicin gave it that mean over the number of empty cells, which darkened the probes frame by
-//   frame (to 0.7 under a uniform sky) and which its 1 / 8 weight partly hid. A quarter of the rays
-//   go to their own cell rather than where the last frame's light guides them, so every cell is
-//   traced now and then. Where the traced cells lost over half their light, the history of the
-//   others drops alike (BlendScreenProbes), and the denoiser drops a pixel's history when the light
-//   falls under an eighth of it (ReprojectGI): Capsaicin held a light that went out for a second.
+// - Only the first few hits of a cell each frame bring it light (HashGridCache_QueueLight); dozens a
+//   frame land in most cells and a cell keeps 16 samples.
 #include "gi_common.hlsli"
+#include "NRD.hlsli"
 
 // ---- Bindings, after gi_common.hlsli's ----
 
-Texture2D<float> g_PreviousDepth : register(t7);
-Texture2D<float4> g_PreviousNormal : register(t8);
-Texture2D<uint> g_ScreenProbes_ProbeMask : register(t9); // The current mask with its mips, for lookups
-
-RWTexture2D<float4> g_ScreenProbes_ProbeBuffer : register(u7);
-RWTexture2D<float4> g_ScreenProbes_PreviousProbeBuffer : register(u8);
-RWTexture2D<uint> g_ScreenProbes_ProbeMaskBuffer : register(u9);
-RWTexture2D<uint> g_ScreenProbes_PreviousProbeMaskBuffer : register(u10);
-RWStructuredBuffer<uint2> g_ScreenProbes_ProbeSHBuffer : register(u11);
-RWStructuredBuffer<uint2> g_ScreenProbes_PreviousProbeSHBuffer : register(u12);
-RWStructuredBuffer<uint> g_ScreenProbes_ProbeSpawnBuffer : register(u13);
-RWStructuredBuffer<uint> g_ScreenProbes_PreviousProbeSpawnBuffer : register(u14);
-RWStructuredBuffer<uint> g_ScreenProbes_ProbeSpawnScanBuffer : register(u15);
-RWStructuredBuffer<uint> g_ScreenProbes_ProbeSpawnIndexBuffer : register(u16);
-RWStructuredBuffer<uint2> g_ScreenProbes_ProbeSpawnProbeBuffer : register(u17);
-RWStructuredBuffer<uint2> g_ScreenProbes_ProbeSpawnSampleBuffer : register(u18);
-RWStructuredBuffer<uint2> g_ScreenProbes_ProbeSpawnRadianceBuffer : register(u19);
-RWStructuredBuffer<uint> g_ScreenProbes_EmptyTileBuffer : register(u20);
-RWStructuredBuffer<uint> g_ScreenProbes_OverrideTileBuffer : register(u21);
-RWTexture2D<float4> g_ScreenProbes_ProbeCachedTileBuffer : register(u22);
-RWTexture2D<float4> g_ScreenProbes_ProbeCachedTileIndexBuffer : register(u23);
-RWStructuredBuffer<uint> g_ScreenProbes_ProbeCachedTileLRUBuffer : register(u24);
-RWStructuredBuffer<uint> g_ScreenProbes_PreviousProbeCachedTileLRUBuffer : register(u25);
-RWStructuredBuffer<uint> g_ScreenProbes_ProbeCachedTileLRUFlagBuffer : register(u26);
-RWStructuredBuffer<uint> g_ScreenProbes_ProbeCachedTileLRUIndexBuffer : register(u27);
-RWStructuredBuffer<uint> g_ScreenProbes_ProbeCachedTileMRUBuffer : register(u28);
-RWStructuredBuffer<uint> g_ScreenProbes_ProbeCachedTileListBuffer : register(u29);
-RWStructuredBuffer<uint> g_ScreenProbes_ProbeCachedTileListCountBuffer : register(u30);
-RWStructuredBuffer<uint> g_ScreenProbes_ProbeCachedTileListIndexBuffer : register(u31);
-RWStructuredBuffer<uint4> g_ScreenProbes_ProbeCachedTileListElementBuffer : register(u32);
-RWStructuredBuffer<uint> g_HashGridCache_HashBuffer : register(u33);
-RWStructuredBuffer<uint> g_HashGridCache_DecayTileBuffer : register(u34);
-RWStructuredBuffer<uint2> g_HashGridCache_ValueBuffer : register(u35);
-RWStructuredBuffer<uint2> g_HashGridCache_ValueIndirectBuffer : register(u36);
-RWStructuredBuffer<uint> g_HashGridCache_UpdateTileBuffer : register(u37);
-RWStructuredBuffer<uint> g_HashGridCache_UpdateCellValueBuffer : register(u38);
-RWStructuredBuffer<uint> g_HashGridCache_UpdateCellValueIndirectBuffer : register(u39);
-RWStructuredBuffer<float4> g_HashGridCache_VisibilityBuffer : register(u40);
-RWStructuredBuffer<uint> g_HashGridCache_VisibilityCellBuffer : register(u41);
-RWStructuredBuffer<uint> g_HashGridCache_VisibilityQueryBuffer : register(u42);
-RWStructuredBuffer<uint2> g_HashGridCache_VisibilityRadianceBuffer : register(u43); // A first-bounce hit's own light; w: 1 to bypass the cache
-RWStructuredBuffer<uint2> g_HashGridCache_MultibounceInfoBuffer : register(u44);    // The first-bounce surface's albedo, over the chance to trace
-RWStructuredBuffer<uint> g_HashGridCache_PackedTileIndexBuffer : register(u45);
-RWStructuredBuffer<uint> g_HashGridCache_PreviousPackedTileIndexBuffer : register(u46);
-RWTexture2D<float> g_GIDenoiser_BlurMask : register(u47);
-RWTexture2D<float4> g_GIDenoiser_ColorBuffers[2] : register(u48);      // u48, u49: this frame's, the last frame's
-RWTexture2D<float> g_GIDenoiser_ColorDeltaBuffers[2] : register(u50);  // u50, u51
-RWTexture2D<float4> g_ScreenProbes_ProbeBufferPair[2] : register(u52); // u52, u53: this frame's probes, the last frame's
-RWStructuredBuffer<uint> g_ScanInput : register(u54);
-RWStructuredBuffer<uint> g_ScanOutput : register(u55);
-RWStructuredBuffer<uint> g_ScanBlockSums : register(u56);
-RWStructuredBuffer<uint> g_HashGridCache_LightBuffer : register(u57); // Hits to light: the visibility index, flags in the top bits
-RWTexture2D<uint> g_ProbeMaskMips[12] : register(u64); // The current mask's mips, u64 to u75
+RWTexture2D<float> g_Light_ViewZ : register(u7);            // The denoiser's guides: NRD's IN_VIEWZ,
+RWTexture2D<float4> g_Light_NormalRoughness : register(u8); // IN_NORMAL_ROUGHNESS,
+RWTexture2D<float> g_Light_LastViewZ : register(u30);       // g_Light_ViewZ as the last frame wrote it (PrepareGuides)
+RWTexture2D<float4> g_Light_Motion : register(u9);          // IN_MV: the last frame's uv minus this one's, and view z's change
+RWTexture2D<float4> g_Light_Noisy[2] : register(u10);       // u10, u11: NRD's IN_DIFF_SH0 and SH1
+RWTexture2D<float4> g_Light_Denoised[2] : register(u12);    // u12, u13: NRD's OUT_DIFF_SH0 and SH1
+RWTexture2D<float4> g_Light_Partial : register(u14);        // A ray's light but its bounce's cache: rgb; w its hit distance
+RWTexture2D<uint4> g_Light_Path : register(u15);            // x its bounce hit's cell (kGI1_InvalidId for none); y its direction (packNormal);
+                                                            // zw the bounce's throughput (packHalf4)
+RWStructuredBuffer<uint> g_HashGridCache_HashBuffer : register(u16);
+RWStructuredBuffer<uint> g_HashGridCache_DecayTileBuffer : register(u17);
+RWStructuredBuffer<uint2> g_HashGridCache_ValueBuffer : register(u18);
+RWStructuredBuffer<uint2> g_HashGridCache_ValueIndirectBuffer : register(u19);
+RWStructuredBuffer<uint> g_HashGridCache_UpdateTileBuffer : register(u20);
+RWStructuredBuffer<uint> g_HashGridCache_UpdateCellValueBuffer : register(u21);
+RWStructuredBuffer<uint> g_HashGridCache_UpdateCellValueIndirectBuffer : register(u22);
+RWStructuredBuffer<float4> g_HashGridCache_VisibilityBuffer : register(u23);
+RWStructuredBuffer<uint> g_HashGridCache_VisibilityCellBuffer : register(u24);
+RWStructuredBuffer<uint> g_HashGridCache_VisibilityQueryBuffer : register(u25);
+RWStructuredBuffer<uint2> g_HashGridCache_MultibounceInfoBuffer : register(u26); // The second hit's albedo
+RWStructuredBuffer<uint> g_HashGridCache_PackedTileIndexBuffer : register(u27);
+RWStructuredBuffer<uint> g_HashGridCache_PreviousPackedTileIndexBuffer : register(u28);
+RWStructuredBuffer<uint> g_HashGridCache_LightBuffer : register(u29); // Hits to light: their visibility index
 
 #define kGI1_InvalidId 0xFFFFFFFFu
-#define kGI1_AngleThreshold cos(2e-2f * PI)
-#define kGI1_FloatQuantize 1e4f
 #define kHashGridCache_TileDecay 50
 #define kHashGridCache_FloatQuantize 1e3f
-#define kGIDenoiser_MaxBlurMask 8.0f
 #define MAX_HIT_DISTANCE 1e9f
+// The hit distance the denoiser gets for a ray that reaches the sky.
+#define MISS_DISTANCE 1000.0f
 
 // Capsaicin's names for this frame's constants.
 #define g_BufferDimensions g_Frame.dimensions.xy
@@ -102,11 +72,6 @@ RWTexture2D<uint> g_ProbeMaskMips[12] : register(u64); // The current mask's mip
 #define g_ViewProjection g_Frame.viewProjection
 #define g_ViewProjectionInverse g_Frame.viewProjectionInverse
 #define g_PreviousViewProjection g_Frame.previousViewProjection
-#define g_PreviousViewProjectionInverse g_Frame.previousViewProjectionInverse
-#define PROBE_SIZE g_Frame.probeLayout.x
-#define PROBE_SPAWN_TILE_SIZE g_Frame.probeLayout.y
-#define PROBE_MASK_MIP_COUNT g_Frame.probeLimits.x
-#define PROBE_CELL_SIZE g_Frame.cellSizes.x
 #define HASH_CELL_SIZE g_Frame.cellSizes.y
 #define HASH_MIN_CELL_SIZE g_Frame.cellSizes.z
 #define HASH_NUM_BUCKETS g_Frame.hashCounts.x
@@ -119,223 +84,52 @@ RWTexture2D<uint> g_ProbeMaskMips[12] : register(u64); // The current mask's mip
 #define HASH_DISCARD_MULTIBOUNCE g_Frame.hashSamples.y
 #define HASH_MAX_MULTIBOUNCE_SAMPLE_COUNT g_Frame.hashSamples.z
 #define HASH_CELL_SAMPLES_PER_FRAME g_Frame.hashMisc.z
-#define LIGHT_SAMPLE 0x80000000u // The hit's light goes into its cell
-#define LIGHT_OWN    0x40000000u // The hit keeps its own light, bypassing the cache
 #define PACKED_TILE_COUNT (GI_COUNTER_PACKED_TILES + g_Frame.hashMisc.y)
 #define PREVIOUS_PACKED_TILE_COUNT (GI_COUNTER_PACKED_TILES + 1 - g_Frame.hashMisc.y)
 
-groupshared float lds_ScreenProbes_Radiance[64];
-groupshared uint lds_ScreenProbes_Reprojection[4];
-groupshared float4 lds_ScreenProbes_ProbeSHBuffer[9 * 64];
-groupshared uint lds_ScreenProbes_RadianceValues[4 * 64];
-groupshared uint lds_ScreenProbes_RadianceSampleCounts[64];
-groupshared uint lds_ScreenProbes_RadianceReuseSampleCount;
-groupshared float4 lds_ScreenProbes_RadianceBackup[64];
-
-// ---- The game's frame ----
+// ---- The game's frame and the light's grid ----
 
 float3 DepthPosition(uint2 pixel, float depth)
 {
     return transformPointProjection((pixel + 0.5f) / g_BufferDimensions, depth, g_ViewProjectionInverse);
 }
 
-// Screen motion of a pixel from the camera alone: its position now, where the camera saw it last frame.
-float2 Velocity(uint2 pixel)
+uint2 LightSize()
 {
-    float2 uv = (pixel + 0.5f) / g_BufferDimensions;
-    float3 world = transformPointProjection(uv, g_Depth.Load(int3(pixel, 0)), g_ViewProjectionInverse);
-    float3 previous = transformPointProjection(world, g_PreviousViewProjection);
-    return uv - (0.5f * float2(previous.x, -previous.y) + 0.5f);
+    return g_Frame.lightLayout.xy;
 }
 
-float GIDenoiser_RemoveNaNs(float color)
+// The render pixel of its 2 x 2 a light pixel takes its sample from: the nearest of the four on light
+// pixels of one checkerboard colour, the farthest on the other, as half-resolution effects downsample
+// depth. With the top left, a wire, a fence or a grass blade under a pixel wide had it one frame and what
+// lay behind the next as the upscaler's jitter moved them, and the denoiser started their light over
+// every frame, the camera still (2026-10-25).
+uint2 RenderPixelOf(uint2 lightPixel)
 {
-    color /= (1.0f + color);
-    color = saturate(color);
-    return color / max(1.0f - color, 1e-4f);
-}
-
-float3 GIDenoiser_RemoveNaNs(float3 color)
-{
-    color /= (1.0f + color);
-    color = saturate(color);
-    return color / max(1.0f - color, 1e-4f);
-}
-
-float4 GIDenoiser_RemoveNaNs(float4 color)
-{
-    color /= (1.0f + color);
-    color = saturate(color);
-    return color / max(1.0f - color, 1e-4f);
-}
-
-// ---- Screen probes (Capsaicin's screen_probes.hlsl) ----
-
-uint ScreenProbes_PackSeed(uint2 seed)
-{
-    return (seed.x << 16) | seed.y;
-}
-
-uint2 ScreenProbes_UnpackSeed(uint packed)
-{
-    return uint2(packed >> 16, packed & 0xFFFFu);
-}
-
-uint ScreenProbes_FindClosestProbe(uint2 pos)
-{
-    uint2 dims = (g_BufferDimensions + PROBE_SIZE - 1) / PROBE_SIZE;
-    pos = min(pos / PROBE_SIZE, dims - 1);
-    for (uint i = 0; i < PROBE_MASK_MIP_COUNT; ++i)
+    uint2 corner = min(lightPixel * 2, g_BufferDimensions - 1);
+    bool nearest = ((lightPixel.x + lightPixel.y) & 1u) == 0u;
+    uint2 chosen = corner;
+    float chosenDepth = g_Depth.Load(int3(corner, 0));
+    for (uint i = 1; i < 4; ++i)
     {
-        uint probe = g_ScreenProbes_ProbeMask.Load(int3(pos, i)).x;
-        if (probe != kGI1_InvalidId) return probe;
-
-        dims = max(dims >> 1, 1);
-        pos = min(pos >> 1, dims - 1);
-    }
-
-    return kGI1_InvalidId;
-}
-
-uint ScreenProbes_FindClosestProbe(uint2 pos, int2 offset)
-{
-    uint2 dims = (g_BufferDimensions + PROBE_SIZE - 1) / PROBE_SIZE;
-    pos = min(pos / PROBE_SIZE, dims - 1);
-    for (uint i = 0; i < PROBE_MASK_MIP_COUNT; ++i)
-    {
-        int2 loc = int2(pos) + offset;
-        if (any(loc < 0) || any(loc >= int2(dims))) break;
-
-        uint probe = g_ScreenProbes_ProbeMask.Load(int3(loc, i)).x;
-        if (probe != kGI1_InvalidId) return probe;
-
-        dims = max(dims >> 1, 1);
-        pos = min(pos >> 1, dims - 1);
-    }
-
-    return kGI1_InvalidId;
-}
-
-float3 ScreenProbes_CalculateSHIrradiance(float3 normal, uint2 probe)
-{
-    float clampedCosine[9];
-    SH_GetCoefficients_ClampedCosine_Cone(normal, HALF_PI, clampedCosine);
-
-    uint probeCount = (g_BufferDimensions.x + PROBE_SIZE - 1) / PROBE_SIZE;
-    uint probeIndex = probe.x + probe.y * probeCount;
-    float3 irradiance = 0.0f;
-    for (uint i = 0; i < 9; ++i) irradiance += clampedCosine[i] * unpackHalf4(g_ScreenProbes_ProbeSHBuffer[9 * probeIndex + i]).xyz;
-
-    return max(irradiance, 0.0f);
-}
-
-uint4 ScreenProbes_QuantizeRadiance(float4 radiance)
-{
-    return uint4(round(kGI1_FloatQuantize * radiance));
-}
-
-float3 ScreenProbes_RecoverRadiance(uint3 quantized)
-{
-    return quantized / kGI1_FloatQuantize;
-}
-
-float4 ScreenProbes_RecoverRadiance(uint4 quantized)
-{
-    return quantized / kGI1_FloatQuantize;
-}
-
-void ScreenProbes_AccumulateRadiance(uint queryIndex, float3 radiance)
-{
-    if (dot(radiance, radiance) > 0.0f)
-    {
-        float4 radianceAndDistance = unpackHalf4(g_ScreenProbes_ProbeSpawnRadianceBuffer[queryIndex]);
-        radianceAndDistance.xyz += radiance;
-        g_ScreenProbes_ProbeSpawnRadianceBuffer[queryIndex] = packHalf4(radianceAndDistance);
-    }
-}
-
-uint2 ScreenProbes_GetCellAndProbeIndex(uint queryIndex)
-{
-    return uint2(queryIndex % (PROBE_SIZE * PROBE_SIZE), queryIndex / (PROBE_SIZE * PROBE_SIZE));
-}
-
-uint ScreenProbes_FindCellIndex(uint localId, float s)
-{
-    uint index = 0;
-    uint count = PROBE_SIZE * PROBE_SIZE;
-    uint start = (localId / count) * count;
-    while (0 < count)
-    {
-        uint count2 = count >> 1;
-        uint middle = index + count2;
-        if (lds_ScreenProbes_Radiance[middle + start] > s) count = count2;
-        else
+        uint2 pixel = min(lightPixel * 2 + uint2(i & 1u, i >> 1), g_BufferDimensions - 1);
+        float depth = g_Depth.Load(int3(pixel, 0));
+        // Reversed Z: the nearer, the greater.
+        if (nearest ? depth > chosenDepth : depth < chosenDepth)
         {
-            index = middle + 1;
-            count -= count2 + 1;
+            chosen = pixel;
+            chosenDepth = depth;
         }
     }
 
-    return max(index, 1) - 1;
+    return chosen;
 }
 
-// Returns the probe's total.
-float ScreenProbes_ScanRadiance(uint localId, float radiance)
+float3 RemoveNaNs(float3 color)
 {
-    lds_ScreenProbes_Radiance[localId] = radiance;
-    GroupMemoryBarrierWithGroupSync();
-
-    uint blockSize = PROBE_SIZE * PROBE_SIZE;
-    uint firstLane = (localId / blockSize) * blockSize;
-    uint localLane = localId - firstLane;
-
-    radiance = lds_ScreenProbes_Radiance[firstLane + blockSize - 1];
-    GroupMemoryBarrierWithGroupSync();
-
-    uint stride;
-    for (stride = 1; stride <= (blockSize >> 1); stride <<= 1)
-    {
-        if (localLane < blockSize / (2 * stride))
-            lds_ScreenProbes_Radiance[firstLane + 2 * (localLane + 1) * stride - 1] += lds_ScreenProbes_Radiance[firstLane + (2 * localLane + 1) * stride - 1];
-        GroupMemoryBarrierWithGroupSync();
-    }
-
-    if (localLane == 0) lds_ScreenProbes_Radiance[firstLane + blockSize - 1] = 0.0f;
-    GroupMemoryBarrierWithGroupSync();
-
-    for (stride = (blockSize >> 1); stride > 0; stride >>= 1)
-    {
-        if (localLane < blockSize / (2 * stride))
-        {
-            float temporary = lds_ScreenProbes_Radiance[firstLane + (2 * localLane + 1) * stride - 1];
-            lds_ScreenProbes_Radiance[firstLane + (2 * localLane + 1) * stride - 1] = lds_ScreenProbes_Radiance[firstLane + 2 * (localLane + 1) * stride - 1];
-            lds_ScreenProbes_Radiance[firstLane + 2 * (localLane + 1) * stride - 1] += temporary;
-        }
-        GroupMemoryBarrierWithGroupSync();
-    }
-
-    radiance += lds_ScreenProbes_Radiance[firstLane + blockSize - 1];
-    GroupMemoryBarrierWithGroupSync();
-
-    lds_ScreenProbes_Radiance[localId] /= max(radiance, 1e-5f);
-    GroupMemoryBarrierWithGroupSync();
-    return radiance;
-}
-
-// A direction in a probe's hemisphere, from its cell (or a point within a cell).
-float3 ProbeDirection(float2 cell, float3 normal)
-{
-    float3 direction = mapToHemiOctahedron(cell / PROBE_SIZE);
-    float3 b1, b2;
-    GetOrthoVectors(normal, b1, b2);
-    return direction.x * b1 + direction.y * b2 + direction.z * normal;
-}
-
-uint ProbeCellOf(float3 direction, float3 normal)
-{
-    uint2 cell = uint2(mapToHemiOctahedronInverse(mul(direction, CreateTBN(normal))) * PROBE_SIZE);
-    cell = min(cell, PROBE_SIZE - 1);
-    return cell.x + cell.y * PROBE_SIZE;
+    color /= (1.0f + color);
+    color = saturate(color);
+    return color / max(1.0f - color, 1e-4f);
 }
 
 // ---- Hash grid cache (Capsaicin's hash_grid_cache.hlsl) ----
@@ -351,15 +145,19 @@ struct HashGridCache_Visibility
     float2 barycentrics;
 };
 
+HashGridCache_Visibility VisibilityOf(SceneHit hit, float3 direction)
+{
+    HashGridCache_Visibility visibility;
+    visibility.direction = direction;
+    visibility.instanceIndex = hit.instance;
+    visibility.geometryIndex = hit.geometry;
+    visibility.primitiveIndex = hit.primitive;
+    visibility.barycentrics = hit.barycentrics;
+    return visibility;
+}
+
 #define HASHGRIDCACHE_STEP_FACTOR 1e3f
 #define HASHGRIDCACHE_SIZE_FACTOR 1e-3f
-
-float HashGridCache_GetCellSize(float3 position)
-{
-    float step = max(distance(g_Eye, position) * HASH_CELL_SIZE, HASH_MIN_CELL_SIZE);
-    uint logStep = uint(log2(HASHGRIDCACHE_STEP_FACTOR * step));
-    return HASHGRIDCACHE_SIZE_FACTOR * exp2(logStep);
-}
 
 struct HashGridCache_Desc
 {
@@ -530,18 +328,29 @@ void HashGridCache_TouchCell(uint tileIndex, bool isNewTile)
     }
 }
 
-// Queues a hit for PopulateCells: as one of its cell's samples while the cell has fewer than
-// HASH_CELL_SAMPLES_PER_FRAME this frame (the claims count in its update's w), or for its own light.
-void HashGridCache_QueueLight(uint visibilityIndex, uint cellIndex, bool own)
+// Queues a hit for PopulateCells as one of its cell's samples while the cell has fewer than
+// HASH_CELL_SAMPLES_PER_FRAME this frame (the claims count in its update's w).
+void HashGridCache_QueueLight(uint visibilityIndex, uint cellIndex)
 {
     uint claimed;
     InterlockedAdd(g_HashGridCache_UpdateCellValueBuffer[4 * cellIndex + 3], 1, claimed);
-    bool sample = claimed < HASH_CELL_SAMPLES_PER_FRAME;
-    if (!sample && !own) return;
+    if (claimed >= HASH_CELL_SAMPLES_PER_FRAME) return;
 
     uint index;
     InterlockedAdd(g_Counters[GI_COUNTER_LIGHTS], 1, index);
-    g_HashGridCache_LightBuffer[index] = visibilityIndex | (sample ? LIGHT_SAMPLE : 0u) | (own ? LIGHT_OWN : 0u);
+    g_HashGridCache_LightBuffer[index] = visibilityIndex;
+}
+
+// A hit the cache keeps, for PopulateCells and the multibounce: `query` is where it came from.
+uint HashGridCache_Keep(uint counter, uint first, HashGridCache_Visibility visibility, uint cellIndex, uint query)
+{
+    uint index;
+    InterlockedAdd(g_Counters[counter], 1, index);
+    uint visibilityIndex = first + index;
+    g_HashGridCache_VisibilityBuffer[visibilityIndex] = HashGridCache_PackVisibility(visibility);
+    g_HashGridCache_VisibilityCellBuffer[visibilityIndex] = cellIndex;
+    g_HashGridCache_VisibilityQueryBuffer[visibilityIndex] = query;
+    return index;
 }
 
 // ---- Hits ----
@@ -574,7 +383,7 @@ float3 HitAlbedo(float3 world, HashGridCache_Visibility visibility)
         }
     }
 
-    // The texture's mean over a few texels' patch: the cells average the light over metres.
+    // The texture's mean over a few texels' patch: the light varies over centimetres to metres.
     SceneTriangle t = LoadTriangle(visibility.instanceIndex, visibility.geometryIndex, visibility.primitiveIndex);
     if (t.geometry.texture && (t.geometry.flags & GI_GEOMETRY_MASK) == 0)
     {
@@ -588,15 +397,22 @@ float3 HitAlbedo(float3 world, HashGridCache_Visibility visibility)
     return learnt.w ? float3(learnt.xyz) / (255.0f * learnt.w) : g_Frame.nearFar.z;
 }
 
-// The light at a hit from one of the frame's point and spot lights `first` to `last` - 1, chosen by its light
-// here without shadows (weighted reservoir sampling, a candidate a light), through a shadow ray to it: its
-// light over the chance it was chosen.
-float3 SampledLocalLight(uint first, uint last, float3 world, float3 normal, float3 origin, float tolerance, inout Random random)
+// Leaves (GI_GEOMETRY_LEAF) let light through, unless the diagnostics keep them opaque.
+bool HitIsLeaf(HashGridCache_Visibility visibility)
+{
+    return (g_Geometries[FirstGeometry(g_Instances[visibility.instanceIndex]) + visibility.geometryIndex].flags & GI_GEOMETRY_LEAF) != 0
+        && !g_Frame.lightDiagnostics.x;
+}
+
+// The light at a hit from one of the frame's point and spot lights, chosen by its light here without
+// shadows (weighted reservoir sampling, a candidate a light), through a shadow ray to it: its light over
+// the chance it was chosen.
+float3 SampledLocalLight(float3 world, float3 normal, float3 origin, float tolerance, inout Random random)
 {
     float total = 0.0f, chosenWeight = 0.0f;
     float3 chosenLight = 0.0f, chosenDirection = 0.0f;
     float chosenDistance = 0.0f, chosenClearance = 0.0f;
-    for (uint i = first; i < last; ++i)
+    for (uint i = 0; i < g_Frame.localLightCount.x; ++i)
     {
         GILocalLight candidate = g_Frame.localLights[i];
         float3 toLight;
@@ -632,58 +448,53 @@ float3 SampledLocalLight(uint first, uint last, float3 world, float3 normal, flo
 // light it lets through is scattered, which its glow here carries to what is around it.
 static const float LeafTransmittance = 0.5f;
 
-// The light a hit reflects from the sun and the sky, and from the frame's point and spot lights but the
-// flashlights (FlashlightLight), in the game's diffuse light units times albedo; `leaf` (GI_GEOMETRY_LEAF)
-// adds what leaves let through from their far side, the sun's and the sky's.
-float3 HitDirectLight(float3 world, float3 normal, float3 albedo, bool leaf, inout Random random)
+// The sun as a disc of its angular size at a hit: a shadow ray to a point on it from the side it lights,
+// a leaf's far side too. Its light before the albedo.
+float3 SunLight(float3 world, float3 normal, float3 origin, float tolerance, bool leaf, inout Random random)
 {
-    float3 origin = OffsetFromTriangle(world, normal);
-    float tolerance = CopyTolerance(world);
-    float3 light = 0.0f;
-
-    // The sun as a disc of its angular size: a shadow ray to a point on it from the side it lights, a leaf's
-    // far side too.
     float3 towardsSun = g_Frame.sunDirection.xyz;
     bool sunFar = leaf && dot(normal, towardsSun) < 0.0f;
     float3 sunSide = sunFar ? -normal : normal;
     float cosine = dot(sunSide, towardsSun);
-    if (cosine > 0.0f && dot(g_Frame.sunColor.rgb, 1.0f) > 0.0f)
-    {
-        float3 b1, b2;
-        GetOrthoVectors(towardsSun, b1, b2);
-        float2 disc = random.rand2();
-        float radius = sqrt(disc.x) * g_Frame.sunDirection.w;
-        float angle = TWO_PI * disc.y;
-        float3 direction = normalize(towardsSun + radius * (cos(angle) * b1 + sin(angle) * b2));
-        float3 sunOrigin = sunFar ? OffsetFromTriangle(world, sunSide) : origin;
-        if (VisibleFromSurface(sunOrigin, sunSide, tolerance, direction, 1e4f))
-            light += g_Frame.sunColor.rgb * (cosine * (sunFar ? LeafTransmittance : 1.0f));
-    }
+    if (!(cosine > 0.0f) || dot(g_Frame.sunColor.rgb, 1.0f) <= 0.0f) return 0.0f;
 
-    // The sky through a cosine-weighted ray: its radiance is irradiance over pi for that sample. A leaf's ray
-    // goes to its far side in proportion to what that side gives, so either side's ray counts the same.
-    float skyWeight = leaf ? 1.0f + LeafTransmittance : 1.0f;
-    bool skyFar = leaf && random.rand() * skyWeight >= 1.0f;
-    float3 skySide = skyFar ? -normal : normal;
-    float3 skyDirection = mapToCosineHemisphere(random.rand2(), skySide);
-    float3 skyOrigin = skyFar ? OffsetFromTriangle(world, skySide) : origin;
-    if (VisibleFromSurface(skyOrigin, skySide, tolerance, skyDirection, 1e4f)) light += SkyRadiance(skyDirection) * skyWeight;
+    float3 b1, b2;
+    GetOrthoVectors(towardsSun, b1, b2);
+    float2 disc = random.rand2();
+    float radius = sqrt(disc.x) * g_Frame.sunDirection.w;
+    float angle = TWO_PI * disc.y;
+    float3 direction = normalize(towardsSun + radius * (cos(angle) * b1 + sin(angle) * b2));
+    float3 sunOrigin = sunFar ? OffsetFromTriangle(world, sunSide) : origin;
+    if (!VisibleFromSurface(sunOrigin, sunSide, tolerance, direction, 1e4f)) return 0.0f;
 
-    // The point and spot lights after the flashlights; a cell averages the choices over frames.
-    light += SampledLocalLight(g_Frame.localLightCount.z, g_Frame.localLightCount.x, world, normal, origin, tolerance, random);
-
-    return albedo * light;
+    return g_Frame.sunColor.rgb * (cosine * (sunFar ? LeafTransmittance : 1.0f));
 }
 
-// The flashlights' light a first-bounce hit reflects, worked out each frame rather than read from its cell:
-// they swing with whoever carries them, and a cell takes 1 / 16 of a frame's light, so it would hold theirs
-// for a second or more (path tracers light every bounce afresh this way). They give no second bounce.
-float3 FlashlightLight(HashGridCache_Visibility visibility, inout Random random)
+// The side a hit's cosine-weighted ray leaves from, and what its light counts: a leaf's ray goes to its
+// far side in proportion to what that side gives, so either side's ray counts the same.
+float3 BounceSide(float3 normal, bool leaf, inout Random random, out float weight)
 {
-    float3 world, normal;
-    HitSurface(visibility, world, normal);
-    float3 light = SampledLocalLight(0, g_Frame.localLightCount.z, world, normal, OffsetFromTriangle(world, normal), CopyTolerance(world), random);
-    return any(light > 0.0f) ? HitAlbedo(world, visibility) * light : 0.0f;
+    weight = leaf ? 1.0f + LeafTransmittance : 1.0f;
+    return leaf && random.rand() * weight >= 1.0f ? -normal : normal;
+}
+
+// The light a cache cell's hit reflects from the sun, the sky and the frame's point and spot lights, in the
+// game's diffuse light units times albedo; a leaf adds what it lets through from its far side.
+float3 HitDirectLight(float3 world, float3 normal, float3 albedo, bool leaf, inout Random random)
+{
+    float3 origin = OffsetFromTriangle(world, normal);
+    float tolerance = CopyTolerance(world);
+    float3 light = SunLight(world, normal, origin, tolerance, leaf, random);
+
+    // The sky through a cosine-weighted ray: its radiance is irradiance over pi for that sample.
+    float skyWeight;
+    float3 skySide = BounceSide(normal, leaf, random, skyWeight);
+    float3 skyDirection = mapToCosineHemisphere(random.rand2(), skySide);
+    float3 skyOrigin = all(skySide == normal) ? origin : OffsetFromTriangle(world, skySide);
+    if (VisibleFromSurface(skyOrigin, skySide, tolerance, skyDirection, 1e4f)) light += SkyRadiance(skyDirection) * skyWeight;
+
+    light += SampledLocalLight(world, normal, origin, tolerance, random);
+    return albedo * light;
 }
 
 // ---- Utilities ----
@@ -691,11 +502,6 @@ float3 FlashlightLight(HashGridCache_Visibility visibility, inout Random random)
 [numthreads(1, 1, 1)]
 void ClearCounters()
 {
-    g_Counters[GI_COUNTER_EMPTY_TILES] = 0;
-    g_Counters[GI_COUNTER_OVERRIDE_TILES] = 0;
-    g_Counters[GI_COUNTER_LRU] = 0;
-    g_Counters[GI_COUNTER_MRU] = 0;
-    g_Counters[GI_COUNTER_LIST_ELEMENTS] = 0;
     g_Counters[PACKED_TILE_COUNT] = 0;
     g_Counters[GI_COUNTER_UPDATE_TILES] = 0;
     g_Counters[GI_COUNTER_VISIBILITY0] = 0;
@@ -705,6 +511,8 @@ void ClearCounters()
     g_Counters[GI_COUNTER_NEAR_HITS] = 0;
     g_Counters[GI_COUNTER_COPIES] = 0;
     g_Counters[GI_COUNTER_FULL_BUCKETS] = 0;
+    g_Counters[GI_COUNTER_BOUNCE_HITS] = 0;
+    g_Counters[GI_COUNTER_FOLIAGE] = 0;
     for (uint counter = GI_COUNTER_MAXIMA_FIRST; counter < GI_COUNTER_MAXIMA_FIRST + GI_COUNTER_MAXIMA; ++counter) g_Counters[counter] = 0;
 }
 
@@ -717,562 +525,192 @@ void GenerateDispatch()
     g_DispatchArgs[g_Dispatch.z] = uint4((count + g_Dispatch.y - 1) / g_Dispatch.y, 1, 1, 0);
 }
 
-// Fills g_ScanOutput, or a buffer chosen by g_Dispatch.y, with g_Dispatch.z; g_Dispatch.x elements.
-[numthreads(64, 1, 1)]
-void ClearBuffer(uint did : SV_DispatchThreadID)
-{
-    if (did >= g_Dispatch.x) return;
+// ---- The light's rays ----
 
-    if (g_Dispatch.y == 0) g_ScreenProbes_ProbeCachedTileListCountBuffer[did] = g_Dispatch.z;
-    else if (g_Dispatch.y == 1) g_HashGridCache_HashBuffer[did] = g_Dispatch.z;
-    else if (g_Dispatch.y == 2) g_HashGridCache_UpdateCellValueBuffer[did] = g_Dispatch.z;
-    else if (g_Dispatch.y == 3) g_HashGridCache_UpdateCellValueIndirectBuffer[did] = g_Dispatch.z;
-    else if (g_Dispatch.y == 4) g_HashGridCache_DecayTileBuffer[did] = g_Dispatch.z;
+// The upscaler's jitter (NDC) as a shift on screen, in uv.
+float2 JitterUv(float2 ndc)
+{
+    return float2(0.5f, -0.5f) * ndc;
 }
 
-// Exclusive prefix sums of g_ScanInput's first g_Dispatch.x values into g_ScanOutput, in three
-// passes: 1024 values a group, the groups' totals, then each group's offset.
-groupshared uint lds_Scan[1024];
-
-[numthreads(1024, 1, 1)]
-void ScanBlocks(uint did : SV_DispatchThreadID, uint local : SV_GroupThreadID, uint group : SV_GroupID)
-{
-    uint value = did < g_Dispatch.x ? g_ScanInput[did] : 0;
-    lds_Scan[local] = value;
-    GroupMemoryBarrierWithGroupSync();
-
-    for (uint offset = 1; offset < 1024; offset <<= 1)
-    {
-        uint add = local >= offset ? lds_Scan[local - offset] : 0;
-        GroupMemoryBarrierWithGroupSync();
-        lds_Scan[local] += add;
-        GroupMemoryBarrierWithGroupSync();
-    }
-
-    if (did < g_Dispatch.x) g_ScanOutput[did] = lds_Scan[local] - value;
-    if (local == 1023) g_ScanBlockSums[group] = lds_Scan[1023];
-}
-
-[numthreads(1024, 1, 1)]
-void ScanBlockSums(uint local : SV_GroupThreadID)
-{
-    uint blocks = (g_Dispatch.x + 1023) / 1024;
-    uint value = local < blocks ? g_ScanBlockSums[local] : 0;
-    lds_Scan[local] = value;
-    GroupMemoryBarrierWithGroupSync();
-
-    for (uint offset = 1; offset < 1024; offset <<= 1)
-    {
-        uint add = local >= offset ? lds_Scan[local - offset] : 0;
-        GroupMemoryBarrierWithGroupSync();
-        lds_Scan[local] += add;
-        GroupMemoryBarrierWithGroupSync();
-    }
-
-    if (local < blocks) g_ScanBlockSums[local] = lds_Scan[local] - value;
-}
-
-[numthreads(1024, 1, 1)]
-void ScanAddOffsets(uint did : SV_DispatchThreadID, uint group : SV_GroupID)
-{
-    if (did < g_Dispatch.x) g_ScanOutput[did] += g_ScanBlockSums[group];
-}
-
-// ---- Screen probe kernels (Capsaicin's gi1.comp) ----
-
-// g_Dispatch.x: the mip to clear.
+// The denoiser's guides for each light pixel: its view depth (the sky's beyond the denoising range), its
+// normal and material (foliage's or not), and where it was on screen last frame, without the upscaler's
+// jitter: the camera's motion, or a moving mesh's from the game's velocity, with the view depth's change by
+// the camera's.
 [numthreads(8, 8, 1)]
-void ClearProbeMask(uint2 did : SV_DispatchThreadID)
+void PrepareGuides(uint2 did : SV_DispatchThreadID)
 {
-    uint2 dims;
-    g_ProbeMaskMips[g_Dispatch.x].GetDimensions(dims.x, dims.y);
-    if (all(did < dims)) g_ProbeMaskMips[g_Dispatch.x][did] = kGI1_InvalidId;
-}
+    if (any(did >= LightSize())) return;
 
-// g_Dispatch.x: the mip to fill from the one above it.
-[numthreads(8, 8, 1)]
-void FilterProbeMask(uint2 did : SV_DispatchThreadID)
-{
-    uint2 dims;
-    g_ProbeMaskMips[g_Dispatch.x - 1].GetDimensions(dims.x, dims.y);
-    if (any((did << 1) >= dims)) return;
-
-    uint probeMask = kGI1_InvalidId;
-    for (uint y = 0; y < 2 && probeMask == kGI1_InvalidId; ++y)
-        for (uint x = 0; x < 2 && probeMask == kGI1_InvalidId; ++x)
-        {
-            uint2 pos = (did << 1) + uint2(x, y);
-            probeMask = all(pos < dims) ? g_ProbeMaskMips[g_Dispatch.x - 1][pos] : kGI1_InvalidId;
-        }
-
-    g_ProbeMaskMips[g_Dispatch.x][did] = probeMask;
-}
-
-[numthreads(64, 1, 1)]
-void InitCachedTileLRU(uint did : SV_DispatchThreadID)
-{
-    if (did < g_Frame.probeLayout.z * g_Frame.probeLayout.w) g_ScreenProbes_ProbeCachedTileLRUBuffer[did] = did | 0x80000000u;
-}
-
-[numthreads(8, 8, 1)]
-void ReprojectScreenProbes(uint2 did : SV_DispatchThreadID, uint2 groupId : SV_GroupID, uint2 localId : SV_GroupThreadID, uint localIndex : SV_GroupIndex)
-{
-    uint2 pixel = min(did, g_BufferDimensions - 1);
+    uint2 pixel = RenderPixelOf(did);
     float depth = g_Depth.Load(int3(pixel, 0));
-    float3 normal = all(did < g_BufferDimensions) ? g_Normal.Load(int3(did, 0)).xyz : float3(0.0f, 0.0f, 0.0f);
-    bool isSkyPixel = dot(normal, normal) == 0.0f;
-    normal = normalize(2.0f * normal - 1.0f);
-
-    float2 uv = (did + 0.5f) / g_BufferDimensions;
-    float3 worldPos = transformPointProjection(uv, depth, g_ViewProjectionInverse);
-    float cellSize = distance(g_Eye, worldPos) * PROBE_CELL_SIZE;
-
-    uint2 cell = localId % PROBE_SIZE;
-    uint cellIndex = cell.x + cell.y * PROBE_SIZE;
-
-    if (cellIndex == 0) lds_ScreenProbes_Reprojection[0] = (f32tof16(65504.0f) << 16) | 0xFFFFu;
-    lds_ScreenProbes_RadianceValues[(localIndex << 2) + 0] = 0;
-    lds_ScreenProbes_RadianceValues[(localIndex << 2) + 1] = 0;
-    lds_ScreenProbes_RadianceValues[(localIndex << 2) + 2] = 0;
-    lds_ScreenProbes_RadianceValues[(localIndex << 2) + 3] = 0;
-    lds_ScreenProbes_RadianceSampleCounts[localIndex] = 0;
-    GroupMemoryBarrierWithGroupSync();
-
-    // The closest matching probe of the last frame: each of the 64 candidates scores, the best wins.
-    if (!isSkyPixel && all(did < g_BufferDimensions))
+    float4 packedNormal = g_Normal.Load(int3(pixel, 0));
+    float3 encoded = packedNormal.xyz;
+    if (depth <= 0.0f || dot(encoded, encoded) == 0.0f)
     {
-        float2 previousUv = uv - Velocity(did);
-        int2 previousPos = int2(previousUv * g_BufferDimensions);
-        if (all(previousPos >= 0) && all(previousPos < int2(g_BufferDimensions)))
-        {
-            uint probeMask = g_Frame.counts.w ? kGI1_InvalidId : g_ScreenProbes_PreviousProbeMaskBuffer[previousPos / PROBE_SIZE];
-            if (probeMask != kGI1_InvalidId)
-            {
-                uint2 probeSeed = ScreenProbes_UnpackSeed(probeMask);
-                float2 probeUv = (probeSeed + 0.5f) / g_BufferDimensions;
-                float probeDepth = g_PreviousDepth.Load(int3(probeSeed, 0));
-                float3 probeNormal = normalize(2.0f * g_PreviousNormal.Load(int3(probeSeed, 0)).xyz - 1.0f);
-                float3 probePos = transformPointProjection(probeUv, probeDepth, g_PreviousViewProjectionInverse);
-                if (abs(dot(probePos - worldPos, normal)) < cellSize && dot(normal, probeNormal) > 0.95f)
-                {
-                    uint probeScore = (f32tof16(distance(probePos, worldPos) / cellSize) << 16) | localIndex;
-                    InterlockedMin(lds_ScreenProbes_Reprojection[0], probeScore);
-                }
-            }
-        }
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    // Each lane takes a cell of the chosen probe and reuses its radiance.
-    uint localLane = lds_ScreenProbes_Reprojection[0] & 0xFFFFu;
-    uint2 seed = (groupId << 3) + uint2(localLane & 7, localLane >> 3);
-    uint2 safeSeed = min(seed, g_BufferDimensions - 1);
-    uv = (seed + 0.5f) / g_BufferDimensions;
-    float2 previousUv = uv - Velocity(safeSeed);
-    uint2 previousPos = uint2(clamp(previousUv * g_BufferDimensions, 0.0f, g_BufferDimensions - 1.0f));
-    uint probeMask = g_ScreenProbes_PreviousProbeMaskBuffer[previousPos / PROBE_SIZE];
-
-    if (localLane != 0xFFFFu)
-    {
-        depth = g_Depth.Load(int3(seed, 0));
-        normal = normalize(2.0f * g_Normal.Load(int3(seed, 0)).xyz - 1.0f);
-        worldPos = transformPointProjection(uv, depth, g_ViewProjectionInverse);
-
-        uint2 probeSeed = ScreenProbes_UnpackSeed(probeMask);
-        float2 probeUv = (probeSeed + 0.5f) / g_BufferDimensions;
-        float probeDepth = g_PreviousDepth.Load(int3(probeSeed, 0));
-        float3 probePos = transformPointProjection(probeUv, probeDepth, g_PreviousViewProjectionInverse);
-        float3 probeNormal = normalize(2.0f * g_PreviousNormal.Load(int3(probeSeed, 0)).xyz - 1.0f);
-        float4 probeRadiance = g_ScreenProbes_PreviousProbeBuffer[(probeSeed / PROBE_SIZE) * PROBE_SIZE + cell];
-        float3 probeDirection = ProbeDirection(cell + 0.5f, probeNormal);
-
-        float3 hitPoint = probePos + probeDirection * probeRadiance.w;
-        float3 reprojectedDirection = hitPoint - worldPos;
-        float reprojectedLength = length(reprojectedDirection);
-        reprojectedDirection /= reprojectedLength;
-        if (dot(normal, reprojectedDirection) > 0.0f)
-        {
-            uint remapCellIndex = ProbeCellOf(reprojectedDirection, normal);
-            uint4 remapRadiance = ScreenProbes_QuantizeRadiance(float4(probeRadiance.xyz, reprojectedLength));
-            InterlockedAdd(lds_ScreenProbes_RadianceValues[(remapCellIndex << 2) + 0], remapRadiance.x);
-            InterlockedAdd(lds_ScreenProbes_RadianceValues[(remapCellIndex << 2) + 1], remapRadiance.y);
-            InterlockedAdd(lds_ScreenProbes_RadianceValues[(remapCellIndex << 2) + 2], remapRadiance.z);
-            InterlockedAdd(lds_ScreenProbes_RadianceValues[(remapCellIndex << 2) + 3], remapRadiance.w);
-            InterlockedAdd(lds_ScreenProbes_RadianceSampleCounts[remapCellIndex], 1);
-        }
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    // The radiance for cells nothing landed in.
-    lds_ScreenProbes_RadianceBackup[localIndex] = float4(ScreenProbes_RecoverRadiance(uint3(lds_ScreenProbes_RadianceValues[(localIndex << 2) + 0],
-        lds_ScreenProbes_RadianceValues[(localIndex << 2) + 1], lds_ScreenProbes_RadianceValues[(localIndex << 2) + 2])),
-        lds_ScreenProbes_RadianceSampleCounts[localIndex] > 0 ? 1.0f : 0.0f);
-    GroupMemoryBarrierWithGroupSync();
-
-    for (uint stride = 1; stride < 64; stride <<= 1)
-    {
-        if (localIndex < 64 / (2 * stride))
-            lds_ScreenProbes_RadianceBackup[2 * (localIndex + 1) * stride - 1] += lds_ScreenProbes_RadianceBackup[(2 * localIndex + 1) * stride - 1];
-        GroupMemoryBarrierWithGroupSync();
-    }
-
-    if (localIndex == 0)
-    {
-        float4 total = lds_ScreenProbes_RadianceBackup[63];
-        lds_ScreenProbes_RadianceBackup[0] = float4(total.xyz / max(total.w, 1.0f), MAX_HIT_DISTANCE);
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    // No probe: a disocclusion.
-    if (localLane == 0xFFFFu)
-    {
-        if (cellIndex == 0)
-        {
-            uint2 probe = did / PROBE_SIZE;
-            if (!isSkyPixel)
-            {
-                uint2 jitter = min(CalculateHaltonSequence(g_FrameIndex) * PROBE_SPAWN_TILE_SIZE, PROBE_SPAWN_TILE_SIZE - 1.0f);
-                // A tile the spawn pass will not fill goes to the empty tiles, for adaptive sampling.
-                if (any((jitter / PROBE_SIZE) != (probe % (PROBE_SPAWN_TILE_SIZE / PROBE_SIZE))))
-                {
-                    uint emptyTileIndex;
-                    InterlockedAdd(g_Counters[GI_COUNTER_EMPTY_TILES], 1, emptyTileIndex);
-                    g_ScreenProbes_EmptyTileBuffer[emptyTileIndex] = probe.x + probe.y * g_Frame.probeLayout.z;
-                }
-            }
-
-            g_ScreenProbes_ProbeMaskBuffer[probe] = kGI1_InvalidId;
-        }
-
+        g_Light_ViewZ[did] = GI_LIGHT_SKY_VIEW_Z;
+        g_Light_NormalRoughness[did] = NRD_FrontEnd_PackNormalAndRoughness(float3(0.0f, 0.0f, 1.0f), 1.0f, 0.0f);
+        g_Light_Motion[did] = 0.0f;
         return;
     }
 
-    if (cellIndex < 9)
+    float viewZ = toLinearDepth(depth, g_NearFar);
+    float2 uv = (pixel + 0.5f) / g_BufferDimensions;
+    float4 previous = mul(g_PreviousViewProjection, float4(DepthPosition(pixel, depth), 1.0f));
+    float2 previousUv = float2(0.5f, -0.5f) * previous.xy / previous.w + 0.5f;
+    float2 moved;
+    bool movingMesh = ObjectMotion(int2(pixel), moved);
+    if (movingMesh) previousUv = uv - moved / g_BufferDimensions;
+
+    // NRD takes the motion without the jitter, as its projections (denoiserCamera in gi_renderer.cpp). The
+    // camera's motion here holds the jitter's change between the frames; the game's velocity runs from this
+    // frame's jittered place to the last frame's unjittered one.
+    float2 motion = previousUv - uv;
+    motion += movingMesh ? JitterUv(g_Frame.jitter.xy) : JitterUv(g_Frame.jitter.xy - g_Frame.jitter.zw);
+
+    // A moving mesh's view depth last frame: the last frame's where it was, when that lies within 10% of its own
+    // now; else as if it stood still, which takes it as new where it was something else. As if it stood still
+    // always, the change was off by the camera's movement where the camera follows it, as it does the player:
+    // a few percent a frame, past NRD's 1%, and the player's light started over every frame (2026-10-25).
+    float depthChange = previous.w - viewZ;
+    if (movingMesh)
     {
-        uint2 probe = did / PROBE_SIZE;
-        uint2 previousProbe = ScreenProbes_UnpackSeed(probeMask) / PROBE_SIZE;
-        uint probeIndex = probe.x + probe.y * g_Frame.probeLayout.z;
-        uint previousProbeIndex = previousProbe.x + previousProbe.y * g_Frame.probeLayout.z;
-        if (cellIndex == 0) g_ScreenProbes_ProbeMaskBuffer[probe] = ScreenProbes_PackSeed(seed);
-        g_ScreenProbes_ProbeSHBuffer[9 * probeIndex + cellIndex] = g_ScreenProbes_PreviousProbeSHBuffer[9 * previousProbeIndex + cellIndex];
-    }
-
-    float4 radiance = ScreenProbes_RecoverRadiance(uint4(lds_ScreenProbes_RadianceValues[(localIndex << 2) + 0],
-        lds_ScreenProbes_RadianceValues[(localIndex << 2) + 1], lds_ScreenProbes_RadianceValues[(localIndex << 2) + 2],
-        lds_ScreenProbes_RadianceValues[(localIndex << 2) + 3]));
-    uint sampleCount = lds_ScreenProbes_RadianceSampleCounts[localIndex];
-    if (sampleCount > 0) radiance /= sampleCount;
-    else radiance = lds_ScreenProbes_RadianceBackup[0];
-
-    g_ScreenProbes_ProbeBuffer[did] = radiance;
-}
-
-[numthreads(64, 1, 1)]
-void CountScreenProbes(uint did : SV_DispatchThreadID)
-{
-    uint2 dims = g_Frame.probeLayout.zw;
-    if (did >= dims.x * dims.y) return;
-
-    uint cachedTileIndex = g_ScreenProbes_ProbeCachedTileLRUBuffer[did];
-    if ((cachedTileIndex & 0x80000000u) == 0)
-    {
-        uint2 cachedProbe = uint2(cachedTileIndex % dims.x, cachedTileIndex / dims.x);
-        float3 worldPos = g_ScreenProbes_ProbeCachedTileIndexBuffer[cachedProbe].xyz;
-        float3 homogeneous = transformPointProjection(worldPos, g_ViewProjection);
-        homogeneous.xy = 0.5f * float2(homogeneous.x, -homogeneous.y) + 0.5f;
-        if (all(homogeneous > 0.0f) && all(homogeneous < 1.0f))
+        float2 lastUv = (did + 0.5f) / LightSize() + motion;
+        if (all(lastUv > 0.0f) && all(lastUv < 1.0f))
         {
-            uint2 probe = uint2(homogeneous.xy * dims);
-            uint probeIndex = probe.x + probe.y * dims.x;
-            uint elementIndex;
-            InterlockedAdd(g_Counters[GI_COUNTER_LIST_ELEMENTS], 1, elementIndex);
-            uint indexInTile;
-            InterlockedAdd(g_ScreenProbes_ProbeCachedTileListCountBuffer[probeIndex], 1, indexInTile);
-            g_ScreenProbes_ProbeCachedTileListElementBuffer[elementIndex] = uint4(did, probeIndex, indexInTile, 0);
+            float lastViewZ = g_Light_LastViewZ[min(uint2(lastUv * LightSize()), LightSize() - 1)];
+            if (abs(lastViewZ - viewZ) < 0.1f * viewZ) depthChange = lastViewZ - viewZ;
         }
     }
 
-    g_ScreenProbes_ProbeCachedTileLRUFlagBuffer[did] = 1;
+    bool foliage = packedNormal.w < 0.5f;
+    CountDiagnostic(GI_COUNTER_FOLIAGE, foliage);
+    g_Light_ViewZ[did] = viewZ;
+    g_Light_NormalRoughness[did] = NRD_FrontEnd_PackNormalAndRoughness(DecodeNormal(packedNormal), 1.0f, foliage ? GI_LIGHT_FOLIAGE_MATERIAL : 0.0f);
+    g_Light_Motion[did] = float4(motion, depthChange, 0.0f);
 }
 
-[numthreads(64, 1, 1)]
-void ScatterScreenProbes(uint did : SV_DispatchThreadID)
+// A light pixel's rays (the ray quality, 1, 2 or 4, twice on foliage): what each hits lit afresh, and its
+// bounce, the sky's light or a cache cell's. The first ray's cell takes the hit's light and gives its own
+// after the cache's update (ResolveLight); the others' cells give theirs as they stand, a frame old, and take none,
+// the cache's buffers holding a hit a light pixel. Their light is averaged; their directions, weighed by
+// it, give the denoiser's spherical harmonics (shorter than 1 where the rays' light spreads).
+[numthreads(8, 8, 1)]
+void TraceLight(uint2 did : SV_DispatchThreadID)
 {
-    if (did >= g_Counters[GI_COUNTER_LIST_ELEMENTS]) return;
+    if (any(did >= LightSize())) return;
 
-    uint3 element = g_ScreenProbes_ProbeCachedTileListElementBuffer[did].xyz;
-    g_ScreenProbes_ProbeCachedTileListBuffer[g_ScreenProbes_ProbeCachedTileListIndexBuffer[element.y] + element.z] = element.x;
-}
-
-[numthreads(64, 1, 1)]
-void SpawnScreenProbes(uint did : SV_DispatchThreadID)
-{
-    uint2 spawn = (g_BufferDimensions + PROBE_SPAWN_TILE_SIZE - 1) / PROBE_SPAWN_TILE_SIZE;
-    if (did >= spawn.x * spawn.y) return;
-
-    uint2 probe = uint2(did % spawn.x, did / spawn.x);
-    uint2 jitter = min(CalculateHaltonSequence(g_FrameIndex) * PROBE_SPAWN_TILE_SIZE, PROBE_SPAWN_TILE_SIZE - 1.0f);
-    uint2 seed = min(probe * PROBE_SPAWN_TILE_SIZE + jitter, g_BufferDimensions - 1);
-    float3 normal = g_Normal.Load(int3(seed, 0)).xyz;
-    bool isSkyPixel = dot(normal, normal) == 0.0f;
-    if (!isSkyPixel) g_ScreenProbes_PreviousProbeSpawnBuffer[did] = ScreenProbes_PackSeed(seed);
-    g_ScanInput[did] = isSkyPixel ? 0 : 1;
-}
-
-// After the scan: g_ScanInput holds whether each tile spawns, g_ScanOutput where it goes.
-[numthreads(64, 1, 1)]
-void CompactScreenProbes(uint did : SV_DispatchThreadID)
-{
-    if (did >= g_Frame.probeLimits.y || g_ScanInput[did] == 0) return;
-
-    uint probeIndex = g_ScanOutput[did];
-    uint probeSeed = g_ScreenProbes_PreviousProbeSpawnBuffer[did];
-    uint probeMask = g_ScreenProbes_ProbeMaskBuffer[ScreenProbes_UnpackSeed(probeSeed) / PROBE_SIZE];
-    // Not filling a hole from the reprojection: a tile an empty one may take the place of.
-    if (probeMask != kGI1_InvalidId)
+    uint2 pixel = RenderPixelOf(did);
+    float depth = g_Depth.Load(int3(pixel, 0));
+    float3 encoded = g_Normal.Load(int3(pixel, 0)).xyz;
+    uint4 path = uint4(kGI1_InvalidId, 0, 0, 0);
+    if (depth <= 0.0f || dot(encoded, encoded) == 0.0f)
     {
-        uint overrideTileIndex;
-        InterlockedAdd(g_Counters[GI_COUNTER_OVERRIDE_TILES], 1, overrideTileIndex);
-        g_ScreenProbes_OverrideTileBuffer[overrideTileIndex] = probeIndex;
+        g_Light_Partial[did] = 0.0f;
+        g_Light_Path[did] = path;
+        return;
     }
 
-    g_ScreenProbes_ProbeSpawnBuffer[probeIndex] = probeSeed;
-    g_ScreenProbes_ProbeSpawnIndexBuffer[did] = probeIndex;
-}
-
-// The number of probes that spawned, from the scan: the last tile's offset plus whether it spawned.
-uint SpawnedProbeCount()
-{
-    uint last = g_Frame.probeLimits.y - 1;
-    return g_ScanOutput[last] + g_ScanInput[last];
-}
-
-[numthreads(64, 1, 1)]
-void PatchScreenProbes(uint did : SV_DispatchThreadID)
-{
-    uint overrideTileCount = g_Counters[GI_COUNTER_OVERRIDE_TILES];
-    if (overrideTileCount == 0 || did >= g_Counters[GI_COUNTER_EMPTY_TILES]) return;
-
-    uint probeIndex = g_ScreenProbes_EmptyTileBuffer[did];
-    uint2 probe = uint2(probeIndex % g_Frame.probeLayout.z, probeIndex / g_Frame.probeLayout.z);
-    uint2 jitter = min(CalculateHaltonSequence(g_FrameIndex) * PROBE_SIZE, PROBE_SIZE - 1.0f);
-    uint2 seed = min(probe * PROBE_SIZE + jitter, g_BufferDimensions - 1);
-    float3 normal = g_Normal.Load(int3(seed, 0)).xyz;
-    if (dot(normal, normal) == 0.0f) return;
-
-    Random random = MakeRandom(did, g_FrameIndex);
-    uint index = random.randInt(overrideTileCount);
-    uint previous;
-    InterlockedExchange(g_ScreenProbes_ProbeSpawnBuffer[g_ScreenProbes_OverrideTileBuffer[index]], ScreenProbes_PackSeed(seed), previous);
-}
-
-// Keeps the spawn count where later passes read it: the scan buffers are reused.
-[numthreads(1, 1, 1)]
-void StoreSpawnCount()
-{
-    g_Counters[GI_COUNTER_COUNT - 1] = SpawnedProbeCount();
-}
-
-uint ProbeCount()
-{
-    return g_Counters[GI_COUNTER_COUNT - 1];
-}
-
-[numthreads(64, 1, 1)]
-void SampleScreenProbes(uint did : SV_DispatchThreadID, uint localId : SV_GroupThreadID)
-{
-    uint probeCount = ProbeCount();
-    uint2 cellAndProbe = ScreenProbes_GetCellAndProbeIndex(did);
-    uint cellIndex = cellAndProbe.x;
-    uint probeIndex = cellAndProbe.y;
-
-    uint2 cell = uint2(cellIndex % PROBE_SIZE, cellIndex / PROBE_SIZE);
-    uint2 seed = probeIndex < probeCount ? ScreenProbes_UnpackSeed(g_ScreenProbes_ProbeSpawnBuffer[probeIndex]) : uint2(0, 0);
-    uint2 probe = seed / PROBE_SIZE;
-    uint2 pos = probe * PROBE_SIZE + cell;
-
-    float2 uv = (seed + 0.5f) / g_BufferDimensions;
-    float depth = g_Depth.Load(int3(seed, 0));
-    float3 normal = normalize(2.0f * g_Normal.Load(int3(seed, 0)).xyz - 1.0f);
-    float3 worldPos = transformPointProjection(uv, depth, g_ViewProjectionInverse);
-
-    uint previousProbeMask = kGI1_InvalidId;
-    float cellSize = distance(g_Eye, worldPos) * PROBE_CELL_SIZE;
-    int2 probeRes = int2(g_Frame.probeLayout.zw);
-    uint2 dims = g_Frame.probeLayout.zw;
-
-    if (localId == 0) lds_ScreenProbes_RadianceReuseSampleCount = 0;
-    lds_ScreenProbes_RadianceValues[(localId << 2) + 0] = 0;
-    lds_ScreenProbes_RadianceValues[(localId << 2) + 1] = 0;
-    lds_ScreenProbes_RadianceValues[(localId << 2) + 2] = 0;
-    lds_ScreenProbes_RadianceValues[(localId << 2) + 3] = 0;
-    lds_ScreenProbes_RadianceSampleCounts[localId] = 0;
-    GroupMemoryBarrierWithGroupSync();
-
-    if (probeIndex < probeCount)
+    float3 normal = DecodeNormal(float4(encoded, 0.0f));
+    float3 world = DepthPosition(pixel, depth);
+    Random random = MakeRandom(did.x + did.y * LightSize().x, g_FrameIndex);
+    float3 origin = OffsetFromScreenSurface(world, normal);
+    uint rays = clamp(g_Frame.lightRays.x, 1u, 4u);
+    // Foliage (the normals' alpha under a half, PrepareGuides) takes twice: swaying and thin, it restarts its
+    // denoiser history every few frames, so its light is mostly the frame's rays; shaded grass boiled (2026-10-25).
+    if (g_Normal.Load(int3(pixel, 0)).w < 0.5f) rays *= 2u;
+    float3 total = 0.0f, weightedDirection = 0.0f, firstDirection = 0.0f;
+    float totalLuminance = 0.0f, totalDistance = 0.0f;
+    for (uint ray = 0; ray < rays; ++ray)
     {
-        for (int y = -1; y <= 1; ++y)
-            for (int x = -1; x <= 1; ++x)
-            {
-                int2 tap = int2(probe) + int2(x, y);
-                if (any(tap < 0) || any(tap >= probeRes)) continue;
-
-                uint probeMask = g_ScreenProbes_ProbeMaskBuffer[tap];
-                if (probeMask == kGI1_InvalidId) continue;
-                if (x == 0 && y == 0) previousProbeMask = probeMask;
-
-                uint2 probeSeed = ScreenProbes_UnpackSeed(probeMask);
-                float3 probePos = DepthPosition(probeSeed, g_Depth.Load(int3(probeSeed, 0)));
-                if (abs(dot(probePos - worldPos, normal)) > cellSize) continue;
-
-                float3 probeNormal = normalize(2.0f * g_Normal.Load(int3(probeSeed, 0)).xyz - 1.0f);
-                float4 probeRadiance = g_ScreenProbes_ProbeBuffer[(probeSeed / PROBE_SIZE) * PROBE_SIZE + cell];
-                float3 hitPoint = probePos + ProbeDirection(cell + 0.5f, probeNormal) * probeRadiance.w;
-                float3 reprojectedDirection = hitPoint - worldPos;
-                float reprojectedLength = length(reprojectedDirection);
-                reprojectedDirection /= reprojectedLength;
-                if (dot(normal, reprojectedDirection) < 0.0f) continue;
-
-                if (x == 0 && y == 0) InterlockedAdd(lds_ScreenProbes_RadianceReuseSampleCount, 1);
-
-                uint remapCellIndex = ProbeCellOf(reprojectedDirection, normal);
-                uint4 remapRadiance = ScreenProbes_QuantizeRadiance(float4(probeRadiance.xyz, reprojectedLength));
-                InterlockedAdd(lds_ScreenProbes_RadianceValues[(remapCellIndex << 2) + 0], remapRadiance.x);
-                InterlockedAdd(lds_ScreenProbes_RadianceValues[(remapCellIndex << 2) + 1], remapRadiance.y);
-                InterlockedAdd(lds_ScreenProbes_RadianceValues[(remapCellIndex << 2) + 2], remapRadiance.z);
-                InterlockedAdd(lds_ScreenProbes_RadianceValues[(remapCellIndex << 2) + 3], remapRadiance.w);
-                InterlockedAdd(lds_ScreenProbes_RadianceSampleCounts[remapCellIndex], 1);
-            }
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    if (lds_ScreenProbes_RadianceReuseSampleCount > 0) previousProbeMask = kGI1_InvalidId;
-
-    if (probeIndex < probeCount)
-    {
-        uint2 previousSeed = ScreenProbes_UnpackSeed(previousProbeMask);
-        float3 previousProbePos = DepthPosition(previousSeed, g_Depth.Load(int3(min(previousSeed, g_BufferDimensions - 1), 0)));
-        float3 previousProbeNormal = normalize(2.0f * g_Normal.Load(int3(min(previousSeed, g_BufferDimensions - 1), 0)).xyz - 1.0f);
-
-        uint evictedProbeMask = kGI1_InvalidId, updatedProbeMask = kGI1_InvalidId;
-        float bestEvictedScore = cellSize, bestUpdatedScore = cellSize;
-        for (int y = -1; y <= 1; ++y)
-            for (int x = -1; x <= 1; ++x)
-            {
-                int2 tap = int2(probe) + int2(x, y);
-                if (any(tap < 0) || any(tap >= probeRes)) continue;
-
-                uint tapIndex = uint(tap.x + tap.y * probeRes.x);
-                uint cachedTileCount = g_ScreenProbes_ProbeCachedTileListCountBuffer[tapIndex];
-                uint cachedTileStart = g_ScreenProbes_ProbeCachedTileListIndexBuffer[tapIndex];
-                for (uint i = 0; i < cachedTileCount; ++i)
-                {
-                    uint cachedTile = g_ScreenProbes_ProbeCachedTileListBuffer[cachedTileStart + i];
-                    uint cachedIndex = g_ScreenProbes_ProbeCachedTileLRUBuffer[cachedTile];
-                    uint2 cachedProbe = uint2(cachedIndex % dims.x, cachedIndex / dims.x);
-                    uint2 cachedPos = cachedProbe * PROBE_SIZE + cell;
-                    float4 cachedProbePos = g_ScreenProbes_ProbeCachedTileIndexBuffer[cachedProbe];
-                    float3 cachedProbeNormal = normalize(unpackNormal(asuint(cachedProbePos.w)));
-
-                    if (abs(dot(cachedProbePos.xyz - worldPos, normal)) < cellSize)
-                    {
-                        float updatedScore = distance(cachedProbePos.xyz, worldPos);
-                        if (updatedScore < bestUpdatedScore && dot(normal, cachedProbeNormal) > 0.95f)
-                        {
-                            updatedProbeMask = cachedTile;
-                            bestUpdatedScore = updatedScore;
-                        }
-
-                        float4 cachedProbeRadiance = g_ScreenProbes_ProbeCachedTileBuffer[cachedPos];
-                        float3 hitPoint = cachedProbePos.xyz + ProbeDirection(cell + 0.5f, cachedProbeNormal) * cachedProbeRadiance.w;
-                        float3 reprojectedDirection = hitPoint - worldPos;
-                        float reprojectedLength = length(reprojectedDirection);
-                        reprojectedDirection /= reprojectedLength;
-                        if (dot(normal, reprojectedDirection) > 0.0f)
-                        {
-                            uint remapCellIndex = ProbeCellOf(reprojectedDirection, normal);
-                            uint4 remapRadiance = ScreenProbes_QuantizeRadiance(float4(cachedProbeRadiance.xyz, reprojectedLength));
-                            InterlockedAdd(lds_ScreenProbes_RadianceValues[(remapCellIndex << 2) + 0], remapRadiance.x);
-                            InterlockedAdd(lds_ScreenProbes_RadianceValues[(remapCellIndex << 2) + 1], remapRadiance.y);
-                            InterlockedAdd(lds_ScreenProbes_RadianceValues[(remapCellIndex << 2) + 2], remapRadiance.z);
-                            InterlockedAdd(lds_ScreenProbes_RadianceValues[(remapCellIndex << 2) + 3], remapRadiance.w);
-                            InterlockedAdd(lds_ScreenProbes_RadianceSampleCounts[remapCellIndex], 1);
-                        }
-                    }
-
-                    if (previousProbeMask != kGI1_InvalidId && abs(dot(cachedProbePos.xyz - previousProbePos, previousProbeNormal)) < cellSize)
-                    {
-                        float evictedScore = distance(cachedProbePos.xyz, previousProbePos);
-                        if (evictedScore < bestEvictedScore && dot(previousProbeNormal, cachedProbeNormal) > 0.95f)
-                        {
-                            evictedProbeMask = cachedTile;
-                            bestEvictedScore = evictedScore;
-                        }
-                    }
-                }
-            }
-
-        if (cellIndex == 0)
+        float3 direction = mapToCosineHemisphere(random.rand2(), normal);
+        if (ray == 0) firstDirection = direction;
+        SceneHit hit = TraceFromSurface(origin, normal, CopyTolerance(world), direction, MAX_HIT_DISTANCE);
+        CountDiagnostic(GI_COUNTER_HITS, hit.hit);
+        CountDiagnostic(GI_COUNTER_NEAR_HITS, hit.hit && hit.distance < 0.25f);
+        float3 light;
+        float3 afterUpdate = 0.0f; // The first ray's cell's light as it stands, to weigh its direction
+        if (!hit.hit)
         {
-            if (previousProbeMask != kGI1_InvalidId)
-            {
-                if (evictedProbeMask == kGI1_InvalidId)
-                {
-                    InterlockedAdd(g_Counters[GI_COUNTER_LRU], 1, evictedProbeMask);
-                    evictedProbeMask |= 0x80000000u; // A newly allocated cached probe
-                }
-                else
-                {
-                    uint flag;
-                    InterlockedCompareExchange(g_ScreenProbes_ProbeCachedTileLRUFlagBuffer[evictedProbeMask], 1, 0, flag);
-                    if (flag != 1) evictedProbeMask = kGI1_InvalidId;
-                }
-            }
-
-            if (updatedProbeMask != kGI1_InvalidId)
-            {
-                uint flag;
-                InterlockedCompareExchange(g_ScreenProbes_ProbeCachedTileLRUFlagBuffer[updatedProbeMask], 1, 0, flag);
-                if (flag != 1) updatedProbeMask = kGI1_InvalidId;
-            }
-
-            g_ScreenProbes_ProbeSpawnProbeBuffer[probeIndex] = uint2(evictedProbeMask, updatedProbeMask);
+            light = SkyRadiance(direction);
+            totalDistance += MISS_DISTANCE;
         }
+        else
+        {
+            // The hit's own light, from the sun and a light.
+            HashGridCache_Visibility visibility = VisibilityOf(hit, direction);
+            float3 hitWorld, hitNormal;
+            HitSurface(visibility, hitWorld, hitNormal);
+            float3 albedo = HitAlbedo(hitWorld, visibility);
+            bool leaf = HitIsLeaf(visibility);
+            float3 hitOrigin = OffsetFromTriangle(hitWorld, hitNormal);
+            float tolerance = CopyTolerance(hitWorld);
+            light = albedo * (SunLight(hitWorld, hitNormal, hitOrigin, tolerance, leaf, random)
+                + SampledLocalLight(hitWorld, hitNormal, hitOrigin, tolerance, random));
+            MaxDiagnostic(GI_COUNTER_MAX_ALBEDO, albedo);
+            MaxDiagnostic(GI_COUNTER_MAX_DIRECT, light);
+
+            // Its bounce: the sky's light, or the cache's at what it reaches. The Lambert BRDF over the
+            // cosine-weighted pdf is the albedo.
+            float weight;
+            float3 side = BounceSide(hitNormal, leaf, random, weight);
+            float3 bounceDirection = mapToCosineHemisphere(random.rand2(), side);
+            float3 bounceOrigin = all(side == hitNormal) ? hitOrigin : OffsetFromTriangle(hitWorld, side);
+            SceneHit bounce = TraceFromSurface(bounceOrigin, side, tolerance, bounceDirection, MAX_HIT_DISTANCE);
+            CountDiagnostic(GI_COUNTER_BOUNCE_HITS, bounce.hit);
+            float3 throughput = albedo * weight;
+            if (!bounce.hit) light += throughput * SkyRadiance(bounceDirection);
+            else
+            {
+                float3 bounceHit = bounceOrigin + bounce.distance * bounceDirection;
+                uint tileIndex;
+                bool isNewTile;
+                uint cellIndex = HashGridCache_InsertCell(bounceHit, bounceDirection, bounce.distance, tileIndex, isNewTile);
+                CountDiagnostic(GI_COUNTER_FULL_BUCKETS, cellIndex == kGI1_InvalidId);
+                if (cellIndex != kGI1_InvalidId)
+                {
+                    HashGridCache_TouchCell(tileIndex, isNewTile);
+                    float3 cell = HashGridCache_FilteredDirect(cellIndex) + HashGridCache_FilteredIndirect(cellIndex);
+                    if (ray == 0)
+                    {
+                        uint index = HashGridCache_Keep(GI_COUNTER_VISIBILITY0, 0, VisibilityOf(bounce, bounceDirection), cellIndex, did.x + did.y * LightSize().x);
+                        HashGridCache_QueueLight(index, cellIndex);
+                        path.x = cellIndex;
+                        path.zw = packHalf4(float4(throughput / rays, 0.0f));
+                        afterUpdate = throughput * cell;
+                    }
+                    else light += throughput * cell;
+                }
+            }
+
+            totalDistance += hit.distance;
+        }
+
+        total += light;
+        float rayLuminance = luminance(light + afterUpdate);
+        weightedDirection += rayLuminance * direction;
+        totalLuminance += rayLuminance;
     }
-    GroupMemoryBarrierWithGroupSync();
 
-    float totalWeight = float(lds_ScreenProbes_RadianceSampleCounts[localId]);
-    float4 previousRadiance = ScreenProbes_RecoverRadiance(uint4(lds_ScreenProbes_RadianceValues[(localId << 2) + 0],
-        lds_ScreenProbes_RadianceValues[(localId << 2) + 1], lds_ScreenProbes_RadianceValues[(localId << 2) + 2],
-        lds_ScreenProbes_RadianceValues[(localId << 2) + 3]));
-    if (totalWeight > 0.0f) previousRadiance /= totalWeight;
-    else previousRadiance.w = -1.0f;
-
-    float3 cellDirection = mapToHemiOctahedron((cell + 0.5f) / PROBE_SIZE);
-    float guide = luminance(previousRadiance.xyz) * cellDirection.z;
-    float guideTotal = ScreenProbes_ScanRadiance(localId, guide); // The sampling CDF
-
-    if (probeIndex >= probeCount) return;
-
-    // Diffuse only: ray guiding by last frame's radiance, for three rays in four.
-    Random random = MakeRandom(did, g_FrameIndex);
-    uint sampledCellIndex = ScreenProbes_FindCellIndex(localId, random.rand());
-    bool guided = totalWeight > 0.0f && guideTotal > 0.0f && random.rand() >= 0.25f;
-    uint2 sampledCell = guided ? uint2(sampledCellIndex % PROBE_SIZE, sampledCellIndex / PROBE_SIZE) : cell;
-    float3 direction = ProbeDirection(sampledCell + random.rand2(), normal);
-
-    g_ScreenProbes_PreviousProbeBuffer[pos] = previousRadiance;
-    g_ScreenProbes_ProbeSpawnSampleBuffer[did] = packHalf3(direction);
+    path.y = packNormal(totalLuminance > 0.0f ? weightedDirection / totalLuminance : firstDirection);
+    g_Light_Partial[did] = float4(total / rays, totalDistance / rays);
+    g_Light_Path[did] = path;
 }
 
-// Teaches each mesh its mean albedo from the probes' pixels: a ray from the camera finds which
-// mesh a pixel shows. Counts stop at 4096, so a mesh's albedo settles.
+// Teaches each mesh its mean albedo from the screen: a ray from the camera finds which mesh a pixel
+// shows. One light pixel of each 16 x 16 a frame, moving over them; counts stop at 4096, so a mesh's
+// albedo settles.
 [numthreads(64, 1, 1)]
 void LearnAlbedo(uint did : SV_DispatchThreadID)
 {
-    if (did >= ProbeCount()) return;
+    uint2 tiles = (LightSize() + 15) / 16;
+    if (did >= tiles.x * tiles.y) return;
 
-    uint2 seed = ScreenProbes_UnpackSeed(g_ScreenProbes_ProbeSpawnBuffer[did]);
+    uint2 jitter = min(uint2(CalculateHaltonSequence(g_FrameIndex) * 16.0f), 15u);
+    uint2 lightPixel = uint2(did % tiles.x, did / tiles.x) * 16 + jitter;
+    if (any(lightPixel >= LightSize())) return;
+
+    uint2 seed = RenderPixelOf(lightPixel);
     float depth = g_Depth.Load(int3(seed, 0));
     if (depth <= 0.0f) return;
 
@@ -1290,64 +728,6 @@ void LearnAlbedo(uint did : SV_DispatchThreadID)
     InterlockedAdd(g_GeometryAlbedo[row].y, albedo.y);
     InterlockedAdd(g_GeometryAlbedo[row].z, albedo.z);
     InterlockedAdd(g_GeometryAlbedo[row].w, 1);
-}
-
-// One thread per probe ray: misses take the sky's radiance, hits become first-bounce cells.
-[numthreads(32, 1, 1)]
-void PopulateScreenProbes(uint did : SV_DispatchThreadID)
-{
-    uint2 cellAndProbe = ScreenProbes_GetCellAndProbeIndex(did);
-    if (cellAndProbe.y >= ProbeCount()) return;
-
-    uint2 seed = ScreenProbes_UnpackSeed(g_ScreenProbes_ProbeSpawnBuffer[cellAndProbe.y]);
-    float3 encodedNormal = g_Normal.Load(int3(seed, 0)).xyz;
-    if (dot(encodedNormal, encodedNormal) == 0.0f) return;
-
-    float3 normal = normalize(2.0f * encodedNormal - 1.0f);
-    float3 direction = unpackHalf3(g_ScreenProbes_ProbeSpawnSampleBuffer[did]);
-    float3 world = DepthPosition(seed, g_Depth.Load(int3(seed, 0)));
-    float3 origin = OffsetFromScreenSurface(world, normal);
-    SceneHit hit = TraceFromSurface(origin, normal, CopyTolerance(world), direction, MAX_HIT_DISTANCE);
-
-    float3 skySample = 0.0f;
-    float hitDistance = MAX_HIT_DISTANCE;
-    if (!hit.hit) skySample = SkyRadiance(direction);
-    else
-    {
-        hitDistance = hit.distance;
-        float3 hitPosition = origin + hit.distance * direction;
-        uint tileIndex;
-        bool isNewTile;
-        uint cellIndex = HashGridCache_InsertCell(hitPosition, direction, hit.distance, tileIndex, isNewTile);
-        CountDiagnostic(GI_COUNTER_FULL_BUCKETS, cellIndex == kGI1_InvalidId);
-        if (cellIndex != kGI1_InvalidId)
-        {
-            HashGridCache_TouchCell(tileIndex, isNewTile);
-
-            HashGridCache_Visibility visibility;
-            visibility.direction = direction;
-            visibility.instanceIndex = hit.instance;
-            visibility.geometryIndex = hit.geometry;
-            visibility.primitiveIndex = hit.primitive;
-            visibility.barycentrics = hit.barycentrics;
-
-            uint visibilityIndex;
-            InterlockedAdd(g_Counters[GI_COUNTER_VISIBILITY0], 1, visibilityIndex);
-            g_HashGridCache_VisibilityBuffer[visibilityIndex] = HashGridCache_PackVisibility(visibility);
-            g_HashGridCache_VisibilityCellBuffer[visibilityIndex] = cellIndex;
-            g_HashGridCache_VisibilityQueryBuffer[visibilityIndex] = did;
-
-            // A ray shorter than a cell shares the cell with surfaces it should not see (a light
-            // leak): it reads its own light instead of the cache, which PopulateCells writes.
-            bool own = hit.distance < HashGridCache_GetCellSize(hitPosition);
-            g_HashGridCache_VisibilityRadianceBuffer[visibilityIndex] = uint2(0, 0);
-            HashGridCache_QueueLight(visibilityIndex, cellIndex, own);
-        }
-    }
-
-    CountDiagnostic(GI_COUNTER_HITS, hit.hit);
-    CountDiagnostic(GI_COUNTER_NEAR_HITS, hit.hit && hit.distance < 0.25f);
-    g_ScreenProbes_ProbeSpawnRadianceBuffer[did] = packHalf4(float4(skySample, hitDistance));
 }
 
 // ---- Hash grid cache kernels ----
@@ -1372,7 +752,7 @@ void PurgeTiles(uint did : SV_DispatchThreadID)
     g_HashGridCache_PackedTileIndexBuffer[packedTileIndex] = tileIndex;
 }
 
-// GI-1.2's multibounce: some first-bounce cells trace on to a second-bounce cell.
+// GI-1.2's multibounce: some second hits' cells trace on to a third hit's cell.
 [numthreads(32, 1, 1)]
 void PopulateMultibounceCells(uint did : SV_DispatchThreadID)
 {
@@ -1385,7 +765,6 @@ void PopulateMultibounceCells(uint did : SV_DispatchThreadID)
     float3 world, normal;
     HitSurface(visibility, world, normal);
     float3 albedo = HitAlbedo(world, visibility);
-    MaxDiagnostic(GI_COUNTER_MAX_ALBEDO, albedo);
 
     // Cosine-weighted: the Lambert BRDF over its pdf is the albedo.
     float3 direction = mapToCosineHemisphere(random.rand2(), normal);
@@ -1400,57 +779,36 @@ void PopulateMultibounceCells(uint did : SV_DispatchThreadID)
     if (cellIndex == kGI1_InvalidId) return;
 
     HashGridCache_TouchCell(tileIndex, isNewTile);
-
-    HashGridCache_Visibility second;
-    second.direction = direction;
-    second.instanceIndex = hit.instance;
-    second.geometryIndex = hit.geometry;
-    second.primitiveIndex = hit.primitive;
-    second.barycentrics = hit.barycentrics;
-
-    uint index;
-    InterlockedAdd(g_Counters[GI_COUNTER_VISIBILITY1], 1, index);
-    // Capsaicin divides by the chance to trace, but a cell averages only the samples that were traced;
-    // that made its indirect light 1 / 0.3 too bright.
+    // Third hits follow the second ones' room; Capsaicin divides by the chance to trace, but a cell
+    // averages only the samples that were traced, which made its indirect light 1 / 0.3 too bright.
+    uint index = HashGridCache_Keep(GI_COUNTER_VISIBILITY1, g_Frame.lightLayout.z, VisibilityOf(hit, direction), cellIndex, did);
     g_HashGridCache_MultibounceInfoBuffer[index] = packHalf4(float4(albedo, 0.0f));
-    uint visibilityIndex = g_Frame.probeLimits.z + index; // Second-bounce hits follow the first-bounce ones' room
-    g_HashGridCache_VisibilityBuffer[visibilityIndex] = HashGridCache_PackVisibility(second);
-    g_HashGridCache_VisibilityCellBuffer[visibilityIndex] = cellIndex;
-    g_HashGridCache_VisibilityQueryBuffer[visibilityIndex] = did; // The first-bounce hit it came from
-    HashGridCache_QueueLight(visibilityIndex, cellIndex, false);
+    HashGridCache_QueueLight(g_Frame.lightLayout.z + index, cellIndex);
 }
 
-// The direct light of the queued hits, first and second bounce: into their cells, or as their own
-// for first-bounce hits too close to their probe to read the cache (Capsaicin's bypass).
+// The direct light of the queued hits, second and third, into their cells.
 [numthreads(32, 1, 1)]
 void PopulateCells(uint did : SV_DispatchThreadID)
 {
     if (did >= g_Counters[GI_COUNTER_LIGHTS]) return;
 
-    uint queued = g_HashGridCache_LightBuffer[did];
-    uint visibilityIndex = queued & ~(LIGHT_SAMPLE | LIGHT_OWN);
+    uint visibilityIndex = g_HashGridCache_LightBuffer[did];
     HashGridCache_Visibility visibility = HashGridCache_UnpackVisibility(g_HashGridCache_VisibilityBuffer[visibilityIndex]);
     float3 world, normal;
     HitSurface(visibility, world, normal);
     float3 albedo = HitAlbedo(world, visibility);
-    bool leaf = (g_Geometries[FirstGeometry(g_Instances[visibility.instanceIndex]) + visibility.geometryIndex].flags & GI_GEOMETRY_LEAF) != 0
-        && !g_Frame.lightDiagnostics.x;
     Random random = MakeRandom(did + 0x9E3779B9u, g_FrameIndex);
-    float3 lighting = HitDirectLight(world, normal, albedo, leaf, random);
+    float3 lighting = HitDirectLight(world, normal, albedo, HitIsLeaf(visibility), random);
     MaxDiagnostic(GI_COUNTER_MAX_ALBEDO, albedo);
     MaxDiagnostic(GI_COUNTER_MAX_DIRECT, lighting);
+    if (!(dot(lighting, lighting) > 0.0f)) return;
 
     // The sample's count went in with its claim (HashGridCache_QueueLight).
     uint cellIndex = g_HashGridCache_VisibilityCellBuffer[visibilityIndex];
-    uint4 quantized = HashGridCache_QuantizeRadiance(lighting);
-    if ((queued & LIGHT_SAMPLE) && dot(lighting, lighting) > 0.0f)
-    {
-        InterlockedAdd(g_HashGridCache_UpdateCellValueBuffer[4 * cellIndex + 0], quantized.x);
-        InterlockedAdd(g_HashGridCache_UpdateCellValueBuffer[4 * cellIndex + 1], quantized.y);
-        InterlockedAdd(g_HashGridCache_UpdateCellValueBuffer[4 * cellIndex + 2], quantized.z);
-    }
-
-    if (queued & LIGHT_OWN) g_HashGridCache_VisibilityRadianceBuffer[visibilityIndex] = packHalf4(float4(GIDenoiser_RemoveNaNs(lighting), 1.0f));
+    uint4 quantized = HashGridCache_QuantizeRadiance(RemoveNaNs(lighting));
+    InterlockedAdd(g_HashGridCache_UpdateCellValueBuffer[4 * cellIndex + 0], quantized.x);
+    InterlockedAdd(g_HashGridCache_UpdateCellValueBuffer[4 * cellIndex + 1], quantized.y);
+    InterlockedAdd(g_HashGridCache_UpdateCellValueBuffer[4 * cellIndex + 2], quantized.z);
 }
 
 // Tiles of 8 x 8 cells: one 8 x 8 group a tile.
@@ -1523,20 +881,20 @@ void UpdateTiles(uint groupId : SV_GroupID, uint2 threadId : SV_GroupThreadID)
     }
 }
 
-// Second-bounce cells' direct light, filtered, into their first-bounce cells' indirect light; it
-// takes effect next frame (GI-1.2).
+// Third hits' cells' direct light, filtered, into their second hits' cells' indirect light; it takes
+// effect next frame (GI-1.2).
 [numthreads(32, 1, 1)]
 void UpdateMultibounceCells(uint did : SV_DispatchThreadID)
 {
     if (did >= g_Counters[GI_COUNTER_VISIBILITY1]) return;
 
-    uint visibilityIndex = g_Frame.probeLimits.z + did;
+    uint visibilityIndex = g_Frame.lightLayout.z + did;
     uint cellIndex = g_HashGridCache_VisibilityCellBuffer[visibilityIndex];
     uint baseCellIndex = g_HashGridCache_VisibilityCellBuffer[g_HashGridCache_VisibilityQueryBuffer[visibilityIndex]];
     float3 weight = unpackHalf4(g_HashGridCache_MultibounceInfoBuffer[did]).rgb;
     float3 radiance = HashGridCache_FilteredDirect(cellIndex) * weight;
     MaxDiagnostic(GI_COUNTER_MAX_BOUNCE, radiance);
-    uint4 quantized = HashGridCache_QuantizeRadiance(GIDenoiser_RemoveNaNs(radiance));
+    uint4 quantized = HashGridCache_QuantizeRadiance(RemoveNaNs(radiance));
     if (dot(radiance, radiance) > 0.0f)
     {
         InterlockedAdd(g_HashGridCache_UpdateCellValueIndirectBuffer[4 * baseCellIndex + 0], quantized.x);
@@ -1546,456 +904,197 @@ void UpdateMultibounceCells(uint did : SV_DispatchThreadID)
     InterlockedAdd(g_HashGridCache_UpdateCellValueIndirectBuffer[4 * baseCellIndex + 3], quantized.w);
 }
 
-// First-bounce cells, filtered, into the probe rays that found them, with the flashlights' light at each hit.
-[numthreads(64, 1, 1)]
-void ResolveCells(uint did : SV_DispatchThreadID)
-{
-    if (did >= g_Counters[GI_COUNTER_VISIBILITY0]) return;
+// ---- Foliage's light by world position ----
 
-    uint cellIndex = g_HashGridCache_VisibilityCellBuffer[did];
-    float4 own = unpackHalf4(g_HashGridCache_VisibilityRadianceBuffer[did]);
-    float3 radiance = own.w > 0.0f ? own.rgb : HashGridCache_FilteredDirect(cellIndex);
-    radiance += HashGridCache_FilteredIndirect(cellIndex);
-    if (g_Frame.localLightCount.z > 0)
+// Grass and leaves sway, and the denoiser starts their light over every few frames, so shaded foliage boiled
+// with each frame's rays (2026-10-25); a cell in the world stays where it is. Cells about 8 light pixels across where they lie (power-of-two sizes, 6.25 cm at the least), in
+// a hash table of buckets (GI_FOLIAGE_MEMORY_SLOTS, GI_FOLIAGE_MEMORY_BUCKET). Each frame a foliage light pixel
+// adds its light to its cell, found at a point jittered by up to half a cell each way (blending neighbouring
+// cells over the frames), and takes FOLIAGE_MEMORY_SHARE of its light from the cell as the last frame left it,
+// once the cell has 8 frames. UpdateFoliageMemory blends the frame's light into each cell over half a second
+// (FOLIAGE_MEMORY_FRAMES) and frees the cells no foliage took for 2 seconds.
+RWStructuredBuffer<uint> g_FoliageMemory_Keys : register(u31);    // A cell's key, 0 for a free slot
+RWStructuredBuffer<uint> g_FoliageMemory_Touched : register(u32); // The frame foliage last took the cell
+RWStructuredBuffer<uint> g_FoliageMemory_Added : register(u33);   // The frame's light into it, four a slot: rgb quantised
+                                                                  // (HashGridCache_QuantizeRadiance), and the light pixels'
+RWStructuredBuffer<uint2> g_FoliageMemory_Light : register(u34);  // Its light (packHalf4): rgb, and w its frames
+
+#define FOLIAGE_MEMORY_SHARE 0.8f
+#define FOLIAGE_MEMORY_FRAMES 30.0f
+#define FOLIAGE_MEMORY_IDLE_FRAMES 120u
+
+// The slot of the cell at `world`, found at a point `jitter` (-0.5 to 0.5 each way) cells off; kGI1_InvalidId
+// when its bucket is full.
+uint FoliageMemorySlot(float3 world, float3 jitter)
+{
+    float size = max(distance(g_Eye, world) * g_Frame.rayCone.x * 16.0f, 1.0f / 16.0f);
+    int level = int(ceil(log2(size)));
+    float cellSize = exp2(level);
+    uint3 c = asuint(int3(floor(world / cellSize + jitter)));
+    uint l = asuint(level);
+    uint key = max(1u, xxHash(l + xxHash(c.x + xxHash(c.y + xxHash(c.z)))));
+    uint bucket = pcgHash(l + pcgHash(c.x + pcgHash(c.y + pcgHash(c.z)))) % (GI_FOLIAGE_MEMORY_SLOTS / GI_FOLIAGE_MEMORY_BUCKET);
+    for (uint i = 0; i < GI_FOLIAGE_MEMORY_BUCKET; ++i)
     {
-        Random random = MakeRandom(did + 0x85EBCA6Bu, g_FrameIndex);
-        float3 flashlights = FlashlightLight(HashGridCache_UnpackVisibility(g_HashGridCache_VisibilityBuffer[did]), random);
-        MaxDiagnostic(GI_COUNTER_MAX_DIRECT, flashlights);
-        radiance += flashlights;
+        uint slot = bucket * GI_FOLIAGE_MEMORY_BUCKET + i;
+        uint previous;
+        InterlockedCompareExchange(g_FoliageMemory_Keys[slot], 0u, key, previous);
+        if (previous == 0u || previous == key) return slot;
     }
-    MaxDiagnostic(GI_COUNTER_MAX_RESOLVED, radiance);
-    ScreenProbes_AccumulateRadiance(g_HashGridCache_VisibilityQueryBuffer[did], GIDenoiser_RemoveNaNs(radiance));
+
+    return kGI1_InvalidId;
 }
 
-// ---- Screen probes, after the cache ----
+// A light pixel's light with its cell's, if it shows foliage: adds its own to the cell's frame.
+float3 RememberFoliageLight(uint2 lightPixel, float3 radiance)
+{
+    uint2 pixel = RenderPixelOf(lightPixel);
+    float depth = g_Depth.Load(int3(pixel, 0));
+    float4 packedNormal = g_Normal.Load(int3(pixel, 0));
+    if (depth <= 0.0f || dot(packedNormal.xyz, packedNormal.xyz) == 0.0f || packedNormal.w >= 0.5f) return radiance;
+
+    Random random = MakeRandom(lightPixel.x + lightPixel.y * LightSize().x + g_Frame.lightLayout.z, g_FrameIndex);
+    float3 jitter = float3(random.rand2(), random.rand()) - 0.5f;
+    uint slot = FoliageMemorySlot(DepthPosition(pixel, depth), jitter);
+    CountDiagnostic(GI_COUNTER_FOLIAGE_MEMORY_FULL, slot == kGI1_InvalidId);
+    if (slot == kGI1_InvalidId) return radiance;
+
+    uint4 quantized = HashGridCache_QuantizeRadiance(RemoveNaNs(radiance));
+    InterlockedAdd(g_FoliageMemory_Added[4 * slot + 0], quantized.x);
+    InterlockedAdd(g_FoliageMemory_Added[4 * slot + 1], quantized.y);
+    InterlockedAdd(g_FoliageMemory_Added[4 * slot + 2], quantized.z);
+    InterlockedAdd(g_FoliageMemory_Added[4 * slot + 3], quantized.w);
+    g_FoliageMemory_Touched[slot] = g_FrameIndex;
+    float4 kept = unpackHalf4(g_FoliageMemory_Light[slot]);
+    return lerp(radiance, kept.rgb, FOLIAGE_MEMORY_SHARE * saturate(kept.w / 8.0f));
+}
 
 [numthreads(64, 1, 1)]
-void BlendScreenProbes(uint did : SV_DispatchThreadID, uint localId : SV_GroupThreadID)
+void UpdateFoliageMemory(uint did : SV_DispatchThreadID)
 {
-    uint probeCount = ProbeCount();
-    uint2 cellAndProbe = ScreenProbes_GetCellAndProbeIndex(did);
-    uint cellIndex = cellAndProbe.x;
-    uint probeIndex = cellAndProbe.y;
-    uint2 cell = uint2(cellIndex % PROBE_SIZE, cellIndex / PROBE_SIZE);
-    uint2 seed = probeIndex < probeCount ? ScreenProbes_UnpackSeed(g_ScreenProbes_ProbeSpawnBuffer[probeIndex]) : uint2(0, 0);
-    uint2 probe = seed / PROBE_SIZE;
-    uint2 pos = probe * PROBE_SIZE + cell;
+    if (did >= GI_FOLIAGE_MEMORY_SLOTS || g_FoliageMemory_Keys[did] == 0u) return;
 
-    lds_ScreenProbes_RadianceValues[(localId << 2) + 0] = 0;
-    lds_ScreenProbes_RadianceValues[(localId << 2) + 1] = 0;
-    lds_ScreenProbes_RadianceValues[(localId << 2) + 2] = 0;
-    lds_ScreenProbes_RadianceValues[(localId << 2) + 3] = 0;
-    lds_ScreenProbes_RadianceSampleCounts[localId] = 0;
-    GroupMemoryBarrierWithGroupSync();
-
-    if (probeIndex < probeCount)
+    uint4 added = uint4(g_FoliageMemory_Added[4 * did + 0], g_FoliageMemory_Added[4 * did + 1], g_FoliageMemory_Added[4 * did + 2],
+        g_FoliageMemory_Added[4 * did + 3]);
+    if (added.w == 0u)
     {
-        float3 normal = normalize(2.0f * g_Normal.Load(int3(seed, 0)).xyz - 1.0f);
-        float3 direction = unpackHalf3(g_ScreenProbes_ProbeSpawnSampleBuffer[did]);
-        float4 radiance = unpackHalf4(g_ScreenProbes_ProbeSpawnRadianceBuffer[did]);
-        uint4 quantized = ScreenProbes_QuantizeRadiance(radiance);
-        uint sampledCellIndex = ProbeCellOf(direction, normal);
-        InterlockedAdd(lds_ScreenProbes_RadianceValues[(sampledCellIndex << 2) + 0], quantized.x);
-        InterlockedAdd(lds_ScreenProbes_RadianceValues[(sampledCellIndex << 2) + 1], quantized.y);
-        InterlockedAdd(lds_ScreenProbes_RadianceValues[(sampledCellIndex << 2) + 2], quantized.z);
-        InterlockedAdd(lds_ScreenProbes_RadianceValues[(sampledCellIndex << 2) + 3], quantized.w);
-        InterlockedAdd(lds_ScreenProbes_RadianceSampleCounts[sampledCellIndex], 1);
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    // The radiance for cells no ray went to.
-    lds_ScreenProbes_RadianceBackup[localId] = float4(ScreenProbes_RecoverRadiance(uint3(lds_ScreenProbes_RadianceValues[(localId << 2) + 0],
-        lds_ScreenProbes_RadianceValues[(localId << 2) + 1], lds_ScreenProbes_RadianceValues[(localId << 2) + 2])),
-        lds_ScreenProbes_RadianceSampleCounts[localId] > 0 ? 1.0f : 0.0f);
-    GroupMemoryBarrierWithGroupSync();
-
-    for (uint stride = 1; stride < 64; stride <<= 1)
-    {
-        if (localId < 64 / (2 * stride))
-            lds_ScreenProbes_RadianceBackup[2 * (localId + 1) * stride - 1] += lds_ScreenProbes_RadianceBackup[(2 * localId + 1) * stride - 1];
-        GroupMemoryBarrierWithGroupSync();
-    }
-
-    if (localId == 0)
-    {
-        float4 total = lds_ScreenProbes_RadianceBackup[63];
-        lds_ScreenProbes_RadianceBackup[0] = float4(total.xyz / max(total.w, 1.0f), MAX_HIT_DISTANCE);
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    if (probeIndex >= probeCount) return;
-
-    float4 radiance = ScreenProbes_RecoverRadiance(uint4(lds_ScreenProbes_RadianceValues[(localId << 2) + 0],
-        lds_ScreenProbes_RadianceValues[(localId << 2) + 1], lds_ScreenProbes_RadianceValues[(localId << 2) + 2],
-        lds_ScreenProbes_RadianceValues[(localId << 2) + 3]));
-    uint sampleCount = lds_ScreenProbes_RadianceSampleCounts[localId];
-    float4 previousRadiance = g_ScreenProbes_PreviousProbeBuffer[pos];
-    if (sampleCount > 0) radiance /= sampleCount;
-    else radiance = previousRadiance.w > 0.0f ? previousRadiance : lds_ScreenProbes_RadianceBackup[0];
-
-    if (previousRadiance.w > 0.0f)
-    {
-        // Shadow-preserving biased temporal hysteresis.
-        float lumaA = luminance(radiance.xyz), lumaB = luminance(previousRadiance.xyz);
-        float blend = squared(clamp(max(lumaA - lumaB - min(lumaA, lumaB), 0.0f) / max(max(lumaA, lumaB), 1e-4f), 0.0f, 0.95f));
-        radiance = lerp(radiance, previousRadiance, blend);
-    }
-
-    uint2 dims = g_Frame.probeLayout.zw;
-    uint2 probes = g_ScreenProbes_ProbeSpawnProbeBuffer[probeIndex];
-    uint evictedProbeMask = probes.x, updatedProbeMask = probes.y;
-    if (evictedProbeMask != kGI1_InvalidId && evictedProbeMask >= g_Counters[GI_COUNTER_LRU])
-    {
-        if ((evictedProbeMask & 0x80000000u) != 0)
+        if (g_FrameIndex - g_FoliageMemory_Touched[did] > FOLIAGE_MEMORY_IDLE_FRAMES)
         {
-            evictedProbeMask &= ~0x80000000u;
-            g_ScreenProbes_ProbeCachedTileLRUBuffer[evictedProbeMask] &= ~0x80000000u;
-            g_ScreenProbes_ProbeCachedTileLRUFlagBuffer[evictedProbeMask] = 0;
+            g_FoliageMemory_Keys[did] = 0u;
+            g_FoliageMemory_Light[did] = uint2(0, 0);
         }
-
-        uint cachedIndex = g_ScreenProbes_ProbeCachedTileLRUBuffer[evictedProbeMask];
-        uint2 cachedProbe = uint2(cachedIndex % dims.x, cachedIndex / dims.x);
-        uint2 cachedPos = cachedProbe * PROBE_SIZE + cell;
-        if (cellIndex == 0)
-        {
-            uint previousProbeMask = g_ScreenProbes_ProbeMaskBuffer[probe];
-            uint mruIndex;
-            InterlockedAdd(g_Counters[GI_COUNTER_MRU], 1, mruIndex);
-            g_ScreenProbes_ProbeCachedTileMRUBuffer[evictedProbeMask] = mruIndex;
-
-            uint2 previousSeed = ScreenProbes_UnpackSeed(previousProbeMask);
-            float3 previousWorld = DepthPosition(previousSeed, g_Depth.Load(int3(previousSeed, 0)));
-            float3 previousNormal = normalize(2.0f * g_Normal.Load(int3(previousSeed, 0)).xyz - 1.0f);
-            g_ScreenProbes_ProbeCachedTileIndexBuffer[cachedProbe] = float4(previousWorld, asfloat(packNormal(previousNormal)));
-        }
-
-        g_ScreenProbes_ProbeCachedTileBuffer[cachedPos] = g_ScreenProbes_ProbeBuffer[pos];
+        return;
     }
 
-    if (updatedProbeMask != kGI1_InvalidId && updatedProbeMask >= g_Counters[GI_COUNTER_LRU])
-    {
-        uint cachedIndex = g_ScreenProbes_ProbeCachedTileLRUBuffer[updatedProbeMask];
-        uint2 cachedProbe = uint2(cachedIndex % dims.x, cachedIndex / dims.x);
-        if (cellIndex == 0) g_ScreenProbes_ProbeCachedTileLRUFlagBuffer[updatedProbeMask] = 1;
-        g_ScreenProbes_ProbeCachedTileBuffer[cachedProbe * PROBE_SIZE + cell] = radiance;
-    }
-
-    if (cellIndex == 0) g_ScreenProbes_ProbeMaskBuffer[probe] = ScreenProbes_PackSeed(seed);
-    g_ScreenProbes_ProbeBuffer[pos] = radiance;
-    MaxDiagnostic(GI_COUNTER_MAX_PROBE, radiance.xyz);
+    float4 kept = unpackHalf4(g_FoliageMemory_Light[did]);
+    float frames = min(kept.w + 1.0f, FOLIAGE_MEMORY_FRAMES);
+    float3 light = HashGridCache_RecoverRadiance(added).rgb / added.w;
+    g_FoliageMemory_Light[did] = packHalf4(float4(lerp(kept.rgb, light, 1.0f / frames), frames));
+    g_FoliageMemory_Added[4 * did + 0] = 0u;
+    g_FoliageMemory_Added[4 * did + 1] = 0u;
+    g_FoliageMemory_Added[4 * did + 2] = 0u;
+    g_FoliageMemory_Added[4 * did + 3] = 0u;
 }
 
-// Copies this frame's probes over the last frame's, which the filter reads (Capsaicin's copy).
+// ---- Denoising and the render size ----
+
+// Each ray's light with its bounce's cell, after the cache's update, and foliage's with its cell in the
+// foliage memory, as the denoiser takes it.
 [numthreads(8, 8, 1)]
-void CopyProbes(uint2 did : SV_DispatchThreadID)
+void ResolveLight(uint2 did : SV_DispatchThreadID)
 {
-    uint2 dims = g_Frame.probeLayout.zw * PROBE_SIZE;
-    if (all(did < dims)) g_ScreenProbes_PreviousProbeBuffer[did] = g_ScreenProbes_ProbeBuffer[did];
+    if (any(did >= LightSize())) return;
+
+    float4 partial = g_Light_Partial[did];
+    uint4 path = g_Light_Path[did];
+    float3 radiance = partial.rgb;
+    if (path.x != kGI1_InvalidId)
+        radiance += unpackHalf4(path.zw).rgb * (HashGridCache_FilteredDirect(path.x) + HashGridCache_FilteredIndirect(path.x));
+
+    MaxDiagnostic(GI_COUNTER_MAX_TRACED, radiance);
+    radiance = RememberFoliageLight(did, radiance);
+    // The rays' direction, at most 1 long (TraceLight).
+    float3 direction = unpackNormal(path.y);
+    float4 second;
+    g_Light_Noisy[0][did] = RELAX_FrontEnd_PackSh(radiance, partial.w, direction * rsqrt(max(dot(direction, direction), 1.0f)), second, true);
+    g_Light_Noisy[1][did] = second;
 }
 
-// After the scan: g_ScanInput holds the LRU flags, g_ScanOutput their offsets.
-[numthreads(64, 1, 1)]
-void ReorderScreenProbes(uint did : SV_DispatchThreadID)
+// A light pixel's denoised light at a surface of `normal`, its own normal being `ownNormal`: its spherical
+// harmonics resolved against the normal (NRD_SH_ResolveDiffuse), scaled to keep the light it has at its own.
+float3 DenoisedLight(uint2 lightPixel, float3 normal, float3 ownNormal)
 {
-    uint count = g_Frame.probeLayout.z * g_Frame.probeLayout.w;
-    if (did >= count) return;
-
-    uint cachedTileIndex = g_ScreenProbes_ProbeCachedTileLRUBuffer[did];
-    uint cachedTileOffset = g_ScanOutput[did];
-    if (g_ScanInput[did] == 0) cachedTileOffset = g_ScreenProbes_ProbeCachedTileMRUBuffer[did] + g_ScanOutput[count];
-    g_ScreenProbes_PreviousProbeCachedTileLRUBuffer[cachedTileOffset] = cachedTileIndex;
+    NRD_SG sg = RELAX_BackEnd_UnpackSh(g_Light_Denoised[0][lightPixel], g_Light_Denoised[1][lightPixel].xyz);
+    float3 color = NRD_SG_ExtractColor(sg);
+    float own = luminance(NRD_SH_ResolveDiffuse(sg, ownNormal));
+    float here = luminance(NRD_SH_ResolveDiffuse(sg, normal));
+    return own > 1e-6f ? color * clamp(here / own, 0.5f, 2.0f) : color;
 }
 
-// g_Dispatch: x the pair entry written, y the one read, zw the blur direction (0 or 1 each).
-[numthreads(64, 1, 1)]
-void FilterScreenProbes(uint did : SV_DispatchThreadID)
+// Diagnostics: the denoiser's history at each render pixel, blended over the image by its alpha
+// (upscaler::LightHistoryView): red where it started the light over within three frames, yellow under ten.
+RWTexture2D<float4> g_LightDebug : register(u79);
+
+float4 HistoryColor(float frames)
 {
-    uint2 cellAndProbe = ScreenProbes_GetCellAndProbeIndex(did);
-    uint cellIndex = cellAndProbe.x;
-    uint probeIndex = cellAndProbe.y;
-    if (probeIndex >= ProbeCount()) return;
-
-    int2 blurDirection = int2(g_Dispatch.zw);
-    uint2 cell = uint2(cellIndex % PROBE_SIZE, cellIndex / PROBE_SIZE);
-    uint2 seed = ScreenProbes_UnpackSeed(g_ScreenProbes_ProbeSpawnBuffer[probeIndex]);
-    uint2 pos = (seed / PROBE_SIZE) * PROBE_SIZE + cell;
-
-    float depth = g_Depth.Load(int3(seed, 0));
-    float3 normal = normalize(2.0f * g_Normal.Load(int3(seed, 0)).xyz - 1.0f);
-    float3 worldPos = DepthPosition(seed, depth);
-    float cellSize = distance(g_Eye, worldPos) * PROBE_CELL_SIZE;
-
-    float4 radiance = g_ScreenProbes_ProbeBufferPair[g_Dispatch.y][pos];
-    float hitDistance = radiance.w;
-    float totalWeight = 1.0f;
-    float3 direction = ProbeDirection(cell + 0.5f, normal);
-
-    for (int i = 0; i < 6; ++i)
-    {
-        int step = (((i & 1) << 1) - 1) * ((i >> 1) + 1);
-        uint probeMask = ScreenProbes_FindClosestProbe(seed, step * blurDirection);
-        if (probeMask == kGI1_InvalidId) continue;
-
-        uint2 probeSeed = ScreenProbes_UnpackSeed(probeMask);
-        float probeDepth = g_Depth.Load(int3(probeSeed, 0));
-        float3 probeNormal = normalize(2.0f * g_Normal.Load(int3(probeSeed, 0)).xyz - 1.0f);
-        float3 probeWorld = DepthPosition(probeSeed, probeDepth);
-        if (abs(dot(probeWorld - worldPos, normal)) > cellSize || dot(direction, probeNormal) < 0.0f) continue;
-
-        uint probeCellIndex = ProbeCellOf(direction, probeNormal);
-        uint2 probeCell = uint2(probeCellIndex % PROBE_SIZE, probeCellIndex / PROBE_SIZE);
-        uint2 probePos = (probeSeed / PROBE_SIZE) * PROBE_SIZE + probeCell;
-        float3 probeDirection = normalize(ProbeDirection(probeCell + 0.5f, probeNormal));
-        float4 probeRadiance = g_ScreenProbes_ProbeBufferPair[g_Dispatch.y][probePos];
-        float probeHitDistance = min(probeRadiance.w, hitDistance);
-        float3 hitPoint = probeWorld + probeDirection * probeHitDistance;
-        if (dot(direction, normalize(hitPoint - worldPos)) < kGI1_AngleThreshold) continue;
-
-        float weight = pow(saturate(1.0f - abs(toLinearDepth(probeDepth, g_NearFar) - toLinearDepth(depth, g_NearFar)) / toLinearDepth(depth, g_NearFar)), 8.0f);
-        radiance += weight * float4(GIDenoiser_RemoveNaNs(probeRadiance.xyz), probeHitDistance);
-        totalWeight += weight;
-        hitDistance = radiance.w / totalWeight;
-    }
-
-    g_ScreenProbes_ProbeBufferPair[g_Dispatch.x][pos] = radiance / totalWeight;
+    if (frames < 3.0f) return float4(1.0f, 0.1f, 0.1f, 0.75f);
+    if (frames < 10.0f) return float4(1.0f, 0.85f, 0.1f, 0.5f);
+    return 0.0f;
 }
 
-[numthreads(64, 1, 1)]
-void ProjectScreenProbes(uint did : SV_DispatchThreadID, uint localId : SV_GroupThreadID)
-{
-    uint probeCount = ProbeCount();
-    uint2 cellAndProbe = ScreenProbes_GetCellAndProbeIndex(did);
-    uint cellIndex = cellAndProbe.x;
-    uint probeIndex = cellAndProbe.y;
-    uint2 cell = uint2(cellIndex % PROBE_SIZE, cellIndex / PROBE_SIZE);
-    uint2 seed = probeIndex < probeCount ? ScreenProbes_UnpackSeed(g_ScreenProbes_ProbeSpawnBuffer[probeIndex]) : uint2(0, 0);
-    uint2 probe = seed / PROBE_SIZE;
-
-    if (probeIndex < probeCount)
-    {
-        float3 normal = normalize(2.0f * g_Normal.Load(int3(seed, 0)).xyz - 1.0f);
-        // Each of the 64 equal-area cells holds 2 pi / 64 of the hemisphere.
-        float3 radiance = g_ScreenProbes_ProbeBuffer[probe * PROBE_SIZE + cell].xyz * (TWO_PI / (PROBE_SIZE * PROBE_SIZE));
-        float coefficients[9];
-        SH_GetCoefficients(ProbeDirection(cell + 0.5f, normal), coefficients);
-        for (uint j = 0; j < 9; ++j) lds_ScreenProbes_ProbeSHBuffer[9 * localId + j] = float4(coefficients[j] * radiance, 1.0f);
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    if (probeIndex >= probeCount || cellIndex >= 9) return;
-
-    float4 irradianceSH = 0.0f;
-    for (uint i = 0; i < 64; ++i) irradianceSH += lds_ScreenProbes_ProbeSHBuffer[9 * i + cellIndex];
-
-    uint index = probe.x + probe.y * g_Frame.probeLayout.z;
-    g_ScreenProbes_ProbeSHBuffer[9 * index + cellIndex] = packHalf4(irradianceSH);
-}
-
-// The probes' irradiance at every pixel; g_Dispatch.x is the colour buffer written.
+// The light at every render pixel, irradiance over pi times the exposure: from the four light pixels
+// around it, as a bilinear filter weighs them, times how alike their view depth and normal are to its own.
 [numthreads(8, 8, 1)]
-void InterpolateScreenProbes(uint2 did : SV_DispatchThreadID)
+void CompositeLight(uint2 did : SV_DispatchThreadID)
 {
     if (any(did >= g_BufferDimensions)) return;
 
     float depth = g_Depth.Load(int3(did, 0));
-    float3 encodedNormal = g_Normal.Load(int3(did, 0)).xyz;
-    if (dot(encodedNormal, encodedNormal) == 0.0f)
+    float3 encoded = g_Normal.Load(int3(did, 0)).xyz;
+    if (depth <= 0.0f || dot(encoded, encoded) == 0.0f)
     {
-        g_GIDenoiser_ColorBuffers[g_Dispatch.x][did] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        g_Output[did] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        if (g_Frame.lightDiagnostics.z != 0u) g_LightDebug[did] = 0.0f;
         return;
     }
 
-    float3 normal = normalize(2.0f * encodedNormal - 1.0f);
-    uint2 pos = did;
-    float3 worldPos = DepthPosition(did, depth);
-    float cellSize = distance(g_Eye, worldPos) * PROBE_CELL_SIZE;
-
-    // A jitter within the pixel's plane spreads the probes' blocks.
-    Random random = MakeRandom(did.x + did.y * g_BufferDimensions.x, g_FrameIndex);
-    int2 jitter = int2((2.0f * random.rand2() - 1.0f) * PROBE_SPAWN_TILE_SIZE);
-    uint2 newPos = clamp(int2(did) + jitter, 0, int2(g_BufferDimensions) - 1);
-    float3 newWorldPos = DepthPosition(newPos, g_Depth.Load(int3(newPos, 0)));
-    if (abs(dot(newWorldPos - worldPos, normal)) < 0.5f * cellSize) pos = newPos;
-
-    uint4 probes;
-    probes.x = ScreenProbes_FindClosestProbe(pos);
-    if (probes.x == kGI1_InvalidId)
-    {
-        g_GIDenoiser_ColorBuffers[g_Dispatch.x][did] = float4(0.0f, 0.0f, 0.0f, 1.0f);
-        return;
-    }
-
-    uint2 seed = ScreenProbes_UnpackSeed(probes.x);
-    int2 offset = int2(pos.x < seed.x ? -1 : 1, pos.y < seed.y ? -1 : 1);
-    probes.y = ScreenProbes_FindClosestProbe(pos, int2(offset.x, 0));
-    probes.z = ScreenProbes_FindClosestProbe(pos, int2(0, offset.y));
-    probes.w = ScreenProbes_FindClosestProbe(pos, offset);
-    if (probes.y == probes.x) probes.y = kGI1_InvalidId;
-    if (probes.z == probes.y || probes.z == probes.x) probes.z = kGI1_InvalidId;
-    if (probes.w == probes.z || probes.w == probes.y || probes.w == probes.x) probes.w = kGI1_InvalidId;
-
-    float4 w = 0.0f;
+    float3 normal = DecodeNormal(float4(encoded, 0.0f));
+    float viewZ = toLinearDepth(depth, g_NearFar);
+    // Light pixel p's ray left from render pixel 2p: an even render pixel is a light pixel, an odd one
+    // halfway between two.
+    float2 position = did * 0.5f;
+    int2 base = int2(floor(position));
+    float2 f = position - base;
+    float3 total = 0.0f, nearest = 0.0f;
+    float nearestHistory = 0.0f; // RELAX's history length in frames, with the light (OUT_DIFF_SH0.w)
+    float weight = 0.0f, nearestDepth = FLT_MAX;
     for (uint i = 0; i < 4; ++i)
     {
-        if (probes[i] == kGI1_InvalidId) continue;
+        int2 offset = int2(i & 1, i >> 1);
+        uint2 tap = uint2(clamp(base + offset, 0, int2(LightSize()) - 1));
+        float tapViewZ = g_Light_ViewZ[tap];
+        if (tapViewZ >= GI_LIGHT_DENOISING_RANGE) continue;
 
-        uint2 probeSeed = ScreenProbes_UnpackSeed(probes[i]);
-        float probeDepth = g_Depth.Load(int3(probeSeed, 0));
-        float3 probePos = DepthPosition(probeSeed, probeDepth);
-        if (abs(dot(probePos - worldPos, normal)) > cellSize) w[i] = 0.0f; // Probes ahead of the pixel's plane would leak into the background
-        else
+        float3 tapNormal = DecodeNormal(g_Normal.Load(int3(RenderPixelOf(tap), 0)));
+        float3 light = DenoisedLight(tap, normal, tapNormal);
+        MaxDiagnostic(GI_COUNTER_MAX_DENOISED, light);
+        float depthDifference = abs(tapViewZ - viewZ) / viewZ;
+        if (depthDifference < nearestDepth)
         {
-            w[i] = saturate(1.0f - abs(toLinearDepth(probeDepth, g_NearFar) - toLinearDepth(depth, g_NearFar)) / toLinearDepth(depth, g_NearFar));
-            w[i] *= max(dot(normal, normalize(2.0f * g_Normal.Load(int3(probeSeed, 0)).xyz - 1.0f)), 0.0f);
-            w[i] = pow(w[i], 8.0f);
-        }
-    }
-
-    bool useBackup = false;
-    if (dot(w, w) == 0.0f)
-    {
-        w = float4(1.0f, probes.y != kGI1_InvalidId ? 1.0f : 0.0f, probes.z != kGI1_InvalidId ? 1.0f : 0.0f, probes.w != kGI1_InvalidId ? 1.0f : 0.0f);
-        useBackup = true;
-    }
-
-    w /= w.x + w.y + w.z + w.w;
-
-    float3 irradiance = 0.0f;
-    for (uint j = 0; j < 4; ++j)
-        if (w[j] > 0.0f) irradiance += w[j] * ScreenProbes_CalculateSHIrradiance(normal, ScreenProbes_UnpackSeed(probes[j]) / PROBE_SIZE);
-
-    MaxDiagnostic(GI_COUNTER_MAX_INTERPOLATED, irradiance);
-    g_GIDenoiser_ColorBuffers[g_Dispatch.x][did] = float4(irradiance, useBackup ? 0.0f : 1.0f);
-}
-
-// ---- Denoiser (Capsaicin's gi_denoiser.hlsl) ----
-
-int GIDenoiser_GetBlurRadius(uint2 pos)
-{
-    float blurMask = g_GIDenoiser_BlurMask[pos] * kGIDenoiser_MaxBlurMask;
-    return blurMask > 0.0f ? int(max(blurMask, 1.0f) + 0.5f) : 0;
-}
-
-// g_Dispatch: x this frame's colour buffer, y the last frame's.
-[numthreads(8, 8, 1)]
-void ReprojectGI(uint2 did : SV_DispatchThreadID)
-{
-    if (any(did >= g_BufferDimensions)) return;
-
-    float4 color = g_GIDenoiser_ColorBuffers[g_Dispatch.x][did];
-    float4 lighting = 0.0f;
-    float3 normal = g_Normal.Load(int3(did, 0)).xyz;
-    float alphaBlend = 1.0f;
-    float colorDelta = 0.0f;
-    float2 uv = (did + 0.5f) / g_BufferDimensions;
-    bool isSkyPixel = dot(normal, normal) == 0.0f;
-
-    if (!isSkyPixel)
-    {
-        float2 previousUv = uv - Velocity(did);
-        float depth = g_Depth.Load(int3(did, 0));
-        normal = 2.0f * normal - 1.0f;
-        if (all(previousUv > 0.0f) && all(previousUv < 1.0f))
-        {
-            float3 world = transformPointProjection(uv, depth, g_ViewProjectionInverse);
-            float cellSize = distance(g_Eye, world) * PROBE_CELL_SIZE;
-            cellSize *= lerp(1.0f, 5.0f, pow(1.0f - max(dot(normalize(g_Eye - world), normalize(normal)), 0.0f), 6.0f));
-
-            float weight = 0.0f;
-            for (float y = -1.0f; y <= 1.0f; ++y)
-                for (float x = -1.0f; x <= 1.0f; ++x)
-                {
-                    int2 tap = int2(floor(previousUv * g_BufferDimensions + float2(x, y)));
-                    if (any(tap < 0) || any(tap >= int2(g_BufferDimensions))) continue;
-
-                    float4 c = g_GIDenoiser_ColorBuffers[g_Dispatch.y][tap];
-                    float3 previousNormal = g_PreviousNormal.Load(int3(tap, 0)).xyz;
-                    if (c.w < 1.0f || dot(previousNormal, previousNormal) == 0.0f) continue;
-
-                    previousNormal = 2.0f * previousNormal - 1.0f;
-                    float2 tapUv = (tap + 0.5f) / g_BufferDimensions;
-                    float3 previousWorld = transformPointProjection(tapUv, g_PreviousDepth.Load(int3(tap, 0)), g_PreviousViewProjectionInverse);
-                    if (distance(world, previousWorld) < cellSize && dot(normal, previousNormal) > 0.95f)
-                    {
-                        float subpixel = distance(tap + 0.5f, previousUv * g_BufferDimensions);
-                        float w = saturate(1.0f - subpixel * 0.707107f);
-                        colorDelta += w * g_GIDenoiser_ColorDeltaBuffers[g_Dispatch.y][tap];
-                        lighting += w * c;
-                        weight += w;
-                    }
-                }
-
-            if (weight > 0.0f)
-            {
-                float sign = colorDelta < 0.0f ? -1.0f : 1.0f;
-                colorDelta = sign * GIDenoiser_RemoveNaNs(abs(colorDelta) / weight);
-                lighting = GIDenoiser_RemoveNaNs(lighting / weight);
-            }
-
-            if (color.w > 0.0f)
-            {
-                float lumaA = luminance(color.xyz);
-                float lumaB = luminance(lighting.xyz / max(lighting.w, 1.0f));
-                colorDelta = lerp(colorDelta, lumaA - lumaB, 1.0f / 8.0f);
-                alphaBlend = saturate(1.0f - abs(colorDelta) / max(lumaB, 1e-4f));
-            }
-        }
-    }
-
-    float blurMask = !isSkyPixel ? max(kGIDenoiser_MaxBlurMask - lighting.w, 0.0f) : -1.0f;
-    if (color.w > 0.0f || lighting.w < 1.0f) lighting += float4(color.xyz, color.w > 0.0f ? 1.0f : -1.0f);
-
-    float2 vignetteUv = uv * (1.0f - uv.yx);
-    float vignette = pow(15.0f * vignetteUv.x * vignetteUv.y, 0.25f);
-    float maxSampleCount = max(lerp(4.0f, 8.0f * min(abs(lighting.w), kGIDenoiser_MaxBlurMask), alphaBlend) * vignette, 1.0f);
-    if (lighting.w > maxSampleCount) lighting *= maxSampleCount / lighting.w;
-
-    g_GIDenoiser_BlurMask[did] = blurMask / kGIDenoiser_MaxBlurMask;
-    g_GIDenoiser_ColorBuffers[g_Dispatch.x][did] = lighting;
-    g_GIDenoiser_ColorDeltaBuffers[g_Dispatch.x][did] = colorDelta;
-}
-
-// g_Dispatch: x the colour buffer written, y the one read, z the blur direction (0 across, 1 down),
-// w 1 on the last pass: it writes the light, irradiance over pi, to the output.
-[numthreads(8, 8, 1)]
-void FilterGI(uint2 did : SV_DispatchThreadID)
-{
-    if (any(did >= g_BufferDimensions)) return;
-
-    int2 blurDirection = g_Dispatch.z ? int2(0, 1) : int2(1, 0);
-    float4 lighting = g_GIDenoiser_ColorBuffers[g_Dispatch.y][did];
-    int blurRadius = GIDenoiser_GetBlurRadius(did);
-    if (blurRadius > 0)
-    {
-        float weight = 1.0f;
-        float3 color = lighting.xyz / max(lighting.w, 1.0f);
-        float centerDepth = toLinearDepth(g_Depth.Load(int3(did, 0)), g_NearFar);
-        float3 centerNormal = 2.0f * g_Normal.Load(int3(did, 0)).xyz - 1.0f;
-        for (int r = -blurRadius; r <= blurRadius; ++r)
-        {
-            int2 pos = clamp(int2(did) + r * blurDirection, 0, int2(g_BufferDimensions) - 1);
-            float4 c = g_GIDenoiser_ColorBuffers[g_Dispatch.y][pos];
-            if (c.w <= 0.0f) continue;
-
-            float depth = toLinearDepth(g_Depth.Load(int3(pos, 0)), g_NearFar);
-            float3 normal = 2.0f * g_Normal.Load(int3(pos, 0)).xyz - 1.0f;
-            float depthDiff = 1.0f - centerDepth / depth;
-            float depthFactor = exp2(-(lighting.w > 0.0f ? 2e2f : 2e1f) * abs(depthDiff));
-            float normalFactor = max(dot(normal, centerNormal), 0.0f);
-            normalFactor *= normalFactor;
-            normalFactor *= normalFactor;
-            float w = depthFactor * (lighting.w > 0.0f ? normalFactor : 1.0f);
-            color += w * (c.xyz / max(c.w, 1.0f));
-            weight += w;
+            nearestDepth = depthDifference;
+            nearest = light;
+            nearestHistory = g_Light_Denoised[0][tap].w;
         }
 
-        lighting.xyz = color / weight * max(lighting.w, 1.0f);
+        float bilinear = (offset.x ? f.x : 1.0f - f.x) * (offset.y ? f.y : 1.0f - f.y);
+        float w = bilinear * saturate(1.0f - depthDifference / 0.05f) * pow(saturate(dot(tapNormal, normal)), 8.0f);
+        total += w * light;
+        weight += w;
     }
 
-    if (g_Dispatch.w)
-    {
-        g_Output[did] = float4(lighting.xyz / max(lighting.w, 1.0f) * (INV_PI * g_Frame.nearFar.w), 1.0f);
-        MaxDiagnostic(GI_COUNTER_MAX_OUTPUT, lighting.xyz / max(lighting.w, 1.0f) * INV_PI);
-    }
-    g_GIDenoiser_ColorBuffers[g_Dispatch.x][did] = lighting;
+    // No light pixel of the same surface around (a thin edge): the one nearest in depth.
+    float3 light = weight > 1e-4f ? total / weight : nearest;
+    if (g_Frame.lightDiagnostics.z != 0u) g_LightDebug[did] = HistoryColor(nearestHistory);
+    MaxDiagnostic(GI_COUNTER_MAX_OUTPUT, light);
+    g_Output[did] = float4(light * g_Frame.nearFar.w, 1.0f);
 }

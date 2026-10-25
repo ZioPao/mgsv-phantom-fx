@@ -7,6 +7,7 @@
 #include "gi_lighting.hpp"
 #include "gi_renderer.hpp"
 #include "gi_textures.hpp"
+#include "indirect_light.hpp"
 #include "local_lights.hpp"
 #include "log.hpp"
 #include "performance.hpp"
@@ -49,11 +50,12 @@ constexpr UINT ObjectVelocitySlot = 3;
 constexpr UINT SceneSlot = 2, LightSlot = 3, ProbeSlot = 7;
 
 // Packs what the kernels read from the G-buffer: the depth, the normals in world space (0 where
-// the sky is) and the albedo, linear.
+// the sky is; alpha 1/3 on foliage, the specular target's material 43, else 1) and the albedo, linear.
 constexpr char PackSource[] = R"(
 Texture2D<float> g_Depth : register(t0);
 Texture2D<float4> g_Normal : register(t1);
 Texture2D<float4> g_Albedo : register(t2);
+Texture2D<float4> g_Specular : register(t3);
 RWTexture2D<float> g_DepthOut : register(u0);
 RWTexture2D<float4> g_NormalOut : register(u1);
 RWTexture2D<float4> g_AlbedoOut : register(u2);
@@ -63,7 +65,7 @@ cbuffer Parameters : register(b0)
     float4 g_View[3]; // World to view, rows
     uint2 g_Size;
     uint g_HasAlbedo;
-    uint g_Padding;
+    uint g_HasSpecular;
 };
 
 [numthreads(8, 8, 1)]
@@ -81,7 +83,8 @@ void main(uint2 id : SV_DispatchThreadID)
     float rest = 1 - z * z;
     float3 view = float3(rsqrt(dot(xy, xy) * rest + 1e-7) * (rest * xy), z);
     float3 world = normalize(view.x * g_View[0].xyz + view.y * g_View[1].xyz + view.z * g_View[2].xyz);
-    g_NormalOut[id] = depth > 0 ? float4(0.5 * world + 0.5, 1) : 0;
+    bool foliage = g_HasSpecular && round(g_Specular.Load(int3(id, 0)).z * 255) == 43;
+    g_NormalOut[id] = depth > 0 ? float4(0.5 * world + 0.5, foliage ? 1.0 / 3 : 1) : 0;
 
     g_AlbedoOut[id] = float4(g_HasAlbedo ? g_Albedo.Load(int3(id, 0)).rgb : 0.25, 1);
 }
@@ -90,7 +93,7 @@ void main(uint2 id : SV_DispatchThreadID)
 struct PackParameters
 {
     float view[3][4];
-    std::uint32_t width, height, hasAlbedo, padding;
+    std::uint32_t width, height, hasAlbedo, hasSpecular;
 };
 
 // The light the global illumination keeps in its caches is the game's before exposure, scaled by
@@ -189,8 +192,9 @@ std::atomic<std::uint64_t> kicksWithObjectVelocity{}, kicksWithoutObjectVelocity
 // whichever thread asks first. Taken after executionMutex when both are.
 std::mutex lightMutex;
 ComPtr<ID3D11Device> lightDevice;
-SharedTexture output, shadowOutput, shadowDebugOutput, localLightOutput;
+SharedTexture output, shadowOutput, shadowDebugOutput, localLightOutput, lightDebugOutput;
 bool shadowWritten{}, shadowDebugWritten{}; // Direct3D 12 has traced into shadowOutput, shadowDebugOutput
+bool lightDebugWritten{}; // And into lightDebugOutput
 bool localLightWritten{};                  // This frame's kick traced the point and spot lights into localLightOutput
 
 void check(HRESULT result, const char* what)
@@ -292,21 +296,23 @@ void pack(ID3D11ShaderResourceView* depth, const camera::SceneConstants& scene)
     parameters.width = width;
     parameters.height = height;
     parameters.hasAlbedo = hasAlbedo;
+    const auto specular = indirect_light::specularTarget(width, height);
+    parameters.hasSpecular = specular != nullptr;
     D3D11_MAPPED_SUBRESOURCE mapped{};
     check(immediate->Map(packParameters.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Writing the G-buffer pack's constants");
     std::memcpy(mapped.pData, &parameters, sizeof(parameters));
     immediate->Unmap(packParameters.Get(), 0);
 
-    ID3D11ShaderResourceView* inputs[]{depth, normals.Get(), hasAlbedo ? albedo.Get() : nullptr};
+    ID3D11ShaderResourceView* inputs[]{depth, normals.Get(), hasAlbedo ? albedo.Get() : nullptr, specular.Get()};
     ID3D11UnorderedAccessView* outputs[]{depthOut.access.Get(), normalOut.access.Get(), albedoOut.access.Get()};
     immediate->CSSetShader(packShader.Get(), nullptr, 0);
     immediate->CSSetConstantBuffers(0, 1, packParameters.GetAddressOf());
-    immediate->CSSetShaderResources(0, 3, inputs);
+    immediate->CSSetShaderResources(0, 4, inputs);
     immediate->CSSetUnorderedAccessViews(0, 3, outputs, nullptr);
     immediate->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
-    ID3D11ShaderResourceView* noInputs[3]{};
+    ID3D11ShaderResourceView* noInputs[4]{};
     ID3D11UnorderedAccessView* noOutputs[3]{};
-    immediate->CSSetShaderResources(0, 3, noInputs);
+    immediate->CSSetShaderResources(0, 4, noInputs);
     immediate->CSSetUnorderedAccessViews(0, 3, noOutputs, nullptr);
     immediate->CSSetShader(nullptr, nullptr, 0);
 }
@@ -377,13 +383,23 @@ void copyTerrain(const engine_scene::TerrainInputs& inputs, gi_renderer::Frame& 
     frame.terrain = terrain;
 }
 
-gi_renderer::Matrix projectionViewOf(const camera::SceneConstants& scene)
+// The rows of one of cPSScene's matrices from its first register: m_projectionView c0, m_projection c4, m_view c8.
+constexpr int ProjectionRows = 4, ViewRows = 8;
+// cPSScene's m_cameraCenterOffset: the upscaler's jitter in NDC (camera::applyJitter).
+constexpr int JitterRow = 28;
+
+gi_renderer::Matrix rowsOf(const camera::SceneConstants& scene, int first)
 {
     gi_renderer::Matrix matrix{};
     for (int row = 0; row < 4; ++row)
-        for (int column = 0; column < 4; ++column) matrix[row * 4 + column] = scene.c[row][column];
+        for (int column = 0; column < 4; ++column) matrix[row * 4 + column] = scene.c[first + row][column];
 
     return matrix;
+}
+
+gi_renderer::Matrix projectionViewOf(const camera::SceneConstants& scene)
+{
+    return rowsOf(scene, 0);
 }
 
 // Diagnostics: the light the scene gets, every ten seconds.
@@ -427,7 +443,7 @@ void logStatus()
 
     lastStatus = now;
     log("Global illumination: " + engine_scene::poseTiming() + ".");
-    log("Global illumination: " + status() + "; the shadow denoiser had the game's velocity for moving meshes in "
+    log("Global illumination: " + status() + "; the denoisers had the game's velocity for moving meshes in "
         + std::to_string(kicksWithObjectVelocity.exchange(0)) + " frames, not in " + std::to_string(kicksWithoutObjectVelocity.exchange(0)));
 
     const auto work = gi_inputs::takeWork();
@@ -479,11 +495,22 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     ID3D11Texture2D* light{};
     ID3D11Texture2D* shadow{};
     ID3D11Texture2D* shadowDebug{};
+    ID3D11Texture2D* lightDebug{};
     {
         std::lock_guard lock(lightMutex);
         if (output.width != depthOut.width || output.height != depthOut.height)
             output = makeShared(device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the light");
         light = output.texture.Get();
+        if (options.enabled && options.debugHistory)
+        {
+            if (lightDebugOutput.width != depthOut.width || lightDebugOutput.height != depthOut.height)
+            {
+                lightDebugOutput = makeShared(device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the light's debug view");
+                lightDebugWritten = false;
+            }
+
+            lightDebug = lightDebugOutput.texture.Get();
+        }
         if (options.shadows)
         {
             if (shadowOutput.width != depthOut.width || shadowOutput.height != depthOut.height)
@@ -534,12 +561,13 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     endStep(TexturesStep);
     if (const auto terrain = engine_scene::takeTerrain()) copyTerrain(*terrain, frame);
 
-    // The game's velocity for its moving meshes, for the shadow denoiser: only this frame's, drawn
-    // before this list, at the shadows' size.
+    // The game's velocity for its moving meshes, for the shadows' and the light's denoisers: only this
+    // frame's, drawn before this list, at the render size.
     DXGI_FORMAT velocityFormat{};
-    const bool velocityCopied = shadow && objectVelocityDrawn && objectVelocity && sizeOf(objectVelocity.Get()) == sizeOf(depth)
+    const bool wantsVelocity = shadow || (options.enabled && options.light);
+    const bool velocityCopied = wantsVelocity && objectVelocityDrawn && objectVelocity && sizeOf(objectVelocity.Get()) == sizeOf(depth)
         && copyShared(objectVelocity.Get(), objectVelocityCopy, velocityFormat);
-    if (shadow) ++(velocityCopied ? kicksWithObjectVelocity : kicksWithoutObjectVelocity);
+    if (wantsVelocity) ++(velocityCopied ? kicksWithObjectVelocity : kicksWithoutObjectVelocity);
 
     endStep(TerrainStep);
     const auto inputsReady = ++fenceValue;
@@ -548,11 +576,17 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     endStep(SignalStep);
 
     frame.textures = {depthOut.texture.Get(), normalOut.texture.Get(), albedoOut.texture.Get(), light, shadow, shadowDebug,
-        velocityCopied ? objectVelocityCopy.Get() : nullptr, velocityFormat, localLightShadow};
+        velocityCopied ? objectVelocityCopy.Get() : nullptr, velocityFormat, localLightShadow, lightDebug};
     frame.width = depthOut.width;
     frame.height = depthOut.height;
     frame.viewProjection = projectionViewOf(*sceneCamera);
     frame.previousViewProjection = projectionViewOf(*previousCamera);
+    frame.view = rowsOf(*sceneCamera, ViewRows);
+    frame.projection = rowsOf(*sceneCamera, ProjectionRows);
+    frame.previousView = rowsOf(*previousCamera, ViewRows);
+    frame.previousProjection = rowsOf(*previousCamera, ProjectionRows);
+    frame.cameraCut = camera::cameraCut(camera::viewOf(*previousCamera), camera::viewOf(*sceneCamera));
+    frame.jitter = {sceneCamera->c[JitterRow][0], sceneCamera->c[JitterRow][1], previousCamera->c[JitterRow][0], previousCamera->c[JitterRow][1]};
     for (int i = 0; i < 3; ++i)
     {
         frame.eye[i] = sceneCamera->c[20][i];
@@ -597,6 +631,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     frame.debugShadows = shadowDebug != nullptr;
     frame.shadowsFromDepth = options.shadowsFromDepth;
     frame.opaqueLeaves = options.opaqueLeaves;
+    frame.lightRays = static_cast<std::uint32_t>(std::clamp(options.lightPixelRays, 1, 4));
     // The lights' colours in the sun's units for the hits (gi_light.hlsl, LocalLightAt).
     for (auto& localLight : localLightsToTrace)
         for (auto& value : localLight.color) value *= LightScale;
@@ -607,6 +642,10 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     const auto result = gi_renderer::render(frame);
     endStep(RenderStep);
     lightSignalled = frame.signalValue;
+    {
+        std::lock_guard lock(lightMutex);
+        lightDebugWritten = lightDebug && frame.traceLight && lightDebugOutput.texture.Get() == lightDebug;
+    }
     if (frame.traceShadows)
     {
         std::lock_guard lock(lightMutex);
@@ -682,8 +721,8 @@ void detach() noexcept
 
     {
         std::lock_guard lock(lightMutex);
-        output = shadowOutput = shadowDebugOutput = localLightOutput = {};
-        shadowWritten = shadowDebugWritten = localLightWritten = false;
+        output = shadowOutput = shadowDebugOutput = localLightOutput = lightDebugOutput = {};
+        shadowWritten = shadowDebugWritten = localLightWritten = lightDebugWritten = false;
         lightDevice.Reset();
     }
 
@@ -956,6 +995,16 @@ ID3D11ShaderResourceView* shadowDebug(UINT width, UINT height) noexcept
     std::lock_guard lock(lightMutex);
     const bool fits = shadowDebugWritten && shadowDebugOutput.width == width && shadowDebugOutput.height == height;
     return fits ? shadowDebugOutput.view.Get() : nullptr;
+}
+
+ID3D11ShaderResourceView* lightDebug(UINT width, UINT height) noexcept
+{
+    const auto last = lastKick.load(std::memory_order_relaxed);
+    if (!lighting.load(std::memory_order_relaxed) || failed || !last || GetTickCount64() - last > 1000) return nullptr;
+
+    std::lock_guard lock(lightMutex);
+    const bool fits = lightDebugWritten && lightDebugOutput.width == width && lightDebugOutput.height == height;
+    return fits ? lightDebugOutput.view.Get() : nullptr;
 }
 
 std::string shadowProbe()

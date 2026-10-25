@@ -13,7 +13,7 @@
 #include <stdexcept>
 #include <string>
 
-// Direct3D 12 helpers shared by the global illumination's renderer (gi_renderer.cpp), its GI-1.2
+// Direct3D 12 helpers shared by the global illumination's renderer (gi_renderer.cpp), its light's
 // passes (gi_light.cpp) and the sun's ray-traced shadows (gi_shadow.cpp): one root signature, one
 // descriptor table pair per frame, and the kernels of src/shaders.
 namespace phantom_fx::gi_d3d12
@@ -26,11 +26,8 @@ enum class Kernel : std::uint8_t
     // gi_scene.hlsl
     ClearNewGeometries, DebugScene, ClearOutput, TerrainGrid, Skin,
     // gi_light.hlsl
-    ClearCounters, GenerateDispatch, ClearBuffer, ScanBlocks, ScanBlockSums, ScanAddOffsets, ClearProbeMask, FilterProbeMask,
-    InitCachedTileLRU, ReprojectScreenProbes, CountScreenProbes, ScatterScreenProbes, SpawnScreenProbes, CompactScreenProbes,
-    PatchScreenProbes, StoreSpawnCount, SampleScreenProbes, LearnAlbedo, PopulateScreenProbes, PurgeTiles, PopulateMultibounceCells,
-    PopulateCells, UpdateTiles, UpdateMultibounceCells, ResolveCells, BlendScreenProbes, CopyProbes, ReorderScreenProbes,
-    FilterScreenProbes, ProjectScreenProbes, InterpolateScreenProbes, ReprojectGI, FilterGI,
+    ClearCounters, GenerateDispatch, PrepareGuides, TraceLight, LearnAlbedo, PurgeTiles, PopulateMultibounceCells, PopulateCells, UpdateTiles,
+    UpdateMultibounceCells, ResolveLight, UpdateFoliageMemory, CompositeLight,
     // gi_shadow.hlsl, gi_shadow_filter.hlsl
     TraceSunShadows, ClassifyShadowTiles, FilterShadows, DebugShadows, ProbeShadows, TraceLocalLightShadows, FilterLocalLightShadows,
     Count
@@ -288,6 +285,15 @@ public:
     }
 
     std::function<void(const char*, std::optional<performance::Pass>)> marker;
+
+    // Binds the frame's descriptor heap, root signature and tables again, after a pass with its own
+    // (the light's denoiser, gi_denoiser.hpp).
+    void rebind()
+    {
+        if (rebinder) rebinder();
+    }
+
+    std::function<void()> rebinder;
 
 private:
     void bind(Kernel kernel, const std::array<std::uint32_t, 4>& parameters)

@@ -76,7 +76,7 @@ This produces `build/release/PhantomFX-<version>.zip` and its `.sha256` checksum
 | `sl.interposer.dll`, `sl.common.dll`, `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`, `nvngx_dlssg.dll` | NVIDIA Streamline and the frame generation model |
 | `amd_fidelityfx_loader_dx12.dll`, `amd_fidelityfx_upscaler_dx12.dll`, `amd_fidelityfx_framegeneration_dx12.dll` | AMD FSR upscaling and frame generation |
 | `PhantomFX/README.md`, `CHANGELOG.md`, `LICENSE` | Player documentation and the add-on's license |
-| `PhantomFX/*-LICENSE.txt` | NVIDIA DLSS, NVIDIA Streamline, AMD FSR SDK, MinHook, ReShade, Dear ImGui, AMD FidelityFX (RCAS), Bend Studio (screen-space shadows), three-gtvbao and Intel XeGTAO (GTVBAO), AMD Capsaicin (global illumination) |
+| `PhantomFX/*-LICENSE.txt` | NVIDIA DLSS, NVIDIA Streamline, NVIDIA NRD (global illumination's denoiser), AMD FSR SDK, MinHook, ReShade, Dear ImGui, AMD FidelityFX (RCAS), Bend Studio (screen-space shadows), three-gtvbao and Intel XeGTAO (GTVBAO), AMD Capsaicin (global illumination) |
 
 CPack packages only the `addon` component, so SDK headers, static libraries, tests, debug symbols
 and local settings are left out. ReShade is installed separately by the player.
@@ -121,6 +121,9 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/engine_brush.cpp`, `src/engine_brush.hpp` | The game's object brush: its loaded blocks' vegetation and props, read from their placement records (see "Scene objects") |
 | `src/game_memory.hpp` | Guarded reads of the game's objects |
 | `src/gi_textures.cpp`, `src/gi_textures.hpp` | Shared copies of the game's textures the ray-traced scene's meshes use, from its texture manager (see "Ray-traced scene") |
+| `src/gi_light.cpp`, `src/gi_light.hpp` | The global illumination's light on Direct3D 12: its memory and passes (see "Global illumination") |
+| `src/gi_denoiser.cpp`, `src/gi_denoiser.hpp` | NVIDIA NRD's RELAX denoiser on Direct3D 12, without NRI: root signature, pipelines, textures, descriptors, states |
+| `src/shaders/gi_light.hlsl` | HLSL: the light's rays, their hits' light, the hash grid cache, the denoiser's inputs and the render size |
 | `src/gi_shadow.cpp`, `src/gi_shadow.hpp` | Ray-traced shadows on the global illumination's Direct3D 12 device: the denoiser's memory and passes |
 | `src/local_lights.cpp`, `src/local_lights.hpp` | Ray-traced lights: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights") |
 | `src/shaders/gi_shadow.hlsl`, `gi_shadow_filter.hlsl`, `gi_shadow.hlsli` | HLSL: the sun's shadow rays, and the FidelityFX Shadow Denoiser's data access, temporal pass and filters |
@@ -253,8 +256,9 @@ reads state; the frame renders unchanged. Its files go into that folder:
   depth in the first 32) and `-lights.txt` (each light's shader, world position and way, colour, range,
   whether traced and its volume's index count).
 
-The overlay's Diagnostics section has, for everyone: debug views of the motion vectors and of
-where the engine's object velocity was used, jitter off, the game's FXAA for comparison (DLSS stays
+The overlay's Diagnostics section has, for everyone: debug views of the motion vectors, of
+where the engine's object velocity was used and of the global illumination denoiser's history (red
+where it started a pixel's light over within three frames, yellow under ten), jitter off, the game's FXAA for comparison (DLSS stays
 ready), and the frame, fallback and reset counts. All are off by default and not saved. Every 1800
 frames with DLSS on, `PhantomFX.log` gets a status line with the same counts.
 
@@ -1397,6 +1401,106 @@ Not handled:
   The shadow map gives the rest.
 - Forward and transparent objects, drawn after the sun, neither cast nor receive the trace.
 
+## Global illumination
+
+The indirect light that replaces the game's baked probe light (`src/gi_light.cpp`,
+`src/shaders/gi_light.hlsl`, `src/gi_denoiser.cpp`), rebuilt on 2026-10-24 the way path tracers with a
+radiance cache work it out. Until then it was AMD's GI-1.2 (screen probes into the same hash grid, and
+Capsaicin's denoiser); a review that day found its lag and blotches built in:
+
+- **Three slow histories in a row.** A cache cell takes 1/16 of a frame's light; three in four probes
+  traced no rays a frame and kept theirs, and the blurred probes became the next frame's history; the
+  denoiser kept up to 64 frames and its change check moved 1/8 a frame. From the code, a light 100 times
+  dimmer took the denoiser alone 32 frames to come within 2x, cache and denoiser 90 (1.5 s), the probes
+  more; the logs of the flashlight tests that morning agreed (3 s, then 0.85 s with the flashlights lit
+  afresh). The anti-lag tried in 1.5.0 compared one noisy frame with the history, so noise tripped it.
+- **Brightening damped too.** A probe cell more than twice as bright kept up to 90% of its old light,
+  and three rays in four went where a probe had been bright, so a dark cell was looked at about every
+  16 frames.
+- **Blotches when moving.** A cell's size follows its distance from the camera, so moving made new,
+  empty cells, which read their tile's coarse average until they had 16 samples; one probe tile in four
+  was traced a frame, and new ones took 64 rays once or borrowed far probes, while the denoiser blurred
+  8 pixels over probe-sized noise; the reprojection followed only the camera, so moving characters lost
+  their history every frame.
+
+Now, each frame:
+
+- **Rays** (`TraceLight`). 1, 2 or 4 (the global illumination's ray quality; Medium, 2, by default) from
+  each pixel of a grid half the render size each way, cosine-weighted from the depth buffer's surface,
+  past copies of it. A ray that gets away takes the sky's light (`SkyRadiance`). A light pixel samples one
+  render pixel of its 2 x 2, by depth (`RenderPixelOf`): the nearest on one checkerboard colour, the
+  farthest on the other, as half-resolution effects downsample depth. With the top left, as first built,
+  a wire, a fence or a grass blade under a pixel wide had it one frame and what lay behind the next as the
+  jitter moved them, and the denoiser started their light over every frame with the camera still. The
+  first ray's bounce feeds the cache and reads it after its update; the others read their cell as it
+  stands, a frame old (the cache's buffers hold a hit a light pixel). Their light is averaged; their
+  directions, weighed by it, go to the denoiser's spherical harmonics, shorter than 1 where they spread.
+  At 1 ray a light pixel, shaded surfaces lit by a few bright openings crawled with leftover noise after
+  a full history ("underwater"); 4 rays cleared most of it (2026-10-25), at about four times the rays' cost.
+  Foliage (material 1, below) takes twice the rays: swaying and thin, it restarts its history every few
+  frames, so its light is mostly the frame's rays, and shaded grass boiled as the player walked by it.
+  Twice the rays wherever the history was under ten frames, in place of on foliage, made no difference
+  seen (2026-10-25).
+  Rays guided by the last frame's light (half of them in a cone around its denoised direction, weighed by
+  one-sample MIS, as GI-1.2 guided its probes' rays) were tried the same day and left out: no steadier in
+  the end, and the light looked darker.
+- **The hit, lit afresh.** A shadow ray to a point of the sun's disc (a leaf lets half through from its
+  far side) and one to a point or spot light picked in proportion to its light there (weighted reservoir
+  sampling over the frame's lights, flashlights among them), times the hit's albedo (`HitAlbedo`).
+  Nothing of the hit's own light comes from a history.
+- **Its bounce.** A cosine-weighted ray from the hit (a leaf's to its far side a third of the time,
+  counting 1.5): the sky's light where it gets away, else the hash grid cell's where it lands, direct and
+  indirect (`ResolveLight`, after the cache's update). The cache only ends the path, as NVIDIA's SHaRC
+  does in a path tracer: its lag and coarseness come after a bounce and an albedo.
+- **The cache** (AMD's two-level hash grid of GI-1.2, unchanged): the bounce hits' cells take up to
+  four of their hits' light a frame (`PopulateCells`: sun, sky and the lights, each through a shadow ray),
+  blended 1/16; 30% of them trace on to a third hit whose cell's light gives them one bounce more
+  (`PopulateMultibounceCells`, `UpdateMultibounceCells`); tiles nothing touched for 50 frames go.
+- **Foliage's light by world position** (`RememberFoliageLight`, `UpdateFoliageMemory`). Grass and
+  leaves sway and the denoiser starts their light over every few frames, so a cell in the world keeps it
+  instead: cells about 16 render pixels across where they lie (power-of-two sizes, 6.25 cm at the least)
+  in a hash table of 2^19 slots in buckets of 8. Each frame a foliage light pixel adds its light to its
+  cell, found at a point jittered by up to half a cell each way (blending neighbours over the frames), and
+  takes 80% of its light from the cell as the last frame left it once the cell has 8 frames; the cell
+  blends each frame's light in over half a second, and goes after 2 seconds without foliage. With it,
+  shaded foliage no longer boiled (2026-10-25). The rays log counts foliage light pixels without room.
+- **Denoiser.** NVIDIA's NRD 4.18 (`RELAX_DIFFUSE_SH`), at the rays' grid, integrated natively
+  (`gi_denoiser.cpp`): one root signature for its pipelines (the constants at the root, its textures and
+  storage textures in one table, its two samplers static), its own shader-visible heap, a texture per
+  pool entry, each texture's state tracked between its dispatches. Its guides (`PrepareGuides`): the view
+  depth (the sky's beyond the denoising range), the normal (`NRD_FrontEnd_PackNormalAndRoughness`,
+  R10G10B10A2) with material 1 on the game's foliage (the specular target's material 43, which the
+  G-buffer pack puts in the normals' alpha), and 2.5D motion: the camera's, or a moving mesh's from the
+  game's velocity where it drew one, and the view depth's change: the camera's, and a moving mesh's from
+  the last frame's view depth where it was when that lies within 10% of its own (as if it stood still,
+  the change was off by the camera's movement where the camera follows it, and the player's light
+  started over every frame). The camera goes in with the engine's x
+  mirror moved from the projection into the view (as for Streamline), and, as NRD requires, without the
+  upscaler's jitter (c28 taken out of the projections, the motion without the jitter's change, the jitter
+  apart as `cameraJitter`): with it in, grass and fine detail shimmered as the jitter moved them, most
+  visibly with DLSS preset M. Foliage is NRD's strands (`strandMaterialID`, 1 cm
+  thick), whose history survives far more depth change: the game sways its grass and bushes without
+  velocity. History: half a second at the real frame rate (smoothed as NRD asks), a fast history of a
+  tenth of a second that the long one is clamped to, three frames rebuilt after a reset, anti-firefly on;
+  a camera cut (`camera::cameraCut`) restarts it. Tried on 2026-10-25 and left out: REBLUR in place of
+  RELAX (blurrier), a wider disocclusion threshold, and the render pixels' light without their own normal
+  (neither steadier).
+- **The render size** (`CompositeLight`). The four light pixels around each render pixel, weighed as a
+  bilinear filter would times how alike their view depth (within 5%) and normal (cosine to the 8th) are,
+  else the one nearest in depth; each resolved against the render pixel's normal
+  (`NRD_SH_ResolveDiffuse`), scaled to keep the light it has at its own normal. Irradiance over pi times
+  the exposure, as before.
+- **Albedo learning** (`LearnAlbedo`): one light pixel of each 16 x 16 a frame.
+
+ReSTIR GI's spatial reuse was tried on 2026-10-24 (each light pixel resampling its own ray's light and
+six neighbours' on its surface, with the Jacobian and a visibility ray for a chosen neighbour's sample,
+this frame's samples only): in game the light was far less stable than without it. Picking one of seven
+samples makes the noise come in clumps that move every frame, which the denoiser smooths far worse than
+noise a pixel at a time (Epic's MegaLights left ReSTIR out for the same reason). Removed.
+
+Next step planned, once measured as needed: a history confidence for the denoiser from samples traced
+again with the last frame's random numbers (NRD's `IN_DIFF_CONFIDENCE`).
+
 ## Ray-traced scene
 
 What the global illumination and the ray-traced shadows trace (`src/gi_scene.cpp`, its use in
@@ -1761,31 +1865,30 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   blocked ray also gives the penumbra its blocker casts from the light, `2 r t / (d - t)`, in pixels.
 - **Filter** (`FilterLocalLightShadows`). Three edge-avoiding a-trous passes (Dammertz et al., 2010),
   1, 2 and 4 pixels apart, a 3 x 3 B-spline weighted by how near the neighbours' depth (2% plus 1 cm)
-  and normal (cosine to the 8th) are; a pixel whose penumbra is narrower than a pass's step keeps its
-  value, so contact shadows stay as sharp as the rays found them while wide penumbrae are smoothed. No
-  history: nothing trails behind moving casters. Before 2026-10-24 each light took one ray to its centre
+  and normal (cosine to the 8th) are; a pass blurs a pixel where the widest penumbra among its
+  neighbours on the same surface is at least its step, so contact shadows stay as sharp as the rays
+  found them while wide penumbrae are smoothed. Until 2026-10-24 the gate was the pixel's own penumbra:
+  a pixel inside a soft shadow whose rays all got through found no blocker, so no penumbra, and kept its
+  full light amid its smoothed neighbours (19% of a wall's soft shadow in `frame-159975`: speckles new
+  every frame). The rays' starts on the lights' total and on each light's disc come from interleaved
+  gradient noise (Jimenez 2014) and the R2 sequence from there, so neighbours sample unlike points and a
+  pixel's rays cover a disc evenly; they were white noise. No history: nothing trails behind moving
+  casters. Before 2026-10-24 each light took one ray to its centre
   and a bit, and its hard edge showed every pixel's difference.
 - **Bounce.** With the global illumination on, the same lights light the surfaces its rays hit
-  (`HitDirectLight` in `src/shaders/gi_light.hlsl`), first and second bounce, besides the sun and the
+  (`SampledLocalLight` in `src/shaders/gi_light.hlsl`), first and later bounces, besides the sun and the
   sky: every light's diffuse light there without shadows, as the game's shaders work it out
   (`LocalLightAt`: the falloff, a point's least and added distance, a spot's cap and cone, the colour
   in the sun's units), picks one in proportion (weighted reservoir sampling, a candidate a light), and
   a shadow ray to it, ending short of the light as the shadow rays do, adds its light over the chance
-  it was picked. The hash grid's cells average the picks over frames. Flashlights are left out of
-  that: a cell takes 1/16 of a frame's light (as in Capsaicin), so it held a flashlight's bounce one to
-  three seconds after the beam moved on (2026-10-24, logged four times a second: the brightest lit hit
-  fell from 1.03 to 0.036 within a quarter second, what the probes read from the cache took 1.3 s and
-  the final light 3 s to settle). Every probe ray's hit takes their light afresh each frame instead
-  (`FlashlightLight`, in `ResolveCells`), as path tracers light every bounce; they come first in the
-  frame's lights (`localLightCount.z` of them) and give no second bounce. Indoors the game's probe light,
-  which the global illumination replaces, held the lamps' baked bounce; without this an indoor hall lit
-  by 47 lamps was dark but for their direct light (2026-10-24).
-- **Open: a flashlight's bounce lingers** about a second after it goes off or swings away: the probes not
-  traced this frame keep their light, and the denoiser's change detection takes 30 frames. An anti-lag
-  (2026-10-24, in release 1.5.0) took histories down at once where the light fell: first each probe's own
-  rays and each pixel's own fall under an eighth, then the change pooled over the probes 5 x 5 around
-  (A-SVGF's filtered gradients). Both made dark speckles flicker everywhere once leaves let light through
-  (noise alone tripped them), so it was removed; the stable light was worth more than the faster fade.
+  it was picked. Since 2026-10-24 (see "Global illumination") a ray's first hit is lit afresh every
+  frame, so a flashlight's bounce follows the beam; only the light past a bounce comes from the hash
+  grid's cells, which average the picks over frames. Before, the first hits read their light from the
+  cells too, and a cell takes 1/16 of a frame's light: a flashlight's bounce took one to three seconds
+  to go after the beam moved on (logged four times a second: the brightest lit hit fell from 1.03 to
+  0.036 within a quarter second, what the probes read from the cache took 1.3 s and the final light
+  3 s). Indoors the game's probe light, which the global illumination replaces, held the lamps' baked
+  bounce; without this an indoor hall lit by 47 lamps was dark but for their direct light (2026-10-24).
 - **Drawn again.** At the first list with a draw point, which waits for Direct3D 12, the immediate
   context draws the frame's lights before the list runs: each its volume as the game drew it (below), cut
   by a scissor to the light's sphere (a spot's: the bounding sphere of its cone) on screen, in the light

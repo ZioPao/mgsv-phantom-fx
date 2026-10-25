@@ -94,7 +94,7 @@ cbuffer CompositeParameters : register(b0)
 Texture2D<float4> Upscaled : register(t0);
 Texture2D<float2> Motion : register(t1);
 Texture2D<float4> Velocity : register(t2);
-Texture2D<float4> ShadowRays : register(t3); // At the render size, by its alpha (global_illumination::shadowDebug)
+Texture2D<float4> ShadowRays : register(t3); // At the render size, by its alpha (global_illumination::shadowDebug or lightDebug)
 
 float3 Load(int2 pixel)
 {
@@ -134,9 +134,9 @@ float4 main(float4 position : SV_Position) : SV_Target
     else if (Sharpness > 0)
         color = Rcas(Load(pixel + int2(0, -1)), Load(pixel + int2(-1, 0)), color, Load(pixel + int2(1, 0)), Load(pixel + int2(0, 1)));
 
-    if (Linear && (DebugView == 0 || DebugView == 3)) color = LinearToSrgb(color / max(1 - color, 1.0 / HalfMax));
+    if (Linear && (DebugView == 0 || DebugView == 3 || DebugView == 4)) color = LinearToSrgb(color / max(1 - color, 1.0 / HalfMax));
 
-    if (DebugView == 3)
+    if (DebugView == 3 || DebugView == 4)
     {
         uint width, height, raysWidth, raysHeight;
         Upscaled.GetDimensions(width, height);

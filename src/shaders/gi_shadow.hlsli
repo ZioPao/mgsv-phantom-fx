@@ -16,12 +16,6 @@ RWTexture2D<float2> g_Shadow_History : register(u83);           // After the fir
 RWTexture2D<float3> g_Shadow_Moments[2] : register(u84);        // u84, u85: this frame's, the last frame's; mean, variance, samples
 RWTexture2D<float> g_Shadow_Depths[2] : register(u86);          // u86, u87: this frame's depth, the last frame's
 RWTexture2D<float> g_Shadow_Output : register(u88);             // What the sun pass reads: 1 where the sun reaches
-// The game's velocity for its moving meshes (characters, the horse, trees in the wind) as its velocity
-// passes drew it this frame, when it came in time (shadowMotion.x): R 1 where one drew, B and A the
-// screen motion from the last frame to this one in pixels / 64, y down, stored as 0.5 v + 0.5 in 8 bits
-// (docs/DEVELOPMENT.md, "Velocity").
-Texture2D<float4> g_ObjectVelocity : register(t17);
-
 int2 ShadowSize()
 {
     return int2(g_Frame.dimensions.xy);
@@ -101,13 +95,8 @@ bool FFX_DNSR_Shadows_IsShadowReciever(uint2 pixel)
 // camera's, the depth's world position through the last frame's projection-view.
 float2 FFX_DNSR_Shadows_ReadVelocity(int2 pixel)
 {
-    if (g_Frame.shadowMotion.x != 0u)
-    {
-        // The game clamps its velocity to 64 pixels; beyond that only the camera's motion is known.
-        float4 velocity = g_ObjectVelocity.Load(int3(ClampToShadow(pixel), 0));
-        float2 moved = (velocity.ba * 2.0f - 1.0f) * 64.0f;
-        if (velocity.r > 0.5f && length(moved) < 63.0f) return moved * float2(2.0f, -2.0f) * FFX_DNSR_Shadows_GetInvBufferDimensions();
-    }
+    float2 moved;
+    if (ObjectMotion(ClampToShadow(pixel), moved)) return moved * float2(2.0f, -2.0f) * FFX_DNSR_Shadows_GetInvBufferDimensions();
 
     float2 uv = (ClampToShadow(pixel) + 0.5f) * FFX_DNSR_Shadows_GetInvBufferDimensions();
     float2 ndc = 2.0f * float2(uv.x, 1.0f - uv.y) - 1.0f;

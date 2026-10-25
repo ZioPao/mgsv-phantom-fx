@@ -247,7 +247,11 @@ void TraceLocalLightShadows(uint2 did : SV_DispatchThreadID)
             float2 cone = PixelCone(position, 0.0f);
             uint rays = max(g_Frame.localLightCount.y, 1u);
             float spacing = total / float(rays);
-            float threshold = random.rand() * spacing;
+            // Neighbouring pixels start their picks and their points on the lights far apart (interleaved
+            // gradient noise), and a pixel's rays cover each light's disc evenly (the R2 sequence from that
+            // start), so the filter averages unlike samples; white noise clumped them.
+            float2 start = float2(InterleavedGradientNoise(did, g_Frame.dimensions.z), InterleavedGradientNoise(did + uint2(47, 17), g_Frame.dimensions.z));
+            float threshold = start.x * spacing;
             float running = 0.0f, penumbra = 0.0f;
             uint traced = 0, visible = 0, blocked = 0;
             for (uint i = 0; i < g_Frame.localLightCount.x && traced < rays; ++i)
@@ -259,7 +263,7 @@ void TraceLocalLightShadows(uint2 did : SV_DispatchThreadID)
                     // A point on the light's disc facing the pixel, its radius in falloff.w.
                     float3 b1, b2;
                     GetOrthoVectors(toLight, b1, b2);
-                    float2 disc = random.rand2();
+                    float2 disc = frac(start + R2(traced));
                     float radius = light.falloff.w * sqrt(disc.x);
                     float angle = TWO_PI * disc.y;
                     float3 target = light.position.xyz + radius * (cos(angle) * b1 + sin(angle) * b2);
@@ -295,8 +299,12 @@ void TraceLocalLightShadows(uint2 did : SV_DispatchThreadID)
 
 // Three edge-avoiding a-trous passes (Dammertz et al., "Edge-Avoiding A-Trous Wavelet Transform for
 // Fast Global Illumination Filtering", 2010), 1, 2 and 4 pixels apart: a neighbour counts by a 3 x 3
-// B-spline's weight, as near as its depth and normal are. A pixel whose penumbra is narrower than the
-// pass's step keeps its value, so a contact shadow stays as sharp as the rays found it.
+// B-spline's weight, as near as its depth and normal are. A pass blurs where the widest penumbra among
+// the pixel's neighbours on its own surface is at least its step, so a contact shadow stays as sharp as
+// the rays found it. The widest, not the pixel's own: a pixel inside a soft shadow whose rays all got
+// through finds no blocker and no penumbra, and kept its full light amid smoothed neighbours (19% of a
+// wall's soft shadow in frame-159975, 2026-10-24: speckles new every frame). Each pass hands on that
+// widest penumbra.
 // g_Dispatch: x the pass (0 to 2), y its step in pixels. The first reads the rays' result and writes
 // g_LocalShadowFirst, the second writes back into g_LocalShadowRays, the third what the light pass reads.
 [numthreads(8, 8, 1)]
@@ -309,12 +317,11 @@ void FilterLocalLightShadows(uint2 did : SV_DispatchThreadID)
     float2 centre = pass == 1 ? g_LocalShadowFirst[did] : g_LocalShadowRays[did];
     float2 filtered = centre;
     float depth = g_Depth.Load(int3(did, 0));
-    if (depth > 0.0f && centre.y >= float(step))
+    if (depth > 0.0f)
     {
         float centreDepth = toLinearDepth(depth, g_Frame.nearFar.xy);
         float3 centreNormal = DecodeNormal(g_Normal.Load(int3(did, 0)));
-        float2 sum = 0.0f;
-        float weights = 0.0f;
+        float sum = 0.0f, weights = 0.0f, widest = 0.0f;
         for (int y = -1; y <= 1; ++y)
             for (int x = -1; x <= 1; ++x)
             {
@@ -323,14 +330,17 @@ void FilterLocalLightShadows(uint2 did : SV_DispatchThreadID)
                 if (neighbourDepth <= 0.0f) continue;
 
                 float2 value = pass == 1 ? g_LocalShadowFirst[pixel] : g_LocalShadowRays[pixel];
-                float weight = (x == 0 ? 0.5f : 0.25f) * (y == 0 ? 0.5f : 0.25f);
-                weight *= exp(-abs(toLinearDepth(neighbourDepth, g_Frame.nearFar.xy) - centreDepth) / (0.02f * centreDepth + 0.01f));
-                weight *= pow(saturate(dot(centreNormal, DecodeNormal(g_Normal.Load(int3(pixel, 0))))), 8.0f);
-                sum += weight * value;
+                float surface = exp(-abs(toLinearDepth(neighbourDepth, g_Frame.nearFar.xy) - centreDepth) / (0.02f * centreDepth + 0.01f));
+                surface *= pow(saturate(dot(centreNormal, DecodeNormal(g_Normal.Load(int3(pixel, 0))))), 8.0f);
+                if (surface > 0.25f) widest = max(widest, value.y);
+
+                float weight = (x == 0 ? 0.5f : 0.25f) * (y == 0 ? 0.5f : 0.25f) * surface;
+                sum += weight * value.x;
                 weights += weight;
             }
 
-        if (weights > 0.0f) filtered = sum / weights;
+        if (widest >= float(step) && weights > 0.0f) filtered.x = sum / weights;
+        filtered.y = widest;
     }
 
     if (pass == 2) g_LocalLightShadow[did] = filtered.x;
