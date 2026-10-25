@@ -414,6 +414,22 @@ void logStatus()
         + " mesh draws; the kick " + perFrame(kick) + " ms (render thread: " + steps + ").");
 }
 
+// Remakes `texture` at this size unless it has it; whether it did.
+bool resizeShared(SharedTexture& texture, ID3D11Device* creator, UINT width, UINT height, DXGI_FORMAT format, const char* what)
+{
+    if (texture.width == width && texture.height == height) return false;
+
+    texture = makeShared(creator, width, height, format, what);
+    return true;
+}
+
+// Milliseconds since the last frame lit; the most there is before the first.
+std::uint64_t sinceKick()
+{
+    const auto last = lastKick.load(std::memory_order_relaxed);
+    return last ? GetTickCount64() - last : UINT64_MAX;
+}
+
 // The frame's kick, before the list with the probe upscale runs; call with executionMutex held.
 void kick(ID3D11ShaderResourceView* depth, const Options& options)
 {
@@ -447,35 +463,23 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     ID3D11Texture2D* lightDebug{};
     {
         std::lock_guard lock(lightMutex);
-        if (output.width != depthOut.width || output.height != depthOut.height)
-            output = makeShared(device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the light");
+        resizeShared(output, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the light");
         light = output.texture.Get();
         if (options.enabled && options.debugHistory)
         {
-            if (lightDebugOutput.width != depthOut.width || lightDebugOutput.height != depthOut.height)
-            {
-                lightDebugOutput = makeShared(device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the light's debug view");
+            if (resizeShared(lightDebugOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the light's debug view"))
                 lightDebugWritten = false;
-            }
 
             lightDebug = lightDebugOutput.texture.Get();
         }
         if (options.shadows)
         {
-            if (shadowOutput.width != depthOut.width || shadowOutput.height != depthOut.height)
-            {
-                shadowOutput = makeShared(device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16_FLOAT, "Creating the shadow");
-                shadowWritten = false;
-            }
-
+            if (resizeShared(shadowOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16_FLOAT, "Creating the shadow")) shadowWritten = false;
             shadow = shadowOutput.texture.Get();
             if (options.debugShadows)
             {
-                if (shadowDebugOutput.width != depthOut.width || shadowDebugOutput.height != depthOut.height)
-                {
-                    shadowDebugOutput = makeShared(device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the shadow debug view");
+                if (resizeShared(shadowDebugOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the shadow debug view"))
                     shadowDebugWritten = false;
-                }
 
                 shadowDebug = shadowDebugOutput.texture.Get();
             }
@@ -491,8 +495,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
         localLightWritten = false;
         if (!localLightsToTrace.empty())
         {
-            if (localLightOutput.width != depthOut.width || localLightOutput.height != depthOut.height)
-                localLightOutput = makeShared(device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16_FLOAT, "Creating the lights' shadow");
+            resizeShared(localLightOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16_FLOAT, "Creating the lights' shadow");
             localLightShadow = localLightOutput.texture.Get();
         }
     }
@@ -696,8 +699,7 @@ std::string problem()
 
     std::lock_guard lock(executionMutex);
     if (failed) return "Ray tracing is unavailable: " + failure;
-    const auto last = lastKick.load();
-    if (!last || GetTickCount64() - last > 1000) return "Ray tracing is waiting for the game's 3D view.";
+    if (sinceKick() > 1000) return "Ray tracing is waiting for the game's 3D view.";
 
     return {};
 }
@@ -912,8 +914,7 @@ ID3D11ShaderResourceView* light(UINT width, UINT height) noexcept
     {
         std::lock_guard lock(lightMutex);
         if (!lightDevice) return nullptr;
-        if (output.width != width || output.height != height)
-            output = makeShared(lightDevice.Get(), width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the light");
+        resizeShared(output, lightDevice.Get(), width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the light");
 
         return output.view.Get();
     }
@@ -933,8 +934,7 @@ ID3D11ShaderResourceView* localLightShadow(UINT width, UINT height) noexcept
 
 ID3D11ShaderResourceView* shadowDebug(UINT width, UINT height) noexcept
 {
-    const auto last = lastKick.load(std::memory_order_relaxed);
-    if (!shadowing.load(std::memory_order_relaxed) || failed || !last || GetTickCount64() - last > 1000) return nullptr;
+    if (!shadowing.load(std::memory_order_relaxed) || failed || sinceKick() > 1000) return nullptr;
 
     std::lock_guard lock(lightMutex);
     const bool fits = shadowDebugWritten && shadowDebugOutput.width == width && shadowDebugOutput.height == height;
@@ -943,8 +943,7 @@ ID3D11ShaderResourceView* shadowDebug(UINT width, UINT height) noexcept
 
 ID3D11ShaderResourceView* lightDebug(UINT width, UINT height) noexcept
 {
-    const auto last = lastKick.load(std::memory_order_relaxed);
-    if (!lighting.load(std::memory_order_relaxed) || failed || !last || GetTickCount64() - last > 1000) return nullptr;
+    if (!lighting.load(std::memory_order_relaxed) || failed || sinceKick() > 1000) return nullptr;
 
     std::lock_guard lock(lightMutex);
     const bool fits = lightDebugWritten && lightDebugOutput.width == width && lightDebugOutput.height == height;
@@ -958,18 +957,13 @@ std::string shadowProbe()
 
 ID3D11ShaderResourceView* sunShadow(UINT width, UINT height) noexcept
 {
-    const auto last = lastKick.load(std::memory_order_relaxed);
-    if (!shadowing.load(std::memory_order_relaxed) || failed || !last || GetTickCount64() - last > 1000) return nullptr;
+    if (!shadowing.load(std::memory_order_relaxed) || failed || sinceKick() > 1000) return nullptr;
 
     try
     {
         std::lock_guard lock(lightMutex);
         if (!lightDevice) return nullptr;
-        if (shadowOutput.width != width || shadowOutput.height != height)
-        {
-            shadowOutput = makeShared(lightDevice.Get(), width, height, DXGI_FORMAT_R16_FLOAT, "Creating the shadow");
-            shadowWritten = false;
-        }
+        if (resizeShared(shadowOutput, lightDevice.Get(), width, height, DXGI_FORMAT_R16_FLOAT, "Creating the shadow")) shadowWritten = false;
 
         return shadowWritten ? shadowOutput.view.Get() : nullptr;
     }
@@ -987,8 +981,7 @@ bool active() noexcept
 
 bool running() noexcept
 {
-    const auto last = lastKick.load(std::memory_order_relaxed);
-    return lighting.load(std::memory_order_relaxed) && !failed && last && GetTickCount64() - last < 1000;
+    return lighting.load(std::memory_order_relaxed) && !failed && sinceKick() < 1000;
 }
 
 void recorded(std::uint64_t list, std::uint64_t context) noexcept
