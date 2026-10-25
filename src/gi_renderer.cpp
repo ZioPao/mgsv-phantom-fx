@@ -674,6 +674,7 @@ void updateModels(State& s, const Frame& frame, Result& result)
         if (const auto model = s.models.find(character.hash); model != s.models.end()) model->second.lastPlaced = frame.frameIndex;
 
     s.modelsWaiting = 0;
+    s.modelsTooLarge = 0;
     std::vector<std::uint8_t> bytes;
     for (auto it = s.models.begin(); it != s.models.end();)
     {

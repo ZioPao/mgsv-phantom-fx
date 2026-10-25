@@ -3,7 +3,10 @@
 #include <Windows.h>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <mutex>
+#include <set>
+#include <string>
 
 namespace phantom_fx
 {
@@ -11,6 +14,8 @@ namespace
 {
 std::mutex logMutex;
 std::ofstream logFile;
+std::mutex loggedOnceMutex;
+std::set<std::string, std::less<>> loggedOnce;
 
 bool writtenSinceProcessStart(const std::filesystem::path& file)
 {
@@ -37,6 +42,12 @@ void log(std::string_view message)
 {
     std::lock_guard lock(logMutex);
     if (logFile) logFile << GetTickCount64() << " [thread " << GetCurrentThreadId() << "] " << message << std::endl;
+}
+
+void logOnce(std::string_view message)
+{
+    std::lock_guard lock(loggedOnceMutex);
+    if (loggedOnce.emplace(message).second) log(message);
 }
 
 std::string hex(std::uint64_t value)
