@@ -1,6 +1,7 @@
 #include "local_lights.hpp"
 
 #include "frame_log.hpp"
+#include "game_lights.hpp"
 #include "gi_inputs.hpp"
 #include "global_illumination.hpp"
 #include "log.hpp"
@@ -31,65 +32,7 @@ namespace phantom_fx::local_lights
 namespace
 {
 using Microsoft::WRL::ComPtr;
-
-enum class Shape : std::uint8_t { Point, Spot };
-// How a light fades with the distance d (docs/DEVELOPMENT.md, "Screen-space shadows"):
-// - Quartic (SSLighting2_*): 1 / d^2 - d^2 c6.w, zero at d = c6.w^(-1/4).
-// - Sixteenth (Lighting_*_NA): (1 - d^16 c6.z) / d^2, zero at d = c6.z^(-1/16).
-// A point light adds c6.x to its distance first.
-enum class Falloff : std::uint8_t { Quartic, Sixteenth };
-// The game's shader for each kind of light with specular and without a shadow map, which draws the
-// lights of that kind again.
-enum class Twin : std::uint8_t { PointNA, SpotNA, MaskedSpotNA, Point2, Spot2, MaskedSpot2, Count };
-
-constexpr const char* TwinChecksums[]{
-    "32bdd328651cf4f11ebcc47c0b65dfde", // Lighting_Point_NA_NShdw
-    "dddab560572d7352181cd83f00f6dd63", // Lighting_Spot_NA_NShdw
-    "dcc81c5f2c97e20003a27a9e7db54376", // Lighting_Spot_NA_Mask_NShdw
-    "4eb687f92330ee7b11ccf8e32950e4a9", // SSLighting2_Point_NoShadow
-    "74063ef2a991625184fdf283ba58c43f", // SSLighting2_Spot_NoShadow
-    "2d985165a56e0622d42f086a28c305d0", // SSLighting2_Spot_Mask_NShdw
-};
-static_assert(std::size(TwinChecksums) == static_cast<std::size_t>(Twin::Count));
-
-struct GameLight
-{
-    const char* checksum;
-    Shape shape;
-    Falloff falloff;
-    Twin twin;
-    bool specular;       // The game's shader adds specular; without, its light's specular scale is 0
-    bool shadowMap;      // The game's shader has a shadow map: its shadows are sharp, whatever the light's size
-    bool flashlight{};   // The weapon flashlights' shader: every light it drew in the captures was one
-};
-
-// Every point and spot light shader of the game's light pass.
-constexpr GameLight GameLights[]{
-    {"e61cc726c5c877555261f03dbc4aa967", Shape::Point, Falloff::Sixteenth, Twin::PointNA, true, true},       // Lighting_Point_NA
-    {"32bdd328651cf4f11ebcc47c0b65dfde", Shape::Point, Falloff::Sixteenth, Twin::PointNA, true, false},      // Lighting_Point_NA_NShdw
-    {"f037f71a002e42f0cb07ad2768f7b8ac", Shape::Point, Falloff::Sixteenth, Twin::PointNA, false, true},      // Lighting_Point_NA_NoSpec
-    {"259fff504d9caef06a467ff6ce9ee1bf", Shape::Point, Falloff::Sixteenth, Twin::PointNA, false, false},     // Lighting_Point_NA_NoSpec_NShdw
-    {"57b7365fcfb89c3f91fffcebf1a6b1e5", Shape::Spot, Falloff::Sixteenth, Twin::SpotNA, true, true},         // Lighting_Spot_NA
-    {"dddab560572d7352181cd83f00f6dd63", Shape::Spot, Falloff::Sixteenth, Twin::SpotNA, true, false},        // Lighting_Spot_NA_NShdw
-    {"7d2ed256fcff999707444bb115321c7f", Shape::Spot, Falloff::Sixteenth, Twin::SpotNA, false, true},        // Lighting_Spot_NA_NoSpec
-    {"91bc5dd518df1368e60d53c5f065e9f4", Shape::Spot, Falloff::Sixteenth, Twin::SpotNA, false, false},       // Lighting_Spot_NA_NoSpec_NShdw
-    {"d53793289e8c2824800876d8525aab2c", Shape::Spot, Falloff::Sixteenth, Twin::MaskedSpotNA, true, true},   // Lighting_Spot_NA_Mask
-    {"dcc81c5f2c97e20003a27a9e7db54376", Shape::Spot, Falloff::Sixteenth, Twin::MaskedSpotNA, true, false},  // Lighting_Spot_NA_Mask_NShdw
-    {"a435549d3334a5715c165a68083ea66e", Shape::Spot, Falloff::Sixteenth, Twin::MaskedSpotNA, false, true},  // Lighting_Spot_NA_Mask_NSpec
-    {"fd570742642f09e699d193ffb02bf0df", Shape::Spot, Falloff::Sixteenth, Twin::MaskedSpotNA, false, false, true}, // Lighting_Spot_NA_Mask_NSpec_NShdw (flashlights)
-    {"afbc12167037e4e0d653da184c7e3e82", Shape::Point, Falloff::Quartic, Twin::Point2, true, true},          // SSLighting2_Point
-    {"4eb687f92330ee7b11ccf8e32950e4a9", Shape::Point, Falloff::Quartic, Twin::Point2, true, false},         // SSLighting2_Point_NoShadow
-    {"a1c56a0978c706222ebeacbf6fc9ebe4", Shape::Point, Falloff::Quartic, Twin::Point2, false, true},         // SSLighting2_Point_NoSpec
-    {"e9cd14a10e3f1df895cb6799c232f99e", Shape::Point, Falloff::Quartic, Twin::Point2, false, false},        // SSLighting2_Point_NoSpec_NoShadow
-    {"ac0947110cb0f17f4ffe930a6a11617d", Shape::Spot, Falloff::Quartic, Twin::Spot2, true, true},            // SSLighting2_Spot
-    {"74063ef2a991625184fdf283ba58c43f", Shape::Spot, Falloff::Quartic, Twin::Spot2, true, false},           // SSLighting2_Spot_NoShadow
-    {"cdc559ec2ca4d52a54697cf5ca023667", Shape::Spot, Falloff::Quartic, Twin::Spot2, false, true},           // SSLighting2_Spot_NoSpec
-    {"a823ffb58661c508e6270227d4910c91", Shape::Spot, Falloff::Quartic, Twin::Spot2, false, false},          // SSLighting2_Spot_NoSpec_NoShadow
-    {"9ead0f83217db6af698f860fd3233441", Shape::Spot, Falloff::Quartic, Twin::MaskedSpot2, true, true},      // SSLighting2_Spot_Mask
-    {"2d985165a56e0622d42f086a28c305d0", Shape::Spot, Falloff::Quartic, Twin::MaskedSpot2, true, false},     // SSLighting2_Spot_Mask_NShdw
-    {"fa6ad11cfc35a2281a22b92c1a2aa6db", Shape::Spot, Falloff::Quartic, Twin::MaskedSpot2, false, true},     // SSLighting2_Spot_Mask_NSpec
-    {"74872741b699fdefa13ae71349f41ec9", Shape::Spot, Falloff::Quartic, Twin::MaskedSpot2, false, false},    // SSLighting2_Spot_Mask_NSpec_NShdw
-};
+using namespace game_lights;
 
 // What the light shaders read: t0 to t10 (the G-buffer, its depth at t2, the mask at t4, the specular
 // tables at t8 and t9, the material table at t10), s8 to s11, and cPSScene, cPSLight and cPSMaterial at
@@ -98,22 +41,14 @@ constexpr UINT ResourceSlots = 11, DepthSlot = 2, FirstSampler = 8, SamplerCount
 // A light's volume as copied from its draw: its indices, then from VolumeVertexStart its vertices. The
 // game's had at most 138 indices and 46 vertices of 16 bytes (2026-10-24).
 constexpr UINT VolumeBytes = 4096, VolumeVertexStart = 1024;
-constexpr UINT SceneConstants = 120, LightConstants = 44, MaterialConstants = 32; // Floats
+constexpr UINT SceneConstants = SceneConstantsSize / 4, LightConstants = LightConstantsSize / 4, MaterialConstants = 32; // Floats
 
-// cPSScene: c8 to c10 take the light passes' view space to the world, c20 is the eye, c21 the
-// projection's parameters (1 / P00, 1 / P11, B, A), c28 the jitter in NDC.
-constexpr std::size_t ViewToWorld = 8 * 4, Eye = 20 * 4, ProjectionParam = 21 * 4, CenterOffset = 28 * 4;
-// cPSLight, view space: c3 the light, c4 its colour and size, c5 the way a spot points, c6 its falloff,
-// c7 a spot's cone (x the cosine past which it cuts its light off, y 1 / its penumbra, z the exponent),
-// c8.x its specular's scale. cPSMaterial c7: x a point's least distance, w the most a spot's falloff gives.
-constexpr std::size_t LightPosition = 3 * 4, LightColor = 4 * 4, LightSize = 4 * 4 + 3, LightAxis = 5 * 4, LightFalloff = 6 * 4,
-                      LightCone = 7 * 4, LightUmbra = 7 * 4, SpecularScale = 8 * 4;
+// cPSMaterial c7: x a point's least distance, w the most a spot's falloff gives (cPSScene and cPSLight
+// in game_lights.hpp).
 constexpr std::size_t LeastDistance = 7 * 4, MaxFalloff = 7 * 4 + 3;
 
 // The game's lights with specular have a scale of 1; it is 0 for those without, as its flashlights.
 constexpr float AddedSpecular = 1.0f;
-// How far a light reaches when its falloff does not end, metres.
-constexpr float UnendingRange = 1000.0f;
 // A light sits inside its lamp's model: a ray ends this far short of it, or the light's size if larger.
 constexpr float LightClearance = 0.1f;
 // The radius a light's shadow rays spread over where the game gives it no size, or shadows it with a
@@ -543,18 +478,6 @@ Volume volumeOf(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call)
     }
 }
 
-// How far the light reaches, from its falloff; a point light's distance has c6.x added first.
-float rangeOf(const Light& light)
-{
-    const float* falloff = &light.light[LightFalloff];
-    const float factor = light.game->falloff == Falloff::Quartic ? falloff[3] : falloff[2];
-    if (!(factor > 0)) return UnendingRange;
-
-    const float reach = std::pow(factor, light.game->falloff == Falloff::Quartic ? -1.0f / 4 : -1.0f / 16);
-
-    return std::max(light.game->shape == Shape::Point ? reach - falloff[0] : reach, 0.0f);
-}
-
 // The light passes' view space to the world, through cPSScene c8 to c10; `w` 1 for a point, 0 for a way.
 std::array<float, 3> toWorld(const Light& light, const float* view, float w)
 {
@@ -585,7 +508,7 @@ gi_renderer::LocalLight forRays(const Light& light)
 
     return {.position = toWorld(light, &light.light[LightPosition], 1),
         .axis = spot ? normalized(toWorld(light, &light.light[LightAxis], 0)) : std::array<float, 3>{0, 1, 0},
-        .range = rangeOf(light),
+        .range = rangeOf(light.light.data(), *light.game),
         .cosOuter = spot ? light.light[LightUmbra] : PointCone,
         .clearance = std::max(LightClearance, light.light[LightSize]),
         .penumbraScale = spot ? light.light[LightCone + 1] : 0,
@@ -610,12 +533,11 @@ bool sameFrame(const Light& light, const camera::SceneConstants& camera)
 }
 
 // The pixels of the viewport the light can reach: its sphere, or for a spot the bounding sphere of its
-// cone, on screen, as shadows.cpp's boundsOf puts a lamp's sphere there (the planes through the eye
-// that touch it). The whole viewport when the camera plane cuts the sphere; none when it is behind or off
-// screen.
+// cone, on screen (sphereOnScreen). The whole viewport when the camera plane cuts the sphere; none when it
+// is behind or off screen.
 std::optional<D3D11_RECT> reachOf(const Light& light)
 {
-    const float range = rangeOf(light);
+    const float range = rangeOf(light.light.data(), *light.game);
     const float* position = &light.light[LightPosition];
     std::array<float, 3> centre{position[0], position[1], position[2]};
     float radius = range;
@@ -637,23 +559,10 @@ std::optional<D3D11_RECT> reachOf(const Light& light)
     if (z + radius <= 0) return std::nullopt;
     if (z - radius <= 0) return whole;
 
-    const float* projection = &light.scene[ProjectionParam];
-    const float* offset = &light.scene[CenterOffset];
-    const float clearance = z * z - radius * radius;
-    std::array<LONG, 2> low{}, high{};
-    for (int axis = 0; axis < 2; ++axis)
-    {
-        const float across = centre[axis];
-        const float spread = radius * std::sqrt(across * across + clearance);
-        const float scale = axis == 0 ? 0.5f : -0.5f;
-        const auto pixelAt = [&](float t) { return ((t / projection[axis] + offset[axis]) * scale + 0.5f) * size[axis]; };
-        const float first = pixelAt((across * z - spread) / clearance), second = pixelAt((across * z + spread) / clearance);
-        low[axis] = static_cast<LONG>(std::clamp(std::floor(std::min(first, second)) - 1, 0.0f, size[axis]));
-        high[axis] = static_cast<LONG>(std::clamp(std::ceil(std::max(first, second)) + 1, 0.0f, size[axis]));
-        if (low[axis] >= high[axis]) return std::nullopt;
-    }
+    const auto rect = sphereOnScreen(light.scene.data(), centre, radius, size);
+    if (!rect) return std::nullopt;
 
-    return D3D11_RECT{left + low[0], top + low[1], left + high[0], top + high[1]};
+    return D3D11_RECT{left + rect->min[0], top + rect->min[1], left + rect->max[0], top + rect->max[1]};
 }
 
 std::pair<UINT, UINT> sizeOf(ID3D11View* view)
@@ -769,7 +678,7 @@ void saveForRecord(const std::filesystem::path& folder, int batch, const char* w
         list << light.game->checksum << (light.traced ? " traced" : " untraced") << (light.volume.view ? " volume " : " no volume ")
              << light.volume.count << " at " << at[0] << ' ' << at[1] << ' ' << at[2] << " way " << way[0] << ' ' << way[1] << ' ' << way[2]
              << " colour " << light.light[LightColor] << ' ' << light.light[LightColor + 1] << ' ' << light.light[LightColor + 2] << " range "
-             << rangeOf(light) << " eye " << light.scene[Eye] << ' ' << light.scene[Eye + 1] << ' ' << light.scene[Eye + 2] << '\n';
+             << rangeOf(light.light.data(), *light.game) << " eye " << light.scene[Eye] << ' ' << light.scene[Eye + 1] << ' ' << light.scene[Eye + 2] << '\n';
     }
 }
 
@@ -948,16 +857,16 @@ void pixelShaderCreated(const void* code, std::size_t size, IUnknown* shader) no
     if (!checksum || !shader) return;
 
     const auto text = toHex(*checksum);
-    const auto game = std::find_if(std::begin(GameLights), std::end(GameLights), [&](const auto& known) { return text == known.checksum; });
-    if (game == std::end(GameLights)) return;
+    const auto* game = findGameLight(text);
+    if (!game) return;
 
     try
     {
         std::unique_lock lock(shaderMutex);
-        gameShaders[shader] = &*game;
+        gameShaders[shader] = game;
         shaderOwners.emplace_back(shader);
-        for (std::size_t i = 0; i < std::size(TwinChecksums); ++i)
-            if (text == TwinChecksums[i] && !twins[i]) check(shader->QueryInterface(IID_PPV_ARGS(&twins[i])), "Taking one of the game's light shaders");
+        auto& twin = twins[static_cast<std::size_t>(game->twin)];
+        if (isTwin(*game) && !twin) check(shader->QueryInterface(IID_PPV_ARGS(&twin)), "Taking one of the game's light shaders");
     }
     catch (...)
     {

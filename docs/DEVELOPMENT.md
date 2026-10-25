@@ -127,6 +127,7 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/shaders/gi_light.hlsl` | HLSL: the light's rays, their hits' light, the hash grid cache, the denoiser's inputs and the render size |
 | `src/gi_shadow.cpp`, `src/gi_shadow.hpp` | Ray-traced shadows on the global illumination's Direct3D 12 device: the denoiser's memory and passes |
 | `src/local_lights.cpp`, `src/local_lights.hpp` | Ray-traced lights: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights") |
+| `src/game_lights.hpp` | The game's point and spot light shaders and their constants, for lamp contact shadows and the ray-traced lights: the checksums, a light's range, its sphere on screen |
 | `src/shaders/gi_shadow.hlsl`, `gi_shadow_filter.hlsl`, `gi_shadow.hlsli` | HLSL: the sun's shadow rays, and the FidelityFX Shadow Denoiser's data access, temporal pass and filters |
 | `third_party/ffx_denoiser_shadows/` | AMD's FidelityFX Shadow Denoiser headers, unchanged (MIT; `licenses/AMD-FidelityFX-LICENSE.txt`) |
 | `src/indirect_light.cpp`, `src/indirect_light.hpp` | GTVBAO in place of the game's SSAO, on the indirect light, and SSILVB's bounce light: pass recognition, the compute passes, the multiply, the resolve's white occlusion and diffuse light |
@@ -1903,7 +1904,7 @@ their shadow maps or of none, and lights without specular get the game's. The sc
 its own if neither the light nor the sun's shadows run. Lamp contact shadows are off while it is on.
 
 - **The game's lights** (24 pixel shaders, `SSLighting2_*` and `Lighting_*_NA`, point or spot, with or
-  without a mask, specular and a shadow map; their checksums in `local_lights.cpp`). Two draws a light
+  without a mask, specular and a shadow map; their checksums in `game_lights.hpp`). Two draws a light
   in the light pass: the light's volume marks the stencil (colour writes off), then lights where it
   marked (ONE, ONE into both light targets). Their vertex shaders are one and the same: the volume
   comes in clip space. Every one reads `cPSLight` (`b3`, the light passes' view space) alike: `c3` the

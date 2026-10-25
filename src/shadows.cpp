@@ -1,5 +1,6 @@
 #include "shadows.hpp"
 
+#include "game_lights.hpp"
 #include "global_illumination.hpp"
 #include "log.hpp"
 #include "performance.hpp"
@@ -29,6 +30,7 @@ namespace phantom_fx::shadows
 namespace
 {
 using Microsoft::WRL::ComPtr;
+using namespace game_lights;
 
 // The game's sun light pixel shaders (docs/DEVELOPMENT.md, "Sun light and shadows"): inside the
 // shadow range, with the shadow map, and beyond it. In rain the game draws a pair without the sky
@@ -53,52 +55,6 @@ bool reflectsSky(Sun sun)
     return sun == Sun::ShadowMap || sun == Sun::Far;
 }
 
-// How a local light's shader fades its light to zero with the distance d to the light, from the
-// disassembly. The points add cPSLight c6.x to d; the spots do not.
-// - Quartic (SSLighting2_*): 1 / d^2 - d^2 c6.w, zero at d = c6.w^(-1/4).
-// - Sixteenth (Lighting_*_NA): (1 - d^16 c6.z) / d^2, zero at d = c6.z^(-1/16).
-enum class Falloff : std::uint8_t { Quartic, Sixteenth };
-
-// The game's point and spot light pixel shaders (docs/DEVELOPMENT.md, "Local lights"), all with the
-// light's view-space position in cPSLight c3.
-struct LocalLightShader
-{
-    const char* checksum;
-    Falloff falloff;
-};
-constexpr LocalLightShader LocalLightShaders[]{
-    {"e61cc726c5c877555261f03dbc4aa967", Falloff::Sixteenth}, // Lighting_Point_NA
-    {"32bdd328651cf4f11ebcc47c0b65dfde", Falloff::Sixteenth}, // Lighting_Point_NA_NShdw
-    {"f037f71a002e42f0cb07ad2768f7b8ac", Falloff::Sixteenth}, // Lighting_Point_NA_NoSpec
-    {"259fff504d9caef06a467ff6ce9ee1bf", Falloff::Sixteenth}, // Lighting_Point_NA_NoSpec_NShdw
-    {"57b7365fcfb89c3f91fffcebf1a6b1e5", Falloff::Sixteenth}, // Lighting_Spot_NA
-    {"d53793289e8c2824800876d8525aab2c", Falloff::Sixteenth}, // Lighting_Spot_NA_Mask
-    {"dcc81c5f2c97e20003a27a9e7db54376", Falloff::Sixteenth}, // Lighting_Spot_NA_Mask_NShdw
-    {"a435549d3334a5715c165a68083ea66e", Falloff::Sixteenth}, // Lighting_Spot_NA_Mask_NSpec
-    {"fd570742642f09e699d193ffb02bf0df", Falloff::Sixteenth}, // Lighting_Spot_NA_Mask_NSpec_NShdw
-    {"dddab560572d7352181cd83f00f6dd63", Falloff::Sixteenth}, // Lighting_Spot_NA_NShdw
-    {"7d2ed256fcff999707444bb115321c7f", Falloff::Sixteenth}, // Lighting_Spot_NA_NoSpec
-    {"91bc5dd518df1368e60d53c5f065e9f4", Falloff::Sixteenth}, // Lighting_Spot_NA_NoSpec_NShdw
-    {"afbc12167037e4e0d653da184c7e3e82", Falloff::Quartic},   // SSLighting2_Point
-    {"4eb687f92330ee7b11ccf8e32950e4a9", Falloff::Quartic},   // SSLighting2_Point_NoShadow
-    {"a1c56a0978c706222ebeacbf6fc9ebe4", Falloff::Quartic},   // SSLighting2_Point_NoSpec
-    {"e9cd14a10e3f1df895cb6799c232f99e", Falloff::Quartic},   // SSLighting2_Point_NoSpec_NoShadow
-    {"ac0947110cb0f17f4ffe930a6a11617d", Falloff::Quartic},   // SSLighting2_Spot
-    {"9ead0f83217db6af698f860fd3233441", Falloff::Quartic},   // SSLighting2_Spot_Mask
-    {"2d985165a56e0622d42f086a28c305d0", Falloff::Quartic},   // SSLighting2_Spot_Mask_NShdw
-    {"fa6ad11cfc35a2281a22b92c1a2aa6db", Falloff::Quartic},   // SSLighting2_Spot_Mask_NSpec
-    {"74872741b699fdefa13ae71349f41ec9", Falloff::Quartic},   // SSLighting2_Spot_Mask_NSpec_NShdw
-    {"74063ef2a991625184fdf283ba58c43f", Falloff::Quartic},   // SSLighting2_Spot_NoShadow
-    {"cdc559ec2ca4d52a54697cf5ca023667", Falloff::Quartic},   // SSLighting2_Spot_NoSpec
-    {"a823ffb58661c508e6270227d4910c91", Falloff::Quartic},   // SSLighting2_Spot_NoSpec_NoShadow
-};
-
-// cPSLight (b3) and cPSScene (b2), as the light passes bind them.
-constexpr UINT LightConstantsSize = 176, SceneConstantsSize = 480;
-constexpr std::size_t LightDirection = 0;                              // c0: towards the sun, view space
-constexpr std::size_t LightPosition = 3 * 4;                           // c3: a local light's position, view space
-constexpr std::size_t LightFade = 6 * 4;                               // c6: a local light's falloff (see Falloff)
-constexpr std::size_t ProjectionParam = 21 * 4, CenterOffset = 28 * 4; // c21: 1 / P00, 1 / P11, B, A; c28: the jitter in NDC
 constexpr UINT SpecularSlot = 1;                                       // t1 of the light passes, whose z is the material
 constexpr UINT DepthSlot = 2;                                          // t2 of the light passes
 constexpr UINT RayTracedSlot = 6;                                      // t6 of the replacement sun shaders
@@ -374,16 +330,6 @@ std::array<float, 4> project(const float* scene, const float (&light)[4])
         projection[3] * light[2] + projection[2] * light[3], light[2]};
 }
 
-// How far a local light reaches, from its falloff in cPSLight c6; infinite or NaN where unknown.
-float rangeOf(const float* light, Falloff falloff)
-{
-    const float* fade = light + LightFade;
-    const float reach = falloff == Falloff::Quartic ? std::pow(fade[3], -1.0f / 4) : std::pow(fade[2], -1.0f / 16);
-
-    // A point adds c6.x to the distance and a spot does not; the larger range covers both.
-    return reach - std::min(fade[0], 0.0f);
-}
-
 // The width and height of the texture `view` shows.
 std::array<int, 2> sizeOf(ID3D11ShaderResourceView* view)
 {
@@ -419,21 +365,14 @@ std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 
 
     bounds.depthMax = depthAt(z - range);
 
-    // On each axis, the planes through the eye that touch the sphere, at x / z (or y / z) = t, bound
-    // it on screen; pixels as Bend places the light.
-    const float* offset = scene + CenterOffset;
-    const float clearance = z * z - range * range;
+    // Pixels as Bend places the light.
+    const auto rect = sphereOnScreen(scene, center, range, {static_cast<float>(size[0]), static_cast<float>(size[1])});
+    if (!rect) return std::nullopt;
+
     for (int axis = 0; axis < 2; ++axis)
     {
-        const float across = center[axis];
-        const float spread = range * std::sqrt(across * across + clearance);
-        const float scale = axis == 0 ? 0.5f : -0.5f;
-        const auto pixelAt = [&](float t) { return ((t / projection[axis] + offset[axis]) * scale + 0.5f) * static_cast<float>(size[axis]); };
-        const float first = pixelAt((across * z - spread) / clearance), second = pixelAt((across * z + spread) / clearance);
-        const auto clamped = [&](float pixel) { return static_cast<int>(std::clamp(pixel, 0.0f, static_cast<float>(size[axis]))); };
-        bounds.min[axis] = clamped(std::floor(std::min(first, second)) - 1);
-        bounds.max[axis] = clamped(std::ceil(std::max(first, second)) + 1);
-        if (bounds.min[axis] >= bounds.max[axis]) return std::nullopt;
+        bounds.min[axis] = rect->min[axis];
+        bounds.max[axis] = rect->max[axis];
     }
 
     return bounds;
@@ -733,7 +672,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     }
 
     // A light that cannot reach the screen keeps the game's draws.
-    const float range = rangeOf(light, falloff);
+    const float range = eitherShapeRangeOf(light, falloff);
     const auto bounds = boundsOf(scene, position, range, sizeOf(depth.Get()));
     if (!bounds) return false;
 
@@ -879,8 +818,8 @@ void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcep
         }
     }
 
-    const auto light = std::find_if(std::begin(LocalLightShaders), std::end(LocalLightShaders), [&](const auto& known) { return text == known.checksum; });
-    if (light == std::end(LocalLightShaders)) return;
+    const auto* light = findGameLight(text);
+    if (!light) return;
 
     try
     {
