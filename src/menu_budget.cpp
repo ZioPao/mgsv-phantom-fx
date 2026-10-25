@@ -2,7 +2,6 @@
 #include "menu_budget.hpp"
 
 #include "atmosphere.hpp"
-#include "depth_of_field.hpp"
 #include "dev_tools.hpp"
 #include "global_illumination.hpp"
 #include "hdr.hpp"
@@ -98,7 +97,6 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
     const auto occlusionProblem = indirect_light::occlusionProblem();
     const auto lightProblem = indirect_light::lightProblem();
     const auto fogProblem = atmosphere::problem();
-    const auto focusProblem = depth_of_field::problem();
 
     const auto status = upscaler::status();
     const State upscaling = wanted.mode == upscaler::Mode::Off ? State::Off
@@ -114,7 +112,6 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
     const State occlusion = stateOf(wanted.ambientOcclusion, held, wanted.globalIllumination, false, occlusionProblem);
     const State indirect = stateOf(wanted.indirectLight, held, wanted.globalIllumination, false, lightProblem);
     const State fog = stateOf(wanted.volumetricFog, held, false, false, fogProblem);
-    const State focus = stateOf(wanted.depthOfField, false, false, false, focusProblem);
 
     State output = State::Working;
     std::string outputMessage;
@@ -215,9 +212,6 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
             .message = messageFor(fog, fogProblem)},
         {{Pass::FogPass, "The game's fog pass, larger"}, {Pass::SkyTables, "Sky tables (physical look)"}, {Pass::FogShadow, "Sun shadow in the fog"},
             {Pass::FogScattering, "Scattering"}, {Pass::FogIntegration, "Integration"}, {Pass::Sky, "Physical sky"}});
-    add({.id = "depthOfField", .name = "Depth of field", .section = at(Section::Camera), .state = focus, .toggle = &wanted.depthOfField,
-            .message = messageFor(focus, focusProblem)},
-        {{Pass::DofSetup, "Setup and tile dilate"}, {Pass::DofGather, "Gather"}, {Pass::DofComposite, "Composite"}});
     add({.id = "hdr", .name = "HDR output", .tech = "HDR10", .section = at(Section::Display), .state = output, .toggle = &wanted.hdr, .message = outputMessage},
         {{Pass::HdrEncode, "Encoding the scene"}, {Pass::HdrDecode, "Decoding copies"}, {Pass::HdrGrade, "Grading"}});
 

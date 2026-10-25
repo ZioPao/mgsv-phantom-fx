@@ -2,7 +2,6 @@
 
 #include "camera.hpp"
 #include "atmosphere.hpp"
-#include "depth_of_field.hpp"
 #include "draw_distance.hpp"
 #include "focus.hpp"
 #include "frame_rate.hpp"
@@ -53,8 +52,9 @@ using Microsoft::WRL::ComPtr;
 constexpr char NgxProjectId[] = "3f6c2a91-7d4e-4b8a-a1c5-9e0d2b7f4c68";
 constexpr UINT SceneConstantsSize = sizeof(camera::SceneConstants);
 
-// The game's pixel shaders the add-on looks for, each drawn as one full-screen triangle.
-enum class Pass : std::uint8_t { Fxaa, CameraVelocity, GammaControl, Count, None = Count };
+// The game's pixel shaders the add-on looks for, each drawn as one full-screen triangle. From Copy on
+// they are the post processing after the depth of field, which the upscaler runs before.
+enum class Pass : std::uint8_t { Fxaa, CameraVelocity, GammaControl, Copy, LutBuild, Grade, Count, None = Count };
 
 struct GameShader
 {
@@ -66,13 +66,16 @@ constexpr GameShader Shaders[]{
     {"Fxaa", "deef1a5e3462ab091b5612a37662d15d"},
     {"MotionBlurCameraVelocity", "5d0241dd9804f41c780cd36669c71198"},
     {"GammaControl", "12790f061c5f1460aa40c264e4bc9f07"},
+    {"CopyRenderBuffer", "9f93a957f1e21656e0d86bf112b71d6d"},
+    {"ColorCorrection_BlndLut_Tex_Gen", "82a954d0fe3755bb0a79aaaded5cce74"},
+    {"Tonemap", "422ba739df267d9f92d4d62b0d2b4e09"},
 };
 static_assert(std::size(Shaders) == static_cast<std::size_t>(Pass::Count));
 
-// The FXAA pass as recorded: it reads the scene copy and writes the scene target, with the depth copy bound.
+// The FXAA pass as recorded: it reads the scene copy and writes the scene target, with the depth copy
+// bound. The upscaler reads the scene target and the depth copy before the grading.
 struct FxaaPass
 {
-    ComPtr<ID3D11ShaderResourceView> sceneCopy;
     ComPtr<ID3D11RenderTargetView> sceneTarget;
     ComPtr<ID3D11DepthStencilView> depth;
     std::uint64_t frame{};
@@ -85,8 +88,8 @@ struct ObjectVelocity
     std::uint64_t frame{};
 };
 
-// Frame generation's frame before the HUD, at the output size, as the back buffer would hold it:
-// DLSS's image is copied into `source` before the UI draws over it, and GammaControl draws a second
+// Frame generation's frame before the HUD, at the output size, as the back buffer would hold it: the
+// graded image is copied into `source` before the UI draws over it, and GammaControl draws a second
 // time from it into `target`, which Direct3D 12 shares. Its colour then matches the back buffer's
 // wherever there is no HUD, which is how frame generation tells the HUD apart.
 struct Hudless
@@ -100,7 +103,10 @@ struct Hudless
 // What a deferred context or command list recorded that the replacement needs.
 struct Recorded
 {
-    std::optional<FxaaPass> fxaa;
+    // Holds the grading: the upscaler runs before the frame's first such list.
+    bool grading{};
+    // Holds the FXAA pass, the end of the grading; the hudless colour is copied after it.
+    bool fxaa{};
     std::optional<ObjectVelocity> velocity;
     // Draws on the UI target, which must be filled before the list runs.
     bool drawsOnUiTarget{};
@@ -214,6 +220,9 @@ std::array<std::array<ComPtr<IUnknown>, CopiesPerShader>, std::size(Shaders)> sh
 // ---- Recording ----
 std::mutex recordMutex;
 std::unordered_map<std::uint64_t, Recorded> recordedLists;
+// The latest FXAA pass recorded. The whole frame is recorded before it executes, so the frame's own
+// is known when its grading starts.
+std::optional<FxaaPass> recordedFxaa;
 Frame frame;
 bool executedSinceFrameStart{true};
 // The scene constants a thread has mapped: Map, memcpy and Unmap run back to back on one thread.
@@ -244,16 +253,25 @@ ComPtr<ID3D11SamplerState> linearSampler;
 ComPtr<ID3D11Buffer> inputConstants, compositeConstants;
 ComPtr<ID3D11Texture2D> exposureTexture; // 1x1, the constant 1 DLSS is told as the exposure
 Target colorTarget, depthTarget, motionTarget, outputTarget;
-ComPtr<ID3D11Resource> depthResource;
-ComPtr<ID3D11ShaderResourceView> depthView;
+ComPtr<ID3D11Resource> depthResource, sceneResource;
+ComPtr<ID3D11ShaderResourceView> depthView, sceneView;
 Ngx ngx;
 UINT outputSize[2]{};
 std::optional<Plan> plan;
 Settings planSettings;
-// The UI target holds this frame's image: the 2D pass and GammaControl can draw on it.
+// The UI target holds this frame's image: the grading, the 2D pass and GammaControl can draw on it.
 bool uiTargetFilled{};
-// The FXAA pass of the command list just executed; DLSS runs at the immediate context's next call.
-std::optional<FxaaPass> pending;
+// The frame the upscaler ran for, at its first command list of the grading.
+std::uint64_t upscaledFrame{};
+// Frame generation's hudless colour comes from `image` once the grading has drawn it: at the
+// immediate context's next call after the FXAA pass's command list (`copyNext`).
+struct PendingHudless
+{
+    std::shared_ptr<const Hudless> hudless;
+    ComPtr<ID3D11Resource> image;
+    bool copyNext{};
+};
+std::optional<PendingHudless> pendingHudless;
 std::optional<ObjectVelocity> velocity;
 std::optional<Frame> lastEvaluated;
 LARGE_INTEGER lastEvaluation{};
@@ -262,7 +280,7 @@ LARGE_INTEGER lastEvaluation{};
 struct Presented
 {
     frame_generation::Inputs inputs;        // From DLSS's evaluation; not yet valid
-    std::shared_ptr<const Hudless> hudless; // DLSS's image went into its source
+    std::shared_ptr<const Hudless> hudless; // The graded image went into its source
     bool hudlessDrawn{};                    // A list drew GammaControl from it after that
 } presented;
 
@@ -357,9 +375,8 @@ void configureAtmosphere()
 }
 
 // Call with settingsMutex held.
-void configureDepthOfField()
+void configurePhotoMode()
 {
-    depth_of_field::configure({.gather = supported && settings.depthOfField && !leftOut.depthOfField, .blades = settings.apertureBlades});
     photo_mode::configure({.fNumber = settings.fNumber});
 }
 
@@ -380,11 +397,11 @@ void configureDrawDistance()
     }
 }
 
-// The game keeps FXAA's output where DLSS cannot run.
+// A frame DLSS cannot run on shows the engine's image as it is, without anti-aliasing.
 bool fallback(std::string reason)
 {
     ++fallbacks;
-    logOnce("fallback:" + reason, "FXAA kept this frame: " + reason + ".");
+    logOnce("fallback:" + reason, "Not upscaled this frame: " + reason + ".");
     lastFallback = std::move(reason);
     return false;
 }
@@ -477,11 +494,17 @@ std::uint64_t recordingFrame()
 void recordFxaa(ID3D11DeviceContext* context)
 {
     FxaaPass pass;
-    context->PSGetShaderResources(0, 1, pass.sceneCopy.GetAddressOf());
     context->OMGetRenderTargets(1, pass.sceneTarget.GetAddressOf(), pass.depth.GetAddressOf());
     std::lock_guard lock(recordMutex);
     pass.frame = recordingFrame();
-    recordedLists[keyOf(context)].fxaa = std::move(pass);
+    recordedFxaa = std::move(pass);
+    recordedLists[keyOf(context)].fxaa = true;
+}
+
+void recordGrading(ID3D11DeviceContext* context)
+{
+    std::lock_guard lock(recordMutex);
+    recordedLists[keyOf(context)].grading = true;
 }
 
 void recordVelocity(ID3D11DeviceContext* context)
@@ -738,6 +761,24 @@ bool ensureDepthView(ID3D11DepthStencilView* depth)
     return SUCCEEDED(device->CreateShaderResourceView(texture.Get(), &viewDesc, depthView.GetAddressOf()));
 }
 
+// The scene target, read as FXAA's view writes it: sRGB-encoded in 8 bits, or float with HDR.
+bool ensureSceneView(ID3D11RenderTargetView* target)
+{
+    const auto resource = resourceOf(target);
+    if (resource == sceneResource) return sceneView != nullptr;
+
+    sceneResource = resource;
+    sceneView.Reset();
+    D3D11_RENDER_TARGET_VIEW_DESC targetDesc{};
+    target->GetDesc(&targetDesc);
+    D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
+    viewDesc.Format = targetDesc.Format;
+    viewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    viewDesc.Texture2D.MipLevels = 1;
+
+    return SUCCEEDED(device->CreateShaderResourceView(resource.Get(), &viewDesc, sceneView.GetAddressOf()));
+}
+
 // ---- NGX ----
 
 void NVSDK_CONV ngxLog(const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature)
@@ -930,6 +971,119 @@ NVSDK_NGX_Result evaluateDlss(const NVSDK_NGX_D3D11_DLSS_Eval_Params& evaluation
     return NVSDK_NGX_D3D11_EvaluateFeature(ngxContext.Get(), ngx.feature, parameters, nullptr);
 }
 
+// ---- Post processing at the output size, on the recording threads ----
+
+using Inputs = std::initializer_list<ui_redirect::OutputSizeDraw::Input>;
+
+// A post-processing draw at the output size, from before the add-on's draw hooks to after them.
+struct PostDraw
+{
+    std::optional<ui_redirect::OutputSizeDraw> redirected;
+    // The grading's render-size target, the scene target, which then gets the graded image as well.
+    ComPtr<ID3D11RenderTargetView> graded;
+
+    void clear()
+    {
+        redirected.reset();
+        graded.Reset();
+    }
+};
+thread_local PostDraw postDraw;
+
+// The stretch the recording threads draw with, made once.
+struct RecordingShaders
+{
+    ComPtr<ID3D11VertexShader> vertex;
+    ComPtr<ID3D11PixelShader> pixel;
+    ComPtr<ID3D11SamplerState> sampler;
+};
+std::mutex recordingShaderMutex;
+std::shared_ptr<const RecordingShaders> recordingShaders;
+
+std::shared_ptr<const RecordingShaders> stretchForRecording()
+{
+    std::lock_guard lock(recordingShaderMutex);
+    if (recordingShaders || !device) return recordingShaders;
+
+    auto made = std::make_shared<RecordingShaders>();
+    auto code = compile(shaders::StretchVertex, "post-stretch-vertex", "vs_5_0");
+    check(device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, made->vertex.GetAddressOf()),
+        "Creating the post-processing stretch");
+    code = compile(shaders::Stretch, "post-stretch", "ps_5_0");
+    check(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, made->pixel.GetAddressOf()),
+        "Creating the post-processing stretch");
+    D3D11_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler.MaxLOD = D3D11_FLOAT32_MAX;
+    check(device->CreateSamplerState(&sampler, made->sampler.GetAddressOf()), "Creating the post-processing stretch");
+    recordingShaders = std::move(made);
+
+    return recordingShaders;
+}
+
+// The graded image at the output size, stretched into the render-size scene target on `context`. The
+// game copies the scene after grading for its 2D filters (chromatic aberration, radial blur, water
+// drops), which then show the graded image under them, as before.
+void drawGradedScene(ID3D11DeviceContext* context, ID3D11RenderTargetView* scene)
+{
+    const auto output = ui_redirect::output();
+    const auto stretch = stretchForRecording();
+    if (!output.view || !stretch) return;
+
+    ComPtr<ID3D11InputLayout> layout;
+    D3D11_PRIMITIVE_TOPOLOGY topology{};
+    ComPtr<ID3D11VertexShader> vertex;
+    ComPtr<ID3D11PixelShader> pixel;
+    ComPtr<ID3D11ShaderResourceView> input;
+    ComPtr<ID3D11SamplerState> sampler;
+    ComPtr<ID3D11RasterizerState> rasterizer;
+    ComPtr<ID3D11BlendState> blend;
+    float blendFactor[4]{};
+    UINT sampleMask{};
+    ID3D11RenderTargetView* bound[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+    ComPtr<ID3D11DepthStencilView> depth;
+    D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    UINT viewportCount = static_cast<UINT>(std::size(viewports));
+    context->IAGetInputLayout(layout.GetAddressOf());
+    context->IAGetPrimitiveTopology(&topology);
+    context->VSGetShader(vertex.GetAddressOf(), nullptr, nullptr);
+    context->PSGetShader(pixel.GetAddressOf(), nullptr, nullptr);
+    context->PSGetShaderResources(0, 1, input.GetAddressOf());
+    context->PSGetSamplers(0, 1, sampler.GetAddressOf());
+    context->RSGetState(rasterizer.GetAddressOf());
+    context->OMGetBlendState(blend.GetAddressOf(), blendFactor, &sampleMask);
+    context->OMGetRenderTargets(static_cast<UINT>(std::size(bound)), bound, depth.GetAddressOf());
+    std::array<ComPtr<ID3D11RenderTargetView>, std::size(bound)> targets;
+    for (std::size_t i = 0; i < std::size(bound); ++i) targets[i].Attach(bound[i]);
+    context->RSGetViewports(&viewportCount, viewports);
+
+    const auto size = textureDesc(scene);
+    const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(size.Width), static_cast<float>(size.Height), 0, 1};
+    context->IASetInputLayout(nullptr);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetShader(stretch->vertex.Get(), nullptr, 0);
+    context->PSSetShader(stretch->pixel.Get(), nullptr, 0);
+    context->PSSetShaderResources(0, 1, output.view.GetAddressOf());
+    context->PSSetSamplers(0, 1, stretch->sampler.GetAddressOf());
+    context->RSSetState(nullptr);
+    context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+    context->OMSetRenderTargets(1, &scene, nullptr);
+    context->RSSetViewports(1, &viewport);
+    context->Draw(3, 0);
+
+    context->IASetInputLayout(layout.Get());
+    context->IASetPrimitiveTopology(topology);
+    context->VSSetShader(vertex.Get(), nullptr, 0);
+    context->PSSetShader(pixel.Get(), nullptr, 0);
+    context->PSSetShaderResources(0, 1, input.GetAddressOf());
+    context->PSSetSamplers(0, 1, sampler.GetAddressOf());
+    context->RSSetState(rasterizer.Get());
+    context->OMSetBlendState(blend.Get(), blendFactor, sampleMask);
+    context->OMSetRenderTargets(static_cast<UINT>(std::size(bound)), bound, depth.Get());
+    context->RSSetViewports(viewportCount, viewports);
+}
+
 // ---- Per frame, on the immediate context ----
 
 // Runs the replacement's Direct3D work in its own context state, so the game's is untouched.
@@ -958,8 +1112,7 @@ template<class Work> void inOwnState(Work&& work)
     restore();
 }
 
-void runInputs(const FxaaPass& pass, const Frame& current, const camera::Matrix& previousFromCurrent, ID3D11ShaderResourceView* objectVelocity,
-    bool linear)
+void runInputs(const Frame& current, const camera::Matrix& previousFromCurrent, ID3D11ShaderResourceView* objectVelocity, bool linear)
 {
     InputConstants constants{};
     for (int i = 0; i < 16; ++i) constants.previousFromCurrent[i / 4][i % 4] = static_cast<float>(previousFromCurrent[i]);
@@ -972,7 +1125,7 @@ void runInputs(const FxaaPass& pass, const Frame& current, const camera::Matrix&
     constants.linear = linear;
     immediate->UpdateSubresource(inputConstants.Get(), 0, nullptr, &constants, 0, 0);
 
-    ID3D11ShaderResourceView* inputs[]{pass.sceneCopy.Get(), depthView.Get(), objectVelocity};
+    ID3D11ShaderResourceView* inputs[]{sceneView.Get(), depthView.Get(), objectVelocity};
     ID3D11UnorderedAccessView* outputs[]{colorTarget.access.Get(), depthTarget.access.Get(), motionTarget.access.Get()};
     immediate->CSSetShader(inputShader.Get(), nullptr, 0);
     immediate->CSSetConstantBuffers(0, 1, inputConstants.GetAddressOf());
@@ -1022,14 +1175,11 @@ void stretchToUiTarget(const ui_redirect::Output& output)
     });
 }
 
-bool replaceFxaa(const FxaaPass& pass)
+// After the depth of field and before the grading: the scene target's image into DLSS or FSR, and
+// their output back over it (DLAA) or into the UI target, which the grading then draws on at the
+// output size.
+bool upscale(const FxaaPass& pass, const Frame& current)
 {
-    Frame current;
-    {
-        std::lock_guard lock(recordMutex);
-        current = frame;
-    }
-
     Settings wanted;
     Diagnostics options;
     {
@@ -1041,17 +1191,16 @@ bool replaceFxaa(const FxaaPass& pass)
 
     // Each frame is recorded before it executes; a later frame's uploads would have started a new one.
     if (pass.frame != current.index) return fallback("the frame's command lists were not recorded in step with their execution");
-    if (lastEvaluated && lastEvaluated->index == current.index) return fallback("the frame has a second FXAA pass");
     if (!current.view) return fallback("the frame has no main camera");
-    if (!pass.sceneCopy || !pass.sceneTarget || !pass.depth) return fallback("the FXAA pass has an unexpected binding");
+    if (!pass.sceneTarget || !pass.depth) return fallback("the FXAA pass has an unexpected binding");
 
-    const auto source = textureDesc(pass.sceneCopy.Get()), target = textureDesc(pass.sceneTarget.Get()), depth = textureDesc(pass.depth.Get());
-    const UINT width = source.Width, height = source.Height;
-    if (!width || target.Width != width || target.Height != height || depth.Width != width || depth.Height != height)
-        return fallback("the FXAA pass's textures differ in size");
+    const auto target = textureDesc(pass.sceneTarget.Get()), depth = textureDesc(pass.depth.Get());
+    const UINT width = target.Width, height = target.Height;
+    if (!width || depth.Width != width || depth.Height != height) return fallback("the FXAA pass's textures differ in size");
     if (current.view->width != static_cast<float>(width) || current.view->height != static_cast<float>(height))
         return fallback("the camera's viewport is not the FXAA pass's size");
     if (!ensureDepthView(pass.depth.Get())) return fallback("the depth copy cannot be read");
+    if (!ensureSceneView(pass.sceneTarget.Get())) return fallback("the scene target cannot be read");
 
     // The upscaling modes run at the planned size, DLAA at the engine's own; after a mode change the
     // engine reaches either once it has rebuilt its targets.
@@ -1066,7 +1215,8 @@ bool replaceFxaa(const FxaaPass& pass)
     else if (width < outputSize[0] && height < outputSize[1])
         return fallback("waiting for the requested render size");
 
-    // Upscaled frames go to the UI target, which the UI then draws on; DLAA writes where FXAA wrote.
+    // Upscaled frames go to the UI target, which the grading and the UI then draw on; DLAA writes over
+    // the scene target.
     const bool upscaled = planned.renderWidth != planned.outputWidth || planned.renderHeight != planned.outputHeight;
     const auto uiTarget = upscaled ? ui_redirect::output() : ui_redirect::Output{};
     if (upscaled && (uiTarget.width != planned.outputWidth || uiTarget.height != planned.outputHeight)) return fallback("the UI target is not ready");
@@ -1104,7 +1254,7 @@ bool replaceFxaa(const FxaaPass& pass)
         ? static_cast<float>(static_cast<double>(now.QuadPart - lastEvaluation.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart))
         : 16.7f;
 
-    // Frame generation's hudless colour starts as the upscaled image, before the UI draws over it.
+    // Frame generation's hudless colour is the graded image there, before the UI draws over it.
     const auto destination = upscaled ? uiTarget.target : pass.sceneTarget;
     const auto destinationDesc = textureDesc(destination.Get());
     std::shared_ptr<const Hudless> hudlessSource;
@@ -1122,7 +1272,7 @@ bool replaceFxaa(const FxaaPass& pass)
     inOwnState([&]
     {
         performance::Timed timed(immediate.Get(), performance::Pass::UpscalerInputs);
-        runInputs(pass, current, reprojection, objectVelocity, linear);
+        runInputs(current, reprojection, objectVelocity, linear);
         timed.next(performance::Pass::Upscaler);
         if (fsr)
         {
@@ -1166,9 +1316,10 @@ bool replaceFxaa(const FxaaPass& pass)
 
         timed.next(performance::Pass::UpscalerOutput);
         runComposite(destination.Get(), objectVelocity, options, wanted.sharpness, linear);
-        if (hudlessSource) immediate->CopyResource(hudlessSource->source.Get(), resourceOf(destination.Get()).Get());
     });
     focus::depthReady(immediate.Get(), depthTarget.texture.Get(), *current.view);
+    pendingHudless.reset();
+    if (hudlessSource) pendingHudless = PendingHudless{hudlessSource, resourceOf(destination.Get())};
 
     if (frameGeneration)
     {
@@ -1183,7 +1334,7 @@ bool replaceFxaa(const FxaaPass& pass)
         inputs.jitter[1] = current.jitter[1];
         inputs.reset = reset;
         inputs.camera = camera::streamlineCamera(previous, *current.view);
-        presented.hudless = std::move(hudlessSource);
+        presented.hudless.reset();
         presented.hudlessDrawn = false;
     }
 
@@ -1200,14 +1351,20 @@ bool replaceFxaa(const FxaaPass& pass)
     return true;
 }
 
-// Called at the immediate context's next call after the FXAA pass's command list.
-void runPending()
+// Before the frame's first command list of the grading runs; its later ones leave it be.
+void upscaleBeforeGrading()
 {
-    if (!pending) return;
+    Frame current;
+    std::optional<FxaaPass> pass;
+    {
+        std::lock_guard lock(recordMutex);
+        current = frame;
+        pass = recordedFxaa;
+    }
 
-    const auto pass = std::move(*pending);
-    pending.reset();
+    if (upscaledFrame == current.index) return;
 
+    upscaledFrame = current.index;
     if (!replacing)
     {
         jitterNext = false;
@@ -1217,7 +1374,7 @@ void runPending()
     bool evaluated{};
     try
     {
-        evaluated = replaceFxaa(pass);
+        evaluated = pass ? upscale(*pass, current) : fallback("no FXAA pass was recorded");
     }
     catch (const std::exception& error)
     {
@@ -1225,6 +1382,16 @@ void runPending()
     }
 
     jitterNext = evaluated && !currentDiagnostics().noJitter;
+}
+
+// The graded image into frame generation's hudless texture, before the UI draws over it.
+void copyHudless()
+{
+    const auto copy = std::move(*pendingHudless);
+    pendingHudless.reset();
+    Bypass guard;
+    immediate->CopyResource(copy.hudless->source.Get(), copy.image.Get());
+    presented.hudless = copy.hudless;
 }
 
 // Before a command list that draws on the UI target runs. DLSS has written it this frame, or the
@@ -1359,7 +1526,7 @@ void initialize(const std::filesystem::path& directory, bool supportedBuild) noe
     configureShadows();
     configureIndirectLight();
     configureAtmosphere();
-    configureDepthOfField();
+    configurePhotoMode();
     configureHdr();
     configureDrawDistance();
     log(std::string(label(settings.upscaler)) + " mode " + std::string(label(settings.mode, settings.upscaler))
@@ -1395,7 +1562,7 @@ void detach() noexcept
     fxaa::setForced(false);
     render_scale::request({}, {});
     ui_redirect::detach();
-    pending.reset();
+    pendingHudless.reset();
     velocity.reset();
     lastEvaluated.reset();
     presented = {};
@@ -1413,6 +1580,13 @@ void detach() noexcept
     exposureTexture.Reset();
     depthResource.Reset();
     depthView.Reset();
+    sceneResource.Reset();
+    sceneView.Reset();
+    {
+        std::lock_guard shaderLock(recordingShaderMutex);
+        recordingShaders.reset();
+    }
+
     inputShader.Reset();
     fullScreenShader.Reset();
     compositeShader.Reset();
@@ -1430,6 +1604,7 @@ void detach() noexcept
     {
         std::lock_guard recordLock(recordMutex);
         recordedLists.clear();
+        recordedFxaa.reset();
     }
 
     {
@@ -1519,14 +1694,90 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
 
         if (!replacing.load(std::memory_order_relaxed)) return false;
 
-        if (pass == Pass::Fxaa) recordFxaa(context);
-        else if (pass == Pass::CameraVelocity) recordVelocity(context);
+        // DLSS ran before the grading; FXAA would only blur its image.
+        if (pass == Pass::Fxaa)
+        {
+            recordFxaa(context);
+
+            return true;
+        }
+
+        if (pass == Pass::CameraVelocity) recordVelocity(context);
     }
     catch (...)
     {
     }
 
     return false;
+}
+
+bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
+{
+    if (bypass || call.indexed || call.count != 3 || call.instances != 1 || !replacing.load(std::memory_order_relaxed)) return false;
+
+    try
+    {
+        ComPtr<ID3D11PixelShader> shader;
+        context->PSGetShader(shader.GetAddressOf(), nullptr, nullptr);
+        const auto pass = passOf(shader.Get());
+        // CopyRenderBuffer is a plain copy the game makes anywhere; the layer's composite shares its
+        // list with the LUT build.
+        if (pass == Pass::LutBuild || pass == Pass::Grade || pass == Pass::Fxaa) recordGrading(context);
+        if (pass != Pass::Copy && pass != Pass::Grade) return false;
+
+        ComPtr<ID3D11RenderTargetView> target;
+        context->OMGetRenderTargets(1, target.GetAddressOf(), nullptr);
+        if (!ui_redirect::renderSized(target.Get())) return false;
+
+        using enum ui_redirect::Surface;
+        auto& redirected = postDraw.redirected;
+        if (pass == Pass::Copy)
+        {
+            // The two copies into a render-size target in every recorded frame: the depth of field's
+            // copy of the scene, before DLSS, and the half-size layer (lens flares) drawn over it after.
+            ComPtr<ID3D11ShaderResourceView> source;
+            context->PSGetShaderResources(0, 1, source.GetAddressOf());
+            if (ui_redirect::renderSized(source.Get())) return false;
+
+            redirected.emplace(context, Scene, Inputs{});
+        }
+        else
+        {
+            ui_redirect::copySurface(context, Copy, Scene);
+            redirected.emplace(context, Scene, Inputs{{0, Copy}});
+            postDraw.graded = target;
+        }
+
+        if (!*redirected)
+        {
+            postDraw.clear();
+            return false;
+        }
+
+        recordUiTargetUse(context);
+
+        return true;
+    }
+    catch (...)
+    {
+        postDraw.clear();
+        return false;
+    }
+}
+
+void afterPostDraw(ID3D11DeviceContext* context) noexcept
+{
+    const auto graded = std::move(postDraw.graded);
+    postDraw.clear();
+    if (!graded) return;
+
+    try
+    {
+        drawGradedScene(context, graded.Get());
+    }
+    catch (...)
+    {
+    }
 }
 
 bool clearTarget(ID3D11DeviceContext* context, ID3D11RenderTargetView* view, const float color[4]) noexcept
@@ -1620,7 +1871,8 @@ void recorded(std::uint64_t into, std::uint64_t from) noexcept
         auto entry = std::move(found->second);
         recordedLists.erase(found);
         auto& target = recordedLists[into];
-        if (entry.fxaa) target.fxaa = std::move(entry.fxaa);
+        target.grading = target.grading || entry.grading;
+        target.fxaa = target.fxaa || entry.fxaa;
         if (entry.velocity) target.velocity = std::move(entry.velocity);
         if (entry.hudless) target.hudless = std::move(entry.hudless);
         target.drawsOnUiTarget = target.drawsOnUiTarget || entry.drawsOnUiTarget;
@@ -1645,7 +1897,7 @@ void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
         std::lock_guard lock(executionMutex);
         if (context != immediate.Get()) return;
 
-        runPending();
+        if (pendingHudless && pendingHudless->copyNext) copyHudless();
         Recorded entry;
         {
             std::lock_guard recordLock(recordMutex);
@@ -1658,19 +1910,13 @@ void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
         }
 
         if (entry.velocity) velocity = std::move(entry.velocity);
-        if (entry.fxaa) pending = std::move(entry.fxaa);
-        // DLSS ran before this list, so the list's GammaControl draws this frame's hudless colour.
+        // The hudless colour was copied before this list, so its GammaControl draws this frame's.
         if (entry.hudless && entry.hudless == presented.hudless) presented.hudlessDrawn = true;
-        if (!entry.drawsOnUiTarget) return;
+        if (entry.grading) upscaleBeforeGrading();
+        // The grading is done once the FXAA pass's list has run; the UI draws in a later one.
+        if (entry.fxaa && pendingHudless) pendingHudless->copyNext = true;
 
-        // DLSS runs after a list; within one it would cover the UI drawn after FXAA.
-        if (pending && entry.fxaa)
-        {
-            pending.reset();
-            fallback("the FXAA pass and the UI share a command list");
-        }
-
-        fillUiTarget();
+        if (entry.drawsOnUiTarget) fillUiTarget();
     }
     catch (const std::exception& error)
     {
@@ -1682,13 +1928,7 @@ void present() noexcept
 {
     savePendingSettings(500);
     std::lock_guard lock(executionMutex);
-    // The game executes its UI and output after FXAA; without them DLSS would have had no place to run.
-    if (pending)
-    {
-        pending.reset();
-        fallback("no command list followed the FXAA pass");
-    }
-
+    pendingHudless.reset();
     // A frame DLSS did not run on (menus, loading screens, a fallback) leaves the next one unjittered,
     // so a 3D view without FXAA never shakes.
     if (lastEvaluatedPresent != presents) jitterNext = false;
@@ -1788,7 +2028,7 @@ void applySettings(const Settings& wanted)
     configureShadows();
     configureIndirectLight();
     configureAtmosphere();
-    configureDepthOfField();
+    configurePhotoMode();
     configureHdr();
     configureDrawDistance();
 }
@@ -1838,6 +2078,5 @@ void leaveOut(const LeftOut& effects)
     configureShadows();
     configureIndirectLight();
     configureAtmosphere();
-    configureDepthOfField();
 }
 }

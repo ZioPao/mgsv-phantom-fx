@@ -9,8 +9,9 @@
 #include <filesystem>
 #include <string>
 
-// NVIDIA DLSS or AMD FSR (fsr_upscaler.hpp) in place of Fox Engine's FXAA, at native resolution
-// (DLAA) or upscaling from a lower render size (render_scale.hpp, ui_redirect.hpp);
+// NVIDIA DLSS or AMD FSR (fsr_upscaler.hpp) after Fox Engine's depth of field and before its grading,
+// in place of its FXAA, at native resolution (DLAA) or upscaling from a lower render size
+// (render_scale.hpp, ui_redirect.hpp);
 // docs/DEVELOPMENT.md ("What the add-on changes") describes how. The ReShade add-on (upscaler_addon.cpp) forwards the game's Direct3D calls, with
 // native objects. Command lists are identified by their native deferred context or ID3D11CommandList.
 namespace phantom_fx::upscaler
@@ -66,9 +67,16 @@ void setOutputSize(unsigned width, unsigned height) noexcept;
 // ---- Recording, on the game's render and worker threads ----
 void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
 // Notes the FXAA and camera velocity passes as they are recorded. Returns true when the draw was
-// made on the UI target instead (the 2D pass and GammaControl while upscaling), so the game's own
-// draw must be skipped; the render target clear likewise.
+// made on the UI target instead (the 2D pass and GammaControl while upscaling), or must not be made
+// (FXAA, as DLSS runs before the grading), so the game's own draw must be skipped; the render
+// target clear likewise.
 bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
+// Before the add-on's other draw hooks: notes the game's grading, which DLSS runs before. While
+// upscaling, true for its full-size draws (the lens flare layer's composite and the grading), which
+// are then bound to the output size (ui_redirect.hpp) and must be made in that state, whoever makes
+// them; afterPostDraw then puts the game's bindings back.
+bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
+void afterPostDraw(ID3D11DeviceContext* context) noexcept;
 bool clearTarget(ID3D11DeviceContext* context, ID3D11RenderTargetView* view, const float color[4]) noexcept;
 void depthStencilCleared(ID3D11DeviceContext* context, ID3D11DepthStencilView* view, UINT flags, float depth, UINT8 stencil) noexcept;
 // Fills `biased` and returns true when any sampler should carry the texture LOD bias for the render size.
@@ -114,7 +122,7 @@ void drawMenu();
 struct LeftOut
 {
     bool upscaler{}, sharpening{}, softShadows{}, sunScreenSpaceShadows{}, lightScreenSpaceShadows{}, rayTracedShadows{}, rayTracedLights{},
-        ambientOcclusion{}, indirectLight{}, globalIllumination{}, volumetricFog{}, depthOfField{};
+        ambientOcclusion{}, indirectLight{}, globalIllumination{}, volumetricFog{};
     // Part of the global illumination, left out before all of it: its light passes.
     bool globalLight{};
 };

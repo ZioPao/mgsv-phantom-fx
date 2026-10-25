@@ -19,14 +19,6 @@ struct LensSettings
     float fNumber{};
 };
 
-// Photo mode's lens as the frames being recorded use it.
-struct Lens
-{
-    bool active{};         // In photo mode: the depth of field follows this lens, not the game's camera
-    float aperture{};      // Diameter in metres: focal length / f-number; 0 with the blur off (F4)
-    float focusDistance{}; // Metres along the view
-};
-
 // Hooks the camera selector and the game's raw input on the supported build, with MinHook
 // initialised; returns what was done, for the log. Without the hooks photo mode is unavailable;
 // hiding the UI does not need them.
@@ -34,10 +26,10 @@ std::string hook() noexcept;
 // Applies at the game's next camera update. The free camera starts where the game's camera is.
 void toggle() noexcept;
 void toggleUi() noexcept;
-// Photo mode's depth of field blur (F4): on by default; off, everything is sharp.
+// Photo mode's depth of field blur (F4): on by default; off, everything is sharp. Photo mode sets the
+// game camera's lens, which the game's depth of field reads.
 void toggleBlur() noexcept;
 void configure(const LensSettings& settings) noexcept;
-Lens lens() noexcept;
 void setControls(const Controls& controls) noexcept;
 // In photo mode, or hidden with F3: the 2D pass does not draw into the scene.
 bool uiHidden() noexcept;

@@ -2,13 +2,14 @@
 
 #include "hdr_shaders.hpp"
 
-// HLSL for DLSS or FSR in place of the game's FXAA, compiled at runtime with d3dcompiler_47.
+// HLSL for DLSS or FSR before the game's grading, compiled at runtime with d3dcompiler_47.
 //
-// Fox Engine tonemaps early and grades with a LUT, so the image FXAA reads is final LDR colour,
-// stored sRGB-encoded. DLSS runs in LDR mode on those values and the composite writes them back
-// where FXAA wrote, before the UI draws. With HDR (hdr.hpp) the image holds light beyond white: DLSS
-// runs in its HDR mode on it, linear, and the composite encodes its result again. FSR always gets
-// linear colour, which it is made for.
+// Fox Engine tonemaps early, in its deferred resolve, so the scene before the grading is LDR colour,
+// stored sRGB-encoded. DLSS runs in LDR mode on those values, after the depth of field, and the
+// composite writes them back over the scene target, or into the UI target when upscaling, before the
+// lens flare layer, bloom's composite and the grading. With HDR (hdr.hpp) the scene holds light
+// beyond white: DLSS runs in its HDR mode on it, linear, and the composite encodes its result again.
+// FSR always gets linear colour, which it is made for.
 namespace phantom_fx::upscaler::shaders
 {
 // Runs once per frame at render resolution and writes what DLSS or FSR reads.
@@ -80,9 +81,9 @@ float4 main(uint vertex : SV_VertexID) : SV_Position
 }
 )";
 
-// Writes the upscaled output where FXAA wrote, sharpened with AMD FidelityFX RCAS (FsrRcasF in
-// ffx_fsr1.h, MIT: AMD-FidelityFX-LICENSE.txt), whose noise filter is left out. RCAS expects
-// perceptual values in 0 to 1, which the sRGB-encoded LDR colour is. FXAA writes alpha 0.
+// Writes the upscaled output, sharpened with AMD FidelityFX RCAS (FsrRcasF in ffx_fsr1.h, MIT:
+// AMD-FidelityFX-LICENSE.txt), whose noise filter is left out. RCAS expects perceptual values in 0 to
+// 1, which the sRGB-encoded LDR colour is. Alpha is 0; the grading writes its own.
 inline constexpr char Composite[] = PHANTOM_FX_HDR_COMMON R"(
 cbuffer CompositeParameters : register(b0)
 {

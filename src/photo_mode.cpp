@@ -11,7 +11,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <mutex>
 #include <string>
 
 namespace phantom_fx::photo_mode
@@ -31,7 +30,7 @@ constexpr std::size_t CameraCount = 0x88, Cameras = 0x90, CameraActive = 0xE0, C
 // distance in metres and the aperture as an f-number, from f/100 up no blur at all. The plugin
 // raises the aperture to a minimum for the focal length (f/3 at 21 mm) unless the camera's byte
 // +0xEA is set.
-constexpr std::size_t CameraFocusDistance = 0x38, CameraFocalLength = 0x3C, CameraAperture = 0x44, CameraAnyAperture = 0xEA;
+constexpr std::size_t CameraFocusDistance = 0x38, CameraAperture = 0x44, CameraAnyAperture = 0xEA;
 
 // The window's raw input, from its WM_INPUT handler: reads the RAWINPUT and hands mouse and keyboard
 // data to the game's devices.
@@ -72,13 +71,8 @@ constexpr float Speed = 5, FastSpeed = 25, MouseSensitivity = 0.001f;
 constexpr float MaxPitch = 1.55f;
 // A hitch does not throw the camera.
 constexpr double MaxStep = 0.1;
-// With the blur off, f/64 keeps everything sharp. The depth of field plugin skips f/100 and up, and
-// the add-on's depth of field runs in its passes.
+// With the blur off, f/64 keeps everything sharp. The depth of field plugin skips f/100 and up.
 constexpr float SharpAperture = 64.0f;
-// Millimetres, when the camera's focal length is not one.
-constexpr float FallbackFocalLength = 35.0f;
-// Focus distances below this one, in metres, are taken as this one.
-constexpr float MinFocusDistance = 0.1f;
 // Seconds the autofocus takes to settle on a new distance, about.
 constexpr float FocusTime = 0.2f;
 
@@ -100,14 +94,12 @@ struct FreeCamera
     float focusDistance{};
 };
 
-// What the selector's update reads from the active camera that photo mode sets, and the focal length
-// in millimetres, which it only reads.
+// What the selector's update reads from the active camera that photo mode sets.
 struct CameraState
 {
     float transform[8]{}; // Rotation, position
     float focusDistance{}, aperture{};
     std::uint8_t anyAperture{};
-    float focalLength{};
 };
 
 std::atomic<bool> installed{}, requested{}, flying{}, hideUi{}, blur{true};
@@ -119,10 +111,6 @@ std::atomic<std::uint32_t*> pauseRequest{};
 // Game thread only.
 FreeCamera freeCamera;
 LARGE_INTEGER lastStep{};
-
-// Written on the game thread, read by the frames being recorded.
-std::mutex lensMutex;
-Lens published;
 
 enum Key : std::uint8_t { Forward = 1, Back = 2, Left = 4, Right = 8, Up = 16, Down = 32, Fast = 64 };
 
@@ -143,7 +131,6 @@ CameraState stateOf(const std::uint8_t* camera)
     std::memcpy(&state.focusDistance, camera + CameraFocusDistance, sizeof(state.focusDistance));
     std::memcpy(&state.aperture, camera + CameraAperture, sizeof(state.aperture));
     state.anyAperture = camera[CameraAnyAperture];
-    std::memcpy(&state.focalLength, camera + CameraFocalLength, sizeof(state.focalLength));
 
     return state;
 }
@@ -245,24 +232,6 @@ double secondsSince(LARGE_INTEGER& last)
     return std::min(seconds, MaxStep);
 }
 
-float focalLengthOf(const CameraState& game)
-{
-    return game.focalLength > 1 && game.focalLength < 5000 ? game.focalLength : FallbackFocalLength;
-}
-
-void publish(const CameraState& game)
-{
-    std::lock_guard lock(lensMutex);
-    published = {.active = flying, .aperture = blur ? focalLengthOf(game) / 1000 / fNumber : 0,
-        .focusDistance = std::max(freeCamera.focusDistance, MinFocusDistance)};
-}
-
-void unpublish()
-{
-    std::lock_guard lock(lensMutex);
-    published.active = false;
-}
-
 void selectorUpdate(std::uint8_t* selector)
 {
     auto* camera = activeCamera(selector);
@@ -284,7 +253,6 @@ void selectorUpdate(std::uint8_t* selector)
         pause(false);
         focus::setActive(false);
         flying = false;
-        unpublish();
     }
 
     if (!flying || !camera)
@@ -302,7 +270,6 @@ void selectorUpdate(std::uint8_t* selector)
         freeCamera.focusDistance += (target - freeCamera.focusDistance) * (1 - std::exp(-seconds / FocusTime));
 
     // Only this update sees the free camera; the game's camera keeps its own.
-    publish(game);
     apply(camera, photoState(freeCamera, game));
     originalSelectorUpdate(selector);
     apply(camera, game);
@@ -395,12 +362,6 @@ void configure(const LensSettings& settings) noexcept
     fNumber = settings.fNumber;
 }
 
-Lens lens() noexcept
-{
-    std::lock_guard lock(lensMutex);
-    return published;
-}
-
 void setControls(const Controls& controls) noexcept
 {
     heldKeys = static_cast<std::uint8_t>((controls.forward ? Forward : 0) | (controls.back ? Back : 0) | (controls.left ? Left : 0)
@@ -418,6 +379,5 @@ void leave() noexcept
     flying = false;
     pause(false);
     focus::setActive(false);
-    unpublish();
 }
 }

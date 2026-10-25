@@ -294,7 +294,6 @@ std::optional<upscaler::LeftOut> startMeasurement(LONGLONG now)
         leftOut.*effect = true;
         m.steps.push_back({std::move(removed), leftOut});
     };
-    leave(settings.depthOfField, "Depth of field", &upscaler::LeftOut::depthOfField);
     leave(lighting && settings.volumetricFog, "Volumetric fog", &upscaler::LeftOut::volumetricFog);
     // The ray-traced shadows first: with the global illumination on, its scene stays, so the step
     // gives the shadows' own cost; alone, it takes the scene with it. They keep soft shadows and sun

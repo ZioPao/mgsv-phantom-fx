@@ -2,9 +2,10 @@
 
 #include <string>
 
-// DLSS takes the place of the game's FXAA pass, so it needs that pass to run, but the game drops it
-// when the player turns post processing down. A hook on the FXAA plugin (docs/DEVELOPMENT.md,
-// "FXAA with post processing down") lets the add-on keep the pass, whatever the game's setting.
+// DLSS takes the place of the game's FXAA pass, whose bindings tell it the scene target and the depth
+// copy, so it needs that pass to be recorded, but the game drops it when the player turns post
+// processing down. A hook on the FXAA plugin (docs/DEVELOPMENT.md, "FXAA with post processing down")
+// lets the add-on keep the pass, whatever the game's setting; the upscaler then skips its draw.
 namespace phantom_fx::fxaa
 {
 // Hooks the plugin on the supported build, with MinHook initialised; returns what was done, for
