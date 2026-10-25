@@ -284,4 +284,17 @@ private:
     ID3D12Resource* arguments;
     std::uint32_t nextSlot{};
 };
+
+// ---- Rounding ----
+
+// Thread groups of `size` that cover `threads`.
+inline std::uint32_t groups(std::uint64_t threads, std::uint32_t size)
+{
+    return static_cast<std::uint32_t>((threads + size - 1) / size);
+}
+
+inline std::uint64_t aligned(std::uint64_t value, std::uint64_t alignment)
+{
+    return (value + alignment - 1) / alignment * alignment;
+}
 }

@@ -110,21 +110,22 @@ Denoiser::Denoiser(ID3D12Device* device, UINT width, UINT height) : device(devic
     checkNrd(nrd::CreateInstance(creation, instance), "Creating the denoiser");
 
     const nrd::InstanceDesc& desc = *nrd::GetInstanceDesc(*instance);
-    texturesPerSet = desc.descriptorPoolDesc.perSetTexturesMaxNum;
-    storagePerSet = desc.descriptorPoolDesc.perSetStorageTexturesMaxNum;
+    // At least one of each: a descriptor range cannot be empty.
+    texturesPerSet = std::max(desc.descriptorPoolDesc.perSetTexturesMaxNum, 1u);
+    storagePerSet = std::max(desc.descriptorPoolDesc.perSetStorageTexturesMaxNum, 1u);
 
     // One layout for every pipeline: the constants at the root, the textures then the storage textures
     // in one table, and NRD's two samplers.
     D3D12_DESCRIPTOR_RANGE ranges[2]{};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = std::max(texturesPerSet, 1u);
+    ranges[0].NumDescriptors = texturesPerSet;
     ranges[0].BaseShaderRegister = desc.resourcesBaseRegisterIndex;
     ranges[0].RegisterSpace = desc.resourcesSpaceIndex;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = std::max(storagePerSet, 1u);
+    ranges[1].NumDescriptors = storagePerSet;
     ranges[1].BaseShaderRegister = desc.resourcesBaseRegisterIndex;
     ranges[1].RegisterSpace = desc.resourcesSpaceIndex;
-    ranges[1].OffsetInDescriptorsFromTableStart = std::max(texturesPerSet, 1u);
+    ranges[1].OffsetInDescriptorsFromTableStart = texturesPerSet;
 
     D3D12_ROOT_PARAMETER parameters[2]{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -178,7 +179,7 @@ Denoiser::Denoiser(ID3D12Device* device, UINT width, UINT height) : device(devic
     check(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&heap)), "Creating the denoiser's descriptor heap");
     descriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-    constantStride = (desc.constantBufferMaxDataSize + 255) & ~255u;
+    constantStride = static_cast<std::uint32_t>(gi_d3d12::aligned(desc.constantBufferMaxDataSize, 256));
     constants = gi_d3d12::createBuffer(device, std::uint64_t{gi_scene::FramesInFlight} * MaxDispatches * constantStride, D3D12_HEAP_TYPE_UPLOAD,
         D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE, "Creating the denoiser's constants");
     void* data{};
@@ -269,7 +270,7 @@ void Denoiser::record(ID3D12GraphicsCommandList4& list, const Camera& camera, co
     list.SetDescriptorHeaps(1, heaps);
     list.SetComputeRootSignature(rootSignature.Get());
 
-    const UINT setSize = std::max(texturesPerSet, 1u) + std::max(storagePerSet, 1u);
+    const UINT setSize = texturesPerSet + storagePerSet;
     std::vector<D3D12_RESOURCE_BARRIER> barriers;
     // A dispatch without constants of its own keeps the last one's.
     std::uint64_t constantOffset = std::uint64_t{frameSlot} * MaxDispatches * constantStride;
@@ -288,9 +289,9 @@ void Denoiser::record(ID3D12GraphicsCommandList4& list, const Camera& camera, co
         D3D12_UNORDERED_ACCESS_VIEW_DESC nullUav{};
         nullUav.Format = DXGI_FORMAT_R8_UNORM;
         nullUav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        for (UINT i = 0; i < std::max(texturesPerSet, 1u); ++i) device->CreateShaderResourceView(nullptr, &nullSrv, cpuAt(set + i));
-        for (UINT i = 0; i < std::max(storagePerSet, 1u); ++i)
-            device->CreateUnorderedAccessView(nullptr, nullptr, &nullUav, cpuAt(set + std::max(texturesPerSet, 1u) + i));
+        for (UINT i = 0; i < texturesPerSet; ++i) device->CreateShaderResourceView(nullptr, &nullSrv, cpuAt(set + i));
+        for (UINT i = 0; i < storagePerSet; ++i)
+            device->CreateUnorderedAccessView(nullptr, nullptr, &nullUav, cpuAt(set + texturesPerSet + i));
 
         // The dispatch's resources come range by range: textures, then storage textures.
         barriers.clear();
@@ -320,7 +321,7 @@ void Denoiser::record(ID3D12GraphicsCommandList4& list, const Camera& camera, co
                     D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
                     uav.Format = format;
                     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-                    device->CreateUnorderedAccessView(texture, nullptr, &uav, cpuAt(set + std::max(texturesPerSet, 1u) + j));
+                    device->CreateUnorderedAccessView(texture, nullptr, &uav, cpuAt(set + texturesPerSet + j));
                 }
                 else
                 {

@@ -8,6 +8,7 @@ namespace phantom_fx::gi_light
 {
 namespace
 {
+using gi_d3d12::groups;
 using gi_d3d12::Kernel;
 
 constexpr std::uint32_t HashTiles = HashBuckets * HashTilesPerBucket;
@@ -18,11 +19,6 @@ constexpr std::uint32_t HashCells = HashTiles * CellsPerTile;
 constexpr float HashCellPixels = 32, HashMinCellSize = 0.1f, MaxSamples = 16, DiscardMultibounce = 0.7f;
 // Hits a cell takes its light from each frame (shaders/gi_light.hlsl, HashGridCache_QueueLight).
 constexpr std::uint32_t CellSamplesPerFrame = 4;
-
-std::uint32_t groups(std::uint64_t threads, std::uint32_t size)
-{
-    return static_cast<std::uint32_t>((threads + size - 1) / size);
-}
 }
 
 Light::Light(ID3D12Device* device, UINT width, UINT height)

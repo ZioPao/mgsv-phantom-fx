@@ -1,6 +1,7 @@
 // The global illumination's Direct3D 12 side; gi_renderer.hpp describes the route.
 #include "gi_renderer.hpp"
 
+#include "camera.hpp"
 #include "gi_d3d12.hpp"
 #include "gi_light.hpp"
 #include "gi_scene.hpp"
@@ -471,16 +472,27 @@ gi_scene::Geometry materialOf(const State& s, const ModelPart& part)
     return geometry;
 }
 
-// The bytes of a model's meshes in the pool: each mesh's vertices (16 bytes: the position, then the
-// texture coordinates), then its indices, from 16-byte boundaries; a skinned model's then its skin
-// (GISkinRecord: 16 bytes a vertex).
+// A mesh's bytes in the pool, in this order and each from a 16-byte boundary: its vertices (16 bytes:
+// the position, then the texture coordinates), its indices, and a skinned model's skin (GISkinRecord:
+// 16 bytes a vertex).
+struct PoolLayout
+{
+    std::uint64_t vertices{}, indices{}, skin{};
+};
+
+PoolLayout poolLayoutOf(const Model& model, const ModelPart& part)
+{
+    return {part.vertices.size() * 16, aligned(part.indices.size() * 2, 16), model.bones ? part.vertices.size() * 16 : 0};
+}
+
+// The bytes of a model's meshes in the pool.
 std::uint64_t modelBytes(const Model& model)
 {
     std::uint64_t bytes{};
     for (std::size_t i = 0; i < model.parts.size() && i < MaxModelParts; ++i)
     {
-        const auto& part = model.parts[i];
-        bytes += part.vertices.size() * 16 + (part.indices.size() * 2 + 15) / 16 * 16 + (model.bones ? part.vertices.size() * 16 : 0);
+        const auto layout = poolLayoutOf(model, model.parts[i]);
+        bytes += layout.vertices + layout.indices + layout.skin;
     }
 
     return bytes;
@@ -498,21 +510,22 @@ std::vector<gi_scene::Geometry> stageModel(const State& s, const Model& model, s
     for (std::size_t i = 0; i < model.parts.size() && i < MaxModelParts; ++i)
     {
         const auto& part = model.parts[i];
+        const auto layout = poolLayoutOf(model, part);
         auto geometry = materialOf(s, part);
         geometry.vertexOffset = poolOffset + at;
         geometry.vertexCount = static_cast<std::uint32_t>(part.vertices.size());
         for (std::size_t v = 0; v < part.vertices.size(); ++v)
         {
             const std::uint32_t uv = v < part.uvs.size() ? part.uvs[v] : 0;
-            std::memcpy(bytes.data() + at, part.vertices[v].data(), 12);
-            std::memcpy(bytes.data() + at + 12, &uv, 4);
-            at += 16;
+            std::memcpy(bytes.data() + at + v * 16, part.vertices[v].data(), 12);
+            std::memcpy(bytes.data() + at + v * 16 + 12, &uv, 4);
         }
 
+        at += layout.vertices;
         geometry.indexOffset = poolOffset + at;
         geometry.indexCount = static_cast<std::uint32_t>(part.indices.size());
         std::memcpy(bytes.data() + at, part.indices.data(), part.indices.size() * 2);
-        at += (part.indices.size() * 2 + 15) / 16 * 16;
+        at += layout.indices;
         geometries.push_back(geometry);
         if (!model.bones) continue;
 
@@ -521,10 +534,11 @@ std::vector<gi_scene::Geometry> stageModel(const State& s, const Model& model, s
         {
             const std::uint64_t bones = v < part.bones.size() ? part.bones[v] : 0;
             const std::uint32_t weights = v < part.weights.size() ? part.weights[v] : 0xFF;
-            std::memcpy(bytes.data() + at, &bones, 8);
-            std::memcpy(bytes.data() + at + 8, &weights, 4);
-            at += 16;
+            std::memcpy(bytes.data() + at + v * 16, &bones, 8);
+            std::memcpy(bytes.data() + at + v * 16 + 8, &weights, 4);
         }
+
+        at += layout.skin;
     }
 
     return geometries;
@@ -863,8 +877,7 @@ struct Uploads
     // Room for `count` elements of `stride` bytes, aligned for a constant buffer and a structured view.
     std::uint64_t reserve(std::uint64_t stride, std::uint64_t count)
     {
-        used = (used + 255) / 256 * 256;
-        used = (used + stride - 1) / stride * stride;
+        used = aligned(aligned(used, 256), stride);
         const auto offset = used;
         used += stride * std::max<std::uint64_t>(count, 1);
         if (used > UploadBytes) throw std::runtime_error("The global illumination's upload buffer is full.");
@@ -873,44 +886,13 @@ struct Uploads
     }
 };
 
-// Gauss-Jordan with partial pivoting; projection-views are invertible.
+// In double (camera::inverse); projection-views are invertible.
 Matrix inverse(const Matrix& input)
 {
-    std::array<double, 16> matrix{}, result{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    camera::Matrix matrix{};
     for (int i = 0; i < 16; ++i) matrix[i] = input[i];
 
-    for (int column = 0; column < 4; ++column)
-    {
-        int pivot = column;
-        for (int row = column + 1; row < 4; ++row)
-            if (std::abs(matrix[row * 4 + column]) > std::abs(matrix[pivot * 4 + column])) pivot = row;
-
-        for (int k = 0; k < 4; ++k)
-        {
-            std::swap(matrix[column * 4 + k], matrix[pivot * 4 + k]);
-            std::swap(result[column * 4 + k], result[pivot * 4 + k]);
-        }
-
-        const double scale = matrix[column * 4 + column] != 0 ? 1 / matrix[column * 4 + column] : 0;
-        for (int k = 0; k < 4; ++k)
-        {
-            matrix[column * 4 + k] *= scale;
-            result[column * 4 + k] *= scale;
-        }
-
-        for (int row = 0; row < 4; ++row)
-        {
-            if (row == column) continue;
-
-            const double factor = matrix[row * 4 + column];
-            for (int k = 0; k < 4; ++k)
-            {
-                matrix[row * 4 + k] -= factor * matrix[column * 4 + k];
-                result[row * 4 + k] -= factor * result[column * 4 + k];
-            }
-        }
-    }
-
+    const auto result = camera::inverse(matrix);
     Matrix single{};
     for (int i = 0; i < 16; ++i) single[i] = static_cast<float>(result[i]);
 
@@ -990,11 +972,6 @@ gi_denoiser::Camera denoiserCamera(const Frame& frame)
     camera.previousWorldToView = columns(frame.previousView, false, true);
     camera.restart = frame.cameraCut;
     return camera;
-}
-
-std::uint32_t groups(std::uint64_t threads, std::uint32_t size)
-{
-    return static_cast<std::uint32_t>((threads + size - 1) / size);
 }
 }
 
@@ -1772,20 +1749,10 @@ Result render(const Frame& frame)
         }
 
         ID3D12DescriptorHeap* heaps[]{s.heap.Get()};
-        list.SetDescriptorHeaps(1, heaps);
-        list.SetComputeRootSignature(s.rootSignature.Get());
-        list.SetComputeRootConstantBufferView(0, uploads.address + constantsOffset);
-        list.SetComputeRootDescriptorTable(2, descriptors.srvTable());
-        list.SetComputeRootDescriptorTable(3, descriptors.uavTable());
-        list.SetComputeRootShaderResourceView(4, scene.topLevel()->GetGPUVirtualAddress());
         // The game's textures stay in the common state between frames: the shaders' reads promote them.
         auto textureRange = s.heap->GetGPUDescriptorHandleForHeapStart();
         textureRange.ptr += std::uint64_t{TableSize} * FramesInFlight * s.descriptorSize;
-        list.SetComputeRootDescriptorTable(5, textureRange);
-        Recorder recorder(list, s.pipelines, s.dispatchSignature.Get(), s.dispatchArguments.Get());
-        auto& marks = s.marks[slot];
-        marks.clear();
-        recorder.rebinder = [&] {
+        const auto bind = [&] {
             list.SetDescriptorHeaps(1, heaps);
             list.SetComputeRootSignature(s.rootSignature.Get());
             list.SetComputeRootConstantBufferView(0, uploads.address + constantsOffset);
@@ -1794,6 +1761,11 @@ Result render(const Frame& frame)
             list.SetComputeRootShaderResourceView(4, scene.topLevel()->GetGPUVirtualAddress());
             list.SetComputeRootDescriptorTable(5, textureRange);
         };
+        bind();
+        Recorder recorder(list, s.pipelines, s.dispatchSignature.Get(), s.dispatchArguments.Get());
+        auto& marks = s.marks[slot];
+        marks.clear();
+        recorder.rebinder = bind;
         recorder.marker = [&](const char* phase, std::optional<performance::Pass> pass) {
             if (marks.size() >= MaxMarks) return;
 
@@ -1801,24 +1773,24 @@ Result render(const Frame& frame)
             marks.push_back({phase ? phase : "", pass});
         };
 
-        recorder.mark("scene writes", performance::Pass::RayTracedScene);
-        D3D12_RESOURCE_BARRIER begin[]{
-            transition(depth, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
-            transition(normal, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
-            transition(albedo, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
-            transition(output, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+        // The shared textures, in the state the passes use each in: they leave the common state first and go
+        // back to it after. Those the frame does not use are null.
+        constexpr auto Read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, Write = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        const std::pair<ID3D12Resource*, D3D12_RESOURCE_STATES> shared[]{{depth, Read}, {normal, Read}, {albedo, Read}, {output, Write},
+            {shadow, Write}, {shadowDebug, Write}, {lightDebug, Write}, {velocity, Read}, {localLightShadow, Write}, {terrainPages, Read},
+            {terrainHeights, Read}};
+        const auto transitionShared = [&](bool toCommon) {
+            std::vector<D3D12_RESOURCE_BARRIER> barriers;
+            if (toCommon) barriers.push_back(uavBarrier());
+            for (const auto& [resource, inUse] : shared)
+                if (resource)
+                    barriers.push_back(toCommon ? transition(resource, inUse, D3D12_RESOURCE_STATE_COMMON)
+                                                : transition(resource, D3D12_RESOURCE_STATE_COMMON, inUse));
+            list.ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
         };
-        list.ResourceBarrier(static_cast<UINT>(std::size(begin)), begin);
-        if (traceShadows) recorder.transition(shadow, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        if (debugShadows) recorder.transition(shadowDebug, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        if (lightDebug) recorder.transition(lightDebug, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        if (velocity) recorder.transition(velocity, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        if (traceLocalLights) recorder.transition(localLightShadow, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        if (terrain)
-        {
-            recorder.transition(terrainPages, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            recorder.transition(terrainHeights, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        }
+
+        recorder.mark("scene writes", performance::Pass::RayTracedScene);
+        transitionShared(false);
 
         // The pool's uploads and the table's rows, then the geometry the GPU makes: the terrain, the
         // characters' poses.
@@ -1875,24 +1847,7 @@ Result render(const Frame& frame)
             if (traceLight && !frame.showScene) copyStats(s, recorder, output, frame);
         }
 
-        D3D12_RESOURCE_BARRIER end[]{
-            uavBarrier(),
-            transition(depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON),
-            transition(normal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON),
-            transition(albedo, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON),
-            transition(output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON),
-        };
-        list.ResourceBarrier(static_cast<UINT>(std::size(end)), end);
-        if (traceShadows) recorder.transition(shadow, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-        if (debugShadows) recorder.transition(shadowDebug, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-        if (lightDebug) recorder.transition(lightDebug, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-        if (velocity) recorder.transition(velocity, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
-        if (traceLocalLights) recorder.transition(localLightShadow, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-        if (terrain)
-        {
-            recorder.transition(terrainPages, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
-            recorder.transition(terrainHeights, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
-        }
+        transitionShared(true);
         recorder.mark(nullptr);
         list.ResolveQueryData(s.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * MaxMarks, static_cast<UINT>(marks.size()), s.timestampReadback.Get(),
             std::uint64_t{slot} * MaxMarks * 8);

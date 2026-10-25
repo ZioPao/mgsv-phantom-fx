@@ -21,11 +21,6 @@ constexpr std::uint64_t UploadBytes = GeometryUploadBytes + std::uint64_t{MaxIns
 // costs a few frames a little rather than one frame a lot.
 constexpr std::uint32_t BuildsPerFrame = 128;
 constexpr std::uint64_t BuildTrianglesPerFrame = 300'000;
-
-std::uint64_t aligned(std::uint64_t value, std::uint64_t alignment)
-{
-    return (value + alignment - 1) / alignment * alignment;
-}
 }
 
 Scene::Scene(ID3D12Device5* device) : device(device), blasAllocator(BlasPoolBytes)
