@@ -1,12 +1,12 @@
 #include "hdr.hpp"
 
+#include "d3d11_helpers.hpp"
 #include "hdr_shaders.hpp"
 #include "log.hpp"
 #include "performance.hpp"
 #include "shader_bytecode.hpp"
 
 #include <Windows.h>
-#include <d3dcompiler.h>
 #include <dxgi1_6.h>
 #include <algorithm>
 #include <atomic>
@@ -153,42 +153,6 @@ void logOnce(const std::string& message)
     if (loggedOnce.emplace(message, true).second) log(message);
 }
 
-void check(HRESULT result, const char* what)
-{
-    if (FAILED(result)) throw std::runtime_error(std::string(what) + " failed (" + hex(static_cast<std::uint32_t>(result)) + ").");
-}
-
-ComPtr<ID3DBlob> compile(const char* source, const char* name, const char* profile)
-{
-    ComPtr<ID3DBlob> code, errors;
-    const auto result = D3DCompile(source, std::strlen(source), name, nullptr, nullptr, "main", profile, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-        code.GetAddressOf(), errors.GetAddressOf());
-    if (FAILED(result))
-        throw std::runtime_error(std::string("Shader ") + name + " did not compile: "
-            + (errors ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize())
-                      : hex(static_cast<std::uint32_t>(result))));
-
-    return code;
-}
-
-ComPtr<ID3D11ComputeShader> computeShader(const char* source, const char* name)
-{
-    const auto code = compile(source, name, "cs_5_0");
-    ComPtr<ID3D11ComputeShader> shader;
-    check(device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader.GetAddressOf()), name);
-
-    return shader;
-}
-
-ComPtr<ID3D11PixelShader> pixelShader(const char* source, const char* name)
-{
-    const auto code = compile(source, name, "ps_5_0");
-    ComPtr<ID3D11PixelShader> shader;
-    check(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader.GetAddressOf()), name);
-
-    return shader;
-}
-
 // Compiles the shaders and makes the fixed buffers; call with the mutex held.
 void createPipeline()
 {
@@ -198,19 +162,13 @@ void createPipeline()
         || !(support.OutFormatSupport2 & D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD))
         throw std::runtime_error("the GPU cannot read R16G16B16A16_FLOAT through unordered access views.");
 
-    captureShader = computeShader(shaders::Capture, "hdr-capture");
-    encodeShader = computeShader(shaders::Encode, "hdr-encode");
-    decodeShader = computeShader(shaders::Decode, "hdr-decode");
-    gradeShader = pixelShader(shaders::Grade, "hdr-grade");
-    reduceShader = pixelShader(shaders::Reduce, "hdr-reduce");
-    outputShader = pixelShader(shaders::Output, "hdr-output");
-
-    D3D11_BUFFER_DESC buffer{};
-    buffer.ByteWidth = sizeof(OutputParameters);
-    buffer.Usage = D3D11_USAGE_DYNAMIC;
-    buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    check(device->CreateBuffer(&buffer, nullptr, outputBuffer.GetAddressOf()), "Creating the HDR output constants");
+    captureShader = computeShader(device.Get(), shaders::Capture, "hdr-capture");
+    encodeShader = computeShader(device.Get(), shaders::Encode, "hdr-encode");
+    decodeShader = computeShader(device.Get(), shaders::Decode, "hdr-decode");
+    gradeShader = pixelShader(device.Get(), shaders::Grade, "hdr-grade");
+    reduceShader = pixelShader(device.Get(), shaders::Reduce, "hdr-reduce");
+    outputShader = pixelShader(device.Get(), shaders::Output, "hdr-output");
+    outputBuffer = makeConstantBuffer(device.Get(), sizeof(OutputParameters), "Creating the HDR output constants");
 
     // Zeros until the first resolve, which the shaders take as no tonemap.
     D3D11_BUFFER_DESC curve{};
@@ -239,23 +197,6 @@ bool madeForScene()
     return false;
 }
 
-D3D11_TEXTURE2D_DESC textureDesc(ID3D11Resource* resource)
-{
-    D3D11_TEXTURE2D_DESC desc{};
-    ComPtr<ID3D11Texture2D> texture;
-    if (resource && SUCCEEDED(resource->QueryInterface(IID_PPV_ARGS(&texture)))) texture->GetDesc(&desc);
-
-    return desc;
-}
-
-ComPtr<ID3D11Resource> resourceOf(ID3D11View* view)
-{
-    ComPtr<ID3D11Resource> resource;
-    if (view) view->GetResource(resource.GetAddressOf());
-
-    return resource;
-}
-
 std::optional<Role> roleOf(IUnknown* shader)
 {
     if (!shader) return std::nullopt;
@@ -263,11 +204,6 @@ std::optional<Role> roleOf(IUnknown* shader)
     std::shared_lock lock(mutex);
     const auto found = roles.find(shader);
     return found == roles.end() ? std::nullopt : std::optional(found->second);
-}
-
-UINT groups(UINT pixels)
-{
-    return (pixels + 7) / 8;
 }
 
 float linearToSrgb(float value)
@@ -328,18 +264,10 @@ void ensureTwin(Upgraded& target)
 {
     if (target.twin) return;
 
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = target.width;
-    desc.Height = target.height;
-    desc.MipLevels = 1;
-    desc.ArraySize = 1;
-    desc.Format = SceneFormat;
-    desc.SampleDesc.Count = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-    check(device->CreateTexture2D(&desc, nullptr, target.twin.GetAddressOf()), "Creating a decoded twin");
-    check(device->CreateShaderResourceView(target.twin.Get(), nullptr, target.twinView.GetAddressOf()), "Creating a decoded twin");
-    check(device->CreateUnorderedAccessView(target.twin.Get(), nullptr, target.twinAccess.GetAddressOf()), "Creating a decoded twin");
+    auto made = makeComputeTexture(device.Get(), target.width, target.height, SceneFormat, "Creating a decoded twin");
+    target.twin = std::move(made.texture);
+    target.twinView = std::move(made.view);
+    target.twinAccess = std::move(made.access);
     twinsInUse = true;
     log("HDR: the reflections read a decoded copy of the scene at " + std::to_string(target.width) + "x" + std::to_string(target.height) + ".");
 }
@@ -999,11 +927,8 @@ OutputShader::OutputShader(ID3D11DeviceContext* target) noexcept
     if (!enabled.load(std::memory_order_relaxed) || !outputShader) return;
 
     const OutputParameters parameters{paperWhiteNits, peakNitsFor(peakNits), shown == Output::Hdr10, 0};
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    if (FAILED(target->Map(outputBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
+    if (FAILED(write(target, outputBuffer.Get(), parameters))) return;
 
-    std::memcpy(mapped.pData, &parameters, sizeof(parameters));
-    target->Unmap(outputBuffer.Get(), 0);
     target->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
     target->PSGetConstantBuffers(OutputSlot, 1, gameBuffer.GetAddressOf());
     target->PSSetShader(outputShader.Get(), nullptr, 0);

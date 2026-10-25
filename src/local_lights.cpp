@@ -1,5 +1,6 @@
 #include "local_lights.hpp"
 
+#include "d3d11_helpers.hpp"
 #include "frame_log.hpp"
 #include "gi_inputs.hpp"
 #include "global_illumination.hpp"
@@ -10,13 +11,11 @@
 #include "shaders/gi_shared.h"
 
 #include <Windows.h>
-#include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
-#include <cstring>
 #include <fstream>
 #include <limits>
 #include <mutex>
@@ -282,37 +281,6 @@ bool drawPointRan{};
 // camera or over the mask's bits at the kick, and lost (a frame ended without a draw point after them).
 std::atomic<std::uint64_t> drawnShadowed{}, drawnUnshadowed{}, drawnWithoutVolume{}, otherFrame{}, overLimit{}, lost{};
 
-void check(HRESULT result, const char* what)
-{
-    if (FAILED(result)) throw std::runtime_error(std::string(what) + " failed (" + hex(static_cast<std::uint32_t>(result)) + ").");
-}
-
-ComPtr<ID3DBlob> compile(const char* source, const char* name, const char* profile)
-{
-    ComPtr<ID3DBlob> code, errors;
-    const auto result = D3DCompile(source, std::strlen(source), name, nullptr, nullptr, "main", profile, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-        code.GetAddressOf(), errors.GetAddressOf());
-    if (FAILED(result))
-        throw std::runtime_error(std::string("Shader ") + name + " did not compile: "
-            + (errors ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize())
-                      : hex(static_cast<std::uint32_t>(result))));
-
-    return code;
-}
-
-ComPtr<ID3D11Buffer> constantBuffer(UINT size, const char* what)
-{
-    D3D11_BUFFER_DESC desc{};
-    desc.ByteWidth = size;
-    desc.Usage = D3D11_USAGE_DYNAMIC;
-    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    ComPtr<ID3D11Buffer> buffer;
-    check(device->CreateBuffer(&desc, nullptr, buffer.GetAddressOf()), what);
-
-    return buffer;
-}
-
 // The shaders, states and buffers, once; call with resourceMutex held. False when unavailable.
 bool ensurePipeline()
 {
@@ -321,13 +289,8 @@ bool ensurePipeline()
 
     try
     {
-        const auto shadowCode = compile(ShadowSource, "light-shadow", "ps_5_0");
-        check(device->CreatePixelShader(shadowCode->GetBufferPointer(), shadowCode->GetBufferSize(), nullptr, shadowShader.ReleaseAndGetAddressOf()),
-            "Creating the lights' shadow shader");
-        const auto beforeVolumeCode = compile(BeforeVolumeSource, "light-before-volume", "ps_5_0");
-        check(device->CreatePixelShader(beforeVolumeCode->GetBufferPointer(), beforeVolumeCode->GetBufferSize(), nullptr,
-                  beforeVolumeShader.ReleaseAndGetAddressOf()),
-            "Creating the lights' volume shader");
+        shadowShader = pixelShader(device.Get(), ShadowSource, "light-shadow");
+        beforeVolumeShader = pixelShader(device.Get(), BeforeVolumeSource, "light-before-volume");
         const auto volumeCode = compile(VolumeSource, "light-volume", "vs_5_0");
         check(device->CreateVertexShader(volumeCode->GetBufferPointer(), volumeCode->GetBufferSize(), nullptr, volumeShader.ReleaseAndGetAddressOf()),
             "Creating the lights' volume vertex shader");
@@ -367,10 +330,10 @@ bool ensurePipeline()
         depth.DepthFunc = D3D11_COMPARISON_ALWAYS;
         check(device->CreateDepthStencilState(&depth, noDepth.ReleaseAndGetAddressOf()), "Creating the lights' depth state");
 
-        passBuffer = constantBuffer(sizeof(PassConstants), "Creating the lights' pass constants");
-        sceneBuffer = constantBuffer(SceneConstants * 4, "Creating the lights' scene constants");
-        lightBuffer = constantBuffer(LightConstants * 4, "Creating the lights' light constants");
-        materialBuffer = constantBuffer(MaterialConstants * 4, "Creating the lights' material constants");
+        passBuffer = makeConstantBuffer(device.Get(), sizeof(PassConstants), "Creating the lights' pass constants");
+        sceneBuffer = makeConstantBuffer(device.Get(), SceneConstants * 4, "Creating the lights' scene constants");
+        lightBuffer = makeConstantBuffer(device.Get(), LightConstants * 4, "Creating the lights' light constants");
+        materialBuffer = makeConstantBuffer(device.Get(), MaterialConstants * 4, "Creating the lights' material constants");
 
         // Last, so it marks a complete pipeline.
         const auto fullScreenCode = compile(FullScreenSource, "light-full-screen", "vs_5_0");
@@ -400,14 +363,6 @@ const GameLight* gameLightOf(IUnknown* shader)
     if (found == gameShaders.end() || !twins[static_cast<std::size_t>(found->second->twin)]) return nullptr;
 
     return found->second;
-}
-
-void write(ID3D11Buffer* buffer, const void* data, std::size_t size)
-{
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    check(immediate->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Writing the lights' constants");
-    std::memcpy(mapped.pData, data, size);
-    immediate->Unmap(buffer, 0);
 }
 
 // What the light's lighting draw binds, or nothing when its constants are unknown.
@@ -656,17 +611,6 @@ std::optional<D3D11_RECT> reachOf(const Light& light)
     return D3D11_RECT{left + low[0], top + low[1], left + high[0], top + high[1]};
 }
 
-std::pair<UINT, UINT> sizeOf(ID3D11View* view)
-{
-    ComPtr<ID3D11Resource> resource;
-    ComPtr<ID3D11Texture2D> texture;
-    D3D11_TEXTURE2D_DESC desc{};
-    view->GetResource(resource.GetAddressOf());
-    if (resource && SUCCEEDED(resource.As(&texture))) texture->GetDesc(&desc);
-
-    return {desc.Width, desc.Height};
-}
-
 // The light once more, within the game's volume for it: on the volume's far faces its shadow into the
 // targets' alpha, none of it where a surface lies short of the near faces, then on the far faces the
 // game's light of its kind with specular scaled by it. Without its volume, a full-screen triangle over
@@ -691,10 +635,10 @@ void drawAgain(const Light& light)
         {0, share ? 1u : 0u, 0, 0}, {volume.wideIndices ? 1u : 0u, volume.stride, VolumeVertexStart, 0}};
     auto constants = light.light;
     if (!light.game->specular) constants[SpecularScale] = AddedSpecular;
-    write(passBuffer.Get(), &pass, sizeof(pass));
-    write(sceneBuffer.Get(), light.scene.data(), sizeof(light.scene));
-    write(lightBuffer.Get(), constants.data(), sizeof(constants));
-    write(materialBuffer.Get(), light.material.data(), sizeof(light.material));
+    check(write(immediate, passBuffer.Get(), pass), "Writing the lights' constants");
+    check(write(immediate, sceneBuffer.Get(), light.scene), "Writing the lights' constants");
+    check(write(immediate, lightBuffer.Get(), constants), "Writing the lights' constants");
+    check(write(immediate, materialBuffer.Get(), light.material), "Writing the lights' constants");
 
     ID3D11RenderTargetView* targets[]{light.targets[0].Get(), light.targets[1].Get()};
     immediate->OMSetRenderTargets(2, targets, nullptr);

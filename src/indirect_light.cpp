@@ -1,5 +1,6 @@
 #include "indirect_light.hpp"
 
+#include "d3d11_helpers.hpp"
 #include "global_illumination.hpp"
 #include "indirect_light_shaders.hpp"
 #include "local_lights.hpp"
@@ -8,12 +9,10 @@
 #include "shader_bytecode.hpp"
 
 #include <Windows.h>
-#include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <array>
 #include <atomic>
 #include <cstdint>
-#include <cstring>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -96,13 +95,7 @@ struct Parameters
     float radius, maxRadiusPixels, occlusionStrength, lightStrength, diffuseScale, padding;
 };
 
-struct Target
-{
-    ComPtr<ID3D11Texture2D> texture;
-    ComPtr<ID3D11ShaderResourceView> view;
-    ComPtr<ID3D11UnorderedAccessView> access;
-    UINT width{}, height{};
-};
+using Target = ComputeTexture;
 
 // A texture one of the game's pixel shaders draws into.
 struct DrawTarget
@@ -178,42 +171,6 @@ void logOnce(const std::string& message)
     if (loggedOnce.emplace(message, true).second) log(message);
 }
 
-void check(HRESULT result, const char* what)
-{
-    if (FAILED(result)) throw std::runtime_error(std::string(what) + " failed (" + hex(static_cast<std::uint32_t>(result)) + ").");
-}
-
-ComPtr<ID3DBlob> compile(const char* source, const char* name, const char* profile, const D3D_SHADER_MACRO* defines = nullptr)
-{
-    ComPtr<ID3DBlob> code, errors;
-    const auto result = D3DCompile(source, std::strlen(source), name, defines, nullptr, "main", profile, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-        code.GetAddressOf(), errors.GetAddressOf());
-    if (FAILED(result))
-        throw std::runtime_error(std::string("Shader ") + name + " did not compile: "
-            + (errors ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize())
-                      : hex(static_cast<std::uint32_t>(result))));
-
-    return code;
-}
-
-ComPtr<ID3D11ComputeShader> computeShader(const char* source, const char* name, const D3D_SHADER_MACRO* defines)
-{
-    const auto code = compile(source, name, "cs_5_0", defines);
-    ComPtr<ID3D11ComputeShader> shader;
-    check(device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader.GetAddressOf()), name);
-
-    return shader;
-}
-
-ComPtr<ID3D11PixelShader> pixelShader(const char* source, const char* name, const D3D_SHADER_MACRO* defines = nullptr)
-{
-    const auto code = compile(source, name, "ps_5_0", defines);
-    ComPtr<ID3D11PixelShader> shader;
-    check(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader.GetAddressOf()), name);
-
-    return shader;
-}
-
 // Compiles the shaders and makes the fixed resources once; call with resourceMutex held. Returns
 // false when GTVBAO and SSILVB are unavailable.
 bool ensurePipeline()
@@ -225,17 +182,17 @@ bool ensurePipeline()
     {
         const D3D_SHADER_MACRO occlusionPass[]{{"LIGHT", "0"}, {"FINAL", "0"}, {}}, lastOcclusionPass[]{{"LIGHT", "0"}, {"FINAL", "1"}, {}};
         const D3D_SHADER_MACRO lightPass[]{{"LIGHT", "1"}, {"FINAL", "0"}, {}}, lastLightPass[]{{"LIGHT", "1"}, {"FINAL", "1"}, {}};
-        prefilterShader = computeShader(shaders::PrefilterDepths, "depth-prefilter", nullptr);
-        denoiseShader = computeShader(shaders::Denoise, "gtvbao-denoise", occlusionPass);
-        finalDenoiseShader = computeShader(shaders::Denoise, "gtvbao-denoise-final", lastOcclusionPass);
-        lightShader = computeShader(shaders::March, "ssilvb", lightPass);
-        lightDenoiseShader = computeShader(shaders::Denoise, "ssilvb-denoise", lightPass);
-        finalLightDenoiseShader = computeShader(shaders::Denoise, "ssilvb-denoise-final", lastLightPass);
-        lightUpsampleShader = computeShader(shaders::Upsample, "ssilvb-upsample", nullptr);
-        addLightShader = computeShader(shaders::AddLight, "gi-add", nullptr);
-        applyShader = pixelShader(shaders::Apply, "gtvbao-apply");
-        showOcclusionShader = pixelShader(shaders::Show, "gtvbao-show", occlusionPass);
-        showLightShader = pixelShader(shaders::Show, "ssilvb-show", lightPass);
+        prefilterShader = computeShader(device.Get(), shaders::PrefilterDepths, "depth-prefilter");
+        denoiseShader = computeShader(device.Get(), shaders::Denoise, "gtvbao-denoise", occlusionPass);
+        finalDenoiseShader = computeShader(device.Get(), shaders::Denoise, "gtvbao-denoise-final", lastOcclusionPass);
+        lightShader = computeShader(device.Get(), shaders::March, "ssilvb", lightPass);
+        lightDenoiseShader = computeShader(device.Get(), shaders::Denoise, "ssilvb-denoise", lightPass);
+        finalLightDenoiseShader = computeShader(device.Get(), shaders::Denoise, "ssilvb-denoise-final", lastLightPass);
+        lightUpsampleShader = computeShader(device.Get(), shaders::Upsample, "ssilvb-upsample");
+        addLightShader = computeShader(device.Get(), shaders::AddLight, "gi-add");
+        applyShader = pixelShader(device.Get(), shaders::Apply, "gtvbao-apply");
+        showOcclusionShader = pixelShader(device.Get(), shaders::Show, "gtvbao-show", occlusionPass);
+        showLightShader = pixelShader(device.Get(), shaders::Show, "ssilvb-show", lightPass);
 
         // Multiplies the diffuse light by the visibility and leaves its alpha, and the specular light
         // the upscale also binds, as they are.
@@ -252,13 +209,7 @@ bool ensurePipeline()
         diffuse.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
         check(device->CreateBlendState(&blend, multiplyBlend.ReleaseAndGetAddressOf()), "Creating the GTVBAO blend");
 
-
-        D3D11_BUFFER_DESC buffer{};
-        buffer.ByteWidth = sizeof(Parameters);
-        buffer.Usage = D3D11_USAGE_DYNAMIC;
-        buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        check(device->CreateBuffer(&buffer, nullptr, parameterBuffer.ReleaseAndGetAddressOf()), "Creating the march constants");
+        parameterBuffer = makeConstantBuffer(device.Get(), sizeof(Parameters), "Creating the march constants");
 
         D3D11_TEXTURE2D_DESC white{};
         white.Width = white.Height = white.MipLevels = white.ArraySize = 1;
@@ -273,7 +224,7 @@ bool ensurePipeline()
         check(device->CreateShaderResourceView(whiteTexture.Get(), nullptr, whiteView.ReleaseAndGetAddressOf()), "Creating the white occlusion");
 
         // Last, so it marks a complete pipeline.
-        occlusionShader = computeShader(shaders::March, "gtvbao", occlusionPass);
+        occlusionShader = computeShader(device.Get(), shaders::March, "gtvbao", occlusionPass);
         log("GTVBAO and SSILVB ready.");
 
         return true;
@@ -293,19 +244,7 @@ bool ensureTarget(Target& target, UINT width, UINT height, DXGI_FORMAT format, c
 {
     if (target.texture && target.width == width && target.height == height) return false;
 
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = width;
-    desc.Height = height;
-    desc.MipLevels = desc.ArraySize = 1;
-    desc.Format = format;
-    desc.SampleDesc.Count = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-    Target made{.width = width, .height = height};
-    check(device->CreateTexture2D(&desc, nullptr, made.texture.GetAddressOf()), what);
-    check(device->CreateShaderResourceView(made.texture.Get(), nullptr, made.view.GetAddressOf()), what);
-    check(device->CreateUnorderedAccessView(made.texture.Get(), nullptr, made.access.GetAddressOf()), what);
-    target = std::move(made);
+    target = makeComputeTexture(device.Get(), width, height, format, what);
 
     return true;
 }
@@ -385,18 +324,6 @@ void ensureLightTargets(UINT width, UINT height)
             + std::to_string(height) + ".");
 }
 
-// The size of the 2D texture behind `view`; zero when there is none.
-std::pair<UINT, UINT> sizeOf(ID3D11View* view)
-{
-    ComPtr<ID3D11Resource> resource;
-    ComPtr<ID3D11Texture2D> texture;
-    D3D11_TEXTURE2D_DESC desc{};
-    if (view) view->GetResource(resource.GetAddressOf());
-    if (resource && SUCCEEDED(resource.As(&texture))) texture->GetDesc(&desc);
-
-    return {desc.Width, desc.Height};
-}
-
 std::optional<Role> roleOf(IUnknown* shader)
 {
     if (!shader) return std::nullopt;
@@ -446,21 +373,13 @@ private:
     ID3D11UnorderedAccessView* accesses[Slots]{};
 };
 
-UINT groups(UINT pixels)
-{
-    return (pixels + 7) / 8;
-}
-
 void writeParameters(ID3D11DeviceContext* context, UINT width, UINT height, float radius, const Options& options)
 {
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    check(context->Map(parameterBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Writing the march constants");
     const bool global = options.globalIllumination;
     const Parameters parameters{{width, height}, radius, MaxRadiusShare * static_cast<float>(height), options.occlusionStrength,
         global ? options.globalIlluminationStrength : options.lightStrength,
         (global ? options.showGlobalIllumination : options.showLight) ? 0.0f : 1.0f, 0};
-    std::memcpy(mapped.pData, &parameters, sizeof(parameters));
-    context->Unmap(parameterBuffer.Get(), 0);
+    check(write(context, parameterBuffer.Get(), parameters), "Writing the march constants");
 }
 
 // Records shaders::PrefilterDepths into `distances`, with the march's constants bound, and unbinds
