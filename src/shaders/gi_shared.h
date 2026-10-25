@@ -68,6 +68,8 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 #define GI_COUNTER_COPIES         8u // Hits skipped as copies of the surface a ray left
 #define GI_COUNTER_FULL_BUCKETS   9u // Bounce hits the hash grid had no room for
 #define GI_COUNTER_BOUNCE_HITS    10u // Bounce rays that hit something (the rest reach the sky)
+#define GI_COUNTER_FOLIAGE        11u // Light pixels on the game's foliage (PrepareGuides)
+#define GI_COUNTER_FOLIAGE_MEMORY_FULL 12u // Foliage light pixels the foliage memory had no room for (ResolveLight)
 // The frame's largest value (asuint of a float, its largest channel) at each step of the light
 // (MaxDiagnostic in gi_light.hlsl), to find where light grows past what the sun and sky give.
 #define GI_COUNTER_MAX_ALBEDO     16u // A hit's albedo
@@ -86,9 +88,16 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 // The light's denoiser (gi_denoiser.cpp) takes pixels nearer than its range; the sky's view depth lies beyond.
 #define GI_LIGHT_DENOISING_RANGE 1e5f
 #define GI_LIGHT_SKY_VIEW_Z 1e6f
+// The denoiser's material for the game's foliage (the other pixels' is 0), which it takes as strands
+// (gi_denoiser.cpp).
+#define GI_LIGHT_FOLIAGE_MATERIAL 1.0f
 
 // Slots of the indirect dispatch argument buffer.
 #define GI_DISPATCH_SLOTS 16u
+
+// The foliage memory (gi_light.hlsl, "Foliage's light by world position"): slots, in buckets of so many.
+#define GI_FOLIAGE_MEMORY_SLOTS  (1u << 19)
+#define GI_FOLIAGE_MEMORY_BUCKET 8u
 
 // The point and spot lights a frame's shadows can hold (TraceLocalLightShadows in gi_shadow.hlsl). A base
 // at night drew about 100.
@@ -122,9 +131,10 @@ struct GIFrameConstants
     uint4 dimensions;    // xy: render size; z: frame index; w: instance count
     float4 nearFar;      // x: near plane; y: far plane; z: albedo where none is known; w: output scale (the exposure)
     uint4 counts;        // x: the frame's new geometries (ClearNewGeometries); z: debug view
-    // The light (gi_light.hlsl): its rays, one a pixel of a grid half the render size each way, and the
-    // hash grid cache (AMD Capsaicin's HashGridCacheConstants).
-    uint4 lightLayout;        // xy: the light's size; z: its pixels (and rays); w: frame parity
+    // The light (gi_light.hlsl): its rays, from a grid half the render size each way, and the hash grid
+    // cache (AMD Capsaicin's HashGridCacheConstants).
+    uint4 lightLayout;        // xy: the light's size; z: its pixels; w: frame parity
+    uint4 lightRays;          // x: rays a light pixel, 1, 2 or 4, twice on foliage (TraceLight)
     float4 cellSizes;         // y: hash cell size; z: smallest hash cell; w: hash tile size
     uint4 hashCounts;         // x: buckets; y: tiles; z: cells; w: tiles per bucket
     uint4 hashTileSizes;      // Cells across a tile, mips 0 to 3
@@ -137,7 +147,8 @@ struct GIFrameConstants
     float4 shadowParams; // x: tangent of the sun's angular radius; y: how much sun an alpha-tested mesh blocks; z: ray length; w: 1 on a fresh start
     uint4 objectMotion;  // x: 1 when g_ObjectVelocity (gi_common.hlsli) holds this frame's velocity of the game's moving meshes
     uint4 shadowDiagnostics; // x: 1 to start every shadow ray from the depth and the G-buffer's normal, as before 2026-10-24 (ShadowSurfaceAt)
-    uint4 lightDiagnostics;  // x: 1 to keep leaves from letting light through, as before 2026-10-24 (HitDirectLight)
+    uint4 lightDiagnostics;  // x: 1 to keep leaves from letting light through, as before 2026-10-24 (HitDirectLight); z: 1 for
+                             // the denoiser's history into g_LightDebug (CompositeLight)
     // The game's terrain (TerrainGrid in gi_scene.hlsl): a world point is (u, height, v) x scale +
     // offset, u and v its virtual heightmap coordinates; the page table's converter (the terrain
     // shaders' b4 c0 and c1).
@@ -150,6 +161,9 @@ struct GIFrameConstants
     // Ray cones for the textures' levels of detail (gi_common.hlsli, TextureLod): x the angle a pixel
     // spans, radians.
     float4 rayCone;
+    // The upscaler's jitter in NDC as the depth was drawn (cPSScene c28, m_cameraCenterOffset): xy this
+    // frame's, zw the last frame's.
+    float4 jitter;
     // The point and spot lights' shadows (TraceLocalLightShadows): x the frame's lights, y rays a pixel.
     uint4 localLightCount;
     GILocalLight localLights[GI_MAX_LOCAL_LIGHTS];

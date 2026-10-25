@@ -35,11 +35,14 @@ struct Options
     bool localLights{}; // The point and spot lights' ray-traced shadows (local_lights.hpp)
     int lightRays{4};   // Their shadow rays a pixel
     float sunSize{0.53f}; // The sun's angular diameter for the shadows, in degrees
+    int lightPixelRays{2}; // The light's rays a light pixel (a 2 x 2 of render pixels): 1, 2 or 4
     bool showScene{}; // Diagnostics: the output shows the traced scene
     bool debugShadows{}; // Diagnostics: the shadow debug view and probe (shadowDebug, shadowProbe), with the shadows
     bool shadowsFromDepth{}; // Diagnostics: every shadow ray from the depth and the G-buffer's normal, as before 2026-10-24
     bool bonesFromSnapshot{}; // Diagnostics: the characters' bones as the snapshot took them (engine_scene::setBonesFromSnapshot)
     bool opaqueLeaves{};      // Diagnostics: leaves let no light through, as before 2026-10-24
+    bool debugHistory{};      // Diagnostics: the light's denoiser history over the image (lightDebug)
+
     bool logOften{};         // Diagnostics: the light's statistics logged every few frames (as each readback returns), not every ten seconds
     // A cost measurement leaves the light passes out (the output keeps its last light).
     bool light = true;
@@ -90,6 +93,9 @@ ID3D11ShaderResourceView* localLightShadow(UINT width, UINT height) noexcept;
 // its alpha (DebugShadows in shaders/gi_shadow.hlsl), and the probe at the screen's centre as text.
 // Null and empty while off.
 ID3D11ShaderResourceView* shadowDebug(UINT width, UINT height) noexcept;
+// Diagnostics: the light's denoiser history at the render size, R8G8B8A8_UNORM to blend over the image by
+// its alpha (CompositeLight in shaders/gi_light.hlsl). Null while off.
+ID3D11ShaderResourceView* lightDebug(UINT width, UINT height) noexcept;
 std::string shadowProbe();
 bool active() noexcept;
 // On and lighting frames: the game's probe light and SSAO make way for it. Until then they stay.

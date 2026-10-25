@@ -648,6 +648,22 @@ ComPtr<ID3D11ShaderResourceView> latestSpecular(std::pair<UINT, UINT> size)
     return sizeOf(view.Get()) == size ? view : nullptr;
 }
 
+}
+
+ComPtr<ID3D11ShaderResourceView> specularTarget(UINT width, UINT height) noexcept
+{
+    try
+    {
+        return latestSpecular({width, height});
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+
+namespace
+{
 // The game's upscale, then GTVBAO's occlusion multiplied into what it wrote. False leaves the draw to the game.
 bool drawUpscale(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, const Options& options)
 {
@@ -1008,9 +1024,9 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
             case Role::Upscale: return drawUpscaleForGlobal(context, call);
             case Role::Resolve: return drawResolveForGlobal(context, call, options);
             case Role::GameOcclusion: return global_illumination::running();
-            case Role::SkyLight:
             case Role::Sun:
-            case Role::SunShadowMap:
+            case Role::SunShadowMap: noteSpecular(context); return false;
+            case Role::SkyLight:
             case Role::SkySpecular: return false;
             }
 

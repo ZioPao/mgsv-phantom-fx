@@ -27,7 +27,7 @@ enum class Kernel : std::uint8_t
     ClearNewGeometries, DebugScene, ClearOutput, TerrainGrid, Skin,
     // gi_light.hlsl
     ClearCounters, GenerateDispatch, PrepareGuides, TraceLight, LearnAlbedo, PurgeTiles, PopulateMultibounceCells, PopulateCells, UpdateTiles,
-    UpdateMultibounceCells, ResolveLight, CompositeLight,
+    UpdateMultibounceCells, ResolveLight, UpdateFoliageMemory, CompositeLight,
     // gi_shadow.hlsl, gi_shadow_filter.hlsl
     TraceSunShadows, ClassifyShadowTiles, FilterShadows, DebugShadows, ProbeShadows, TraceLocalLightShadows, FilterLocalLightShadows,
     Count

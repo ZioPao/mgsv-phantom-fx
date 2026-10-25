@@ -36,6 +36,7 @@ struct Settings
     static constexpr float MinSunSize = 0.1f, MaxSunSize = 4.0f, DefaultSunSize = 0.53f;
     static constexpr float MinFNumber = 0.7f, MaxFNumber = 32.0f, DefaultFNumber = 1.4f;
     static constexpr int DefaultRayQuality = 4;
+    static constexpr int DefaultGlobalIlluminationRays = 2;
     static constexpr float MinFlashlightBrightness = 1.0f, MaxFlashlightBrightness = 16.0f, DefaultFlashlightBrightness = 8.0f;
     static constexpr float MinPeakNits = 400, MaxPeakNits = 10000;
     static constexpr float MinPaperWhiteNits = 80, MaxPaperWhiteNits = 500, DefaultPaperWhiteNits = 203;
@@ -87,9 +88,10 @@ struct Settings
     float indirectLightStrength{1};
     // Ray-traced global illumination after AMD's GI-1.2 in place of the game's probe light and
     // SSAO (global_illumination.hpp), whatever the mode; GTVBAO and SSILVB are off while it is on.
-    // The strength multiplies its light.
+    // The strength multiplies its light. The ray quality is its rays a 2 x 2 of pixels: 1, 2 or 4.
     bool globalIllumination{};
     float globalIlluminationStrength{1};
+    int globalIlluminationRays{DefaultGlobalIlluminationRays};
     // Volumetric fog with light shafts in place of the game's fog (atmosphere.hpp), whatever the mode,
     // in the game's look or the physical one, which also draws the sky. The physical look's haze runs
     // from 0 (clear air) to 1 (as thick as the game's own haze).
@@ -125,6 +127,7 @@ unsigned multiplier(FrameGeneration mode);
 bool validPreset(int value);
 bool validApertureBlades(int value);
 bool validRayQuality(int value);
+bool validGlobalIlluminationRays(int value);
 // Quality, Balanced, Performance, Ultra Performance and Custom render below the output size.
 bool upscales(Mode mode);
 

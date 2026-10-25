@@ -34,11 +34,11 @@ Light::Light(ID3D12Device* device, UINT width, UINT height)
     };
     const auto buffer = [&](std::uint64_t bytes, const char* what) { return gi_d3d12::createStorage(device, bytes, what); };
 
-    viewZ = texture(DXGI_FORMAT_R32_FLOAT, "Creating the light's view depth");
     normalRoughness = texture(DXGI_FORMAT_R10G10B10A2_UNORM, "Creating the light's normals");
     motion = texture(DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the light's motion");
     for (int i = 0; i < 2; ++i)
     {
+        viewZ[i] = texture(DXGI_FORMAT_R32_FLOAT, "Creating the light's view depth");
         noisy[i] = texture(DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the light's rays");
         denoised[i] = texture(DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the denoised light");
         packedTiles[i] = buffer(std::uint64_t{HashTiles} * 4, "Creating the packed tiles");
@@ -59,6 +59,10 @@ Light::Light(ID3D12Device* device, UINT width, UINT height)
     visibilityQueries = buffer(std::uint64_t{rayCount} * 2 * 4, "Creating the hits' rays");
     multibounce = buffer(std::uint64_t{rayCount} * 8, "Creating the multibounce weights");
     lights = buffer(std::uint64_t{rayCount} * 2 * 4, "Creating the hits to light");
+    foliageKeys = buffer(std::uint64_t{GI_FOLIAGE_MEMORY_SLOTS} * 4, "Creating the foliage memory's keys");
+    foliageTouched = buffer(std::uint64_t{GI_FOLIAGE_MEMORY_SLOTS} * 4, "Creating the foliage memory's ages");
+    foliageAdded = buffer(std::uint64_t{GI_FOLIAGE_MEMORY_SLOTS} * 16, "Creating the foliage memory's new light");
+    foliageLight = buffer(std::uint64_t{GI_FOLIAGE_MEMORY_SLOTS} * 8, "Creating the foliage memory's light");
 }
 
 void Light::fill(gi::GIFrameConstants& constants, float verticalFov, std::uint32_t parity) const
@@ -79,7 +83,7 @@ void Light::fill(gi::GIFrameConstants& constants, float verticalFov, std::uint32
 void Light::describe(gi_d3d12::Descriptors& d, std::uint32_t parity) const
 {
     const auto now = parity, last = 1 - parity;
-    d.outputTexture(7, viewZ.Get(), DXGI_FORMAT_R32_FLOAT);
+    d.outputTexture(7, viewZ[now].Get(), DXGI_FORMAT_R32_FLOAT);
     d.outputTexture(8, normalRoughness.Get(), DXGI_FORMAT_R10G10B10A2_UNORM);
     d.outputTexture(9, motion.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
     d.outputTexture(10, noisy[0].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -102,6 +106,11 @@ void Light::describe(gi_d3d12::Descriptors& d, std::uint32_t parity) const
     d.outputBuffer(27, packedTiles[now].Get(), 4, HashTiles);
     d.outputBuffer(28, packedTiles[last].Get(), 4, HashTiles);
     d.outputBuffer(29, lights.Get(), 4, std::uint64_t{rayCount} * 2);
+    d.outputTexture(30, viewZ[last].Get(), DXGI_FORMAT_R32_FLOAT);
+    d.outputBuffer(31, foliageKeys.Get(), 4, GI_FOLIAGE_MEMORY_SLOTS);
+    d.outputBuffer(32, foliageTouched.Get(), 4, GI_FOLIAGE_MEMORY_SLOTS);
+    d.outputBuffer(33, foliageAdded.Get(), 4, std::uint64_t{GI_FOLIAGE_MEMORY_SLOTS} * 4);
+    d.outputBuffer(34, foliageLight.Get(), 8, GI_FOLIAGE_MEMORY_SLOTS);
 }
 
 void Light::record(gi_d3d12::Recorder& r, std::uint32_t parity, const gi_denoiser::Camera& camera, std::uint32_t frameSlot)
@@ -141,9 +150,12 @@ void Light::record(gi_d3d12::Recorder& r, std::uint32_t parity, const gi_denoise
     r.indirect(Kernel::UpdateTiles, GI_COUNTER_UPDATE_TILES, 1);
     r.indirect(Kernel::UpdateMultibounceCells, GI_COUNTER_VISIBILITY1, 32);
     lightPixels(Kernel::ResolveLight);
+    // The foliage memory takes the frame's light; its empty slots return at once.
+    r.dispatch(Kernel::UpdateFoliageMemory, groups(GI_FOLIAGE_MEMORY_SLOTS, 64));
+    r.barrier();
 
     r.mark("denoiser", performance::Pass::GiDenoiser);
-    denoiser.record(r.commands(), camera, {motion.Get(), normalRoughness.Get(), viewZ.Get(), noisy[0].Get(), noisy[1].Get(), denoised[0].Get(),
+    denoiser.record(r.commands(), camera, {motion.Get(), normalRoughness.Get(), viewZ[parity].Get(), noisy[0].Get(), noisy[1].Get(), denoised[0].Get(),
         denoised[1].Get()}, frameSlot, static_cast<float>(1000.0 / smoothedFrameMilliseconds));
     r.rebind();
 

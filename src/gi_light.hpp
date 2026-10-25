@@ -41,9 +41,12 @@ private:
     double smoothedFrameMilliseconds{1000.0 / 60.0};
     std::optional<std::chrono::steady_clock::time_point> lastRecord;
 
-    gi_d3d12::ComPtr<ID3D12Resource> viewZ, normalRoughness, motion, noisy[2], denoised[2], partial, path;
+    // The view depth this frame's and the last's by parity: a moving mesh's depth change takes the last (PrepareGuides).
+    gi_d3d12::ComPtr<ID3D12Resource> viewZ[2], normalRoughness, motion, noisy[2], denoised[2], partial, path;
     gi_d3d12::ComPtr<ID3D12Resource> hash, decay, values, indirectValues, updateTiles, updateValues, updateIndirectValues, visibility,
         visibilityCells, visibilityQueries, multibounce, lights, packedTiles[2];
+    // The foliage memory (shaders/gi_light.hlsl, "Foliage's light by world position").
+    gi_d3d12::ComPtr<ID3D12Resource> foliageKeys, foliageTouched, foliageAdded, foliageLight;
 };
 
 // The hash grid's size: 2^12 buckets of 16 tiles, tiles of 8 x 8 cells and three smaller mips.

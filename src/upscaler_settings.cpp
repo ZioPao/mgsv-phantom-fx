@@ -138,6 +138,11 @@ bool validRayQuality(int value)
     return value == 1 || value == 2 || value == 4 || value == 8;
 }
 
+bool validGlobalIlluminationRays(int value)
+{
+    return value == 1 || value == 2 || value == 4;
+}
+
 bool upscales(Mode mode)
 {
     return mode >= Mode::Quality && mode <= Mode::Custom;
@@ -325,6 +330,11 @@ Settings loadSettings(const std::filesystem::path& path)
             if (number(value, strength) && std::isfinite(strength))
                 settings.globalIlluminationStrength = std::clamp(strength, 0.0f, Settings::MaxGlobalIlluminationStrength);
         }
+        else if (key == "global_illumination_rays")
+        {
+            int rays{};
+            if (number(value, rays) && validGlobalIlluminationRays(rays)) settings.globalIlluminationRays = rays;
+        }
         else if (key == "depth_of_field")
         {
             if (value == "0" || value == "1") settings.depthOfField = value == "1";
@@ -375,6 +385,7 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
         || !within(settings.indirectLightStrength, 0, Settings::MaxIndirectLightStrength) || !within(settings.atmosphereHaze, 0, 1)
         || !within(settings.globalIlluminationStrength, 0, Settings::MaxGlobalIlluminationStrength)
         || !validApertureBlades(settings.apertureBlades) || !validRayQuality(settings.rayQuality)
+        || !validGlobalIlluminationRays(settings.globalIlluminationRays)
         || !within(settings.flashlightBrightness, Settings::MinFlashlightBrightness, Settings::MaxFlashlightBrightness)
         || !within(settings.fNumber, Settings::MinFNumber, Settings::MaxFNumber)
         || (settings.peakNits != 0 && !within(settings.peakNits, Settings::MinPeakNits, Settings::MaxPeakNits))
@@ -401,7 +412,8 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
                << "\nocclusion_radius=" << settings.occlusionRadius << "\nocclusion_strength=" << settings.occlusionStrength
                << "\nindirect_light=" << settings.indirectLight << "\nindirect_light_radius=" << settings.indirectLightRadius
                << "\nindirect_light_strength=" << settings.indirectLightStrength << "\nglobal_illumination=" << settings.globalIllumination
-               << "\nglobal_illumination_strength=" << settings.globalIlluminationStrength << "\nvolumetric_fog=" << settings.volumetricFog
+               << "\nglobal_illumination_strength=" << settings.globalIlluminationStrength
+               << "\nglobal_illumination_rays=" << settings.globalIlluminationRays << "\nvolumetric_fog=" << settings.volumetricFog
                << "\natmosphere_look=" << AtmosphereLookKeys[static_cast<std::size_t>(settings.atmosphereLook)]
                << "\natmosphere_haze=" << settings.atmosphereHaze
                << "\ndraw_distance=" << DrawDistanceKeys[static_cast<std::size_t>(settings.drawDistance)]

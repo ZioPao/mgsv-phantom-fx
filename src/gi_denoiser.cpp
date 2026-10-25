@@ -212,11 +212,21 @@ void Denoiser::record(ID3D12GraphicsCommandList4& list, const Camera& camera, co
     std::memcpy(common.viewToClipMatrixPrev, camera.previousViewToClip.data(), sizeof(common.viewToClipMatrixPrev));
     std::memcpy(common.worldToViewMatrix, camera.worldToView.data(), sizeof(common.worldToViewMatrix));
     std::memcpy(common.worldToViewMatrixPrev, camera.previousWorldToView.data(), sizeof(common.worldToViewMatrixPrev));
+    for (int i = 0; i < 2; ++i)
+    {
+        common.cameraJitter[i] = std::clamp(camera.jitter[i], -0.5f, 0.5f);
+        common.cameraJitterPrev[i] = std::clamp(camera.previousJitter[i], -0.5f, 0.5f);
+    }
     // 2.5D motion: uv, and view z's change.
     common.motionVectorScale[0] = common.motionVectorScale[1] = common.motionVectorScale[2] = 1.0f;
     common.resourceSize[0] = common.resourceSizePrev[0] = common.rectSize[0] = common.rectSizePrev[0] = static_cast<std::uint16_t>(width);
     common.resourceSize[1] = common.resourceSizePrev[1] = common.rectSize[1] = common.rectSizePrev[1] = static_cast<std::uint16_t>(height);
     common.denoisingRange = DenoisingRange;
+    // The game's foliage as NRD's strands, which keep their history through far more depth change, most
+    // while the camera is still: the game sways its grass and bushes without velocity, so the denoiser
+    // looked for their history where they no longer were, and they shimmered (2026-10-25).
+    common.strandMaterialID = GI_LIGHT_FOLIAGE_MATERIAL;
+    common.strandThickness = 0.01f; // A grass blade's width; NRD's is a hair's
     common.frameIndex = frameIndex;
     common.accumulationMode = frameIndex == 0 ? nrd::AccumulationMode::CLEAR_AND_RESTART
         : camera.restart                      ? nrd::AccumulationMode::RESTART

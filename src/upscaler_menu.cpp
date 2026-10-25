@@ -243,16 +243,22 @@ void drawLighting(Settings& wanted)
             .name = "Global illumination",
             .tech = "NRD",
             .tag = "Experimental",
-            .tip = "Ray-traced indirect light: a ray for every 2 x 2 pixels, each hit lit afresh by the sun and the lights, its bounce from a "
+            .tip = "Ray-traced indirect light: rays for every 2 x 2 pixels, each hit lit afresh by the sun and the lights, its bounce from a "
                    "light cache, then NVIDIA's NRD denoiser. Sunlight, skylight and lamplight bounce between surfaces, also those off screen, and "
                    "the sky only lights what it can reach. It replaces the game's baked probe light and SSAO, and GTVBAO and SSILVB while on. Needs "
                    "a GPU that traces rays (DXR 1.1). Off keeps the game's indirect light.",
             .summary = "Sun and sky light bounce between surfaces, also those off screen, in place of the game's baked light.",
-            .keywords = "RT DXR GI strength"});
+            .keywords = "RT DXR GI strength ray quality"});
         item)
+    {
+        constexpr Choice<int> qualities[]{{1, "Low 1"}, {2, "Medium 2"}, {4, "High 4"}};
+        fxui::segmented("Ray quality", wanted.globalIlluminationRays, qualities,
+            "Rays for every 2 x 2 pixels a frame, twice on grass and leaves. More rays leave less of the noise that crawls over shaded surfaces "
+            "(High has half of Low's); the rays' cost grows with them.");
         fxui::slider("Strength", wanted.globalIlluminationStrength,
             {.max = Settings::MaxGlobalIlluminationStrength, .standard = Defaults.globalIlluminationStrength,
                 .tip = "1 is physically based; higher brightens the indirect light, 0 leaves only the sun and the lamps."});
+    }
 
     if (const fxui::Item item({.id = "ambientOcclusion",
             .name = "Ambient occlusion",
@@ -535,10 +541,14 @@ void drawDiagnostics(const Status& state)
     bool changed{};
     if (const fxui::Item item({.id = "debugView", .name = "Debug view", .keywords = "motion vectors object motion shadow rays probe"}); item)
     {
-        constexpr Choice<int> views[]{{0, "Final image"}, {1, "Motion vectors"}, {2, "Object motion (red)"}, {ShadowRaysView, "Ray-traced shadow rays"}};
+        constexpr Choice<int> views[]{{0, "Final image"}, {1, "Motion vectors"}, {2, "Object motion (red)"}, {ShadowRaysView, "Ray-traced shadow rays"},
+            {LightHistoryView, "Global illumination history"}};
         changed |= fxui::combo("Debug view", options.debugView, views,
             "Ray-traced shadow rays: with ray-traced shadows and an upscaler on, what blocks each pixel's ray to the sun's centre, over the image. The "
             "cross is the probe, whose findings show below (and, in a dev build, go to PhantomFX.log whenever they change).");
+        if (options.debugView == LightHistoryView)
+            fxui::note(Tone::Dim, "With global illumination and an upscaler on: red where the denoiser started a pixel's light over this frame or "
+                                  "the last two, yellow where it holds under ten frames. Clear: a full history.");
         if (options.debugView == ShadowRaysView)
         {
             fxui::note(Tone::Dim, "Lavender: the game's models and characters. Brown: the terrain. Yellow: cut-out geometry. Olive: cut-out geometry "

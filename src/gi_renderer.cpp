@@ -51,6 +51,7 @@
 #include "TraceLight.h"
 #include "TraceLocalLightShadows.h"
 #include "TraceSunShadows.h"
+#include "UpdateFoliageMemory.h"
 #include "UpdateMultibounceCells.h"
 #include "UpdateTiles.h"
 
@@ -105,7 +106,7 @@ constexpr std::uint32_t TerrainRingVertices = GI_TERRAIN_CELLS * GI_TERRAIN_CELL
 // The kernels' DXIL in gi_d3d12::Kernel's order.
 constexpr std::span<const unsigned char> Bytecode[]{GI_ClearNewGeometries, GI_DebugScene, GI_ClearOutput, GI_TerrainGrid, GI_Skin,
     GI_ClearCounters, GI_GenerateDispatch, GI_PrepareGuides, GI_TraceLight, GI_LearnAlbedo, GI_PurgeTiles, GI_PopulateMultibounceCells,
-    GI_PopulateCells, GI_UpdateTiles, GI_UpdateMultibounceCells, GI_ResolveLight, GI_CompositeLight, GI_TraceSunShadows, GI_ClassifyShadowTiles,
+    GI_PopulateCells, GI_UpdateTiles, GI_UpdateMultibounceCells, GI_ResolveLight, GI_UpdateFoliageMemory, GI_CompositeLight, GI_TraceSunShadows, GI_ClassifyShadowTiles,
     GI_FilterShadows, GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows};
 static_assert(std::size(Bytecode) == static_cast<std::size_t>(Kernel::Count));
 
@@ -278,7 +279,7 @@ struct State
     ComPtr<ID3D12Resource> statsReadback, statsCounters;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT statsFootprint{};
     std::uint64_t statsFence{}, lastStats{};
-    Shared depth, normal, albedo, output, shadow, shadowDebug, velocity, terrainPages, terrainHeights, localLightShadow;
+    Shared depth, normal, albedo, output, shadow, shadowDebug, velocity, terrainPages, terrainHeights, localLightShadow, lightDebug;
 
     ~State()
     {
@@ -940,6 +941,7 @@ GIFrameConstants constantsOf(const Frame& frame, std::uint32_t newGeometries, st
     constants.shadowRange = {frame.shadowRange[0], frame.shadowRange[1], frame.shadowRange[2], frame.shadowRange[3]};
     constants.shadowParams = {frame.sunTangent, AlphaTestedBlocking, ShadowRayLength, 0};
     constants.rayCone = {2 * std::tan(frame.verticalFov / 2) / static_cast<float>(std::max(frame.height, 1u)), 0, 0, 0};
+    constants.jitter = {frame.jitter[0], frame.jitter[1], frame.jitter[2], frame.jitter[3]};
     const auto localLights = std::min<std::size_t>(frame.localLights.size(), GI_MAX_LOCAL_LIGHTS);
     for (std::size_t i = 0; i < localLights; ++i)
     {
@@ -953,8 +955,10 @@ GIFrameConstants constantsOf(const Frame& frame, std::uint32_t newGeometries, st
     return constants;
 }
 
-// The camera for NRD: column-vector matrices stored by columns, the engine's x mirror moved from the
-// projection into the view (gi_denoiser::Camera).
+// The camera for NRD: column-vector matrices stored by columns, the projections without the upscaler's
+// jitter and the jitter apart, the engine's x mirror moved from the projection into the view
+// (gi_denoiser::Camera). NRD requires the projections without the jitter: with it in, the denoiser
+// followed each frame's jittered samples, and grass and fine detail shimmered (2026-10-25).
 gi_denoiser::Camera denoiserCamera(const Frame& frame)
 {
     const auto columns = [](const Matrix& rows, bool mirrorColumn0, bool mirrorRow0) {
@@ -969,9 +973,22 @@ gi_denoiser::Camera denoiserCamera(const Frame& frame)
         return stored;
     };
 
+    // The jitter is the projection's third column in its first two rows (camera::applyJitter).
+    const auto unjittered = [](Matrix projection, float x, float y) {
+        projection[2] -= x;
+        projection[6] -= y;
+        return projection;
+    };
+    // A light pixel's sample is one of its 2 x 2's render pixels, by depth (RenderPixelOf): at its centre on
+    // average, moved the jitter back (x right, y down).
+    const float width = static_cast<float>(frame.width), height = static_cast<float>(frame.height);
+    const auto sampleOffset = [&](float x, float y) { return std::array<float, 2>{-x * width / 4, y * height / 4}; };
+
     gi_denoiser::Camera camera;
-    camera.viewToClip = columns(frame.projection, true, false);
-    camera.previousViewToClip = columns(frame.previousProjection, true, false);
+    camera.viewToClip = columns(unjittered(frame.projection, frame.jitter[0], frame.jitter[1]), true, false);
+    camera.previousViewToClip = columns(unjittered(frame.previousProjection, frame.jitter[2], frame.jitter[3]), true, false);
+    camera.jitter = sampleOffset(frame.jitter[0], frame.jitter[1]);
+    camera.previousJitter = sampleOffset(frame.jitter[2], frame.jitter[3]);
     camera.worldToView = columns(frame.view, false, true);
     camera.previousWorldToView = columns(frame.previousView, false, true);
     camera.restart = frame.cameraCut;
@@ -1132,7 +1149,8 @@ void logStats(State& s)
     log("Global illumination's rays: " + value(GI_COUNTER_HITS) + " hits (" + value(GI_COUNTER_NEAR_HITS) + " within 25 cm), "
         + value(GI_COUNTER_BOUNCE_HITS) + " bounces that hit (" + value(GI_COUNTER_VISIBILITY0) + " into the cache, " + value(GI_COUNTER_FULL_BUCKETS)
         + " without room in it), " + value(GI_COUNTER_VISIBILITY1) + " multibounce hits, " + value(GI_COUNTER_LIGHTS) + " cache hits lit, "
-        + value(GI_COUNTER_COPIES) + " copies of a surface skipped, " + value(GI_COUNTER_UPDATE_TILES) + " cache tiles updated.");
+        + value(GI_COUNTER_COPIES) + " copies of a surface skipped, " + value(GI_COUNTER_UPDATE_TILES) + " cache tiles updated, "
+        + value(GI_COUNTER_FOLIAGE) + " light pixels on foliage (" + value(GI_COUNTER_FOLIAGE_MEMORY_FULL) + " without room in the foliage memory).");
 
     constexpr const char* MaximumNames[GI_COUNTER_MAXIMA]{"a hit's albedo", "a hit's direct light", "a cell's direct light", "a cell's indirect light",
         "a multibounce", "a ray's light", "a denoised light pixel", "a render pixel"};
@@ -1600,6 +1618,9 @@ Result render(const Frame& frame)
         auto* output = openShared(s, s.output, frame.textures.output, "Opening the output").Get();
         auto* shadow = traceShadows ? openShared(s, s.shadow, frame.textures.shadow, "Opening the shadow").Get() : nullptr;
         auto* shadowDebug = debugShadows ? openShared(s, s.shadowDebug, frame.textures.shadowDebug, "Opening the shadow debug view").Get() : nullptr;
+        auto* lightDebug = traceLight && frame.textures.lightDebug
+            ? openShared(s, s.lightDebug, frame.textures.lightDebug, "Opening the light's debug view").Get()
+            : nullptr;
         auto* velocity = (traceShadows || traceLight) && frame.textures.velocity
             ? openShared(s, s.velocity, frame.textures.velocity, "Opening the velocity").Get()
             : nullptr;
@@ -1708,7 +1729,8 @@ Result render(const Frame& frame)
         if (traceShadows) s.shadows->fill(constants);
         constants.objectMotion = {velocity ? 1u : 0u, 0, 0, 0};
         constants.shadowDiagnostics = {frame.shadowsFromDepth ? 1u : 0u, 0, 0, 0};
-        constants.lightDiagnostics = {frame.opaqueLeaves ? 1u : 0u, 0, 0, 0};
+        constants.lightDiagnostics = {frame.opaqueLeaves ? 1u : 0u, 0, lightDebug ? 1u : 0u, 0};
+        constants.lightRays = {frame.lightRays, 0, 0, 0};
         std::memcpy(uploads.data + constantsOffset, &constants, sizeof(constants));
 
         // ---- Descriptors ----
@@ -1738,6 +1760,7 @@ Result render(const Frame& frame)
             descriptors.outputBuffer(77, s.probe.Get(), sizeof(GIShadowProbe), 1);
             descriptors.outputTexture(78, shadowDebug, DXGI_FORMAT_R8G8B8A8_UNORM);
         }
+        if (lightDebug) descriptors.outputTexture(79, lightDebug, DXGI_FORMAT_R8G8B8A8_UNORM);
         if (traceLight) s.light->describe(descriptors, parity);
         if (traceShadows) s.shadows->describe(descriptors, parity, shadow);
         if (traceLocalLights)
@@ -1787,6 +1810,7 @@ Result render(const Frame& frame)
         list.ResourceBarrier(static_cast<UINT>(std::size(begin)), begin);
         if (traceShadows) recorder.transition(shadow, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (debugShadows) recorder.transition(shadowDebug, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (lightDebug) recorder.transition(lightDebug, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (velocity) recorder.transition(velocity, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         if (traceLocalLights) recorder.transition(localLightShadow, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (terrain)
@@ -1860,6 +1884,7 @@ Result render(const Frame& frame)
         list.ResourceBarrier(static_cast<UINT>(std::size(end)), end);
         if (traceShadows) recorder.transition(shadow, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
         if (debugShadows) recorder.transition(shadowDebug, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+        if (lightDebug) recorder.transition(lightDebug, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
         if (velocity) recorder.transition(velocity, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
         if (traceLocalLights) recorder.transition(localLightShadow, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
         if (terrain)

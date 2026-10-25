@@ -3,6 +3,7 @@
 #include "ui_redirect.hpp"
 
 #include <d3d11.h>
+#include <wrl/client.h>
 #include <cstddef>
 #include <string>
 
@@ -60,4 +61,8 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
 // Each present. The game records a whole frame between presents, so every pass of a frame sees the
 // same options.
 void present() noexcept;
+
+// The G-buffer's specular target as the last sun pass bound it (its material in .z, 43 for foliage), if
+// it is `width` x `height`; null otherwise. The view is a frame old; the target is the frame's.
+Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> specularTarget(UINT width, UINT height) noexcept;
 }

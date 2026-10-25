@@ -19,12 +19,14 @@ struct Instance;
 // and textures; the caller binds its own again afterwards.
 namespace phantom_fx::gi_denoiser
 {
-// The camera as NRD takes it: matrices for column vectors, stored by columns. The engine's view
-// mirrors x (P00 < 0); the mirror moves from the projection into the view, so the projection is the
-// usual left-handed one and P x V is unchanged (as camera::streamlineCamera does).
+// The camera as NRD takes it: matrices for column vectors, stored by columns, the projections without
+// the upscaler's jitter (as NRD requires). The engine's view mirrors x (P00 < 0); the mirror moves from
+// the projection into the view, so the projection is the usual left-handed one and P x V is unchanged
+// (as camera::streamlineCamera does).
 struct Camera
 {
     std::array<float, 16> viewToClip{}, previousViewToClip{}, worldToView{}, previousWorldToView{};
+    std::array<float, 2> jitter{}, previousJitter{}; // Where a pixel's sample lies from its centre, in the denoiser's pixels
     bool restart{}; // A camera cut or a fresh start: the history goes
 };
 

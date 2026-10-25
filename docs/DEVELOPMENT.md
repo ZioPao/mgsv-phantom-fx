@@ -256,8 +256,9 @@ reads state; the frame renders unchanged. Its files go into that folder:
   depth in the first 32) and `-lights.txt` (each light's shader, world position and way, colour, range,
   whether traced and its volume's index count).
 
-The overlay's Diagnostics section has, for everyone: debug views of the motion vectors and of
-where the engine's object velocity was used, jitter off, the game's FXAA for comparison (DLSS stays
+The overlay's Diagnostics section has, for everyone: debug views of the motion vectors, of
+where the engine's object velocity was used and of the global illumination denoiser's history (red
+where it started a pixel's light over within three frames, yellow under ten), jitter off, the game's FXAA for comparison (DLSS stays
 ready), and the frame, fallback and reset counts. All are off by default and not saved. Every 1800
 frames with DLSS on, `PhantomFX.log` gets a status line with the same counts.
 
@@ -1424,9 +1425,25 @@ Capsaicin's denoiser); a review that day found its lag and blotches built in:
 
 Now, each frame:
 
-- **Rays** (`TraceLight`). One a pixel of a grid half the render size each way (the top left pixel of
-  each 2 x 2; the same rays the probes had), cosine-weighted from the depth buffer's surface, past copies
-  of it. A ray that gets away takes the sky's light (`SkyRadiance`).
+- **Rays** (`TraceLight`). 1, 2 or 4 (the global illumination's ray quality; Medium, 2, by default) from
+  each pixel of a grid half the render size each way, cosine-weighted from the depth buffer's surface,
+  past copies of it. A ray that gets away takes the sky's light (`SkyRadiance`). A light pixel samples one
+  render pixel of its 2 x 2, by depth (`RenderPixelOf`): the nearest on one checkerboard colour, the
+  farthest on the other, as half-resolution effects downsample depth. With the top left, as first built,
+  a wire, a fence or a grass blade under a pixel wide had it one frame and what lay behind the next as the
+  jitter moved them, and the denoiser started their light over every frame with the camera still. The
+  first ray's bounce feeds the cache and reads it after its update; the others read their cell as it
+  stands, a frame old (the cache's buffers hold a hit a light pixel). Their light is averaged; their
+  directions, weighed by it, go to the denoiser's spherical harmonics, shorter than 1 where they spread.
+  At 1 ray a light pixel, shaded surfaces lit by a few bright openings crawled with leftover noise after
+  a full history ("underwater"); 4 rays cleared most of it (2026-10-25), at about four times the rays' cost.
+  Foliage (material 1, below) takes twice the rays: swaying and thin, it restarts its history every few
+  frames, so its light is mostly the frame's rays, and shaded grass boiled as the player walked by it.
+  Twice the rays wherever the history was under ten frames, in place of on foliage, made no difference
+  seen (2026-10-25).
+  Rays guided by the last frame's light (half of them in a cone around its denoised direction, weighed by
+  one-sample MIS, as GI-1.2 guided its probes' rays) were tried the same day and left out: no steadier in
+  the end, and the light looked darker.
 - **The hit, lit afresh.** A shadow ray to a point of the sun's disc (a leaf lets half through from its
   far side) and one to a point or spot light picked in proportion to its light there (weighted reservoir
   sampling over the frame's lights, flashlights among them), times the hit's albedo (`HitAlbedo`).
@@ -1439,16 +1456,35 @@ Now, each frame:
   four of their hits' light a frame (`PopulateCells`: sun, sky and the lights, each through a shadow ray),
   blended 1/16; 30% of them trace on to a third hit whose cell's light gives them one bounce more
   (`PopulateMultibounceCells`, `UpdateMultibounceCells`); tiles nothing touched for 50 frames go.
+- **Foliage's light by world position** (`RememberFoliageLight`, `UpdateFoliageMemory`). Grass and
+  leaves sway and the denoiser starts their light over every few frames, so a cell in the world keeps it
+  instead: cells about 16 render pixels across where they lie (power-of-two sizes, 6.25 cm at the least)
+  in a hash table of 2^19 slots in buckets of 8. Each frame a foliage light pixel adds its light to its
+  cell, found at a point jittered by up to half a cell each way (blending neighbours over the frames), and
+  takes 80% of its light from the cell as the last frame left it once the cell has 8 frames; the cell
+  blends each frame's light in over half a second, and goes after 2 seconds without foliage. With it,
+  shaded foliage no longer boiled (2026-10-25). The rays log counts foliage light pixels without room.
 - **Denoiser.** NVIDIA's NRD 4.18 (`RELAX_DIFFUSE_SH`), at the rays' grid, integrated natively
   (`gi_denoiser.cpp`): one root signature for its pipelines (the constants at the root, its textures and
   storage textures in one table, its two samplers static), its own shader-visible heap, a texture per
   pool entry, each texture's state tracked between its dispatches. Its guides (`PrepareGuides`): the view
   depth (the sky's beyond the denoising range), the normal (`NRD_FrontEnd_PackNormalAndRoughness`,
-  R10G10B10A2), and 2.5D motion: the camera's, or a moving mesh's from the game's velocity where it drew
-  one, and the view depth's change. The camera goes in with the engine's x mirror moved from the
-  projection into the view (as for Streamline). History: half a second at the real frame rate (smoothed
-  as NRD asks), a fast history of a tenth of a second that the long one is clamped to, three frames
-  rebuilt after a reset, anti-firefly on; a camera cut (`camera::cameraCut`) restarts it.
+  R10G10B10A2) with material 1 on the game's foliage (the specular target's material 43, which the
+  G-buffer pack puts in the normals' alpha), and 2.5D motion: the camera's, or a moving mesh's from the
+  game's velocity where it drew one, and the view depth's change: the camera's, and a moving mesh's from
+  the last frame's view depth where it was when that lies within 10% of its own (as if it stood still,
+  the change was off by the camera's movement where the camera follows it, and the player's light
+  started over every frame). The camera goes in with the engine's x
+  mirror moved from the projection into the view (as for Streamline), and, as NRD requires, without the
+  upscaler's jitter (c28 taken out of the projections, the motion without the jitter's change, the jitter
+  apart as `cameraJitter`): with it in, grass and fine detail shimmered as the jitter moved them, most
+  visibly with DLSS preset M. Foliage is NRD's strands (`strandMaterialID`, 1 cm
+  thick), whose history survives far more depth change: the game sways its grass and bushes without
+  velocity. History: half a second at the real frame rate (smoothed as NRD asks), a fast history of a
+  tenth of a second that the long one is clamped to, three frames rebuilt after a reset, anti-firefly on;
+  a camera cut (`camera::cameraCut`) restarts it. Tried on 2026-10-25 and left out: REBLUR in place of
+  RELAX (blurrier), a wider disocclusion threshold, and the render pixels' light without their own normal
+  (neither steadier).
 - **The render size** (`CompositeLight`). The four light pixels around each render pixel, weighed as a
   bilinear filter would times how alike their view depth (within 5%) and normal (cosine to the 8th) are,
   else the one nearest in depth; each resolved against the render pixel's normal

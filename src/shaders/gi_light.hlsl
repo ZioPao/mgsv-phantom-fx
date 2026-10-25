@@ -1,7 +1,8 @@
 // The global illumination's indirect light (docs/DEVELOPMENT.md, "Global illumination"), as path tracers
 // with a radiance cache work it out:
-// - One ray a pixel of a grid half the render size each way (a quarter of the render pixels, one each
-//   2 x 2), cosine-weighted from the surface the depth buffer gives (TraceLight).
+// - Rays from each pixel of a grid half the render size each way (1, 2 or 4, the ray quality, twice on
+//   foliage), from one render pixel of its 2 x 2 chosen by depth (RenderPixelOf), cosine-weighted from the
+//   surface the depth buffer gives (TraceLight).
 // - Where it hits, the hit is lit afresh every frame: a shadow ray to a point of the sun's disc, and
 //   one to a point or spot light picked in proportion to its light there (weighted reservoir
 //   sampling). Its bounce ray takes the sky's light where it gets away, and otherwise the light of the
@@ -10,8 +11,9 @@
 //   own rays, one bounce more. The cache only ends the path, where NVIDIA's SHaRC sits in a path tracer:
 //   its lag (a cell takes 1 / 16 of a frame's light) and its coarseness come after a bounce, not in the
 //   light a pixel sees first.
-// - NVIDIA's RELAX denoiser in its spherical harmonics form (gi_denoiser.cpp) at the same grid, then the
-//   render size from the four light pixels around each render pixel, weighed by how alike their surfaces
+// - Foliage's light mostly from cells in the world that keep it over the frames (RememberFoliageLight).
+// - NVIDIA's RELAX denoiser in its spherical harmonics form (gi_denoiser.cpp) at the same grid, given the
+//   motion without the upscaler's jitter and the game's foliage as strands, then the render size from the four light pixels around each render pixel, weighed by how alike their surfaces
 //   are and resolved against the render pixel's own normal (CompositeLight).
 //
 // Where it deviates from a path tracer, and why:
@@ -33,6 +35,7 @@
 
 RWTexture2D<float> g_Light_ViewZ : register(u7);            // The denoiser's guides: NRD's IN_VIEWZ,
 RWTexture2D<float4> g_Light_NormalRoughness : register(u8); // IN_NORMAL_ROUGHNESS,
+RWTexture2D<float> g_Light_LastViewZ : register(u30);       // g_Light_ViewZ as the last frame wrote it (PrepareGuides)
 RWTexture2D<float4> g_Light_Motion : register(u9);          // IN_MV: the last frame's uv minus this one's, and view z's change
 RWTexture2D<float4> g_Light_Noisy[2] : register(u10);       // u10, u11: NRD's IN_DIFF_SH0 and SH1
 RWTexture2D<float4> g_Light_Denoised[2] : register(u12);    // u12, u13: NRD's OUT_DIFF_SH0 and SH1
@@ -96,10 +99,30 @@ uint2 LightSize()
     return g_Frame.lightLayout.xy;
 }
 
-// The render pixel a light pixel's ray leaves from: the top left of its 2 x 2.
+// The render pixel of its 2 x 2 a light pixel takes its sample from: the nearest of the four on light
+// pixels of one checkerboard colour, the farthest on the other, as half-resolution effects downsample
+// depth. With the top left, a wire, a fence or a grass blade under a pixel wide had it one frame and what
+// lay behind the next as the upscaler's jitter moved them, and the denoiser started their light over
+// every frame, the camera still (2026-10-25).
 uint2 RenderPixelOf(uint2 lightPixel)
 {
-    return min(lightPixel * 2, g_BufferDimensions - 1);
+    uint2 corner = min(lightPixel * 2, g_BufferDimensions - 1);
+    bool nearest = ((lightPixel.x + lightPixel.y) & 1u) == 0u;
+    uint2 chosen = corner;
+    float chosenDepth = g_Depth.Load(int3(corner, 0));
+    for (uint i = 1; i < 4; ++i)
+    {
+        uint2 pixel = min(lightPixel * 2 + uint2(i & 1u, i >> 1), g_BufferDimensions - 1);
+        float depth = g_Depth.Load(int3(pixel, 0));
+        // Reversed Z: the nearer, the greater.
+        if (nearest ? depth > chosenDepth : depth < chosenDepth)
+        {
+            chosen = pixel;
+            chosenDepth = depth;
+        }
+    }
+
+    return chosen;
 }
 
 float3 RemoveNaNs(float3 color)
@@ -489,6 +512,7 @@ void ClearCounters()
     g_Counters[GI_COUNTER_COPIES] = 0;
     g_Counters[GI_COUNTER_FULL_BUCKETS] = 0;
     g_Counters[GI_COUNTER_BOUNCE_HITS] = 0;
+    g_Counters[GI_COUNTER_FOLIAGE] = 0;
     for (uint counter = GI_COUNTER_MAXIMA_FIRST; counter < GI_COUNTER_MAXIMA_FIRST + GI_COUNTER_MAXIMA; ++counter) g_Counters[counter] = 0;
 }
 
@@ -503,9 +527,16 @@ void GenerateDispatch()
 
 // ---- The light's rays ----
 
+// The upscaler's jitter (NDC) as a shift on screen, in uv.
+float2 JitterUv(float2 ndc)
+{
+    return float2(0.5f, -0.5f) * ndc;
+}
+
 // The denoiser's guides for each light pixel: its view depth (the sky's beyond the denoising range), its
-// normal, and where it was on screen last frame: the camera's motion, or a moving mesh's from the game's
-// velocity, with the view depth's change by the camera's.
+// normal and material (foliage's or not), and where it was on screen last frame, without the upscaler's
+// jitter: the camera's motion, or a moving mesh's from the game's velocity, with the view depth's change by
+// the camera's.
 [numthreads(8, 8, 1)]
 void PrepareGuides(uint2 did : SV_DispatchThreadID)
 {
@@ -513,7 +544,8 @@ void PrepareGuides(uint2 did : SV_DispatchThreadID)
 
     uint2 pixel = RenderPixelOf(did);
     float depth = g_Depth.Load(int3(pixel, 0));
-    float3 encoded = g_Normal.Load(int3(pixel, 0)).xyz;
+    float4 packedNormal = g_Normal.Load(int3(pixel, 0));
+    float3 encoded = packedNormal.xyz;
     if (depth <= 0.0f || dot(encoded, encoded) == 0.0f)
     {
         g_Light_ViewZ[did] = GI_LIGHT_SKY_VIEW_Z;
@@ -527,15 +559,42 @@ void PrepareGuides(uint2 did : SV_DispatchThreadID)
     float4 previous = mul(g_PreviousViewProjection, float4(DepthPosition(pixel, depth), 1.0f));
     float2 previousUv = float2(0.5f, -0.5f) * previous.xy / previous.w + 0.5f;
     float2 moved;
-    if (ObjectMotion(int2(pixel), moved)) previousUv = uv - moved / g_BufferDimensions;
+    bool movingMesh = ObjectMotion(int2(pixel), moved);
+    if (movingMesh) previousUv = uv - moved / g_BufferDimensions;
 
+    // NRD takes the motion without the jitter, as its projections (denoiserCamera in gi_renderer.cpp). The
+    // camera's motion here holds the jitter's change between the frames; the game's velocity runs from this
+    // frame's jittered place to the last frame's unjittered one.
+    float2 motion = previousUv - uv;
+    motion += movingMesh ? JitterUv(g_Frame.jitter.xy) : JitterUv(g_Frame.jitter.xy - g_Frame.jitter.zw);
+
+    // A moving mesh's view depth last frame: the last frame's where it was, when that lies within 10% of its own
+    // now; else as if it stood still, which takes it as new where it was something else. As if it stood still
+    // always, the change was off by the camera's movement where the camera follows it, as it does the player:
+    // a few percent a frame, past NRD's 1%, and the player's light started over every frame (2026-10-25).
+    float depthChange = previous.w - viewZ;
+    if (movingMesh)
+    {
+        float2 lastUv = (did + 0.5f) / LightSize() + motion;
+        if (all(lastUv > 0.0f) && all(lastUv < 1.0f))
+        {
+            float lastViewZ = g_Light_LastViewZ[min(uint2(lastUv * LightSize()), LightSize() - 1)];
+            if (abs(lastViewZ - viewZ) < 0.1f * viewZ) depthChange = lastViewZ - viewZ;
+        }
+    }
+
+    bool foliage = packedNormal.w < 0.5f;
+    CountDiagnostic(GI_COUNTER_FOLIAGE, foliage);
     g_Light_ViewZ[did] = viewZ;
-    g_Light_NormalRoughness[did] = NRD_FrontEnd_PackNormalAndRoughness(DecodeNormal(float4(encoded, 0.0f)), 1.0f, 0.0f);
-    g_Light_Motion[did] = float4(previousUv - uv, previous.w - viewZ, 0.0f);
+    g_Light_NormalRoughness[did] = NRD_FrontEnd_PackNormalAndRoughness(DecodeNormal(packedNormal), 1.0f, foliage ? GI_LIGHT_FOLIAGE_MATERIAL : 0.0f);
+    g_Light_Motion[did] = float4(motion, depthChange, 0.0f);
 }
 
-// One ray a light pixel: what it hits lit afresh, and its bounce, the sky's light or a cache cell's for
-// ResolveLight.
+// A light pixel's rays (the ray quality, 1, 2 or 4, twice on foliage): what each hits lit afresh, and its
+// bounce, the sky's light or a cache cell's. The first ray's cell takes the hit's light and gives its own
+// after the cache's update (ResolveLight); the others' cells give theirs as they stand, a frame old, and take none,
+// the cache's buffers holding a hit a light pixel. Their light is averaged; their directions, weighed by
+// it, give the denoiser's spherical harmonics (shorter than 1 where the rays' light spreads).
 [numthreads(8, 8, 1)]
 void TraceLight(uint2 did : SV_DispatchThreadID)
 {
@@ -555,60 +614,86 @@ void TraceLight(uint2 did : SV_DispatchThreadID)
     float3 normal = DecodeNormal(float4(encoded, 0.0f));
     float3 world = DepthPosition(pixel, depth);
     Random random = MakeRandom(did.x + did.y * LightSize().x, g_FrameIndex);
-    float3 direction = mapToCosineHemisphere(random.rand2(), normal);
     float3 origin = OffsetFromScreenSurface(world, normal);
-    SceneHit hit = TraceFromSurface(origin, normal, CopyTolerance(world), direction, MAX_HIT_DISTANCE);
-    CountDiagnostic(GI_COUNTER_HITS, hit.hit);
-    CountDiagnostic(GI_COUNTER_NEAR_HITS, hit.hit && hit.distance < 0.25f);
-    path.y = packNormal(direction);
-    if (!hit.hit)
+    uint rays = clamp(g_Frame.lightRays.x, 1u, 4u);
+    // Foliage (the normals' alpha under a half, PrepareGuides) takes twice: swaying and thin, it restarts its
+    // denoiser history every few frames, so its light is mostly the frame's rays; shaded grass boiled (2026-10-25).
+    if (g_Normal.Load(int3(pixel, 0)).w < 0.5f) rays *= 2u;
+    float3 total = 0.0f, weightedDirection = 0.0f, firstDirection = 0.0f;
+    float totalLuminance = 0.0f, totalDistance = 0.0f;
+    for (uint ray = 0; ray < rays; ++ray)
     {
-        g_Light_Partial[did] = float4(SkyRadiance(direction), MISS_DISTANCE);
-        g_Light_Path[did] = path;
-        return;
-    }
-
-    // The hit's own light, from the sun and a light.
-    HashGridCache_Visibility visibility = VisibilityOf(hit, direction);
-    float3 hitWorld, hitNormal;
-    HitSurface(visibility, hitWorld, hitNormal);
-    float3 albedo = HitAlbedo(hitWorld, visibility);
-    bool leaf = HitIsLeaf(visibility);
-    float3 hitOrigin = OffsetFromTriangle(hitWorld, hitNormal);
-    float tolerance = CopyTolerance(hitWorld);
-    float3 light = albedo * (SunLight(hitWorld, hitNormal, hitOrigin, tolerance, leaf, random)
-        + SampledLocalLight(hitWorld, hitNormal, hitOrigin, tolerance, random));
-    MaxDiagnostic(GI_COUNTER_MAX_ALBEDO, albedo);
-    MaxDiagnostic(GI_COUNTER_MAX_DIRECT, light);
-
-    // Its bounce: the sky's light, or the cache's at what it reaches. The Lambert BRDF over the
-    // cosine-weighted pdf is the albedo.
-    float weight;
-    float3 side = BounceSide(hitNormal, leaf, random, weight);
-    float3 bounceDirection = mapToCosineHemisphere(random.rand2(), side);
-    float3 bounceOrigin = all(side == hitNormal) ? hitOrigin : OffsetFromTriangle(hitWorld, side);
-    SceneHit bounce = TraceFromSurface(bounceOrigin, side, tolerance, bounceDirection, MAX_HIT_DISTANCE);
-    CountDiagnostic(GI_COUNTER_BOUNCE_HITS, bounce.hit);
-    float3 throughput = albedo * weight;
-    if (!bounce.hit) light += throughput * SkyRadiance(bounceDirection);
-    else
-    {
-        float3 bounceHit = bounceOrigin + bounce.distance * bounceDirection;
-        uint tileIndex;
-        bool isNewTile;
-        uint cellIndex = HashGridCache_InsertCell(bounceHit, bounceDirection, bounce.distance, tileIndex, isNewTile);
-        CountDiagnostic(GI_COUNTER_FULL_BUCKETS, cellIndex == kGI1_InvalidId);
-        if (cellIndex != kGI1_InvalidId)
+        float3 direction = mapToCosineHemisphere(random.rand2(), normal);
+        if (ray == 0) firstDirection = direction;
+        SceneHit hit = TraceFromSurface(origin, normal, CopyTolerance(world), direction, MAX_HIT_DISTANCE);
+        CountDiagnostic(GI_COUNTER_HITS, hit.hit);
+        CountDiagnostic(GI_COUNTER_NEAR_HITS, hit.hit && hit.distance < 0.25f);
+        float3 light;
+        float3 afterUpdate = 0.0f; // The first ray's cell's light as it stands, to weigh its direction
+        if (!hit.hit)
         {
-            HashGridCache_TouchCell(tileIndex, isNewTile);
-            uint index = HashGridCache_Keep(GI_COUNTER_VISIBILITY0, 0, VisibilityOf(bounce, bounceDirection), cellIndex, did.x + did.y * LightSize().x);
-            HashGridCache_QueueLight(index, cellIndex);
-            path.x = cellIndex;
-            path.zw = packHalf4(float4(throughput, 0.0f));
+            light = SkyRadiance(direction);
+            totalDistance += MISS_DISTANCE;
         }
+        else
+        {
+            // The hit's own light, from the sun and a light.
+            HashGridCache_Visibility visibility = VisibilityOf(hit, direction);
+            float3 hitWorld, hitNormal;
+            HitSurface(visibility, hitWorld, hitNormal);
+            float3 albedo = HitAlbedo(hitWorld, visibility);
+            bool leaf = HitIsLeaf(visibility);
+            float3 hitOrigin = OffsetFromTriangle(hitWorld, hitNormal);
+            float tolerance = CopyTolerance(hitWorld);
+            light = albedo * (SunLight(hitWorld, hitNormal, hitOrigin, tolerance, leaf, random)
+                + SampledLocalLight(hitWorld, hitNormal, hitOrigin, tolerance, random));
+            MaxDiagnostic(GI_COUNTER_MAX_ALBEDO, albedo);
+            MaxDiagnostic(GI_COUNTER_MAX_DIRECT, light);
+
+            // Its bounce: the sky's light, or the cache's at what it reaches. The Lambert BRDF over the
+            // cosine-weighted pdf is the albedo.
+            float weight;
+            float3 side = BounceSide(hitNormal, leaf, random, weight);
+            float3 bounceDirection = mapToCosineHemisphere(random.rand2(), side);
+            float3 bounceOrigin = all(side == hitNormal) ? hitOrigin : OffsetFromTriangle(hitWorld, side);
+            SceneHit bounce = TraceFromSurface(bounceOrigin, side, tolerance, bounceDirection, MAX_HIT_DISTANCE);
+            CountDiagnostic(GI_COUNTER_BOUNCE_HITS, bounce.hit);
+            float3 throughput = albedo * weight;
+            if (!bounce.hit) light += throughput * SkyRadiance(bounceDirection);
+            else
+            {
+                float3 bounceHit = bounceOrigin + bounce.distance * bounceDirection;
+                uint tileIndex;
+                bool isNewTile;
+                uint cellIndex = HashGridCache_InsertCell(bounceHit, bounceDirection, bounce.distance, tileIndex, isNewTile);
+                CountDiagnostic(GI_COUNTER_FULL_BUCKETS, cellIndex == kGI1_InvalidId);
+                if (cellIndex != kGI1_InvalidId)
+                {
+                    HashGridCache_TouchCell(tileIndex, isNewTile);
+                    float3 cell = HashGridCache_FilteredDirect(cellIndex) + HashGridCache_FilteredIndirect(cellIndex);
+                    if (ray == 0)
+                    {
+                        uint index = HashGridCache_Keep(GI_COUNTER_VISIBILITY0, 0, VisibilityOf(bounce, bounceDirection), cellIndex, did.x + did.y * LightSize().x);
+                        HashGridCache_QueueLight(index, cellIndex);
+                        path.x = cellIndex;
+                        path.zw = packHalf4(float4(throughput / rays, 0.0f));
+                        afterUpdate = throughput * cell;
+                    }
+                    else light += throughput * cell;
+                }
+            }
+
+            totalDistance += hit.distance;
+        }
+
+        total += light;
+        float rayLuminance = luminance(light + afterUpdate);
+        weightedDirection += rayLuminance * direction;
+        totalLuminance += rayLuminance;
     }
 
-    g_Light_Partial[did] = float4(light, hit.distance);
+    path.y = packNormal(totalLuminance > 0.0f ? weightedDirection / totalLuminance : firstDirection);
+    g_Light_Partial[did] = float4(total / rays, totalDistance / rays);
     g_Light_Path[did] = path;
 }
 
@@ -819,9 +904,102 @@ void UpdateMultibounceCells(uint did : SV_DispatchThreadID)
     InterlockedAdd(g_HashGridCache_UpdateCellValueIndirectBuffer[4 * baseCellIndex + 3], quantized.w);
 }
 
+// ---- Foliage's light by world position ----
+
+// Grass and leaves sway, and the denoiser starts their light over every few frames, so shaded foliage boiled
+// with each frame's rays (2026-10-25); a cell in the world stays where it is. Cells about 8 light pixels across where they lie (power-of-two sizes, 6.25 cm at the least), in
+// a hash table of buckets (GI_FOLIAGE_MEMORY_SLOTS, GI_FOLIAGE_MEMORY_BUCKET). Each frame a foliage light pixel
+// adds its light to its cell, found at a point jittered by up to half a cell each way (blending neighbouring
+// cells over the frames), and takes FOLIAGE_MEMORY_SHARE of its light from the cell as the last frame left it,
+// once the cell has 8 frames. UpdateFoliageMemory blends the frame's light into each cell over half a second
+// (FOLIAGE_MEMORY_FRAMES) and frees the cells no foliage took for 2 seconds.
+RWStructuredBuffer<uint> g_FoliageMemory_Keys : register(u31);    // A cell's key, 0 for a free slot
+RWStructuredBuffer<uint> g_FoliageMemory_Touched : register(u32); // The frame foliage last took the cell
+RWStructuredBuffer<uint> g_FoliageMemory_Added : register(u33);   // The frame's light into it, four a slot: rgb quantised
+                                                                  // (HashGridCache_QuantizeRadiance), and the light pixels'
+RWStructuredBuffer<uint2> g_FoliageMemory_Light : register(u34);  // Its light (packHalf4): rgb, and w its frames
+
+#define FOLIAGE_MEMORY_SHARE 0.8f
+#define FOLIAGE_MEMORY_FRAMES 30.0f
+#define FOLIAGE_MEMORY_IDLE_FRAMES 120u
+
+// The slot of the cell at `world`, found at a point `jitter` (-0.5 to 0.5 each way) cells off; kGI1_InvalidId
+// when its bucket is full.
+uint FoliageMemorySlot(float3 world, float3 jitter)
+{
+    float size = max(distance(g_Eye, world) * g_Frame.rayCone.x * 16.0f, 1.0f / 16.0f);
+    int level = int(ceil(log2(size)));
+    float cellSize = exp2(level);
+    uint3 c = asuint(int3(floor(world / cellSize + jitter)));
+    uint l = asuint(level);
+    uint key = max(1u, xxHash(l + xxHash(c.x + xxHash(c.y + xxHash(c.z)))));
+    uint bucket = pcgHash(l + pcgHash(c.x + pcgHash(c.y + pcgHash(c.z)))) % (GI_FOLIAGE_MEMORY_SLOTS / GI_FOLIAGE_MEMORY_BUCKET);
+    for (uint i = 0; i < GI_FOLIAGE_MEMORY_BUCKET; ++i)
+    {
+        uint slot = bucket * GI_FOLIAGE_MEMORY_BUCKET + i;
+        uint previous;
+        InterlockedCompareExchange(g_FoliageMemory_Keys[slot], 0u, key, previous);
+        if (previous == 0u || previous == key) return slot;
+    }
+
+    return kGI1_InvalidId;
+}
+
+// A light pixel's light with its cell's, if it shows foliage: adds its own to the cell's frame.
+float3 RememberFoliageLight(uint2 lightPixel, float3 radiance)
+{
+    uint2 pixel = RenderPixelOf(lightPixel);
+    float depth = g_Depth.Load(int3(pixel, 0));
+    float4 packedNormal = g_Normal.Load(int3(pixel, 0));
+    if (depth <= 0.0f || dot(packedNormal.xyz, packedNormal.xyz) == 0.0f || packedNormal.w >= 0.5f) return radiance;
+
+    Random random = MakeRandom(lightPixel.x + lightPixel.y * LightSize().x + g_Frame.lightLayout.z, g_FrameIndex);
+    float3 jitter = float3(random.rand2(), random.rand()) - 0.5f;
+    uint slot = FoliageMemorySlot(DepthPosition(pixel, depth), jitter);
+    CountDiagnostic(GI_COUNTER_FOLIAGE_MEMORY_FULL, slot == kGI1_InvalidId);
+    if (slot == kGI1_InvalidId) return radiance;
+
+    uint4 quantized = HashGridCache_QuantizeRadiance(RemoveNaNs(radiance));
+    InterlockedAdd(g_FoliageMemory_Added[4 * slot + 0], quantized.x);
+    InterlockedAdd(g_FoliageMemory_Added[4 * slot + 1], quantized.y);
+    InterlockedAdd(g_FoliageMemory_Added[4 * slot + 2], quantized.z);
+    InterlockedAdd(g_FoliageMemory_Added[4 * slot + 3], quantized.w);
+    g_FoliageMemory_Touched[slot] = g_FrameIndex;
+    float4 kept = unpackHalf4(g_FoliageMemory_Light[slot]);
+    return lerp(radiance, kept.rgb, FOLIAGE_MEMORY_SHARE * saturate(kept.w / 8.0f));
+}
+
+[numthreads(64, 1, 1)]
+void UpdateFoliageMemory(uint did : SV_DispatchThreadID)
+{
+    if (did >= GI_FOLIAGE_MEMORY_SLOTS || g_FoliageMemory_Keys[did] == 0u) return;
+
+    uint4 added = uint4(g_FoliageMemory_Added[4 * did + 0], g_FoliageMemory_Added[4 * did + 1], g_FoliageMemory_Added[4 * did + 2],
+        g_FoliageMemory_Added[4 * did + 3]);
+    if (added.w == 0u)
+    {
+        if (g_FrameIndex - g_FoliageMemory_Touched[did] > FOLIAGE_MEMORY_IDLE_FRAMES)
+        {
+            g_FoliageMemory_Keys[did] = 0u;
+            g_FoliageMemory_Light[did] = uint2(0, 0);
+        }
+        return;
+    }
+
+    float4 kept = unpackHalf4(g_FoliageMemory_Light[did]);
+    float frames = min(kept.w + 1.0f, FOLIAGE_MEMORY_FRAMES);
+    float3 light = HashGridCache_RecoverRadiance(added).rgb / added.w;
+    g_FoliageMemory_Light[did] = packHalf4(float4(lerp(kept.rgb, light, 1.0f / frames), frames));
+    g_FoliageMemory_Added[4 * did + 0] = 0u;
+    g_FoliageMemory_Added[4 * did + 1] = 0u;
+    g_FoliageMemory_Added[4 * did + 2] = 0u;
+    g_FoliageMemory_Added[4 * did + 3] = 0u;
+}
+
 // ---- Denoising and the render size ----
 
-// Each ray's light with its bounce's cell, after the cache's update, as the denoiser takes it.
+// Each ray's light with its bounce's cell, after the cache's update, and foliage's with its cell in the
+// foliage memory, as the denoiser takes it.
 [numthreads(8, 8, 1)]
 void ResolveLight(uint2 did : SV_DispatchThreadID)
 {
@@ -834,9 +1012,11 @@ void ResolveLight(uint2 did : SV_DispatchThreadID)
         radiance += unpackHalf4(path.zw).rgb * (HashGridCache_FilteredDirect(path.x) + HashGridCache_FilteredIndirect(path.x));
 
     MaxDiagnostic(GI_COUNTER_MAX_TRACED, radiance);
+    radiance = RememberFoliageLight(did, radiance);
+    // The rays' direction, at most 1 long (TraceLight).
     float3 direction = unpackNormal(path.y);
     float4 second;
-    g_Light_Noisy[0][did] = RELAX_FrontEnd_PackSh(radiance, partial.w, direction * rsqrt(max(dot(direction, direction), 1e-6f)), second, true);
+    g_Light_Noisy[0][did] = RELAX_FrontEnd_PackSh(radiance, partial.w, direction * rsqrt(max(dot(direction, direction), 1.0f)), second, true);
     g_Light_Noisy[1][did] = second;
 }
 
@@ -851,6 +1031,17 @@ float3 DenoisedLight(uint2 lightPixel, float3 normal, float3 ownNormal)
     return own > 1e-6f ? color * clamp(here / own, 0.5f, 2.0f) : color;
 }
 
+// Diagnostics: the denoiser's history at each render pixel, blended over the image by its alpha
+// (upscaler::LightHistoryView): red where it started the light over within three frames, yellow under ten.
+RWTexture2D<float4> g_LightDebug : register(u79);
+
+float4 HistoryColor(float frames)
+{
+    if (frames < 3.0f) return float4(1.0f, 0.1f, 0.1f, 0.75f);
+    if (frames < 10.0f) return float4(1.0f, 0.85f, 0.1f, 0.5f);
+    return 0.0f;
+}
+
 // The light at every render pixel, irradiance over pi times the exposure: from the four light pixels
 // around it, as a bilinear filter weighs them, times how alike their view depth and normal are to its own.
 [numthreads(8, 8, 1)]
@@ -863,6 +1054,7 @@ void CompositeLight(uint2 did : SV_DispatchThreadID)
     if (depth <= 0.0f || dot(encoded, encoded) == 0.0f)
     {
         g_Output[did] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        if (g_Frame.lightDiagnostics.z != 0u) g_LightDebug[did] = 0.0f;
         return;
     }
 
@@ -874,6 +1066,7 @@ void CompositeLight(uint2 did : SV_DispatchThreadID)
     int2 base = int2(floor(position));
     float2 f = position - base;
     float3 total = 0.0f, nearest = 0.0f;
+    float nearestHistory = 0.0f; // RELAX's history length in frames, with the light (OUT_DIFF_SH0.w)
     float weight = 0.0f, nearestDepth = FLT_MAX;
     for (uint i = 0; i < 4; ++i)
     {
@@ -890,6 +1083,7 @@ void CompositeLight(uint2 did : SV_DispatchThreadID)
         {
             nearestDepth = depthDifference;
             nearest = light;
+            nearestHistory = g_Light_Denoised[0][tap].w;
         }
 
         float bilinear = (offset.x ? f.x : 1.0f - f.x) * (offset.y ? f.y : 1.0f - f.y);
@@ -900,6 +1094,7 @@ void CompositeLight(uint2 did : SV_DispatchThreadID)
 
     // No light pixel of the same surface around (a thin edge): the one nearest in depth.
     float3 light = weight > 1e-4f ? total / weight : nearest;
+    if (g_Frame.lightDiagnostics.z != 0u) g_LightDebug[did] = HistoryColor(nearestHistory);
     MaxDiagnostic(GI_COUNTER_MAX_OUTPUT, light);
     g_Output[did] = float4(light * g_Frame.nearFar.w, 1.0f);
 }
