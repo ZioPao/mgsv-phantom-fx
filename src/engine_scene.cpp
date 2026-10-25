@@ -155,7 +155,6 @@ std::mutex publishMutex;
 std::vector<gi_renderer::ModelInstance> latestInstances;
 std::vector<gi_renderer::CharacterInstance> latestCharacters;
 bool latestFresh{};
-std::uint64_t latestFrame{}; // The game loop's frame the latest snapshot was taken in
 
 // The skinned models parsed, for their meshes' index ranges and bone groups (take); render thread.
 std::unordered_map<std::uint64_t, std::shared_ptr<const gi_renderer::Model>> skinnedModels;
@@ -729,7 +728,6 @@ void snapshot()
     latestInstances = std::move(instances);
     latestCharacters = std::move(characters);
     latestFresh = true;
-    latestFrame = lastSnapshotFrame.load(std::memory_order_relaxed);
 }
 
 // Registers a manager in the first free slot unless it has one; any thread.
@@ -831,7 +829,6 @@ void setActive(bool on) noexcept
 void take(Snapshot& snapshot, const std::vector<gi_inputs::DrawnBones>& drawn)
 {
     std::vector<PendingFile> files;
-    std::uint64_t snapshotFrame{};
     {
         std::lock_guard lock(publishMutex);
         snapshot.instancesUpdated = latestFresh;
@@ -839,7 +836,6 @@ void take(Snapshot& snapshot, const std::vector<gi_inputs::DrawnBones>& drawn)
         {
             snapshot.instances = std::move(latestInstances);
             snapshot.characters = std::move(latestCharacters);
-            snapshotFrame = latestFrame;
         }
 
         latestFresh = false;

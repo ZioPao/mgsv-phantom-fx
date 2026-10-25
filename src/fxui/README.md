@@ -57,12 +57,12 @@ void drawSettings(Settings& wanted, const Costs& costs)
         fxui::ledger();
 
     if (const fxui::Page page(Section::Lighting, "Light and shade."); page)
-        if (const fxui::Item item({.id = "ao", .name = "Ambient occlusion", .summary = "Shade where surfaces meet."}); item)
+        if (const fxui::Item item({.id = "ao", .summary = "Shade where surfaces meet."}); item)
             fxui::slider("Radius", wanted.aoRadius, {.min = 0.25f, .max = 4, .standard = 1, .format = "%.2f m"});
 }
 ```
 
-An item and a budget line with the same `id` belong together: the line gives the item its switch, state, cost and message.
+An item and a budget line with the same `id` belong together: the line gives the item its switch, state, cost and message, and its name and technical name where the item leaves them out.
 
 ## Building blocks
 

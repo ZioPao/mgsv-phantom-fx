@@ -1,5 +1,10 @@
 # Phantom FX changelog
 
+## Unreleased
+
+- The menu and the Budget page name each effect the same way: global illumination shows NRD on
+  both, and the upscaler's item shows DLSS or FSR beside its name.
+
 ## 1.7.0
 
 - Add **presets** on the Budget page: **Screen-space** (soft and contact shadows, GTVBAO, SSILVB)
