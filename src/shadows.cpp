@@ -396,16 +396,7 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
     int boundsMin[2]{covered.min[0], covered.min[1]}, boundsMax[2]{covered.max[0], covered.max[1]};
     const auto dispatches = Bend::BuildDispatchList(lightProjection.data(), size.data(), boundsMin, boundsMax, false, WaveSize);
 
-    ComPtr<ID3D11ComputeShader> gameShader;
-    ComPtr<ID3D11Buffer> gameBuffer;
-    std::array<ID3D11ShaderResourceView*, 2> gameViews{};
-    ComPtr<ID3D11UnorderedAccessView> gameAccess;
-    ComPtr<ID3D11SamplerState> gameSampler;
-    context->CSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
-    context->CSGetConstantBuffers(0, 1, gameBuffer.GetAddressOf());
-    context->CSGetShaderResources(0, static_cast<UINT>(gameViews.size()), gameViews.data());
-    context->CSGetUnorderedAccessViews(0, 1, gameAccess.GetAddressOf());
-    context->CSGetSamplers(0, 1, gameSampler.GetAddressOf());
+    const SavedComputeState saved(context, {.buffers = 1, .views = 2, .accesses = 1, .samplers = 1});
 
     if (!bounds)
     {
@@ -439,14 +430,6 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
 
         context->Dispatch(static_cast<UINT>(dispatch.WaveCount[0]), static_cast<UINT>(dispatch.WaveCount[1]), static_cast<UINT>(dispatch.WaveCount[2]));
     }
-
-    context->CSSetShader(gameShader.Get(), nullptr, 0);
-    context->CSSetConstantBuffers(0, 1, gameBuffer.GetAddressOf());
-    context->CSSetShaderResources(0, static_cast<UINT>(gameViews.size()), gameViews.data());
-    for (auto* view : gameViews)
-        if (view) view->Release();
-    context->CSSetUnorderedAccessViews(0, 1, gameAccess.GetAddressOf(), nullptr);
-    context->CSSetSamplers(0, 1, gameSampler.GetAddressOf());
 
     return dispatches;
 }
