@@ -196,7 +196,7 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
     add({.id = "lampContactShadows", .name = "Lamp contact shadows", .section = at(Section::Shadows), .state = lampContact, .toggle = &wanted.lightScreenSpaceShadows,
             .replacedBy = "rayTracedLights", .message = messageFor(lampContact, {}, "Contact shadows are unavailable (see PhantomFX.log).")},
         {{Pass::LampTraces, "Traces"}, {Pass::LampShadows, "Shadow draws"}});
-    add({.id = "globalIllumination", .name = "Global illumination", .tech = "GI-1.2", .section = at(Section::Lighting), .state = global,
+    add({.id = "globalIllumination", .name = "Global illumination", .tech = "NRD", .section = at(Section::Lighting), .state = global,
             .toggle = &wanted.globalIllumination, .message = messageFor(global, rayTracing)},
         {{Pass::GiRays, "Rays and the light cache"}, {Pass::GiDenoiser, "Denoiser and render size"},
             {Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}});
