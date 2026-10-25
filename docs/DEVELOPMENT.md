@@ -118,7 +118,7 @@ and local settings are left out. ReShade is installed separately by the player.
 | `third_party/bend_sss/bend_sss_cpu.h` | Bend Studio's dispatch layout, unchanged (Apache License 2.0) |
 | `src/gi_scene.cpp`, `src/gi_scene.hpp` | The ray-traced scene on Direct3D 12: the geometry pool, bottom-level structures (a geometry per mesh, compacted), the geometry table, the frame's instances and top level (see "Ray-traced scene") |
 | `src/engine_scene.cpp`, `src/engine_scene.hpp` | The game's loaded models from its visibility managers, its characters from its model list, their FMDL meshes and base textures, its texture manager, the terrain's heightmap inputs (see "Scene objects") |
-| `src/gi_inputs.cpp`, `src/gi_inputs.hpp` | What the ray tracing takes from the game's draws: the constants it writes, the main camera of the frame drawn, the terrain's inputs |
+| `src/gi_inputs.cpp`, `src/gi_inputs.hpp` | What the ray tracing takes from the game's draws: the constants it writes (also the screen-space shadows' light pass constants), the main camera of the frame drawn, the terrain's inputs |
 | `src/engine_brush.cpp`, `src/engine_brush.hpp` | The game's object brush: its loaded blocks' vegetation and props, read from their placement records (see "Scene objects") |
 | `src/game_memory.hpp` | Guarded reads of the game's objects |
 | `src/gi_textures.cpp`, `src/gi_textures.hpp` | Shared copies of the game's textures the ray-traced scene's meshes use, from its texture manager (see "Ray-traced scene") |
@@ -1436,9 +1436,9 @@ screen.
   from `cPSScene` `c21` (`1 / P00`, `1 / P11`, B, A) and `c28` (the jitter, while DLSS jitters), so
   it matches the depth. The direction is `cPSLight` `c0`. Both buffers are kept per thread as the
   game writes them (Map, memcpy, Unmap on the recording thread, after the upscaler has added the
-  jitter) and looked up by the buffers the draw binds. Depth is reversed (near 1, far 0, the border
-  colour). Bend's starting values: 60 samples, surface thickness 0.5%, bilinear threshold 2%,
-  contrast 4, early-out on.
+  jitter; `gi_inputs.cpp` keeps them, as for the ray tracing) and looked up by the buffers the draw
+  binds. Depth is reversed (near 1, far 0, the border colour). Bend's starting values: 60 samples,
+  surface thickness 0.5%, bilinear threshold 2%, contrast 4, early-out on.
 - **Foliage casts no shadow.** The trace reads the material from the pass's specular target
   (`t1`, `z` x 255; foliage is 43, as in "GTVBAO") and skips foliage samples as Bend skips edge
   pixels. Taken as solid surfaces 0.5% deep, a clump's blades shaded each other: in a sunlit
