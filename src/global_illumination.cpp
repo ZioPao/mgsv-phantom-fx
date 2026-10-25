@@ -587,11 +587,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     frame.previousProjection = rowsOf(*previousCamera, ProjectionRows);
     frame.cameraCut = camera::cameraCut(camera::viewOf(*previousCamera), camera::viewOf(*sceneCamera));
     frame.jitter = {sceneCamera->c[JitterRow][0], sceneCamera->c[JitterRow][1], previousCamera->c[JitterRow][0], previousCamera->c[JitterRow][1]};
-    for (int i = 0; i < 3; ++i)
-    {
-        frame.eye[i] = sceneCamera->c[20][i];
-        frame.previousEye[i] = previousCamera->c[20][i];
-    }
+    for (int i = 0; i < 3; ++i) frame.eye[i] = sceneCamera->c[20][i];
 
     frame.nearPlane = sceneCamera->c[22][2];
     frame.farPlane = sceneCamera->c[22][3];

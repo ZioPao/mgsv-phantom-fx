@@ -377,7 +377,7 @@ void configureAtmosphere()
 // Call with settingsMutex held.
 void configurePhotoMode()
 {
-    photo_mode::configure({.fNumber = settings.fNumber});
+    photo_mode::setFNumber(settings.fNumber);
 }
 
 // Call with settingsMutex held. Whether HDR runs is decided at start.

@@ -240,7 +240,7 @@ struct Notes
 };
 
 std::mutex optionsMutex;
-Options wanted, current;
+Options wanted;
 // On with the pipeline and a twin of the game's: the draw points and the lists are followed. Active once a
 // frame also had a draw point, whose list draws them again: the game's lights are taken over. Menus and
 // loading screens, without one, keep the game's.
@@ -1155,8 +1155,7 @@ void present() noexcept
     bool on{};
     {
         std::lock_guard lock(optionsMutex);
-        current = wanted;
-        on = current.enabled;
+        on = wanted.enabled;
     }
 
     {

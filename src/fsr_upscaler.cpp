@@ -229,11 +229,6 @@ void start(ID3D11Device* device, const std::filesystem::path& directory)
     log("FSR started on Direct3D 12.");
 }
 
-bool started() noexcept
-{
-    return state != nullptr;
-}
-
 bool evaluate(const Inputs& inputs)
 {
     auto& s = *state;

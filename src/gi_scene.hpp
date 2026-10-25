@@ -97,10 +97,7 @@ public:
 
     // Traced this frame: built, or built in this frame's list (planBuilds).
     bool ready(BlasId id) const;
-    // Its first row of the geometry table; rows made since the last call, whose learnt albedo starts over.
-    std::uint32_t firstGeometry(BlasId id) const;
-    // Bytes of the structure pool it takes.
-    std::uint64_t size(BlasId id) const;
+    // Rows of the geometry table made since the last call, whose learnt albedo starts over.
     std::vector<std::uint32_t> takeNewGeometries();
 
     // ---- The frame's instances ----
