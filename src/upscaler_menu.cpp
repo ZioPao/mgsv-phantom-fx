@@ -121,7 +121,6 @@ void drawUpscaling(const Status& state, Settings& wanted)
 
     drawStatus(state, wanted);
     if (const fxui::Item item({.id = "upscaler",
-            .name = "Upscaler",
             .tip = "NVIDIA DLSS needs an NVIDIA RTX GPU. AMD FSR runs on any GPU: FSR 4 on Radeon RX 7000 and 9000, FSR 3.1 on the rest.",
             .summary = "Replaces the game's FXAA, at full resolution or upscaled from a lower one. The HUD stays at full resolution.",
             .keywords = "DLSS FSR DLAA native AA mode quality balanced performance preset sharpening texture detail bias render scale"});
@@ -172,7 +171,6 @@ void drawShadows(Settings& wanted)
     if (!page) return;
 
     if (const fxui::Item item({.id = "rayTracedShadows",
-            .name = "Ray-traced shadows",
             .tag = "Experimental",
             .tip = "The sun's shadows from rays traced through the game's own scene: as soft as the sun's disc makes them, exact where objects meet "
                    "the ground, and as far as you can see, where the game's shadows end at about 90 m. It replaces the game's shadows, soft shadows "
@@ -187,8 +185,6 @@ void drawShadows(Settings& wanted)
     }
 
     if (const fxui::Item item({.id = "softShadows",
-            .name = "Soft shadows",
-            .tech = "PCSS",
             .tip = "Contact-hardening soft shadows from the sun's shadow map: sharp where an object meets the ground, softer the further the shadow "
                    "falls from it, as the sun's disc gives. Off keeps the game's evenly sharp shadow edges.",
             .summary = "Sharp where an object meets the ground, softer the further the shadow falls.",
@@ -197,14 +193,12 @@ void drawShadows(Settings& wanted)
         sunSize(wanted);
 
     fxui::item({.id = "sunContactShadows",
-        .name = "Sun contact shadows",
         .tip = "Bend Studio's screen-space shadows for the sun: short shadows traced through the depth buffer. They add the contact shadows the "
                "sun's shadow map misses (feet, rocks, folds of clothing). Cheap: one trace a frame.",
         .summary = "The short shadows the shadow map misses: feet, rocks, folds of clothing.",
         .keywords = "screen-space SSS"});
 
     if (const fxui::Item item({.id = "rayTracedLights",
-            .name = "Ray-traced lights",
             .tag = "Experimental",
             .tip = "Every lamp, spot light and flashlight casts shadows from rays traced through the game's own scene, in place of the game's "
                    "shadow maps or none at all: most of the game's lights, the flashlights among them, light through walls and characters. Lights "
@@ -226,7 +220,6 @@ void drawShadows(Settings& wanted)
     }
 
     fxui::item({.id = "lampContactShadows",
-        .name = "Lamp contact shadows",
         .tip = "Bend Studio's screen-space shadows for every lamp, spot light and flashlight, which gives lights that have no shadow of their own "
                "one. Costly: one trace per light, so the frame rate drops where many lights are on screen, as in a base at night.",
         .summary = "Contact shadows for every lamp and flashlight. One trace per light, so it costs more where many lights are on screen.",
@@ -240,8 +233,6 @@ void drawLighting(Settings& wanted)
     if (!page) return;
 
     if (const fxui::Item item({.id = "globalIllumination",
-            .name = "Global illumination",
-            .tech = "NRD",
             .tag = "Experimental",
             .tip = "Ray-traced indirect light: rays for every 2 x 2 pixels, each hit lit afresh by the sun and the lights, its bounce from a "
                    "light cache, then NVIDIA's NRD denoiser. Sunlight, skylight and lamplight bounce between surfaces, also those off screen, and "
@@ -261,8 +252,6 @@ void drawLighting(Settings& wanted)
     }
 
     if (const fxui::Item item({.id = "ambientOcclusion",
-            .name = "Ambient occlusion",
-            .tech = "GTVBAO",
             .tip = "Ground-truth visibility bitmask ambient occlusion in place of the game's SSAO, whatever its SSAO setting. It darkens only the "
                    "indirect light, so sunlit surfaces keep their brightness. Off keeps the game's SSAO, which darkens all light.",
             .summary = "Shade where surfaces meet, on the indirect light only, so sunlit surfaces keep their brightness.",
@@ -278,8 +267,6 @@ void drawLighting(Settings& wanted)
     }
 
     if (const fxui::Item item({.id = "indirectLight",
-            .name = "Indirect lighting",
-            .tech = "SSILVB",
             .tip = "Screen-space indirect lighting with visibility bitmask: light bounces off nearby surfaces onto others, taking their colour, such "
                    "as sunlit ground brightening the underside of a jeep. It only knows what is on screen. Off leaves the game's indirect light unchanged.",
             .summary = "Light bounces off nearby surfaces and takes their colour. It only knows what is on screen.",
@@ -301,7 +288,6 @@ void drawAtmosphere(Settings& wanted)
     if (!page) return;
 
     const fxui::Item item({.id = "volumetricFog",
-        .name = "Volumetric fog",
         .tip = "Fog with the sun shadowed in it: light shafts through trees, buildings and dust, and shade where the sun cannot reach. Shadows reach "
                "about 90 m, as the game's do. Off leaves the game's fog unchanged.",
         .summary = "Light shafts through trees, buildings and dust, and shade where the sun cannot reach.",
@@ -343,8 +329,6 @@ void drawDisplay(Settings& wanted)
     if (!page) return;
 
     if (const fxui::Item item({.id = "hdr",
-            .name = "HDR output",
-            .tech = "HDR10",
             .tip = "The game in HDR10 on an HDR display: the sun, lamps, fire and reflections shine brighter than the game's white. It needs HDR on "
                    "for the display in Windows. Turning it on or off takes a restart; the brightness applies at once.",
             .summary = "The sun, lamps and fire shine brighter than the game's white. Needs HDR on for the display in Windows.",

@@ -166,7 +166,9 @@ private:
 
 struct ItemSpec
 {
-    const char* id{};       // Unique; a budget line with the same id gives the item its state and cost
+    // Unique; a budget line with the same id gives the item its state and cost, and the name and tech
+    // it leaves out.
+    const char* id{};
     const char* name{};
     const char* tech{};     // Its technical name, dim beside the name
     const char* tag{};      // An outlined tag, such as "Experimental"

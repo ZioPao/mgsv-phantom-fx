@@ -2,6 +2,7 @@
 #include "global_illumination.hpp"
 
 #include "camera.hpp"
+#include "d3d11_helpers.hpp"
 #include "engine_scene.hpp"
 #include "gi_inputs.hpp"
 #include "gi_lighting.hpp"
@@ -16,7 +17,6 @@
 
 #include <Windows.h>
 #include <d3d11_4.h>
-#include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <algorithm>
 #include <array>
@@ -129,13 +129,7 @@ struct Notes
 };
 
 // A shared texture with the views Direct3D 11 uses.
-struct SharedTexture
-{
-    ComPtr<ID3D11Texture2D> texture;
-    ComPtr<ID3D11ShaderResourceView> view;
-    ComPtr<ID3D11UnorderedAccessView> access;
-    UINT width{}, height{};
-};
+using SharedTexture = ComputeTexture;
 
 std::mutex optionsMutex;
 Options wanted, current;
@@ -197,39 +191,9 @@ bool shadowWritten{}, shadowDebugWritten{}; // Direct3D 12 has traced into shado
 bool lightDebugWritten{}; // And into lightDebugOutput
 bool localLightWritten{};                  // This frame's kick traced the point and spot lights into localLightOutput
 
-void check(HRESULT result, const char* what)
-{
-    if (FAILED(result)) throw std::runtime_error(std::string(what) + " failed (" + hex(static_cast<std::uint32_t>(result)) + ").");
-}
-
 SharedTexture makeShared(ID3D11Device* creator, UINT width, UINT height, DXGI_FORMAT format, const char* what)
 {
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = width;
-    desc.Height = height;
-    desc.MipLevels = desc.ArraySize = 1;
-    desc.Format = format;
-    desc.SampleDesc.Count = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-    SharedTexture made{.width = width, .height = height};
-    check(creator->CreateTexture2D(&desc, nullptr, made.texture.GetAddressOf()), what);
-    check(creator->CreateShaderResourceView(made.texture.Get(), nullptr, made.view.GetAddressOf()), what);
-    check(creator->CreateUnorderedAccessView(made.texture.Get(), nullptr, made.access.GetAddressOf()), what);
-
-    return made;
-}
-
-std::pair<UINT, UINT> sizeOf(ID3D11View* view)
-{
-    ComPtr<ID3D11Resource> resource;
-    ComPtr<ID3D11Texture2D> texture;
-    D3D11_TEXTURE2D_DESC desc{};
-    if (view) view->GetResource(resource.GetAddressOf());
-    if (resource && SUCCEEDED(resource.As(&texture))) texture->GetDesc(&desc);
-
-    return {desc.Width, desc.Height};
+    return makeComputeTexture(creator, width, height, format, what, SharedWithD3D12);
 }
 
 Notes& notesOf(ID3D11DeviceContext* context)
@@ -258,20 +222,8 @@ void ensurePipeline()
         return;
     }
 
-    ComPtr<ID3DBlob> code, errors;
-    const auto result = D3DCompile(PackSource, std::strlen(PackSource), "gi-pack", nullptr, nullptr, "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-        code.GetAddressOf(), errors.GetAddressOf());
-    if (FAILED(result))
-        throw std::runtime_error("The G-buffer pack did not compile: "
-            + (errors ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize()) : hex(static_cast<std::uint32_t>(result))));
-
-    check(device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, packShader.GetAddressOf()), "Creating the G-buffer pack");
-    D3D11_BUFFER_DESC parameters{};
-    parameters.ByteWidth = sizeof(PackParameters);
-    parameters.Usage = D3D11_USAGE_DYNAMIC;
-    parameters.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    parameters.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    check(device->CreateBuffer(&parameters, nullptr, packParameters.GetAddressOf()), "Creating the G-buffer pack's constants");
+    packShader = computeShader(device.Get(), PackSource, "gi-pack");
+    packParameters = makeConstantBuffer(device.Get(), sizeof(PackParameters), "Creating the G-buffer pack's constants");
 
     check(device->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence)), "Creating the shared fence");
     check(fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &fenceHandle), "Sharing the fence");
@@ -298,10 +250,7 @@ void pack(ID3D11ShaderResourceView* depth, const camera::SceneConstants& scene)
     parameters.hasAlbedo = hasAlbedo;
     const auto specular = indirect_light::specularTarget(width, height);
     parameters.hasSpecular = specular != nullptr;
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    check(immediate->Map(packParameters.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Writing the G-buffer pack's constants");
-    std::memcpy(mapped.pData, &parameters, sizeof(parameters));
-    immediate->Unmap(packParameters.Get(), 0);
+    check(write(immediate.Get(), packParameters.Get(), parameters), "Writing the G-buffer pack's constants");
 
     ID3D11ShaderResourceView* inputs[]{depth, normals.Get(), hasAlbedo ? albedo.Get() : nullptr, specular.Get()};
     ID3D11UnorderedAccessView* outputs[]{depthOut.access.Get(), normalOut.access.Get(), albedoOut.access.Get()};
@@ -309,7 +258,7 @@ void pack(ID3D11ShaderResourceView* depth, const camera::SceneConstants& scene)
     immediate->CSSetConstantBuffers(0, 1, packParameters.GetAddressOf());
     immediate->CSSetShaderResources(0, 4, inputs);
     immediate->CSSetUnorderedAccessViews(0, 3, outputs, nullptr);
-    immediate->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    immediate->Dispatch(groups(width), groups(height), 1);
     ID3D11ShaderResourceView* noInputs[4]{};
     ID3D11UnorderedAccessView* noOutputs[3]{};
     immediate->CSSetShaderResources(0, 4, noInputs);

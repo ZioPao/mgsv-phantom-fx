@@ -498,18 +498,9 @@ float3 HitDirectLight(float3 world, float3 normal, float3 albedo, bool leaf, ino
 [numthreads(1, 1, 1)]
 void ClearCounters()
 {
+    // The previous frame's packed tiles stay: PurgeTiles reads them this frame.
     g_Counters[PACKED_TILE_COUNT] = 0;
-    g_Counters[GI_COUNTER_UPDATE_TILES] = 0;
-    g_Counters[GI_COUNTER_VISIBILITY0] = 0;
-    g_Counters[GI_COUNTER_VISIBILITY1] = 0;
-    g_Counters[GI_COUNTER_LIGHTS] = 0;
-    g_Counters[GI_COUNTER_HITS] = 0;
-    g_Counters[GI_COUNTER_NEAR_HITS] = 0;
-    g_Counters[GI_COUNTER_COPIES] = 0;
-    g_Counters[GI_COUNTER_FULL_BUCKETS] = 0;
-    g_Counters[GI_COUNTER_BOUNCE_HITS] = 0;
-    g_Counters[GI_COUNTER_FOLIAGE] = 0;
-    for (uint counter = GI_COUNTER_MAXIMA_FIRST; counter < GI_COUNTER_MAXIMA_FIRST + GI_COUNTER_MAXIMA; ++counter) g_Counters[counter] = 0;
+    for (uint counter = GI_COUNTER_UPDATE_TILES; counter < GI_COUNTER_COUNT; ++counter) g_Counters[counter] = 0;
 }
 
 // g_Dispatch: x counter, y threads (or tiles) a group handles, z argument slot, w a second counter to add.
