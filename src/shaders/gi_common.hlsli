@@ -124,6 +124,17 @@ float3 mapToCosineHemisphere(float2 samples, float3 normal)
     return normalize(u * sinTheta * cosPhi + v * sinTheta * sinPhi + normal * cosTheta);
 }
 
+// A uniform point on a disc of `radius` around the unit `axis`, from its centre.
+float3 DiscOffset(float3 axis, float radius, float2 samples)
+{
+    float3 u, v;
+    GetOrthoVectors(axis, u, v);
+
+    float r = radius * sqrt(samples.x);
+    float angle = TWO_PI * samples.y;
+    return r * (cos(angle) * u + sin(angle) * v);
+}
+
 float3 transformPointProjection(float3 position, float4x4 transform)
 {
     float4 result = mul(transform, float4(position, 1.0f));
@@ -134,6 +145,12 @@ float3 transformPointProjection(float3 position, float4x4 transform)
 float3 transformPointProjection(float2 uv, float depth, float4x4 transform)
 {
     return transformPointProjection(float3(2.0f * float2(uv.x, 1.0f - uv.y) - 1.0f, depth), transform);
+}
+
+// The world position of a render pixel's centre at a depth.
+float3 DepthPosition(uint2 pixel, float depth)
+{
+    return transformPointProjection((pixel + 0.5f) / g_Frame.dimensions.xy, depth, g_Frame.viewProjectionInverse);
 }
 
 // Distance along the view of a reversed-Z depth with a finite far plane, as Fox Engine's.
@@ -347,6 +364,12 @@ SceneTriangle LoadTriangle(uint instanceIndex, uint geometryIndex, uint primitiv
     return t;
 }
 
+// The point at DXR's barycentrics (the weights of v1 and v2).
+float3 TrianglePoint(SceneTriangle t, float2 barycentrics)
+{
+    return (1.0f - barycentrics.x - barycentrics.y) * t.v0 + barycentrics.x * t.v1 + barycentrics.y * t.v2;
+}
+
 float2 VertexUV(GIGeometry geometry, uint index)
 {
     uint packed = g_GeometryPool.Load(geometry.vertexOffset + 16 * index + 12);
@@ -488,37 +511,19 @@ SceneHit TraceClosest(float3 origin, float3 direction, float maxDistance)
     return TraceClosest(origin, direction, 0.0f, maxDistance);
 }
 
-// Whether a global illumination ray gets away, any hit ending it.
-bool TraceVisible(float3 origin, float3 direction, float minDistance, float maxDistance)
+// A triangle's geometric normal, facing a ray along `direction`; against the ray for a degenerate one.
+float3 FacingNormal(SceneTriangle t, float3 direction)
 {
-    RayDesc ray;
-    ray.Origin = origin;
-    ray.Direction = direction;
-    ray.TMin = minDistance;
-    ray.TMax = maxDistance;
-
-    float2 cone = LightCone(origin);
-    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> query;
-    query.TraceRayInline(g_Scene, GI_RAY_FLAGS, GI_MASK_SCENE, ray);
-    while (query.Proceed())
-    {
-        uint row = query.CandidateInstanceContributionToHitGroupIndex() + query.CandidateGeometryIndex();
-        float footprint = cone.x + query.CandidateTriangleRayT() * cone.y;
-        if (CutOutBlocks(row, query.CandidatePrimitiveIndex(), query.CandidateTriangleBarycentrics(), false, footprint, query.CandidateObjectToWorld3x4()))
-            query.CommitNonOpaqueTriangleHit();
-    }
-
-    return query.CommittedStatus() == COMMITTED_NOTHING;
+    float3 normal = cross(t.v1 - t.v0, t.v2 - t.v0);
+    float lengthSquared = dot(normal, normal);
+    normal = lengthSquared > 0.0f ? normal * rsqrt(lengthSquared) : -direction;
+    return dot(normal, direction) > 0.0f ? -normal : normal;
 }
 
 // The geometric normal of a hit triangle, facing the ray.
 float3 HitNormal(SceneHit hit, float3 direction)
 {
-    SceneTriangle t = LoadTriangle(hit.instance, hit.geometry, hit.primitive);
-    float3 normal = cross(t.v1 - t.v0, t.v2 - t.v0);
-    float lengthSquared = dot(normal, normal);
-    normal = lengthSquared > 0.0f ? normal * rsqrt(lengthSquared) : -direction;
-    return dot(normal, direction) > 0.0f ? -normal : normal;
+    return FacingNormal(LoadTriangle(hit.instance, hit.geometry, hit.primitive), direction);
 }
 
 // Diagnostics: adds the lanes for which `counted` holds to a counter, one atomic a wave.
@@ -579,10 +584,12 @@ bool IsCopyOfSurface(SceneHit hit, float3 normal, float3 direction, float tolera
     return height >= 0.0f && height < tolerance && abs(dot(HitNormal(hit, direction), normal)) > 0.85f;
 }
 
-// The closest hit of a ray leaving a surface of `normal` from `origin`, past copies of the surface;
-// `alphaTest` as TraceClosest.
-SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance, uint mask, bool alphaTest, float2 cone)
+// The closest hit of a ray leaving a surface of `normal` from `origin`, past copies of the surface, and
+// in `copies` how many it skipped; `alphaTest` as TraceClosest.
+SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance, uint mask, bool alphaTest, float2 cone,
+    out uint copies)
 {
+    copies = 0;
     float start = 0.0f;
     SceneHit hit;
     for (uint attempt = 0; attempt < 4; ++attempt)
@@ -592,6 +599,7 @@ SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 
         CountDiagnostic(GI_COUNTER_COPIES, copy);
         if (!copy) return hit;
 
+        ++copies;
         start = hit.distance * 1.0001f + 1e-3f;
     }
 
@@ -600,20 +608,83 @@ SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 
     return hit;
 }
 
+SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance, uint mask, bool alphaTest, float2 cone)
+{
+    uint copies;
+    return TraceFromSurface(origin, normal, tolerance, direction, maxDistance, mask, alphaTest, cone, copies);
+}
+
 // A global illumination ray leaving a surface (LightCone).
 SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance)
 {
     return TraceFromSurface(origin, normal, tolerance, direction, maxDistance, GI_MASK_SCENE, true, LightCone(origin));
 }
 
-// Whether a ray leaving a surface gets away, past copies of the surface: the stretch of the ray
-// where copies can be takes closest hits, the rest the first hit found.
+// How far along a ray leaving a surface copies of the surface can be: where it rises `tolerance` above it.
+float NearEnd(float3 normal, float tolerance, float3 direction, float maxDistance)
+{
+    return min(tolerance / max(dot(direction, normal), 0.1f), maxDistance);
+}
+
+// Whether a ray leaving a surface is stopped before `maxDistance`, and in `blocker` how far along it is
+// (FLT_MAX where it gets through). The stretch where copies of the surface can be (NearEnd) skips them
+// and takes the closest hit; on from there the first hit found ends it. Cut-out geometry with the game's
+// alpha blocks it where its alpha does. Cut-out geometry without its texture lets it through; with
+// `chance`, it blocks it with chance `blocking`, a random number drawn a candidate, so the denoiser
+// averages a partial shadow.
+bool SurfaceRayBlocked(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance, float2 cone, bool chance, float blocking,
+    inout Random random, out float blocker)
+{
+    blocker = FLT_MAX;
+    float nearEnd = NearEnd(normal, tolerance, direction, maxDistance);
+    SceneHit nearHit = TraceFromSurface(origin, normal, tolerance, direction, nearEnd, GI_MASK_SCENE, true, cone);
+    if (nearHit.hit)
+    {
+        blocker = nearHit.distance;
+        return true;
+    }
+
+    if (nearEnd >= maxDistance) return false;
+
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = nearEnd;
+    ray.TMax = maxDistance;
+
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> query;
+    query.TraceRayInline(g_Scene, GI_RAY_FLAGS, GI_MASK_SCENE, ray);
+    // Only cut-out geometry is non-opaque, so only it comes here.
+    while (query.Proceed())
+    {
+        uint row = query.CandidateInstanceContributionToHitGroupIndex() + query.CandidateGeometryIndex();
+        float footprint = cone.x + query.CandidateTriangleRayT() * cone.y;
+        bool untextured = false;
+        if (chance) untextured = random.rand() < blocking;
+        if (CutOutBlocks(row, query.CandidatePrimitiveIndex(), query.CandidateTriangleBarycentrics(), untextured, footprint, query.CandidateObjectToWorld3x4()))
+            query.CommitNonOpaqueTriangleHit();
+    }
+
+    bool blocked = query.CommittedStatus() != COMMITTED_NOTHING;
+    if (blocked) blocker = query.CommittedRayT();
+    return blocked;
+}
+
+// Whether a global illumination ray (LightCone) leaving a surface gets away; cut-out geometry without
+// its texture lets it through.
 bool VisibleFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance)
 {
-    float nearEnd = min(tolerance / max(dot(direction, normal), 0.1f), maxDistance);
-    if (TraceFromSurface(origin, normal, tolerance, direction, nearEnd).hit) return false;
+    Random unused = (Random)0;
+    float blocker;
+    return !SurfaceRayBlocked(origin, normal, tolerance, direction, maxDistance, LightCone(origin), false, 0.0f, unused, blocker);
+}
 
-    return nearEnd >= maxDistance || TraceVisible(origin, direction, nearEnd, maxDistance);
+// The sun's direction, spread over its disc: a uniform point on a disc of the angular radius's tangent
+// (the Sun size setting) around it.
+float3 SunSample(float2 samples)
+{
+    float3 toSun = g_Frame.sunDirection.xyz;
+    return normalize(toSun + DiscOffset(toSun, g_Frame.shadowParams.x, samples));
 }
 
 // ---- The game's terrain ----

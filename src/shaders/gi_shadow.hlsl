@@ -20,19 +20,6 @@
 #include "ffx_denoiser_shadows/ffx_denoiser_shadows_tileclassification.h"
 #pragma dxc diagnostic pop
 
-// The sun's direction, spread over its disc: a uniform point on a disc of the angular radius's
-// tangent around it.
-float3 SunSample(float2 samples)
-{
-    float3 toSun = g_Frame.sunDirection.xyz;
-    float3 u, v;
-    GetOrthoVectors(toSun, u, v);
-
-    float radius = g_Frame.shadowParams.x * sqrt(samples.x);
-    float angle = TWO_PI * samples.y;
-    return normalize(toSun + radius * (cos(angle) * u + sin(angle) * v));
-}
-
 // How far a point lies beyond the game's shadow map: 0 inside it, 1 past its fade, as
 // SunLight_DL_CS_ES fades its shadow to lit (shadows_shaders.hpp, SunShadow). In view space the
 // fade runs from the point (0, 0, c8.x); its distance from there follows from the distance to the
@@ -93,7 +80,7 @@ ShadowSurface ShadowSurfaceAt(float3 position, float3 gbufferNormal)
 
     normal *= rsqrt(lengthSquared);
     surface.normal = dot(normal, direction) > 0.0f ? -normal : normal;
-    surface.position = (1.0f - hit.barycentrics.x - hit.barycentrics.y) * t.v0 + hit.barycentrics.x * t.v1 + hit.barycentrics.y * t.v2;
+    surface.position = TrianglePoint(t, hit.barycentrics);
     surface.exact = true;
     surface.hit = hit;
     return surface;
@@ -127,44 +114,6 @@ void ShadowRayStart(ShadowSurface surface, float3 toLight, out float3 origin, ou
     tolerance = surface.exact ? 0.0f : CopyTolerance(surface.position);
 }
 
-// Whether a ray leaving a surface reaches a light `rayLength` away. Near the surface, copies of it are
-// skipped (gi_common.hlsli, "Copies of a surface"); further on, cut-out geometry with the game's alpha
-// blocks it where its alpha does, and cut-out geometry without its texture with chance `blocking`, so
-// the denoiser averages a partial shadow.
-// How far along the ray it is stopped: FLT_MAX where it gets through.
-float ShadowRayBlocker(float3 origin, float3 normal, float tolerance, float3 direction, float rayLength, float blocking, float2 cone, inout Random random)
-{
-    float nearEnd = min(tolerance / max(dot(direction, normal), 0.1f), rayLength);
-    SceneHit nearHit = TraceFromSurface(origin, normal, tolerance, direction, nearEnd, GI_MASK_SCENE, true, cone);
-    if (nearHit.hit) return nearHit.distance;
-    if (nearEnd >= rayLength) return FLT_MAX;
-
-    RayDesc ray;
-    ray.Origin = origin;
-    ray.Direction = direction;
-    ray.TMin = nearEnd;
-    ray.TMax = rayLength;
-
-    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> query;
-    query.TraceRayInline(g_Scene, GI_RAY_FLAGS, GI_MASK_SCENE, ray);
-    // Only cut-out geometry is non-opaque, so only it comes here.
-    while (query.Proceed())
-    {
-        uint row = query.CandidateInstanceContributionToHitGroupIndex() + query.CandidateGeometryIndex();
-        float footprint = cone.x + query.CandidateTriangleRayT() * cone.y;
-        if (CutOutBlocks(row, query.CandidatePrimitiveIndex(), query.CandidateTriangleBarycentrics(), random.rand() < blocking, footprint,
-                query.CandidateObjectToWorld3x4()))
-            query.CommitNonOpaqueTriangleHit();
-    }
-
-    return query.CommittedStatus() == COMMITTED_NOTHING ? FLT_MAX : query.CommittedRayT();
-}
-
-bool ShadowRayVisible(float3 origin, float3 normal, float tolerance, float3 direction, float rayLength, float blocking, float2 cone, inout Random random)
-{
-    return ShadowRayBlocker(origin, normal, tolerance, direction, rayLength, blocking, cone, random) == FLT_MAX;
-}
-
 groupshared uint g_TileMask;
 
 // One 8x4 tile a group: a ray a pixel, into the tile's mask. The sky and pixels past the edge count
@@ -182,8 +131,7 @@ void TraceSunShadows(uint2 gtid : SV_GroupThreadID, uint2 gid : SV_GroupID, uint
         float depth = g_Depth.Load(int3(did, 0));
         if (depth > 0.0f)
         {
-            float2 uv = (did + 0.5f) / g_Frame.dimensions.xy;
-            float3 position = transformPointProjection(uv, depth, g_Frame.viewProjectionInverse);
+            float3 position = DepthPosition(did, depth);
             float3 normal = DecodeNormal(g_Normal.Load(int3(did, 0)));
             Random random = MakeRandom(g_Frame.dimensions.z, did.y * g_Frame.dimensions.x + did.x);
             float3 toSun = SunSample(random.rand2());
@@ -194,7 +142,8 @@ void TraceSunShadows(uint2 gtid : SV_GroupThreadID, uint2 gid : SV_GroupID, uint
             // Rays to the sun run parallel: each keeps its pixel's footprint. The sun's size comes from
             // spreading the rays over its disc; a cone widened by it as well took cut-out alpha from
             // coarse levels of detail, where a pylon's thin bars fell under the threshold.
-            lit = ShadowRayVisible(origin, facing, tolerance, toSun, g_Frame.shadowParams.z, blocking, PixelCone(position, 0.0f), random);
+            float blocker;
+            lit = !SurfaceRayBlocked(origin, facing, tolerance, toSun, g_Frame.shadowParams.z, PixelCone(position, 0.0f), true, blocking, random, blocker);
         }
     }
 
@@ -230,8 +179,7 @@ void TraceLocalLightShadows(uint2 did : SV_DispatchThreadID)
     float depth = g_Depth.Load(int3(did, 0));
     if (depth > 0.0f)
     {
-        float2 uv = (did + 0.5f) / g_Frame.dimensions.xy;
-        float3 position = transformPointProjection(uv, depth, g_Frame.viewProjectionInverse);
+        float3 position = DepthPosition(did, depth);
         float3 normal = DecodeNormal(g_Normal.Load(int3(did, 0)));
         float3 toLight;
         float lightDistance;
@@ -259,12 +207,7 @@ void TraceLocalLightShadows(uint2 did : SV_DispatchThreadID)
                 while (traced < rays && threshold < running)
                 {
                     // A point on the light's disc facing the pixel, its radius in falloff.w.
-                    float3 b1, b2;
-                    GetOrthoVectors(toLight, b1, b2);
-                    float2 disc = frac(start + R2(traced));
-                    float radius = light.falloff.w * sqrt(disc.x);
-                    float angle = TWO_PI * disc.y;
-                    float3 target = light.position.xyz + radius * (cos(angle) * b1 + sin(angle) * b2);
+                    float3 target = light.position.xyz + DiscOffset(toLight, light.falloff.w, frac(start + R2(traced)));
                     float3 offset = target - position;
                     float targetDistance = length(offset);
                     float3 direction = offset / targetDistance;
@@ -273,7 +216,8 @@ void TraceLocalLightShadows(uint2 did : SV_DispatchThreadID)
                     float tolerance;
                     ShadowRayStart(surface, direction, origin, facing, tolerance);
                     float rayLength = targetDistance - light.shape.x;
-                    float blocker = rayLength > 0.0f ? ShadowRayBlocker(origin, facing, tolerance, direction, rayLength, 0.0f, cone, random) : FLT_MAX;
+                    float blocker = FLT_MAX;
+                    if (rayLength > 0.0f) SurfaceRayBlocked(origin, facing, tolerance, direction, rayLength, cone, true, 0.0f, random, blocker);
                     if (blocker == FLT_MAX) ++visible;
                     else
                     {
@@ -382,20 +326,8 @@ DebugRay TraceDebugRay(float3 position, float3 normal, float depth)
     ShadowRayStart(r.surface, r.direction, r.origin, r.normal, r.tolerance);
     r.beyond = BeyondShadowMap(position, depth);
     float rayLength = g_Frame.shadowParams.z;
-    r.nearEnd = min(r.tolerance / max(dot(r.direction, r.normal), 0.1f), rayLength);
-
-    // As TraceFromSurface, counting the copies it skips.
-    r.copies = 0;
-    float start = 0.0f;
-    for (uint attempt = 0; attempt < 4; ++attempt)
-    {
-        r.nearHit = TraceClosest(r.origin, r.direction, start, r.nearEnd, GI_MASK_SCENE, true, false, PixelCone(position, 0.0f));
-        if (!r.nearHit.hit || !IsCopyOfSurface(r.nearHit, r.normal, r.direction, r.tolerance)) break;
-
-        ++r.copies;
-        start = r.nearHit.distance * 1.0001f + 1e-3f;
-        r.nearHit.hit = false;
-    }
+    r.nearEnd = NearEnd(r.normal, r.tolerance, r.direction, rayLength);
+    r.nearHit = TraceFromSurface(r.origin, r.normal, r.tolerance, r.direction, r.nearEnd, GI_MASK_SCENE, true, PixelCone(position, 0.0f), r.copies);
 
     // Beyond the shadow map the shadow rays take cut-out geometry without the game's alpha as blocking
     // with chance: here always. Inside, they let the sun through it.
@@ -440,8 +372,7 @@ void DebugShadows(uint2 did : SV_DispatchThreadID)
     float4 color = 0.0f;
     if (depth > 0.0f)
     {
-        float2 uv = (did + 0.5f) / g_Frame.dimensions.xy;
-        float3 position = transformPointProjection(uv, depth, g_Frame.viewProjectionInverse);
+        float3 position = DepthPosition(did, depth);
         float3 normal = DecodeNormal(g_Normal.Load(int3(did, 0)));
         if (g_Frame.shadowDiagnostics.y)
         {
@@ -498,8 +429,7 @@ void ProbeShadows(uint index : SV_GroupIndex)
         probe.receiver.w = depth;
         if (depth > 0.0f)
         {
-            float2 uv = (centre + 0.5f) / g_Frame.dimensions.xy;
-            float3 position = transformPointProjection(uv, depth, g_Frame.viewProjectionInverse);
+            float3 position = DepthPosition(centre, depth);
             float3 normal = DecodeNormal(g_Normal.Load(int3(centre, 0)));
             DebugRay r = TraceDebugRay(position, normal, depth);
             probe.receiver.xyz = position;
@@ -537,7 +467,7 @@ void ProbeShadows(uint index : SV_GroupIndex)
             bool rayLit = (g_Shadow_Masks[tile] & FFX_DNSR_Shadows_GetBitMaskFromPixelPosition(centre)) != 0;
             probe.shadow = float4(g_Shadow_Output[centre], rayLit ? 1.0f : 0.0f, 0.0f, 0.0f);
             // The camera's ray through the centre pixel, as the scene view traces it.
-            float3 farPoint = transformPointProjection(uv, 1e-6f, g_Frame.viewProjectionInverse);
+            float3 farPoint = DepthPosition(centre, 1e-6f);
             probe.view = ProbeHit(TraceClosest(g_Frame.eye.xyz, normalize(farPoint - g_Frame.eye.xyz), 1e5f));
             g_ProbeReceiver = position;
             g_ProbeNormal = normal;

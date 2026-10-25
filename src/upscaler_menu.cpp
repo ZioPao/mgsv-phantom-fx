@@ -162,7 +162,7 @@ void sunSize(Settings& wanted)
 {
     fxui::slider("Sun size", wanted.sunSize,
         {.min = Settings::MinSunSize, .max = Settings::MaxSunSize, .standard = Defaults.sunSize, .format = "%.2f\xC2\xB0",
-            .tip = "The sun's angular diameter, which sets how fast shadows soften with distance. 0.53 is the real sun."});
+            .tip = "The sun's angular diameter, which sets how fast shadows soften with distance. It also sets the sun for the global illumination. 0.53 is the real sun."});
 }
 
 void drawShadows(Settings& wanted)
@@ -239,7 +239,7 @@ void drawLighting(Settings& wanted)
                    "the sky only lights what it can reach. It replaces the game's baked probe light and SSAO, and GTVBAO and SSILVB while on. Needs "
                    "a GPU that traces rays (DXR 1.1). Off keeps the game's indirect light.",
             .summary = "Sun and sky light bounce between surfaces, also those off screen, in place of the game's baked light.",
-            .keywords = "RT DXR GI strength ray quality"});
+            .keywords = "RT DXR GI strength ray quality sun size"});
         item)
     {
         constexpr Choice<int> qualities[]{{1, "Low 1"}, {2, "Medium 2"}, {4, "High 4"}};
@@ -249,6 +249,7 @@ void drawLighting(Settings& wanted)
         fxui::slider("Strength", wanted.globalIlluminationStrength,
             {.max = Settings::MaxGlobalIlluminationStrength, .standard = Defaults.globalIlluminationStrength,
                 .tip = "1 is physically based; higher brightens the indirect light, 0 leaves only the sun and the lamps."});
+        sunSize(wanted);
     }
 
     if (const fxui::Item item({.id = "ambientOcclusion",

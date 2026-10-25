@@ -1521,9 +1521,10 @@ Now, each frame:
   Rays guided by the last frame's light (half of them in a cone around its denoised direction, weighed by
   one-sample MIS, as GI-1.2 guided its probes' rays) were tried the same day and left out: no steadier in
   the end, and the light looked darker.
-- **The hit, lit afresh.** A shadow ray to a point of the sun's disc (a leaf lets half through from its
-  far side) and one to a point or spot light picked in proportion to its light there (weighted reservoir
-  sampling over the frame's lights, flashlights among them), times the hit's albedo (`HitAlbedo`).
+- **The hit, lit afresh.** A shadow ray to a point of the sun's disc (of the **Sun size**, as the
+  shadows' rays; a leaf lets half through from its far side) and one to a point or spot light picked in
+  proportion to its light there (weighted reservoir sampling over the frame's lights, flashlights among
+  them), times the hit's albedo (`HitAlbedo`).
   Nothing of the hit's own light comes from a history.
 - **Its bounce.** A cosine-weighted ray from the hit (a leaf's to its far side a third of the time,
   counting 1.5): the sky's light where it gets away, else the hash grid cell's where it lands, direct and

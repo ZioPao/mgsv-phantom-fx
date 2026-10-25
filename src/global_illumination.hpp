@@ -34,7 +34,7 @@ struct Options
     bool withShadowMap{};
     bool localLights{}; // The point and spot lights' ray-traced shadows (local_lights.hpp)
     int lightRays{4};   // Their shadow rays a pixel
-    float sunSize{0.53f}; // The sun's angular diameter for the shadows, in degrees
+    float sunSize{0.53f}; // The sun's angular diameter for the shadows and the light's hits, in degrees
     int lightPixelRays{2}; // The light's rays a light pixel (a 2 x 2 of render pixels): 1, 2 or 4
     bool showScene{}; // Diagnostics: the output shows the traced scene
     bool debugShadows{}; // Diagnostics: the shadow debug view and probe (shadowDebug, shadowProbe), with the shadows
