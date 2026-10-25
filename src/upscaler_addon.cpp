@@ -425,7 +425,6 @@ void onMapBuffer(device*, resource buffer, uint64_t, uint64_t, map_access access
     if (access == map_access::read_only || !data) return;
 
     upscaler::bufferMapped(reinterpret_cast<ID3D11Resource*>(buffer.handle), *data);
-    shadows::bufferMapped(reinterpret_cast<ID3D11Resource*>(buffer.handle), *data);
     global_illumination::bufferMapped(reinterpret_cast<ID3D11Resource*>(buffer.handle), *data);
 }
 
@@ -434,7 +433,6 @@ void onMapBuffer(device*, resource buffer, uint64_t, uint64_t, map_access access
 void onUnmapBuffer(device*, resource buffer)
 {
     upscaler::bufferUnmapped(reinterpret_cast<ID3D11Resource*>(buffer.handle));
-    shadows::bufferUnmapped(reinterpret_cast<ID3D11Resource*>(buffer.handle));
     global_illumination::bufferUnmapped(reinterpret_cast<ID3D11Resource*>(buffer.handle));
 }
 

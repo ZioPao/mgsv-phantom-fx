@@ -14,12 +14,16 @@
 // What the ray tracing takes from the game's draws (docs/DEVELOPMENT.md, "Global illumination"): the
 // constants the game writes for them, the main camera the frame was drawn with, and its terrain's
 // inputs (engine_scene::noteTerrain). The scene itself comes from the game's memory (engine_scene.hpp).
+// The screen-space shadows (shadows.hpp) read the light passes' constants from here too.
 namespace phantom_fx::gi_inputs
 {
 // Releases what it holds; only when no Direct3D work can run.
 void detach() noexcept;
 // Inputs are noted only while on.
 void setActive(bool active) noexcept;
+// While on, the scene (b2) and light (b3) constants are kept even when not active, for the screen-space
+// shadows.
+void keepLightPassConstants(bool keep) noexcept;
 
 // ---- Recording, on the game's render and worker threads ----
 void vertexShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
@@ -30,6 +34,8 @@ void bufferMapped(ID3D11Resource* buffer, void* data) noexcept;
 void bufferUnmapped(ID3D11Resource* buffer) noexcept;
 // What this thread last wrote to `buffer`, as many floats as `into` holds; false when it wrote nothing.
 bool written(ID3D11Buffer* buffer, std::span<float> into) noexcept;
+// The same, only when that write was exactly the size of `into`.
+bool writtenExactly(ID3D11Buffer* buffer, std::span<float> into) noexcept;
 // Before an indexed draw of the game's models or terrain: notes the camera and the terrain's inputs.
 void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
 // FinishCommandList: what `context` noted now belongs to `list`.

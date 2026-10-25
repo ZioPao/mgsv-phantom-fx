@@ -119,7 +119,7 @@ and local settings are left out. ReShade is installed separately by the player.
 | `third_party/bend_sss/bend_sss_cpu.h` | Bend Studio's dispatch layout, unchanged (Apache License 2.0) |
 | `src/gi_scene.cpp`, `src/gi_scene.hpp` | The ray-traced scene on Direct3D 12: the geometry pool, bottom-level structures (a geometry per mesh, compacted), the geometry table, the frame's instances and top level (see "Ray-traced scene") |
 | `src/engine_scene.cpp`, `src/engine_scene.hpp` | The game's loaded models from its visibility managers, its characters from its model list, their FMDL meshes and base textures, its texture manager, the terrain's heightmap inputs (see "Scene objects") |
-| `src/gi_inputs.cpp`, `src/gi_inputs.hpp` | What the ray tracing takes from the game's draws: the constants it writes, the main camera of the frame drawn, the terrain's inputs |
+| `src/gi_inputs.cpp`, `src/gi_inputs.hpp` | What the ray tracing takes from the game's draws: the constants it writes (also the screen-space shadows' light pass constants), the main camera of the frame drawn, the terrain's inputs |
 | `src/engine_brush.cpp`, `src/engine_brush.hpp` | The game's object brush: its loaded blocks' vegetation and props, read from their placement records (see "Scene objects") |
 | `src/game_memory.hpp` | Guarded reads of the game's objects |
 | `src/gi_textures.cpp`, `src/gi_textures.hpp` | Shared copies of the game's textures the ray-traced scene's meshes use, from its texture manager (see "Ray-traced scene") |
@@ -128,6 +128,7 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/shaders/gi_light.hlsl` | HLSL: the light's rays, their hits' light, the hash grid cache, the denoiser's inputs and the render size |
 | `src/gi_shadow.cpp`, `src/gi_shadow.hpp` | Ray-traced shadows on the global illumination's Direct3D 12 device: the denoiser's memory and passes |
 | `src/local_lights.cpp`, `src/local_lights.hpp` | Ray-traced lights: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights") |
+| `src/game_lights.hpp` | The game's point and spot light shaders and their constants, for lamp contact shadows and the ray-traced lights: the checksums, a light's range, its sphere on screen |
 | `src/shaders/gi_shadow.hlsl`, `gi_shadow_filter.hlsl`, `gi_shadow.hlsli` | HLSL: the sun's shadow rays, and the FidelityFX Shadow Denoiser's data access, temporal pass and filters |
 | `third_party/ffx_denoiser_shadows/` | AMD's FidelityFX Shadow Denoiser headers, unchanged (MIT; `licenses/AMD-FidelityFX-LICENSE.txt`) |
 | `src/indirect_light.cpp`, `src/indirect_light.hpp` | GTVBAO in place of the game's SSAO, on the indirect light, and SSILVB's bounce light: pass recognition, the compute passes, the multiply, the resolve's white occlusion and diffuse light |
@@ -1437,9 +1438,9 @@ screen.
   from `cPSScene` `c21` (`1 / P00`, `1 / P11`, B, A) and `c28` (the jitter, while DLSS jitters), so
   it matches the depth. The direction is `cPSLight` `c0`. Both buffers are kept per thread as the
   game writes them (Map, memcpy, Unmap on the recording thread, after the upscaler has added the
-  jitter) and looked up by the buffers the draw binds. Depth is reversed (near 1, far 0, the border
-  colour). Bend's starting values: 60 samples, surface thickness 0.5%, bilinear threshold 2%,
-  contrast 4, early-out on.
+  jitter; `gi_inputs.cpp` keeps them, as for the ray tracing) and looked up by the buffers the draw
+  binds. Depth is reversed (near 1, far 0, the border colour). Bend's starting values: 60 samples,
+  surface thickness 0.5%, bilinear threshold 2%, contrast 4, early-out on.
 - **Foliage casts no shadow.** The trace reads the material from the pass's specular target
   (`t1`, `z` x 255; foliage is 43, as in "GTVBAO") and skips foliage samples as Bend skips edge
   pixels. Taken as solid surfaces 0.5% deep, a clump's blades shaded each other: in a sunlit
@@ -1904,7 +1905,7 @@ their shadow maps or of none, and lights without specular get the game's. The sc
 its own if neither the light nor the sun's shadows run. Lamp contact shadows are off while it is on.
 
 - **The game's lights** (24 pixel shaders, `SSLighting2_*` and `Lighting_*_NA`, point or spot, with or
-  without a mask, specular and a shadow map; their checksums in `local_lights.cpp`). Two draws a light
+  without a mask, specular and a shadow map; their checksums in `game_lights.hpp`). Two draws a light
   in the light pass: the light's volume marks the stencil (colour writes off), then lights where it
   marked (ONE, ONE into both light targets). Their vertex shaders are one and the same: the volume
   comes in clip space. Every one reads `cPSLight` (`b3`, the light passes' view space) alike: `c3` the
