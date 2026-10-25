@@ -56,10 +56,7 @@ void drawPresets(upscaler::Settings& wanted)
 
 void drawBudget(upscaler::Settings& wanted)
 {
-    const fxui::Page page(menu::Section::Budget,
-        "Where the GPU's frame goes, effect by effect, on the same scale as every bar in this window. Timed on the GPU, averaged over about half a "
-        "second. Each ray-traced effect counts its own rays; the scene they trace and the hand-over to Direct3D 12 split evenly between "
-        "those working.");
+    const fxui::Page page(menu::Section::Budget);
     if (!page) return;
 
     drawPresets(wanted);
