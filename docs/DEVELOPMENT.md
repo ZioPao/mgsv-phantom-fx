@@ -250,7 +250,9 @@ reads state; the frame renders unchanged. Its files go into that folder:
   in `frame-<n>/` once their command list has run, so a list's textures are as it left them, not as
   each of its calls saw them. ` constants` after the count leaves the textures out. An indexed call
   also saves `<call>-vertices.txt`: each index's vertex (its first four floats) and the bounds in NDC
-  of those in front of the eye.
+  of those in front of the eye; and `<call>-streams.txt`: every other bound vertex buffer slot from
+  its offset, an element a line as floats (an instanced draw's per-instance data, such as the clone
+  shaders' matrix rows).
 - With Ray-traced lights on, a dev build's redraw of the lights saves what it draws from into the same
   folder, for each batch it draws: `lights-<n>-before-diffuse.dds` and `-specular` (the light targets),
   `-after-` the same once drawn, `-share.dds` (the rays' share, R16), `-depth.dds` (64 bits a pixel, the
@@ -900,7 +902,7 @@ level at Camp Omega's cliffs. No names in the exe: the class names here are desc
   the camera, name their brush at `+0xA0` (the brush's name object), keep their id at `+0xB8` (row x 64 +
   column) and their placements at `+0x98`: a range (begin, end), then 16-byte groups from begin + 24
   (the records' address, their count (16 bits), the plugin index (8), 1 (8), a type (32)), each record 24
-  bytes: Y (float), X and Z (16-bit, 256 a metre around the block's centre), the rotation (four halves,
+  bytes: Y (float), X and Z (16-bit, 255 a metre around the block's centre), the rotation (four halves,
   x y z w), the block's id, the plugin index and a scale byte (across the plugin's range), an id. The list
   ends in other data; only records naming their block and their group's plugin count. The grid was
   fitted in Afghanistan: 128 m blocks from (-4096, -4096); with it the placements' heights match across
@@ -908,7 +910,13 @@ level at Camp Omega's cliffs. No names in the exe: the class names here are desc
   point sit 1.6 m from it. Read in game 2026-10-23: 46,359 records in 234 groups of 25 blocks, each
   naming its block and group's plugin, none repeated. The first reading took the groups from begin + 16,
   which paired each count with the group before's records: 8,750 records were read twice and about
-  21,500 not at all (the shadow probe listed every bush crossed twice).
+  21,500 not at all (the shadow probe listed every bush crossed twice). The 255 to the metre was
+  measured 2026-10-25 in Africa against the game's own draws: a frame record with the clone shader's
+  draws dumped (their per-instance stream, `<call>-streams.txt`: three matrix rows, then 0 1 0 0) gave
+  794 instances, each with a record of the same rotation, scale and height; read as 255 to the metre,
+  all 794 sat where the game drew them (within the dump's 6 digits), read as 256, 2 did and the rest
+  up to 34 cm nearer the block's centre: the ray-traced scene's rocks missed the drawn ones, and sun
+  rays from a drawn rock's top started inside the scene's copy of it.
 - **Texture manager** (found 2026-10-23): the global `0x2B79B18` points to it (vtable `0x21046E8`). It
   keeps an array of 0x78-byte texture records, as many as its capacity (`+0x28`, 4881 in that run, `+0x2C`
   the count, 2649); a record's handle (`+0x40`, vtable `0x2104710`, 0x50 bytes) has the texture's path

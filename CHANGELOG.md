@@ -8,6 +8,9 @@
 - A first start, without a settings file, uses the Screen-space preset at Quality: DLSS on NVIDIA,
   FSR on other GPUs.
 - The left-hand list scrolls with the mouse wheel when the window is too short for it.
+- Fix scattered rocks and stones in the ray-traced scene sitting up to 34 cm from where the game
+  draws them: a rock's ray-traced shadow fell on its own top, and rocks cast shadows from empty
+  ground.
 
 ## 1.6.0
 
