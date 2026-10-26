@@ -1495,7 +1495,7 @@ close to the camera keep only the shadow near their feet.
 - **Soft contact shadows.** Two parts, both spatial: Bend's trace has no temporal accumulation to lean
   on, and it runs before the frame's TAA. `Coverage` swaps Bend's measure for RenoDX's. Instead of the
   gap between the receiver and the nearest surface, each sample counts when a surface lies *in front of*
-  the ray point (`saturate(sample - start + 1)`, unbounded), and the mean of those counts is the share of
+  the ray point and within four thickness windows of it, and the mean of those counts is the share of
   the ray that is blocked. That is what turns a silhouette into a graded penumbra, and it costs one
   compare and one add inside a loop that already runs. `Gain` scales that share before it is subtracted
   from one, because a shadowed ray is mostly empty space. `Soften` then spreads the mask with a five-tap
