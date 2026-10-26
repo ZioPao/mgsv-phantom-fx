@@ -115,6 +115,7 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/travel.cpp`, `src/travel.hpp` | The Developer page's travel: free roam in another map (see "Travel") |
 | `src/shadows.cpp`, `src/shadows.hpp` | Soft shadows and Bend Studio's screen-space shadows on the sun and the lamps: the traces and the light passes' replacement draws |
 | `src/shadows_shaders.hpp` | HLSL: Bend's trace ported to FXC, the game's sun light shaders rebuilt with soft shadows and the screen-space shadow |
+| `src/local_light_shaders.hpp` | HLSL: the game's point light shader rebuilt, with the light's own shadow map filtered by contact-hardening soft shadows |
 | `third_party/bend_sss/bend_sss_cpu.h` | Bend Studio's dispatch layout, unchanged (Apache License 2.0) |
 | `src/gi_scene.cpp`, `src/gi_scene.hpp` | The ray-traced scene on Direct3D 12: the geometry pool, bottom-level structures (a geometry per mesh, compacted), the geometry table, the frame's instances and top level (see "Ray-traced scene") |
 | `src/engine_scene.cpp`, `src/engine_scene.hpp` | The game's loaded models from its visibility managers, its characters from its model list, their FMDL meshes and base textures, its texture manager, the terrain's heightmap inputs (see "Scene objects") |
@@ -1489,6 +1490,33 @@ Not handled:
   the start of their shadow is found, and at 4K it reaches half as far in the world as at 1080p.
   The shadow map gives the rest.
 - Forward and transparent objects, drawn after the sun, neither cast nor receive the trace.
+
+## Soft local shadows
+
+With **Soft local shadows** on, a point light whose shader is `SSLighting2_Point` draws with the
+add-on's replacement (`src/local_light_shaders.hpp`) instead of the game's, and its own shadow map is
+filtered with contact-hardening soft shadows: sharp where the object meets the light, wider the
+further the shadow falls, as a real bulb's is.
+
+- **Why the shader and not the blend.** The add-on's other local-light work (the screen-space shadow,
+  the ray-traced lights) only *scales* the game's light through the targets' alpha. A soft shadow
+  cannot be added that way: the game's four comparisons have already decided the pixel is in shadow,
+  and scaling a zero leaves zero. The filter has to replace the comparison, so it replaces the shader.
+- **The body is the decompiled one** (renodx-mgsv's `SSLighting2_Point` port, itself from 3Dmigoto),
+  kept in its register form: rewriting 500 lines of register code into named variables risks a
+  transcription error that no test here would catch, and FXC folds the redundant moves away.
+- **Dual-paraboloid atlas.** The point light's shadow map is two hemispheres side by side; a texel
+  covers a different world size at a hemisphere's centre than at its rim, so the penumbra uses a
+  compromise scale, `3 x distance / hemisphereRes`, as renodx-mgsv does. The search radius is
+  `g_lampSearchTexels`, the penumbra's growth `g_lampHardening`, its widest `g_lampSoftness` (10 cm),
+  and how dark its core gets `g_lampDarkness`.
+- **Identified by checksum.** `shaderCreated` records the address of `SSLighting2_Point`
+  (`afbc12167037e4e0d653da184c7e3e82`) and the lighting draw matches on it; every other local light,
+  the points without specular and the spots among them, keeps the game's shader. The log says
+  "Identified the point light pass" and then "the point lights draw with soft shadows" once.
+
+Not handled yet: the spot lights' own contact hardening (their shadow map is a plain projection, so
+it is the easier of the two) and the point lights without specular, which have their own shader.
 
 ## Global illumination
 

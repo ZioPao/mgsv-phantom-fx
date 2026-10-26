@@ -311,6 +311,7 @@ void configureShadows()
         .turnPattern = replacing,
         .screenSpaceSun = enhancements && settings.sunScreenSpaceShadows && !leftOut.sunScreenSpaceShadows && !rayTraced,
         .screenSpaceLights = enhancements && settings.lightScreenSpaceShadows && !leftOut.lightScreenSpaceShadows && !rayTracedLights(),
+        .softLocalShadows = enhancements && settings.softLocalShadows && !rayTracedLights(),
         .rayTraced = rayTraced,
         .withShadowMap = settings.vanillaShadowsWithRayTracing,
         .onlyScreenSpace = diagnostics.onlyScreenSpaceShadows,

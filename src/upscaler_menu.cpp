@@ -218,6 +218,14 @@ void drawShadows(Settings& wanted)
                        "about a real 1980s weapon light against the game's night. Only the look: the guards see as before."});
     }
 
+    fxui::item({.id = "softLocalShadows",
+        .tag = "Experimental",
+        .tip = "Contact-hardening soft shadows from a point light's own shadow map: sharp where the light meets a surface, softer the further the "
+               "shadow falls, as the lamp's size gives. The game's own shader draws it, rebuilt, and only the point lights with a shadow map take it. "
+               "Off keeps the game's evenly sharp edges.",
+        .summary = "Point lights' shadows soften with distance, as a real lamp's do.",
+        .keywords = "PCSS lamp point light soft"});
+
     fxui::item({.id = "lampContactShadows",
         .tip = "Bend Studio's screen-space shadows for every lamp, spot light and flashlight, which gives lights that have no shadow of their own "
                "one. Costly: one trace per light, so the frame rate drops where many lights are on screen, as in a base at night.",

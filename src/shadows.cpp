@@ -4,6 +4,7 @@
 #include "game_lights.hpp"
 #include "gi_inputs.hpp"
 #include "global_illumination.hpp"
+#include "local_light_shaders.hpp"
 #include "log.hpp"
 #include "performance.hpp"
 #include "shader_bytecode.hpp"
@@ -44,6 +45,10 @@ constexpr const char* SunChecksums[]{
 };
 constexpr const char* SunNames[]{"shadow map", "far", "shadow map, rain", "far, rain"};
 static_assert(std::size(SunChecksums) == static_cast<std::size_t>(Sun::Count) && std::size(SunNames) == std::size(SunChecksums));
+
+// The game's point light with a shadow map and specular (SSLighting2_Point, game_lights.hpp), the only
+// local light the soft shadows replace so far. Its falloff is the quartic one.
+constexpr const char* PointShadowChecksum = "afbc12167037e4e0d653da184c7e3e82";
 
 bool shadowMapped(Sun sun)
 {
@@ -96,6 +101,17 @@ struct ShaderOptions
 };
 static_assert(sizeof(ShaderOptions) % 16 == 0);
 
+// cLampShadows (b6) of the point light replacement (src/local_light_shaders.hpp).
+struct LampOptions
+{
+    float soft, searchTexels, hardening, softness, darkness, padding[3];
+};
+static_assert(sizeof(LampOptions) % 16 == 0);
+
+// The penumbra's shape for the lamps, in metres and texels: a 10 cm softness at a 30 cm blocker
+// separation, 24 texels of search, as renodx-mgsv's point lights start.
+constexpr float LampSearchTexels = 24, LampHardening = 20, LampSoftness = 0.1f, LampDarkness = 1;
+
 // What the overlay asked for, and what the frame being recorded uses.
 std::mutex optionsMutex;
 Options wanted, current;
@@ -115,6 +131,12 @@ std::shared_mutex lightShaderMutex;
 std::unordered_map<IUnknown*, Falloff> lightShaders;
 std::vector<ComPtr<IUnknown>> lightShaderOwners;
 
+// The game's point light shader the soft shadows replace, read lock-free on every indexed draw; like
+// the sun's, a copy keeps its address from being reused.
+std::mutex pointShaderMutex;
+std::array<std::atomic<IUnknown*>, CopiesPerShader> pointShadowShaders{};
+std::array<ComPtr<IUnknown>, CopiesPerShader> pointShadowOwners;
+
 // The depth a context's recording traced the sun from since its last FinishCommandList: both parts
 // of the sun pass read the same shadow. And the light whose shadow a context's last stencil-marking
 // draw put in the light targets' alpha, by its position, for the lighting draw that follows.
@@ -131,8 +153,9 @@ ComPtr<ID3D11Device> device;
 ComPtr<ID3D11ComputeShader> traceShader;
 std::array<ComPtr<ID3D11PixelShader>, std::size(SunChecksums)> replacements;
 ComPtr<ID3D11PixelShader> lightShadowShader;
+ComPtr<ID3D11PixelShader> pointShadowShader;
 ComPtr<ID3D11SamplerState> borderSampler;
-ComPtr<ID3D11Buffer> parameterBuffer, optionsBuffer;
+ComPtr<ID3D11Buffer> parameterBuffer, optionsBuffer, lampOptionsBuffer;
 // The light shadow's draw: alpha only, over the whole light volume.
 ComPtr<ID3D11BlendState> alphaOnly;
 ComPtr<ID3D11DepthStencilState> noDepth;
@@ -161,6 +184,7 @@ bool ensurePipeline()
         }
 
         lightShadowShader = pixelShader(device.Get(), shaders::LightShadow, "light-shadow");
+        pointShadowShader = pixelShader(device.Get(), shaders::PointLight, "point-light-shadows");
 
         D3D11_SAMPLER_DESC sampler{};
         sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
@@ -171,6 +195,7 @@ bool ensurePipeline()
 
         parameterBuffer = makeConstantBuffer(device.Get(), sizeof(Parameters), "Creating the shadow trace constants");
         optionsBuffer = makeConstantBuffer(device.Get(), sizeof(ShaderOptions), "Creating the sun shadow options");
+        lampOptionsBuffer = makeConstantBuffer(device.Get(), sizeof(LampOptions), "Creating the lamp shadow options");
 
         D3D11_BLEND_DESC blend{};
         blend.RenderTarget[0].SrcBlend = blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
@@ -198,6 +223,7 @@ bool ensurePipeline()
     {
         pipelineFailed = true;
         traceShader.Reset();
+        pointShadowShader.Reset();
         log(std::string("Shadows unavailable: ") + error.what());
 
         return false;
@@ -233,6 +259,17 @@ std::optional<Falloff> falloffOf(IUnknown* shader)
     if (found == lightShaders.end()) return std::nullopt;
 
     return found->second;
+}
+
+// Whether `shader` is the game's point light the soft local shadows replace.
+bool isPointShadowShader(IUnknown* shader)
+{
+    if (!shader) return false;
+
+    for (const auto& copy : pointShadowShaders)
+        if (copy.load(std::memory_order_relaxed) == shader) return true;
+
+    return false;
 }
 
 // What this thread wrote to the light pass's cPSScene (b2) and cPSLight (b3), each at its full size.
@@ -417,6 +454,13 @@ void writeOptions(ID3D11DeviceContext* context, const Options& options, bool ray
     check(write(context, optionsBuffer.Get(), values), "Writing the sun shadow options");
 }
 
+// Writes the point light replacement's options on `context`; call with resourceMutex held.
+void writeLampOptions(ID3D11DeviceContext* context)
+{
+    const LampOptions values{1, LampSearchTexels, LampHardening, LampSoftness, LampDarkness, {}};
+    check(write(context, lampOptionsBuffer.Get(), values), "Writing the lamp shadow options");
+}
+
 // The game's additive light blend (ONE, ONE) with its light scaled by the target's alpha, which it
 // keeps; null for any other blend. Call with resourceMutex held.
 ID3D11BlendState* shadowedBlend(ID3D11BlendState* game)
@@ -531,7 +575,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
 // shadow is traced within the light's reach, and the light's volume drawn once more, both faces and
 // without depth test, to put the shadow in the alpha of both light targets wherever the light can
 // reach. The lighting draw that follows then scales its light by that alpha.
-bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Falloff falloff)
+bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Falloff falloff, const Options& options)
 {
     ComPtr<ID3D11BlendState> gameBlend;
     float blendFactor[4]{};
@@ -542,6 +586,11 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     D3D11_BLEND_DESC blend{};
     gameBlend->GetDesc(&blend);
     const bool marking = blend.RenderTarget[0].RenderTargetWriteMask == 0;
+
+    // The alpha the screen-space shadow puts the light's dimming in is marked on the game's own
+    // marking draw; with that option off, the game draws the marking draw as it always does.
+    if (marking && !options.screenSpaceLights) return false;
+
     const auto constants = passConstants(context);
     if (!constants)
     {
@@ -556,19 +605,50 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     const std::array position{light[LightPosition], light[LightPosition + 1], light[LightPosition + 2]};
     if (!marking)
     {
-        if (!takeMarked(context, position)) return false;
+        // The lighting draw: the game's own, scaled by the alpha the marking draw left when the
+        // screen-space shadow is on, or with the soft shadows' replacement of the point light.
+        ComPtr<ID3D11PixelShader> gameShader;
+        context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
+        bool soft = options.softLocalShadows && isPointShadowShader(gameShader.Get());
+        const bool alphaMarked = takeMarked(context, position);
+        if (!soft && !alphaMarked) return false;
 
         std::lock_guard lock(resourceMutex);
-        auto* shadowed = shadowedBlend(gameBlend.Get());
-        if (!shadowed)
+        if (soft && !ensurePipeline()) soft = false;
+
+        ID3D11BlendState* shadowed{};
+        if (alphaMarked)
         {
-            logOnce("Shadows: a light with another blend than (one, one) keeps the game's shadows.");
-            return false;
+            shadowed = shadowedBlend(gameBlend.Get());
+            if (!shadowed)
+            {
+                logOnce("Shadows: a light with another blend than (one, one) keeps the game's shadows.");
+                return false;
+            }
         }
 
-        context->OMSetBlendState(shadowed, blendFactor, sampleMask);
+        ComPtr<ID3D11Buffer> gameOptions;
+        if (shadowed) context->OMSetBlendState(shadowed, blendFactor, sampleMask);
+        if (soft)
+        {
+            context->PSGetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
+            writeLampOptions(context);
+            context->PSSetShader(pointShadowShader.Get(), nullptr, 0);
+            context->PSSetConstantBuffers(OptionsSlot, 1, lampOptionsBuffer.GetAddressOf());
+        }
+
+        performance::Timed timed(context, performance::Pass::LampShadows);
         context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
-        context->OMSetBlendState(gameBlend.Get(), blendFactor, sampleMask);
+        timed.end();
+
+        if (soft)
+        {
+            context->PSSetShader(gameShader.Get(), nullptr, 0);
+            context->PSSetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
+            logOnce("Shadows: the point lights draw with soft shadows.");
+        }
+
+        if (shadowed) context->OMSetBlendState(gameBlend.Get(), blendFactor, sampleMask);
 
         return true;
     }
@@ -646,7 +726,7 @@ void attach(ID3D11Device* gameDevice) noexcept
     bool wantedOn;
     {
         std::lock_guard lock(optionsMutex);
-        wantedOn = wanted.soft || wanted.screenSpaceSun || wanted.screenSpaceLights || wanted.rayTraced;
+        wantedOn = wanted.soft || wanted.screenSpaceSun || wanted.screenSpaceLights || wanted.softLocalShadows || wanted.rayTraced;
     }
 
     std::lock_guard lock(resourceMutex);
@@ -660,9 +740,11 @@ void detach() noexcept
     traceShader.Reset();
     for (auto& replacement : replacements) replacement.Reset();
     lightShadowShader.Reset();
+    pointShadowShader.Reset();
     borderSampler.Reset();
     parameterBuffer.Reset();
     optionsBuffer.Reset();
+    lampOptionsBuffer.Reset();
     alphaOnly.Reset();
     noDepth.Reset();
     bothFaces.Reset();
@@ -690,6 +772,13 @@ void detach() noexcept
             sunShaders[sun][i] = nullptr;
             shaderOwners[sun][i].Reset();
         }
+
+    std::lock_guard pointLock(pointShaderMutex);
+    for (std::size_t i = 0; i < CopiesPerShader; ++i)
+    {
+        pointShadowShaders[i] = nullptr;
+        pointShadowOwners[i].Reset();
+    }
 }
 
 void configure(const Options& options) noexcept
@@ -699,7 +788,7 @@ void configure(const Options& options) noexcept
         wanted = options;
     }
 
-    if (!options.soft && !options.screenSpaceSun && !options.screenSpaceLights && !options.rayTraced) return;
+    if (!options.soft && !options.screenSpaceSun && !options.screenSpaceLights && !options.softLocalShadows && !options.rayTraced) return;
 
     std::lock_guard lock(resourceMutex);
     ensurePipeline();
@@ -735,6 +824,20 @@ void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcep
     const auto* light = findGameLight(text);
     if (!light) return;
 
+    if (text == PointShadowChecksum)
+    {
+        std::lock_guard lock(pointShaderMutex);
+        for (std::size_t i = 0; i < CopiesPerShader; ++i)
+        {
+            if (pointShadowShaders[i].load()) continue;
+
+            pointShadowOwners[i] = shader;
+            pointShadowShaders[i] = shader;
+            log("Identified the point light pass (SSLighting2_Point) for the soft local shadows.");
+            break;
+        }
+    }
+
     try
     {
         std::unique_lock lock(lightShaderMutex);
@@ -766,7 +869,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
 
         if (sun != Sun::None) return drawSun(context, call, sun, gameShader.Get(), options);
 
-        return options.screenSpaceLights && drawLocalLight(context, call, *falloff);
+        return (options.screenSpaceLights || options.softLocalShadows) && drawLocalLight(context, call, *falloff, options);
     }
     catch (const std::exception& error)
     {
@@ -798,7 +901,7 @@ void present() noexcept
     frame.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard lock(optionsMutex);
     current = wanted;
-    active = (current.soft || current.screenSpaceSun || current.screenSpaceLights || current.rayTraced) && !pipelineFailed;
+    active = (current.soft || current.screenSpaceSun || current.screenSpaceLights || current.softLocalShadows || current.rayTraced) && !pipelineFailed;
     gi_inputs::keepLightPassConstants(active && (current.screenSpaceSun || current.screenSpaceLights));
 }
 }

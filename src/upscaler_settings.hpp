@@ -63,6 +63,9 @@ struct Settings
     // whatever the mode. Apart because the lights' cost grows with how many are on screen.
     bool sunScreenSpaceShadows{};
     bool lightScreenSpaceShadows{};
+    // Contact-hardening soft shadows from a point light's own shadow map (shadows.hpp), in place of the
+    // game's four evenly sharp comparisons. Its own option: the shader it replaces is the game's.
+    bool softLocalShadows{};
     // The sun's ray-traced shadows through the global illumination's scene (shadows.hpp), whatever
     // the mode; soft shadows and sun contact shadows are off while it is on. Uses the sun size. With
     // vanilla shadows the game's shadow map adds its shadow near the camera: the darker of the two.

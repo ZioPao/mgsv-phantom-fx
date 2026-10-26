@@ -1,5 +1,12 @@
 # Phantom FX changelog
 
+## Unreleased
+
+- Add **Soft local shadows** (Experimental): point lights with a shadow map filter it with
+  contact-hardening soft shadows instead of the game's four evenly sharp comparisons, so a lamp's
+  shadow is sharp where it meets a surface and widens with distance. Off by default; reuses the
+  soft shadows' options in a rebuilt `SSLighting2_Point`.
+
 ## 1.8.0
 
 This release focuses on fixing and improving the visuals of the prologue's hospital.

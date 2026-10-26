@@ -243,6 +243,7 @@ Settings loadSettings(const std::filesystem::path& path)
         else if (key == "sun_size") readFloat(value, settings.sunSize, Settings::MinSunSize, Settings::MaxSunSize);
         else if (key == "sun_screen_space_shadows") readFlag(value, settings.sunScreenSpaceShadows);
         else if (key == "light_screen_space_shadows") readFlag(value, settings.lightScreenSpaceShadows);
+        else if (key == "soft_local_shadows") readFlag(value, settings.softLocalShadows);
         else if (key == "ray_traced_shadows") readFlag(value, settings.rayTracedShadows);
         else if (key == "vanilla_shadows_with_ray_tracing") readFlag(value, settings.vanillaShadowsWithRayTracing);
         else if (key == "ray_traced_lights") readFlag(value, settings.rayTracedLights);
@@ -317,7 +318,8 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
                << "\nunlock_fps=" << settings.unlockFps << "\nframe_generation=" << FrameGenerationKeys[static_cast<std::size_t>(settings.frameGeneration)]
                << "\nsoft_shadows=" << settings.softShadows << "\nsun_size=" << settings.sunSize
                << "\nsun_screen_space_shadows=" << settings.sunScreenSpaceShadows
-               << "\nlight_screen_space_shadows=" << settings.lightScreenSpaceShadows << "\nray_traced_shadows=" << settings.rayTracedShadows
+               << "\nlight_screen_space_shadows=" << settings.lightScreenSpaceShadows
+                << "\nsoft_local_shadows=" << settings.softLocalShadows << "\nray_traced_shadows=" << settings.rayTracedShadows
                << "\nvanilla_shadows_with_ray_tracing=" << settings.vanillaShadowsWithRayTracing
                << "\nray_traced_lights=" << settings.rayTracedLights << "\nray_quality=" << settings.rayQuality
                << "\nflashlight_brightness=" << settings.flashlightBrightness
