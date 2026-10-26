@@ -188,12 +188,12 @@ void contactShadowShape(Settings& wanted)
         {.min = Settings::MinContactShadowThickness, .max = Settings::MaxContactShadowThickness,
             .standard = Defaults.contactShadowThickness, .format = "%.1f%%", .shown = 100,
             .tip = "How deep a surface has to be behind the receiver to count as a contact. Bend Studio's 0.5% is thin: the trace only sees something sitting almost exactly at the receiver's depth, which is why its contact shadows are so tight. Raising it widens what counts, and darkens and softens every contact."});
-    fxui::slider("Soft contact edge", wanted.contactShadowSoften,
-        {.min = Settings::MinContactShadowSoften, .max = Settings::MaxContactShadowSoften, .standard = Defaults.contactShadowSoften,
-            .format = "%.0f px",
-            .tip = "How far the trace's mask is spread before the lights read it, in pixels of the render size. The trace writes a hard 0 or 1 at "
-                   "every pixel and the lights take it as it is, so this is what turns an edge into a gradient. 1 is enough to lose the stair step, "
-                   "0 keeps Bend Studio's own edge."});
+    fxui::slider("Contact shadow fade", wanted.contactShadowFade,
+        {.min = Settings::MinContactShadowFade, .max = Settings::MaxContactShadowFade, .standard = Defaults.contactShadowFade,
+            .format = "%.0f m",
+            .tip = "How far away the contact shadows reach, in metres. Full strength underfoot, then a straight fade to nothing by this distance, "
+                   "where the shadow map is the better tool. RenoDX fades them the same way; without it they stay as sharp at a hundred metres as at "
+                   "your feet."});
     if (wanted.contactShadowSoft)
         fxui::slider("Soft contact gain", wanted.contactShadowGain,
             {.min = Settings::MinContactShadowGain, .max = Settings::MaxContactShadowGain, .standard = Defaults.contactShadowGain, .format = "%.1fx",

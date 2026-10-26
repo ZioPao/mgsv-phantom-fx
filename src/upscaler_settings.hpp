@@ -38,8 +38,8 @@ struct Settings
     static constexpr float MinContactShadowContrast = 1.0f, MaxContactShadowContrast = 8.0f, DefaultContactShadowContrast = 1.0f;
     static constexpr float MinContactShadowReach = 8.0f, MaxContactShadowReach = 120.0f, DefaultContactShadowReach = 80.0f;
     static constexpr float MinContactShadowGain = 1.0f, MaxContactShadowGain = 24.0f, DefaultContactShadowGain = 1.0f;
-    static constexpr float MinContactShadowSoften = 0.0f, MaxContactShadowSoften = 4.0f, DefaultContactShadowSoften = 0.0f;
     static constexpr float MinContactShadowThickness = 0.005f, MaxContactShadowThickness = 0.1f, DefaultContactShadowThickness = 0.005f;
+    static constexpr float MinContactShadowFade = 50.0f, MaxContactShadowFade = 250.0f, DefaultContactShadowFade = 100.0f;
     static constexpr float MinFNumber = 0.7f, MaxFNumber = 32.0f, DefaultFNumber = 1.4f;
     static constexpr int DefaultRayQuality = 4;
     static constexpr int DefaultGlobalIlluminationRays = 2;
@@ -78,11 +78,11 @@ struct Settings
     // How far the coverage reaches full darkness, since a shadowed ray spends most of its length in empty
     // space: a mean over the samples is small, and this scales it back up.
     float contactShadowGain{DefaultContactShadowGain};
-    // How far the softening pass spreads the mask's edges, in pixels. 0 leaves Bend's edge alone.
-    float contactShadowSoften{DefaultContactShadowSoften};
     // How deep a sample counts as a caster, as a share of the depth between it and the far plane. Bend's
     // own 0.5% is thin: a contact has to sit almost exactly at the receiver's depth to register.
     float contactShadowThickness{DefaultContactShadowThickness};
+    // Where the contact shadows fade out, in metres of view depth: full underfoot, gone past this.
+    float contactShadowFade{DefaultContactShadowFade};
     // Contact-hardening soft shadows from a point or spot light's own shadow map (shadows.hpp), in
     // place of the game's four evenly sharp comparisons. Its own option: the shaders it replaces are
     // the game's.

@@ -44,6 +44,9 @@ struct DispatchParameters
     float Gain;                         // How far that share reaches full darkness: a shadowed ray spends most
                                         // of its length in empty space, so the mean is small
 
+    float2 Projection;                  // B, A: view Z from the reversed depth
+    float2 Fade;                        // Metres: the contact shadow fades out between these
+
     bool IgnoreEdgePixels;              // If an edge is detected, the edge pixel will not contribute to the shadow.
                                         // If a very flat surface is being lit and rendered at an grazing angles, the edge detect may incorrectly detect multiple 'edge' pixels along that flat surface.
                                         // In these cases, the grazing angle of the light may subsequently produce aliasing artefacts in the shadow where these incorrect edges were detected.
@@ -81,6 +84,8 @@ struct DispatchParameters
         Reach                       = SAMPLE_COUNT;
         Coverage                    = 0;
         Gain                        = 1;
+        Projection                  = float2(1, 0);
+        Fade                        = float2(0, 0);
         IgnoreEdgePixels            = false;
         UsePrecisionOffset          = false;
         BilinearSamplingOffsetMode  = false;
@@ -432,6 +437,15 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
     // If the first samples are always producing a hard shadow, then compute this value separately.
     result = min(hard_shadow, result);
 
+    // Distance fade. Past this range the shadow map is the right tool and the trace has too little of the
+    // caster on screen to be trusted, so the contact shadow thins out instead of staying as sharp at 60 m
+    // as it is underfoot. RenoDX fades the same way; Bend's shader has no fade at all.
+    {
+        const float viewZ = inParameters.Projection.x / max(sampling_depth[0] - inParameters.Projection.y, 1e-6);
+        const float fade = saturate((inParameters.Fade.y - viewZ) / max(inParameters.Fade.y - inParameters.Fade.x, 1e-3));
+        result = lerp(1.0, result, fade);
+    }
+
     // Coverage: the share of the ray that lies inside a surface, in place of the gap to the nearest one.
     // renodx-mgsv's march counts the samples that hit something and divides; this is the same measure in
     // Bend's window units, so a pixel the ray only grazes comes out partly shadowed instead of either
@@ -477,6 +491,8 @@ cbuffer Parameters : register(b0)
     int2 BoundsMax;
     float Coverage;         // 1: coverage rather than the gap to the nearest surface
     float Gain;             // How far the coverage reaches full darkness
+    float2 Projection;      // B, A: view Z from the reversed depth
+    float2 Fade;            // Metres: start and end of the distance fade
 };
 Texture2D<float> Depth : register(t0);
 RWTexture2D<unorm float> Shadow : register(u0);
@@ -493,6 +509,8 @@ void main(int3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
     parameters.Reach = Reach;
     parameters.Coverage = Coverage;
     parameters.Gain = Gain;
+    parameters.Projection = Projection;
+    parameters.Fade = Fade;
     // Skips the sky, which is at the far plane, and for a local light what it cannot reach.
     parameters.UseEarlyOut = true;
     parameters.DepthBounds = DepthBounds;

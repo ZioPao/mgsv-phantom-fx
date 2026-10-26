@@ -104,6 +104,8 @@ struct Parameters
     float depthBounds[2];
     std::int32_t boundsMin[2], boundsMax[2];
     float coverage, gain; // 1: the trace counts coverage instead of the nearest gap
+    float projection[2];  // B, A: view Z from the reversed depth
+    float fade[2];        // Metres: start and end of the distance fade
 };
 static_assert(sizeof(Parameters) % 16 == 0);
 
@@ -354,6 +356,20 @@ std::array<float, 4> project(const float* scene, const float (&light)[4])
         projection[3] * light[2] + projection[2] * light[3], light[2]};
 }
 
+// B and A of the light pass's projection, for the view Z the trace computes from the depth it reads:
+// viewZ = B / (depth - A), the same pair the sun's replacement shaders use.
+std::array<float, 2> viewProjection(const PassConstants& constants)
+{
+    const float* projection = constants.scene.data() + ProjectionParam;
+    return {projection[2], projection[3]};
+}
+
+// Where the contact shadows fade out, in metres of view depth: full underfoot, gone by the setting.
+constexpr float ContactFadeStart = 40;
+std::array<float, 2> fadeRange(const Options& options)
+{
+    return {ContactFadeStart, std::max(options.contactFade, ContactFadeStart + 1)};
+}
 // The width and height of the depth buffer `view` shows; throws when it is not a 2D texture, as the
 // trace needs one.
 std::array<int, 2> depthSize(ID3D11ShaderResourceView* view)
@@ -405,7 +421,8 @@ std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 
 // stays lit. Call with resourceMutex held. Returns Bend's dispatch list.
 Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth,
     std::array<float, 4> lightProjection, const std::optional<TraceBounds>& bounds, ShadowTarget& target, float contrast, float reach,
-    float coverage, float gain, ShadowTarget& softened, float soften, float thickness)
+    float coverage, float gain, ShadowTarget& softened, float soften, float thickness, const std::array<float, 2>& projection,
+    const std::array<float, 2>& fade)
 {
     auto size = depthSize(depth);
     ensureShadowTarget(target, static_cast<UINT>(size[0]), static_cast<UINT>(size[1]));
@@ -444,6 +461,8 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
         parameters.reach = std::clamp(reach, 1.0f, MaxReach);
         parameters.coverage = std::clamp(coverage, 0.0f, 1.0f);
         parameters.gain = std::clamp(gain, 1.0f, 24.0f);
+        std::memcpy(parameters.projection, projection.data(), sizeof(parameters.projection));
+        std::memcpy(parameters.fade, fade.data(), sizeof(parameters.fade));
         parameters.depthBounds[0] = covered.depthMin;
         parameters.depthBounds[1] = covered.depthMax;
         std::memcpy(parameters.boundsMin, covered.min, sizeof(parameters.boundsMin));
@@ -605,7 +624,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
             const float* direction = &constants->light[LightDirection];
             const auto lightProjection = project(constants->scene.data(), {direction[0], direction[1], direction[2], 0});
             const auto where = describe(trace(context, depth.Get(), lightProjection, {}, sunShadow, options.contactContrast, options.contactReach,
-            options.contactSoft ? 1.0f : 0.0f, options.contactGain, sunSoftened, options.contactSoften, options.contactThickness));
+            options.contactSoft ? 1.0f : 0.0f, options.contactGain, sunSoftened, 0.0f, options.contactThickness, viewProjection(*constants), fadeRange(options)));
             noteTraced(context, depth.Get());
             if (!tracedSunOnce)
             {
@@ -750,7 +769,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     if (std::abs(point[2]) < MinLightDepth) point[2] = std::copysign(MinLightDepth, point[2]);
     performance::Timed timed(context, performance::Pass::LampTraces);
     const auto dispatches = trace(context, depth.Get(), project(scene, point), bounds, lightShadow, options.contactContrast, options.contactReach,
-        options.contactSoft ? 1.0f : 0.0f, options.contactGain, lightSoftened, options.contactSoften, options.contactThickness);
+        options.contactSoft ? 1.0f : 0.0f, options.contactGain, lightSoftened, 0.0f, options.contactThickness, viewProjection(*constants), fadeRange(options));
     timed.end();
     if (dispatches.DispatchCount == 0) return false;
 

@@ -249,8 +249,6 @@ Settings loadSettings(const std::filesystem::path& path)
         else if (key == "contact_shadow_soft") readFlag(value, settings.contactShadowSoft);
         else if (key == "contact_shadow_thickness")
             readFloat(value, settings.contactShadowThickness, Settings::MinContactShadowThickness, Settings::MaxContactShadowThickness);
-        else if (key == "contact_shadow_soften")
-            readFloat(value, settings.contactShadowSoften, Settings::MinContactShadowSoften, Settings::MaxContactShadowSoften);
         else if (key == "contact_shadow_gain")
             readFloat(value, settings.contactShadowGain, Settings::MinContactShadowGain, Settings::MaxContactShadowGain);
         else if (key == "contact_shadow_reach")
@@ -334,7 +332,7 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
                 << "\ncontact_shadow_reach=" << settings.contactShadowReach
                 << "\ncontact_shadow_soft=" << settings.contactShadowSoft
                 << "\ncontact_shadow_thickness=" << settings.contactShadowThickness
-                << "\ncontact_shadow_soften=" << settings.contactShadowSoften
+                << "\ncontact_shadow_fade=" << settings.contactShadowFade
                 << "\ncontact_shadow_gain=" << settings.contactShadowGain
                 << "\nsoft_local_shadows=" << settings.softLocalShadows << "\nray_traced_shadows=" << settings.rayTracedShadows
                << "\nvanilla_shadows_with_ray_tracing=" << settings.vanillaShadowsWithRayTracing
