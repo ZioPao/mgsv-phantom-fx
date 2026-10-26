@@ -161,7 +161,10 @@ ComPtr<ID3D11ShaderResourceView> objectVelocity;
 bool objectVelocityDrawn{};
 ComPtr<ID3D11Texture2D> objectVelocityCopy;
 std::optional<Sky> sky;
+// The last sun pass's sun, while each frame has one: a frame without (indoors) has no sun. Until
+// 2026-10-26 it was kept, and the main menu's daytime sun lit a night-time hospital through its windows.
 std::optional<Sun> sun;
+bool sunSincePresent{};
 std::array<float, 4> shadowRange{};
 ComPtr<ID3D11ShaderResourceView> normals, albedo;
 ComPtr<ID3D11ComputeShader> packShader;
@@ -577,12 +580,14 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     frame.sunTangent = std::tan(options.sunSize * 0.5f * 3.14159265f / 180);
     frame.debugShadows = shadowDebug != nullptr;
     frame.shadowStarts = options.shadowStarts;
+    frame.twoSidedShadows = options.twoSidedShadows;
     frame.lightRays = static_cast<std::uint32_t>(std::clamp(options.lightPixelRays, 1, 4));
     // The lights' colours in the sun's units for the hits (gi_light.hlsl, LocalLightAt).
     for (auto& localLight : localLightsToTrace)
         for (auto& value : localLight.color) value *= LightScale;
     frame.localLights = std::move(localLightsToTrace);
     frame.localLightRays = static_cast<std::uint32_t>(options.lightRays);
+    frame.probeLights = options.debugShadows;
     frame.waitValue = inputsReady;
     frame.signalValue = ++fenceValue;
     const auto result = gi_renderer::render(frame);
@@ -951,7 +956,11 @@ ID3D11ShaderResourceView* lightDebug(UINT width, UINT height) noexcept
 
 std::string shadowProbe()
 {
-    return gi_renderer::shadowProbe();
+    auto text = gi_renderer::shadowProbe();
+    const auto lamps = gi_renderer::lightProbe();
+    if (!text.empty() && !lamps.empty()) text += "\n";
+
+    return text + lamps;
 }
 
 ID3D11ShaderResourceView* sunShadow(UINT width, UINT height) noexcept
@@ -1037,7 +1046,12 @@ void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
 
     gi_inputs::executing(list);
     if (noted.sky) sky = noted.sky;
-    if (noted.sun) sun = noted.sun;
+    if (noted.sun)
+    {
+        sun = noted.sun;
+        sunSincePresent = true;
+    }
+
     if (noted.shadowRange) shadowRange = *noted.shadowRange;
     if (noted.normals) normals = noted.normals;
     if (noted.albedo) albedo = noted.albedo;
@@ -1085,6 +1099,8 @@ void present() noexcept
     {
         std::lock_guard lock(executionMutex);
         objectVelocityDrawn = false;
+        // The next frame's kick lights with this frame's sun, so none when this frame had no sun pass.
+        if (!std::exchange(sunSincePresent, false)) sun.reset();
     }
 
     Options options;

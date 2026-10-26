@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -131,12 +132,58 @@ void main(float4 position : SV_Position, out float4 diffuse : SV_Target0, out fl
 }
 )";
 
+// A light's volume's bounds in the world, from the copy of its indices and vertices (clip space, as the
+// game drew it) through the inverse of the light pass's m_projectionView.
+constexpr char BoundsSource[] = R"(
+cbuffer Bounds : register(b0)
+{
+    float4 ClipToWorld[4]; // Rows applied as dot(row, v)
+    uint4 Volume;          // x: 1 for 32-bit indices, y: the vertices' stride, z: where they start, w: how many indices
+    uint4 Slot;            // x: the light's place in Bounds
+};
+
+ByteAddressBuffer Drawn : register(t0);
+RWStructuredBuffer<float4> Bounds : register(u0); // Two a light: lowest, highest
+
+[numthreads(1, 1, 1)]
+void main()
+{
+    float3 lowest = 1e30, highest = -1e30;
+    for (uint i = 0; i < Volume.w; ++i)
+    {
+        uint index = Volume.x ? Drawn.Load(i * 4) : (Drawn.Load((i * 2) & ~3u) >> ((i % 2) * 16)) & 0xFFFF;
+        float4 clip = asfloat(Drawn.Load4(Volume.z + index * Volume.y));
+        float4 world = float4(dot(ClipToWorld[0], clip), dot(ClipToWorld[1], clip), dot(ClipToWorld[2], clip), dot(ClipToWorld[3], clip));
+        float3 corner = world.xyz / world.w;
+        lowest = min(lowest, corner);
+        highest = max(highest, corner);
+    }
+
+    Bounds[Slot.x * 2] = float4(lowest, 1.0);
+    Bounds[Slot.x * 2 + 1] = float4(highest, 1.0);
+}
+)";
+
 struct PassConstants
 {
     float viewToUv[4];
     std::uint32_t shadow[4];
     std::uint32_t volume[4];
 };
+
+struct BoundsConstants
+{
+    float clipToWorld[4][4];
+    std::uint32_t volume[4];
+    std::uint32_t slot[4];
+};
+
+// A light's volume's bounds in the world are worked out as it is drawn and read back this many frames
+// later, by light (keyOf): the global illumination's bounce and the rays' picks keep it within them, as
+// the game does. The game's lights hold still, so the last frame's bounds are this frame's.
+constexpr std::uint32_t BoundsReadbacks = 3;
+// The bounds a light's volume had: lowest, then highest corner.
+using Bounds = std::array<float, 6>;
 
 // A light's volume as its draws had it bound (a box, for a spot its cone within one), copied: the game
 // lights only within it (docs/DEVELOPMENT.md, "Ray-traced lights", "Within the game's volume").
@@ -180,6 +227,7 @@ Options wanted;
 // loading screens, without one, keep the game's.
 std::atomic<bool> enabled{}, active{};
 std::atomic<float> flashlightBrightness{1};
+std::atomic<BeyondVolumes> beyondVolumes{};
 
 // The game's light shaders by the object it draws with, looked up on every indexed draw, and the twins
 // that draw them again. Holding them keeps their addresses from being reused.
@@ -210,6 +258,19 @@ bool pipelineFailed{};
 // The frame's lights from the lists run so far, and whether a list with a draw point has run.
 std::vector<Light> frameLights;
 bool drawPointRan{};
+// The volumes' bounds: the shader and its output, its copies on their way back, the lights each holds by
+// slot, and this frame's so far.
+ComPtr<ID3D11ComputeShader> boundsShader;
+ComPtr<ID3D11Buffer> boundsConstants, boundsBuffer;
+ComPtr<ID3D11UnorderedAccessView> boundsAccess;
+std::array<ComPtr<ID3D11Buffer>, BoundsReadbacks> boundsReadbacks;
+std::array<std::vector<std::uint64_t>, BoundsReadbacks> readbackLights;
+std::vector<std::uint64_t> frameBoundsLights;
+std::uint32_t boundsFrame{};
+
+// The bounds read back, by light; taken at the kick.
+std::mutex boundsMutex;
+std::unordered_map<std::uint64_t, Bounds> volumeBounds;
 
 // Diagnostics, logged every ten seconds: lights drawn with their shadow and without it (recorded after
 // the kick, or the shadow not traced), those of them drawn without their volume, left to the next frame's
@@ -269,6 +330,22 @@ bool ensurePipeline()
         sceneBuffer = makeConstantBuffer(device.Get(), SceneConstants * 4, "Creating the lights' scene constants");
         lightBuffer = makeConstantBuffer(device.Get(), LightConstants * 4, "Creating the lights' light constants");
         materialBuffer = makeConstantBuffer(device.Get(), MaterialConstants * 4, "Creating the lights' material constants");
+
+        boundsShader = computeShader(device.Get(), BoundsSource, "light-volume-bounds");
+        boundsConstants = makeConstantBuffer(device.Get(), sizeof(BoundsConstants), "Creating the lights' bounds constants");
+        D3D11_BUFFER_DESC bounds{};
+        bounds.ByteWidth = GI_MAX_LOCAL_LIGHTS * 2 * 16;
+        bounds.Usage = D3D11_USAGE_DEFAULT;
+        bounds.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        bounds.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        bounds.StructureByteStride = 16;
+        check(device->CreateBuffer(&bounds, nullptr, boundsBuffer.ReleaseAndGetAddressOf()), "Creating the lights' bounds");
+        check(device->CreateUnorderedAccessView(boundsBuffer.Get(), nullptr, boundsAccess.ReleaseAndGetAddressOf()), "Viewing the lights' bounds");
+        bounds.Usage = D3D11_USAGE_STAGING;
+        bounds.BindFlags = 0;
+        bounds.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        for (auto& readback : boundsReadbacks)
+            check(device->CreateBuffer(&bounds, nullptr, readback.ReleaseAndGetAddressOf()), "Creating the lights' bounds readback");
 
         // Last, so it marks a complete pipeline.
         const auto fullScreenCode = compile(FullScreenSource, "light-full-screen", "vs_5_0");
@@ -455,13 +532,58 @@ std::array<float, 3> normalized(std::array<float, 3> v)
     return v;
 }
 
+// How far along a shadow-mapped spot's axis the game's shadow map starts: where m_shadowProjection gives
+// the map's near depth, 1 (its depth is reversed: cleared to 0, tested greater-equal). Nothing nearer the
+// light is in the map, so the game's shadows never see the recess its lamp sits in; the corridor's lamps
+// in the prologue's hospital sit 13 cm above its ceiling, in a box the rays met 0.3 to 0.6 m short of
+// them (the lamp probe, 2026-10-26). 0 without a shadow map, or where the projection gives none within
+// the light's reach.
+float shadowMapStart(const Light& light)
+{
+    if (!light.game->shadowMap || light.game->shape != Shape::Spot) return 0;
+
+    const float* depthRow = &light.scene[ShadowProjection + 2 * 4];
+    const float* wRow = &light.scene[ShadowProjection + 3 * 4];
+    const float* position = &light.light[LightPosition];
+    const auto axis = normalized({light.light[LightAxis], light.light[LightAxis + 1], light.light[LightAxis + 2]});
+    const auto atLight = [&](const float* row) { return row[0] * position[0] + row[1] * position[1] + row[2] * position[2] + row[3]; };
+    const auto alongAxis = [&](const float* row) { return row[0] * axis[0] + row[1] * axis[1] + row[2] * axis[2]; };
+    const float start = (atLight(wRow) - atLight(depthRow)) / (alongAxis(depthRow) - alongAxis(wRow));
+
+    return std::isfinite(start) && start > 0 && start < rangeOf(light.light.data(), *light.game) ? start : 0;
+}
+
+// A light the same from frame to frame: its kind, where it is in the world to the centimetre, and its colour.
+std::uint64_t keyOf(const Light& light)
+{
+    const auto at = toWorld(light, &light.light[LightPosition], 1);
+    std::uint64_t key = reinterpret_cast<std::uintptr_t>(light.game);
+    const auto mix = [&](std::uint64_t value) { key = (key ^ value) * 0x100000001B3ull; };
+    for (const float coordinate : at) mix(static_cast<std::uint64_t>(std::llround(coordinate * 100)));
+    for (int i = 0; i < 3; ++i) mix(std::bit_cast<std::uint32_t>(light.light[LightColor + i]));
+
+    return key;
+}
+
+// The bounds of the light's volume as read back, if they have come back yet. A flashlight's moves with it.
+std::optional<Bounds> volumeBoundsOf(const Light& light)
+{
+    if (light.game->flashlight) return std::nullopt;
+
+    std::lock_guard lock(boundsMutex);
+    const auto found = volumeBounds.find(keyOf(light));
+    if (found == volumeBounds.end()) return std::nullopt;
+
+    return found->second;
+}
+
 gi_renderer::LocalLight forRays(const Light& light)
 {
     const bool spot = light.game->shape == Shape::Spot;
     const bool sixteenth = light.game->falloff == Falloff::Sixteenth;
     const float* falloff = &light.light[LightFalloff];
 
-    return {.position = toWorld(light, &light.light[LightPosition], 1),
+    gi_renderer::LocalLight rays{.position = toWorld(light, &light.light[LightPosition], 1),
         .axis = spot ? normalized(toWorld(light, &light.light[LightAxis], 0)) : std::array<float, 3>{0, 1, 0},
         .range = rangeOf(light.light.data(), *light.game),
         .cosOuter = spot ? light.light[LightUmbra] : PointCone,
@@ -474,7 +596,16 @@ gi_renderer::LocalLight forRays(const Light& light)
         .factor = sixteenth ? falloff[2] : falloff[3],
         .addedDistance = spot ? 0 : falloff[0],
         .leastDistance = spot ? 0 : light.material[LeastDistance],
-        .radius = !light.game->shadowMap && light.light[LightSize] > 0 ? light.light[LightSize] : BulbRadius};
+        .radius = !light.game->shadowMap && light.light[LightSize] > 0 ? light.light[LightSize] : BulbRadius,
+        .shadowStart = shadowMapStart(light)};
+    if (const auto bounds = volumeBoundsOf(light))
+    {
+        rays.volumeLowest = {(*bounds)[0], (*bounds)[1], (*bounds)[2]};
+        rays.volumeHighest = {(*bounds)[3], (*bounds)[4], (*bounds)[5]};
+        rays.volumeKnown = true;
+    }
+
+    return rays;
 }
 
 // Drawn for the frame `camera` draws: the same eye, within a millimetre. Lists recorded before the kick
@@ -538,6 +669,8 @@ void drawAgain(const Light& light)
     const auto& volume = light.volume;
     if (!volume.view) ++drawnWithoutVolume;
 
+    const auto beyond = beyondVolumes.load(std::memory_order_relaxed);
+    const bool withinVolume = volume.view && beyond != BeyondVolumes::All && !(beyond == BeyondVolumes::ShadowMapped && light.game->shadowMap);
     const auto& viewport = light.viewport;
     const PassConstants pass{{viewport.Width / static_cast<float>(width), viewport.Height / static_cast<float>(height),
                                  viewport.TopLeftX / static_cast<float>(width), viewport.TopLeftY / static_cast<float>(height)},
@@ -559,7 +692,7 @@ void drawAgain(const Light& light)
     immediate->PSSetConstantBuffers(0, 1, passBuffer.GetAddressOf());
     immediate->PSSetShaderResources(0, 2, shadowResources);
     immediate->OMSetBlendState(alphaOnly.Get(), nullptr, 0xFFFFFFFF);
-    if (volume.view)
+    if (withinVolume)
     {
         immediate->VSSetShader(volumeShader.Get(), nullptr, 0);
         immediate->VSSetShaderResources(0, 1, volume.view.GetAddressOf());
@@ -588,7 +721,81 @@ void drawAgain(const Light& light)
     immediate->PSSetSamplers(FirstSampler, SamplerCount, samplers.data());
     immediate->PSSetConstantBuffers(FirstConstants, 3, lightConstants);
     immediate->OMSetBlendState(shadowed.Get(), nullptr, 0xFFFFFFFF);
-    immediate->Draw(volume.view ? volume.count : 3, 0);
+    immediate->Draw(withinVolume ? volume.count : 3, 0);
+}
+
+// The world-space bounds of the frame's lights' volumes into boundsBuffer, a slot each, for present to read
+// back into volumeBounds. Call with resourceMutex held, the pipeline made.
+void measureVolumes()
+{
+    bool bound{};
+    for (const auto& light : frameLights)
+    {
+        const auto& volume = light.volume;
+        if (!volume.view || light.game->flashlight || frameBoundsLights.size() >= GI_MAX_LOCAL_LIGHTS) continue;
+
+        camera::Matrix projectionView{};
+        for (std::size_t i = 0; i < projectionView.size(); ++i) projectionView[i] = light.scene[i];
+        const auto clipToWorld = camera::inverse(projectionView);
+        BoundsConstants constants{{}, {volume.wideIndices ? 1u : 0u, volume.stride, VolumeVertexStart, volume.count},
+            {static_cast<std::uint32_t>(frameBoundsLights.size()), 0, 0, 0}};
+        for (std::size_t i = 0; i < clipToWorld.size(); ++i) constants.clipToWorld[i / 4][i % 4] = static_cast<float>(clipToWorld[i]);
+        check(write(immediate, boundsConstants.Get(), constants), "Writing the lights' bounds constants");
+        if (!bound)
+        {
+            immediate->CSSetShader(boundsShader.Get(), nullptr, 0);
+            immediate->CSSetConstantBuffers(0, 1, boundsConstants.GetAddressOf());
+            immediate->CSSetUnorderedAccessViews(0, 1, boundsAccess.GetAddressOf(), nullptr);
+            bound = true;
+        }
+
+        immediate->CSSetShaderResources(0, 1, volume.view.GetAddressOf());
+        immediate->Dispatch(1, 1, 1);
+        frameBoundsLights.push_back(keyOf(light));
+    }
+
+    if (!bound) return;
+
+    ID3D11ShaderResourceView* noView{};
+    ID3D11UnorderedAccessView* noAccess{};
+    ID3D11Buffer* noConstants{};
+    immediate->CSSetShaderResources(0, 1, &noView);
+    immediate->CSSetUnorderedAccessViews(0, 1, &noAccess, nullptr);
+    immediate->CSSetConstantBuffers(0, 1, &noConstants);
+    immediate->CSSetShader(nullptr, nullptr, 0);
+}
+
+// The bounds measured this frame on their way back, and those of a frame BoundsReadbacks - 1 ago into
+// volumeBounds once the GPU is past them. Call with resourceMutex held.
+void readVolumeBounds()
+{
+    if (!boundsBuffer) return;
+
+    const auto slot = boundsFrame++ % BoundsReadbacks;
+    if (!frameBoundsLights.empty())
+    {
+        immediate->CopyResource(boundsReadbacks[slot].Get(), boundsBuffer.Get());
+        readbackLights[slot] = std::move(frameBoundsLights);
+    }
+    else readbackLights[slot].clear();
+    frameBoundsLights.clear();
+
+    const auto oldest = (slot + 1) % BoundsReadbacks;
+    auto& lights = readbackLights[oldest];
+    if (lights.empty()) return;
+
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(immediate->Map(boundsReadbacks[oldest].Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped))) return;
+
+    const auto* corners = static_cast<const float*>(mapped.pData);
+    {
+        std::lock_guard lock(boundsMutex);
+        for (std::size_t i = 0; i < lights.size(); ++i)
+            volumeBounds[lights[i]] = {corners[i * 8], corners[i * 8 + 1], corners[i * 8 + 2], corners[i * 8 + 4], corners[i * 8 + 5], corners[i * 8 + 6]};
+    }
+
+    immediate->Unmap(boundsReadbacks[oldest].Get(), 0);
+    lights.clear();
 }
 
 // Developer: while F10 records a frame, what the lights are drawn from and into, in the frame's dump
@@ -622,7 +829,11 @@ void saveForRecord(const std::filesystem::path& folder, int batch, const char* w
         list << light.game->checksum << (light.traced ? " traced" : " untraced") << (light.volume.view ? " volume " : " no volume ")
              << light.volume.count << " at " << at[0] << ' ' << at[1] << ' ' << at[2] << " way " << way[0] << ' ' << way[1] << ' ' << way[2]
              << " colour " << light.light[LightColor] << ' ' << light.light[LightColor + 1] << ' ' << light.light[LightColor + 2] << " range "
-             << rangeOf(light.light.data(), *light.game) << " eye " << light.scene[Eye] << ' ' << light.scene[Eye + 1] << ' ' << light.scene[Eye + 2] << '\n';
+             << rangeOf(light.light.data(), *light.game) << " shadow map from " << shadowMapStart(light);
+        if (const auto bounds = volumeBoundsOf(light))
+            list << " volume from " << (*bounds)[0] << ' ' << (*bounds)[1] << ' ' << (*bounds)[2] << " to " << (*bounds)[3] << ' ' << (*bounds)[4] << ' '
+                 << (*bounds)[5];
+        list << " eye " << light.scene[Eye] << ' ' << light.scene[Eye + 1] << ' ' << light.scene[Eye + 2] << '\n';
     }
 }
 
@@ -654,6 +865,7 @@ void drawFrameLights()
 
         for (const auto& light : frameLights) drawAgain(light);
 
+        measureVolumes();
         if (!record.empty()) saveForRecord(record, recordBatch++, "after");
 
         // The draws reading the volumes are queued: a list that copies into one again runs after them.
@@ -735,6 +947,13 @@ void detach() noexcept
         sceneBuffer.Reset();
         lightBuffer.Reset();
         materialBuffer.Reset();
+        boundsShader.Reset();
+        boundsConstants.Reset();
+        boundsBuffer.Reset();
+        boundsAccess.Reset();
+        for (auto& readback : boundsReadbacks) readback.Reset();
+        for (auto& lights : readbackLights) lights.clear();
+        frameBoundsLights.clear();
         frameLights.clear();
         drawPointRan = false;
         device.Reset();
@@ -753,6 +972,11 @@ void detach() noexcept
         spareVolumes.clear();
     }
 
+    {
+        std::lock_guard lock(boundsMutex);
+        volumeBounds.clear();
+    }
+
     std::unique_lock lock(shaderMutex);
     gameShaders.clear();
     shaderOwners.clear();
@@ -767,6 +991,7 @@ void configure(const Options& options) noexcept
     }
 
     flashlightBrightness = options.flashlightBrightness;
+    beyondVolumes = options.beyondVolumes;
 
     if (!options.enabled) return;
 
@@ -827,6 +1052,9 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
         context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
         const auto* game = gameLightOf(gameShader.Get());
         if (!game || isBeam(context, *game)) return false;
+
+        // A smaller camera's light, as the intro mirror's: the rays trace the main view only.
+        if (!viewportFillsTarget(context)) return false;
 
         // The stencil-marking draw writes no colour: drawn as the game does, but here, so that lamp
         // contact shadows (shadows.hpp) do not trace a light the rays shadow.
@@ -981,10 +1209,14 @@ void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
     {
     }
 
-    // The first list with a draw point comes after the game's lights, and waits for the rays: the lights so
-    // far are drawn before it. Any in a list after it are drawn at once.
-    drawPointRan |= noted.drawPoint;
-    if (drawPointRan) drawFrameLights();
+    // A list with a draw point comes after the game's lights, and waits for the rays: the lights so far are
+    // drawn before it. Never at once in a later list: that list has not run yet, so neither have the copies
+    // of its lights' volumes, nor has the immediate context waited for the rays a later kick traced. A
+    // second camera, as the intro's mirror, draws its lights after the first camera's draw point.
+    if (!noted.drawPoint) return;
+
+    drawPointRan = true;
+    drawFrameLights();
 }
 
 void present() noexcept
@@ -996,6 +1228,7 @@ void present() noexcept
         frameLights.clear();
         sawDrawPoint = drawPointRan;
         drawPointRan = false;
+        if (immediate) readVolumeBounds();
     }
 
     {

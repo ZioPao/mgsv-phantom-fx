@@ -378,6 +378,19 @@ std::string outputStates(ID3D11DeviceContext* context)
     if (desc.DepthEnable && desc.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL) text += " write";
     if (desc.StencilEnable) text += " stencil ref " + std::to_string(stencilReference);
 
+    // Which faces the draw culls, and which winding is its front (without a state: back faces, clockwise).
+    ID3D11RasterizerState* rasterizer{};
+    context->RSGetState(&rasterizer);
+    D3D11_RASTERIZER_DESC raster{D3D11_FILL_SOLID, D3D11_CULL_BACK};
+    if (rasterizer)
+    {
+        rasterizer->GetDesc(&raster);
+        rasterizer->Release();
+    }
+
+    text += raster.CullMode == D3D11_CULL_NONE ? " | cull none" : raster.CullMode == D3D11_CULL_FRONT ? " | cull front" : " | cull back";
+    if (raster.FrontCounterClockwise) text += " ccw";
+
     return text;
 }
 

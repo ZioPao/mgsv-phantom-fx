@@ -47,6 +47,11 @@ struct LocalLight
     float factor{};
     float addedDistance{}, leastDistance{}; // A point's: its distance is at least the least, plus the added
     float radius{};                         // Its shadow rays spread over a disc this wide around it
+    float shadowStart{};                    // A shadow-mapped spot's: how far along its axis the game's shadow map starts; 0 for none
+    // The bounds in the world of the game's volume for it (its box, a spot's cone within one), when known:
+    // its light stops there, as the game's does.
+    std::array<float, 3> volumeLowest{}, volumeHighest{};
+    bool volumeKnown{};
 };
 
 using Matrix = std::array<float, 16>; // Rows applied as dot(row, v), as the engine's
@@ -66,6 +71,7 @@ struct ModelPart
     std::uint32_t group{};
     bool alphaTested{};
     bool leaf{}; // Leaves, which let light through (GI_GEOMETRY_LEAF)
+    bool castsNoShadow{}; // The game draws it in the main view only, never into its shadow maps (GI_GEOMETRY_NO_SHADOW)
     std::uint64_t baseTexture{};
     bool textureIsMask{};
     std::vector<Vertex> vertices;
@@ -77,8 +83,9 @@ struct ModelPart
     // and a skinned mesh's palette slots, the model's bone in each (VSBones' g_vsBone, gi_inputs::DrawnBones).
     std::uint32_t firstIndex{}, indexCount{};
     std::vector<std::uint16_t> boneGroup;
-    // Diagnostics (the shadow probe): the FMDL mesh's alpha and shadow bytes.
+    // Diagnostics (the shadow probe): the FMDL mesh's alpha and shadow bytes, and its material's technique.
     std::uint8_t alphaBits{}, shadowBits{};
+    std::uint64_t technique{};
 };
 
 // Diagnostics (the shadow probe): a mesh of a model file the scene leaves out, with its alpha and shadow bytes.
@@ -86,6 +93,7 @@ struct LeftOutMesh
 {
     std::uint32_t mesh{};
     std::uint8_t alphaBits{}, shadowBits{};
+    std::uint64_t technique{};
 };
 
 // A model the game has loaded (engine_scene.hpp): its meshes the scene takes; a skinned model's bones.
@@ -108,11 +116,13 @@ struct SceneTexture
     std::uint32_t mips{};
 };
 
-// One placement of a model, by its hash.
+// One placement of a model, by its hash, and its mesh groups (ModelPart::group, the first 64) the game
+// hides, a bit each.
 struct ModelInstance
 {
     std::uint64_t hash{};
     Transform transform{};
+    std::uint64_t hiddenGroups{};
 };
 
 // One of the game's characters (engine_scene.hpp): a skinned model in the pose the game gives it this
@@ -178,11 +188,13 @@ struct Frame
     // screen's centre (shadowProbe).
     bool debugShadows{};
     bool shadowStarts{};     // The debug view: where the shadow rays leave each pixel (ShadowStartColor)
+    bool twoSidedShadows{};  // Diagnostics: rays towards lights blocked by every surface from both sides, as until 2026-10-26
     std::uint32_t lightRays{2}; // The light's rays a light pixel, 1 to 4 (TraceLight)
     // The point and spot lights whose shadows go into textures.localLightShadow, at most GI_MAX_LOCAL_LIGHTS,
     // and the rays a pixel they take.
     std::vector<LocalLight> localLights;
     std::uint32_t localLightRays{1};
+    bool probeLights{}; // Diagnostics: the lamp probe at the screen's centre (lightProbe), sun or none
     std::uint64_t waitValue{}, signalValue{}; // On the shared fence
 };
 
@@ -212,4 +224,7 @@ std::string status();
 // For the overlay: the latest shadow probe as text, a few frames old; empty while the debug view is
 // off. Logged by itself whenever what blocks the probe's sun ray changes.
 std::string shadowProbe();
+// The same of the lamp probe: the strongest point and spot lights at the screen's centre and what blocks
+// each; logged whenever those change.
+std::string lightProbe();
 }

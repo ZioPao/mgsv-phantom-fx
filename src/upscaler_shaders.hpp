@@ -138,6 +138,12 @@ float4 main(float4 position : SV_Position) : SV_Target
             float4 rays = ShadowRays.Load(int3(position.xy * float2(raysWidth, raysHeight) / float2(width, height), 0));
             color = lerp(color, rays.rgb, rays.a);
         }
+
+        // The probes' pixel, the screen's centre, sun or none: indoors only the lamps' probe runs, and
+        // without a sun the rays' view stays empty.
+        int2 fromCentre = int2(position.xy) - int2(uint2(width, height) / 2);
+        bool onCross = (abs(fromCentre.x) <= 1 && abs(fromCentre.y) <= 18) || (abs(fromCentre.y) <= 1 && abs(fromCentre.x) <= 18);
+        if ((DebugView == 3 || DebugView == 5) && onCross) color = 1;
     }
 
     return float4(color, 0);

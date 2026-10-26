@@ -343,9 +343,11 @@ void configureIndirectLight()
         .localLights = tracedLights, .lightRays = settings.rayQuality, .sunSize = settings.sunSize, .lightPixelRays = settings.globalIlluminationRays,
         .showScene = diagnostics.showTracedScene,
         .debugShadows = diagnostics.debugView == ShadowRaysView || diagnostics.debugView == ShadowStartsView,
-        .shadowStarts = diagnostics.debugView == ShadowStartsView, .debugHistory = diagnostics.debugView == LightHistoryView,
+        .shadowStarts = diagnostics.debugView == ShadowStartsView, .twoSidedShadows = diagnostics.twoSidedShadows,
+        .debugHistory = diagnostics.debugView == LightHistoryView,
         .logOften = diagnostics.logGlobalIlluminationOften, .light = !leftOut.globalLight});
-    local_lights::configure({.enabled = tracedLights, .flashlightBrightness = settings.flashlightBrightness});
+    local_lights::configure({.enabled = tracedLights, .flashlightBrightness = settings.flashlightBrightness,
+        .beyondVolumes = static_cast<local_lights::BeyondVolumes>(std::clamp(diagnostics.lightVolumes, 0, 2))});
 }
 
 // Call with settingsMutex held.
@@ -522,7 +524,10 @@ void sceneWritten(camera::SceneConstants& scene)
         startFrame();
     }
 
-    if (kind == camera::SceneView::MainCamera && !frame.view) frame.view = camera::viewOf(scene);
+    // The frame's largest camera view: a mirror's reflection is drawn first, and smaller (the intro's,
+    // 1080x608 of a 2560x1440 frame, 2026-10-26).
+    const float area = scene.c[22][0] * scene.c[22][1];
+    if (kind == camera::SceneView::MainCamera && (!frame.view || area > frame.view->width * frame.view->height)) frame.view = camera::viewOf(scene);
     if (frame.jittered) camera::applyJitter(scene, camera::jitterNdc(frame.jitter, scene.c[22][0], scene.c[22][1]));
 }
 

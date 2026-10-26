@@ -30,7 +30,7 @@ enum class Kernel : std::uint8_t
     ClearCounters, GenerateDispatch, PrepareGuides, TraceLight, LearnAlbedo, PurgeTiles, PopulateMultibounceCells, PopulateCells, UpdateTiles,
     UpdateMultibounceCells, ResolveLight, UpdateFoliageMemory, CompositeLight,
     // gi_shadow.hlsl, gi_shadow_filter.hlsl
-    TraceSunShadows, ClassifyShadowTiles, FilterShadows, DebugShadows, ProbeShadows, TraceLocalLightShadows, FilterLocalLightShadows,
+    TraceSunShadows, ClassifyShadowTiles, FilterShadows, DebugShadows, ProbeShadows, TraceLocalLightShadows, FilterLocalLightShadows, ProbeLocalLights,
     Count
 };
 

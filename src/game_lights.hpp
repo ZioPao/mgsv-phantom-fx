@@ -88,9 +88,11 @@ inline const GameLight* findGameLight(std::string_view checksum)
 }
 
 // cPSScene (b2, camera::SceneConstants), in floats: c8 to c10 take the light passes' view space to the
-// world, c20 is the eye, c21 the projection's parameters (1 / P00, 1 / P11, B, A), c28 the jitter in NDC.
+// world, c12 to c15 (m_shadowProjection) a shadow-mapped light's view space to its shadow map, rows applied
+// as dot(row, v), c20 is the eye, c21 the projection's parameters (1 / P00, 1 / P11, B, A), c28 the jitter
+// in NDC.
 constexpr std::uint32_t SceneConstantsSize = sizeof(camera::SceneConstants); // Bytes
-constexpr std::size_t ViewToWorld = 8 * 4, Eye = 20 * 4, ProjectionParam = 21 * 4, CenterOffset = 28 * 4;
+constexpr std::size_t ViewToWorld = 8 * 4, ShadowProjection = 12 * 4, Eye = 20 * 4, ProjectionParam = 21 * 4, CenterOffset = 28 * 4;
 // cPSLight (b3), in floats, view space: c0 the way towards the sun (the sun passes), c3 the light, c4 its
 // colour and size, c5 the way a spot points, c6 its falloff, c7 a spot's cone (x the cosine past which it
 // cuts its light off, y 1 / its penumbra, z the exponent), c8.x its specular's scale.

@@ -31,6 +31,7 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 #define GI_GEOMETRY_ALPHA_TEXTURE 4u // A cut-out geometry with its texture: the rays test its alpha (GIGeometry::alphaThreshold)
 #define GI_GEOMETRY_MASK          8u // Its texture is a shadow-only mesh's mask: its alpha cuts, its colour is not the mesh's
 #define GI_GEOMETRY_LEAF          16u // Leaves (the object brush's bushes and grass): thin, they let light through (HitDirectLight)
+#define GI_GEOMETRY_NO_SHADOW     32u // The game never casts with it (a rigid model's main-view-only mesh): rays towards lights pass it (StopsShadowRay)
 
 // The game's textures the scene holds at most (g_SceneTextures, gi_textures.hpp).
 #define GI_MAX_TEXTURES 4096u
@@ -111,6 +112,9 @@ struct GILocalLight
     float4 color;    // rgb: its colour (c4) times the global illumination's light scale; w: its falloff's factor (c6.z, or c6.w for SSLighting2)
     float4 falloff;  // x: 1 for (1 - d^16 c6.z) / d^2 (Lighting_*_NA), 0 for 1 / d^2 - d^2 c6.w (SSLighting2_*); y: a point's added distance (c6.x);
                      // z: a point's least distance (cPSMaterial c7.x); w: the radius its shadow rays spread over
+    float4 shadow;   // x: a spot the game shadows with a shadow map: how far along its axis that map starts, metres; 0 for none
+    float4 volumeLow;  // xyz: the lowest corner in the world of the game's volume for it (its box, a spot's cone within one); w: 1 when known
+    float4 volumeHigh; // xyz: its highest corner
 };
 
 struct GIFrameConstants
@@ -140,7 +144,7 @@ struct GIFrameConstants
     float4 shadowRange;  // The game's shadow map range (cPSLight): x: centre depth (c8.x); y: start distance (c8.y); z: fade rate (c6.x); w: 1 once known
     float4 shadowParams; // x: tangent of the sun's angular radius (SunSample); y: how much sun an alpha-tested mesh blocks; z: ray length; w: 1 on a fresh start
     uint4 objectMotion;  // x: 1 when g_ObjectVelocity (gi_common.hlsli) holds this frame's velocity of the game's moving meshes
-    uint4 shadowDiagnostics; // y: 1 for the debug view of where the shadow rays leave (ShadowStartColor)
+    uint4 shadowDiagnostics; // x: 1 for every surface casting from both sides (ShadowFaces); y: 1 for the debug view of where the shadow rays leave (ShadowStartColor)
     uint4 lightDiagnostics;  // z: 1 for the denoiser's history into g_LightDebug (CompositeLight)
     // The game's terrain (TerrainGrid in gi_scene.hlsl): a world point is (u, height, v) x scale +
     // offset, u and v its virtual heightmap coordinates; the page table's converter (the terrain
@@ -216,6 +220,26 @@ struct GIShadowProbe
     uint4 startHit;  // On the scene's own surface, its triangle: x its instance + 1, y its geometry, z its primitive; w the
                      // primitive of the whole ray's first hit (hits.w)
     uint4 crossed;   // The first thing between the lifted start and the surface, from the start, as lightNearest; zeros for none
+};
+
+// The lamp probe: the point and spot lights at the screen's centre pixel, each with a ray from there to
+// its centre as their shadow rays trace them (ProbeLocalLights in gi_shadow.hlsl); the strongest
+// GI_PROBE_LIGHTS kept, most light first. Works with or without a sun.
+#define GI_PROBE_LIGHTS 6u
+#define GI_PROBE_LIGHT_HITS 4u
+struct GILightProbe
+{
+    float4 receiver; // xyz: the centre pixel's surface, world space; w: its distance from the eye, 0 for the sky
+    float4 share;    // x: the share of the lights' light the rays to their centres let through; y: the filtered share the light
+                     // pass reads there; z: all the lights' light there without shadows (luminance); w: how many lights light it
+    float4 start;    // Where the rays leave (ShadowSurfaceAt): xyz the scene surface's point less the depth's; w 1 on the scene's own surface
+    uint4 startHit;  // That surface, as GIShadowProbe::lightNearest; zeros at the depth's point
+    uint4 view;      // The camera's ray through the centre pixel, as the scene view traces it (GIShadowProbe::view)
+    float4 lights[GI_PROBE_LIGHTS]; // x: the light's index in the frame + 1, 0 for none; y: its light there without shadows
+                                    // (luminance); z: how far its centre is; w: where the ray to it is blocked, metres, or -1
+    // What blocks that ray, as GIShadowProbe::lightNearest, and what lies past it towards the light, GI_PROBE_LIGHT_HITS a
+    // light; zeros past the last
+    uint4 hits[GI_PROBE_LIGHTS * GI_PROBE_LIGHT_HITS];
 };
 
 // D3D12_RAYTRACING_INSTANCE_DESC: the frame's instances as the top level holds them, which the

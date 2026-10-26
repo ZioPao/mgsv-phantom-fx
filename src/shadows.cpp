@@ -458,9 +458,9 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
     context->PSGetShaderResources(SpecularSlot, 1, specular.GetAddressOf());
 
     // The ray-traced shadow at the depth's size, once Direct3D 12 has traced one; until then the
-    // game's shadows stay.
+    // game's shadows stay. The rays trace the main view only, not a smaller camera's (a mirror's).
     ID3D11ShaderResourceView* rayTraced{};
-    if (options.rayTraced && depth)
+    if (options.rayTraced && depth && viewportFillsTarget(context))
     {
         const auto size = depthSize(depth.Get());
         rayTraced = global_illumination::sunShadow(static_cast<UINT>(size[0]), static_cast<UINT>(size[1]));
