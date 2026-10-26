@@ -184,6 +184,12 @@ void contactShadowShape(Settings& wanted)
         "Counts the share of the trace's ray that lies inside a surface instead of how far the nearest one is from the surface, so a ray that "
         "only grazes an edge comes out partly shadowed and the contact edges read soft, as the screen-space shadows do in renodx-mgsv. It "
         "changes their shape rather than their strength; off keeps Bend Studio's own result.");
+    if (wanted.contactShadowSoft)
+        fxui::slider("Soft contact gain", wanted.contactShadowGain,
+            {.min = Settings::MinContactShadowGain, .max = Settings::MaxContactShadowGain, .standard = Defaults.contactShadowGain, .format = "%.1fx",
+                .tip = "How far the coverage reaches full darkness. A shadowed ray spends most of its length in empty space, so the share that lies "
+                       "inside something is small; this scales it back up. Higher is darker and closes the soft edge in, lower keeps the edge but "
+                       "never gets dark."});
 }
 
 void drawShadows(Settings& wanted)

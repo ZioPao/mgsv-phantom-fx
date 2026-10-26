@@ -41,6 +41,9 @@ struct DispatchParameters
     float Coverage;                     // 1: count the share of the ray that lies inside a surface, rather than
                                         // the gap to the nearest one, so a grazed edge reads soft
 
+    float Gain;                         // How far that share reaches full darkness: a shadowed ray spends most
+                                        // of its length in empty space, so the mean is small
+
     bool IgnoreEdgePixels;              // If an edge is detected, the edge pixel will not contribute to the shadow.
                                         // If a very flat surface is being lit and rendered at an grazing angles, the edge detect may incorrectly detect multiple 'edge' pixels along that flat surface.
                                         // In these cases, the grazing angle of the light may subsequently produce aliasing artefacts in the shadow where these incorrect edges were detected.
@@ -77,6 +80,7 @@ struct DispatchParameters
         ShadowContrast              = 4;
         Reach                       = SAMPLE_COUNT;
         Coverage                    = 0;
+        Gain                        = 8;
         IgnoreEdgePixels            = false;
         UsePrecisionOffset          = false;
         BilinearSamplingOffsetMode  = false;
@@ -430,7 +434,7 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
     // contact shadow rather than their strength.
     if (inParameters.Coverage > 0 && covered > 0)
     {
-        const float cover = saturate(1 - coverSum / (float)covered);
+        const float cover = saturate((1 - coverSum / (float)covered) * inParameters.Gain);
         result = lerp(result, saturate(cover * inParameters.ShadowContrast + (1 - inParameters.ShadowContrast)),
             saturate(inParameters.Coverage));
     }
@@ -463,6 +467,7 @@ cbuffer Parameters : register(b0)
     int2 BoundsMin;         // The pixels BuildDispatchList covers, for the light shadow shader
     int2 BoundsMax;
     float Coverage;         // 1: coverage rather than the gap to the nearest surface
+    float Gain;             // How far the coverage reaches full darkness
 };
 Texture2D<float> Depth : register(t0);
 RWTexture2D<unorm float> Shadow : register(u0);
@@ -478,6 +483,7 @@ void main(int3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
     parameters.ShadowContrast = ShadowContrast;
     parameters.Reach = Reach;
     parameters.Coverage = Coverage;
+    parameters.Gain = Gain;
     // Skips the sky, which is at the far plane, and for a local light what it cannot reach.
     parameters.UseEarlyOut = true;
     parameters.DepthBounds = DepthBounds;
