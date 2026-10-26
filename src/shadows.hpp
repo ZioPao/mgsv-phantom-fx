@@ -39,7 +39,7 @@ struct Options
     float contactReach{80};   // How far the trace marches, in pixels of the render size
     bool contactSoft{};       // The trace counts coverage rather than the nearest gap, so edges read soft
     float contactGain{1};     // How far that coverage reaches full darkness
-    float contactSoften{1};   // Pixels the mask's edges are spread by; 0 leaves Bend's edge alone
+    float contactSoften{0};   // Pixels the mask's edges are spread by; 0 leaves Bend's edge alone
     float contactThickness{0.005f}; // How deep a sample counts as a caster, as a share of its depth to the far plane
     bool softLocalShadows{};  // Contact-hardening soft shadows from a point light's own shadow map
     bool rayTraced{};         // The sun's ray-traced shadows: the rays alone shadow the sun

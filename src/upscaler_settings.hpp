@@ -38,7 +38,7 @@ struct Settings
     static constexpr float MinContactShadowContrast = 1.0f, MaxContactShadowContrast = 8.0f, DefaultContactShadowContrast = 1.0f;
     static constexpr float MinContactShadowReach = 8.0f, MaxContactShadowReach = 120.0f, DefaultContactShadowReach = 80.0f;
     static constexpr float MinContactShadowGain = 1.0f, MaxContactShadowGain = 24.0f, DefaultContactShadowGain = 1.0f;
-    static constexpr float MinContactShadowSoften = 0.0f, MaxContactShadowSoften = 4.0f, DefaultContactShadowSoften = 1.0f;
+    static constexpr float MinContactShadowSoften = 0.0f, MaxContactShadowSoften = 4.0f, DefaultContactShadowSoften = 0.0f;
     static constexpr float MinContactShadowThickness = 0.005f, MaxContactShadowThickness = 0.1f, DefaultContactShadowThickness = 0.005f;
     static constexpr float MinFNumber = 0.7f, MaxFNumber = 32.0f, DefaultFNumber = 1.4f;
     static constexpr int DefaultRayQuality = 4;
