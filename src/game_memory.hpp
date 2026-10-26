@@ -32,6 +32,28 @@ template<class T> std::optional<T> read(std::uintptr_t from) noexcept
     return value;
 }
 
+// Writes the game's own memory, for the settings the add-on takes over: false when the address
+// cannot be written.
+inline bool writeRaw(std::uintptr_t to, const void* from, std::size_t size) noexcept
+{
+    if (to < 0x10000 || to > 0x7FFFFFFF0000ull || size > 0x7FFFFFFF0000ull - to) return false;
+
+    __try
+    {
+        std::memcpy(reinterpret_cast<void*>(to), from, size);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+template<class T> bool write(std::uintptr_t to, const T& value) noexcept
+{
+    return writeRaw(to, &value, sizeof(T));
+}
+
 // Whether an object's first word is this vtable (an address in the game's image).
 inline bool isA(std::uintptr_t object, std::uintptr_t vtable) noexcept
 {

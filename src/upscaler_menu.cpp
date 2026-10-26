@@ -355,6 +355,20 @@ void drawDisplay(Settings& wanted)
         .keywords = "fps 60 cap limit",
         .toggle = &wanted.unlockFps,
         .state = wanted.unlockFps ? State::Working : State::Off});
+
+    if (const fxui::Item item({.id = "motionBlur",
+            .name = "Motion blur",
+            .tip = "The game's own motion blur, drawn by the engine at the speed and radius its graphics setting asks for, with the upscaler on "
+                   "too. Off leaves it out whatever the game's setting says.",
+            .summary = "The game's own motion blur, at the strength below.",
+            .keywords = "motion blur strength smear trail shutter",
+            .toggle = &wanted.motionBlur,
+            .state = wanted.motionBlur ? State::Working : State::Off});
+        item)
+        fxui::slider("Strength", wanted.motionBlurStrength,
+            {.max = Settings::MaxMotionBlurStrength, .standard = Defaults.motionBlurStrength, .format = "%.0f%%", .shown = 100,
+                .tip = "How far each pixel's motion smears, against what the game's graphics setting asks for: 100% the game's own, 0% none, "
+                       "200% twice as far."});
 }
 
 // "06:30" for a time in hours.

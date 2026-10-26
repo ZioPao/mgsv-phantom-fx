@@ -397,6 +397,18 @@ void photoModeSettingsPersist(const fs::path& root)
     expect(saveRejected(path, chosen, Settings{.fNumber = 64}), "An invalid f-stop cannot replace a valid saved one.");
 }
 
+// The engine's motion blur toggle and strength persist, and the strength is clamped.
+void motionBlurSettingsPersist(const fs::path& root)
+{
+    const auto path = root / L"PhantomFX-motion-blur.ini";
+    const Settings chosen{.motionBlur = false, .motionBlurStrength = 1.5f};
+    saveSettings(path, chosen);
+    expect(loadSettings(path) == chosen, "Restart restores the motion blur toggle and its strength.");
+
+    write(path, "motion_blur_strength=9\n");
+    expect(loadSettings(path).motionBlurStrength == Settings::MaxMotionBlurStrength, "The motion blur strength is clamped.");
+}
+
 void hdrSettingsPersist(const fs::path& root)
 {
     const auto path = root / L"PhantomFX-hdr.ini";
@@ -555,6 +567,7 @@ int main()
         jitterSequence();
         photoModeSettingsPersist(root);
         hdrSettingsPersist(root);
+        motionBlurSettingsPersist(root);
         outputSaturation();
         globalIlluminationSettingsPersist(root);
         rangesComeBack();

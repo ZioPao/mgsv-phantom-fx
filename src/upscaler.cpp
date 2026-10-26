@@ -367,6 +367,7 @@ void configureEffects()
     configureShadows();
     configureIndirectLight();
     configureAtmosphere();
+    motion_blur::configure(settings.motionBlur, settings.motionBlurStrength);
 }
 
 // Call with settingsMutex held.
