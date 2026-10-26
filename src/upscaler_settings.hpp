@@ -69,6 +69,9 @@ struct Settings
     bool lightScreenSpaceShadows{};
     float contactShadowContrast{DefaultContactShadowContrast};
     float contactShadowReach{DefaultContactShadowReach};
+    // The trace counts coverage rather than the gap to the nearest surface, which softens every contact
+    // edge. Its own switch: it changes their shape, not only their strength.
+    bool contactShadowSoft{};
     // Contact-hardening soft shadows from a point or spot light's own shadow map (shadows.hpp), in
     // place of the game's four evenly sharp comparisons. Its own option: the shaders it replaces are
     // the game's.

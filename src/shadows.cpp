@@ -102,7 +102,7 @@ struct Parameters
     float surfaceThickness, bilinearThreshold, shadowContrast, reach;
     float depthBounds[2];
     std::int32_t boundsMin[2], boundsMax[2];
-    float padding2[2];
+    float coverage, padding; // 1: the trace counts coverage instead of the nearest gap
 };
 static_assert(sizeof(Parameters) % 16 == 0);
 
@@ -390,7 +390,8 @@ std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 
 // them, and the shadow draw takes the rest as lit; without, it covers the whole screen and the sky
 // stays lit. Call with resourceMutex held. Returns Bend's dispatch list.
 Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth,
-    std::array<float, 4> lightProjection, const std::optional<TraceBounds>& bounds, ShadowTarget& target, float contrast, float reach)
+    std::array<float, 4> lightProjection, const std::optional<TraceBounds>& bounds, ShadowTarget& target, float contrast, float reach,
+    float coverage)
 {
     auto size = depthSize(depth);
     ensureShadowTarget(target, static_cast<UINT>(size[0]), static_cast<UINT>(size[1]));
@@ -426,6 +427,7 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
         parameters.bilinearThreshold = BilinearThreshold;
         parameters.shadowContrast = std::clamp(contrast, 1.0f, 8.0f);
         parameters.reach = std::clamp(reach, 1.0f, MaxReach);
+        parameters.coverage = std::clamp(coverage, 0.0f, 1.0f);
         parameters.depthBounds[0] = covered.depthMin;
         parameters.depthBounds[1] = covered.depthMax;
         std::memcpy(parameters.boundsMin, covered.min, sizeof(parameters.boundsMin));
@@ -565,7 +567,8 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
             const performance::Timed timed(context, performance::Pass::SunTrace);
             const float* direction = &constants->light[LightDirection];
             const auto lightProjection = project(constants->scene.data(), {direction[0], direction[1], direction[2], 0});
-            const auto where = describe(trace(context, depth.Get(), lightProjection, {}, sunShadow, options.contactContrast, options.contactReach));
+            const auto where = describe(trace(context, depth.Get(), lightProjection, {}, sunShadow, options.contactContrast, options.contactReach,
+            options.contactSoft ? 1.0f : 0.0f));
             noteTraced(context, depth.Get());
             if (!tracedSunOnce)
             {
@@ -709,7 +712,8 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     float point[4]{position[0], position[1], position[2], 1};
     if (std::abs(point[2]) < MinLightDepth) point[2] = std::copysign(MinLightDepth, point[2]);
     performance::Timed timed(context, performance::Pass::LampTraces);
-    const auto dispatches = trace(context, depth.Get(), project(scene, point), bounds, lightShadow, options.contactContrast, options.contactReach);
+    const auto dispatches = trace(context, depth.Get(), project(scene, point), bounds, lightShadow, options.contactContrast, options.contactReach,
+        options.contactSoft ? 1.0f : 0.0f);
     timed.end();
     if (dispatches.DispatchCount == 0) return false;
 

@@ -1492,6 +1492,14 @@ close to the camera keep only the shadow near their feet.
   shader's `SAMPLE_COUNT` went from 60 to 120, and the march stops at the setting, so a shorter reach
   is cheap; the last eight samples of it fade out as Bend's last eight do. It is in pixels, so at 4K
   the same reach covers half the world distance it does at 1080p.
+- **Soft contact shadows.** Bend's value is the gap between the receiver and the nearest surface along
+  the ray, so a pixel is lit or shadowed by where that one surface sits, and the edge lands on the
+  silhouette. With this switch on, the trace also sums, for every sample it marched, how deep inside a
+  surface that sample was (`1 - saturate(depth_delta + fade)`), divides by the sample count, and blends
+  the result over Bend's. A ray that grazes an edge covers part of its length and so comes out partly
+  shadowed: that is the coverage measure `renodx-mgsv`'s march uses, in Bend's window units. The cost
+  is a sum and a count inside a loop that already runs, so the switch exists to A/B the shape rather
+  than the speed. Off, the shader computes and takes Bend's value alone.
 
 Not handled:
 

@@ -180,6 +180,10 @@ void contactShadowShape(Settings& wanted)
             .standard = Defaults.contactShadowReach, .format = "%.0f px",
             .tip = "How far along the screen the contact shadows are traced, in pixels of the render size. Longer picks up casters further from what "
                    "they shadow, and costs more; shorter is the cheap end. At 4K the same pixels reach half as far in the world as at 1080p."});
+    fxui::checkbox("Soft contact shadows", wanted.contactShadowSoft,
+        "Counts the share of the trace's ray that lies inside a surface instead of how far the nearest one is from the surface, so a ray that "
+        "only grazes an edge comes out partly shadowed and the contact edges read soft, as the screen-space shadows do in renodx-mgsv. It "
+        "changes their shape rather than their strength; off keeps Bend Studio's own result.");
 }
 
 void drawShadows(Settings& wanted)
