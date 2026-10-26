@@ -119,7 +119,7 @@ static_assert(sizeof(SoftenConstants) % 16 == 0);
 // Bend's recommended starting values, which suit Fox Engine's reversed depth as they are. The contrast
 // and the reach are the add-on's contact shadow settings instead; the reach cannot pass the shader's
 // SAMPLE_COUNT, the most it marches.
-constexpr float SurfaceThickness = 0.005f, BilinearThreshold = 0.02f;
+constexpr float BilinearThreshold = 0.02f;
 constexpr float MaxReach = 120;
 
 // cSunShadows (b6) of the replacement shaders.
@@ -405,7 +405,7 @@ std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 
 // stays lit. Call with resourceMutex held. Returns Bend's dispatch list.
 Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth,
     std::array<float, 4> lightProjection, const std::optional<TraceBounds>& bounds, ShadowTarget& target, float contrast, float reach,
-    float coverage, float gain, ShadowTarget& softened, float soften)
+    float coverage, float gain, ShadowTarget& softened, float soften, float thickness)
 {
     auto size = depthSize(depth);
     ensureShadowTarget(target, static_cast<UINT>(size[0]), static_cast<UINT>(size[1]));
@@ -438,7 +438,7 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
         parameters.waveOffset[1] = dispatch.WaveOffset_Shader[1];
         parameters.inverseDepthSize[0] = 1.0f / static_cast<float>(size[0]);
         parameters.inverseDepthSize[1] = 1.0f / static_cast<float>(size[1]);
-        parameters.surfaceThickness = SurfaceThickness;
+        parameters.surfaceThickness = std::clamp(thickness, 0.001f, 0.1f);
         parameters.bilinearThreshold = BilinearThreshold;
         parameters.shadowContrast = std::clamp(contrast, 1.0f, 8.0f);
         parameters.reach = std::clamp(reach, 1.0f, MaxReach);
@@ -605,7 +605,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
             const float* direction = &constants->light[LightDirection];
             const auto lightProjection = project(constants->scene.data(), {direction[0], direction[1], direction[2], 0});
             const auto where = describe(trace(context, depth.Get(), lightProjection, {}, sunShadow, options.contactContrast, options.contactReach,
-            options.contactSoft ? 1.0f : 0.0f, options.contactGain, sunSoftened, options.contactSoften));
+            options.contactSoft ? 1.0f : 0.0f, options.contactGain, sunSoftened, options.contactSoften, options.contactThickness));
             noteTraced(context, depth.Get());
             if (!tracedSunOnce)
             {
@@ -750,7 +750,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     if (std::abs(point[2]) < MinLightDepth) point[2] = std::copysign(MinLightDepth, point[2]);
     performance::Timed timed(context, performance::Pass::LampTraces);
     const auto dispatches = trace(context, depth.Get(), project(scene, point), bounds, lightShadow, options.contactContrast, options.contactReach,
-        options.contactSoft ? 1.0f : 0.0f, options.contactGain, lightSoftened, options.contactSoften);
+        options.contactSoft ? 1.0f : 0.0f, options.contactGain, lightSoftened, options.contactSoften, options.contactThickness);
     timed.end();
     if (dispatches.DispatchCount == 0) return false;
 

@@ -179,10 +179,6 @@ static void ComputeWavefrontExtents(DispatchParameters inParameters, int3 inGrou
 // Number of bilinear sample reads performed per-thread
 #define READ_COUNT (SAMPLE_COUNT / WAVE_SIZE + 2)
 
-// How many thickness windows in front of the ray a surface still counts as blocking it. Unbounded,
-// a ray that grazes a slope counts its whole length; RenoDX bounds it too (its caster separation).
-static const float CoverageBand = 4;
-
 // Common shared data
 groupshared float DepthData[READ_COUNT * WAVE_SIZE];
 groupshared bool LdsEarlyOut;
@@ -398,8 +394,7 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
             // touching it can give. RenoDX counts any surface in front of the ray point, so that is what
             // this sums: saturate(sample - start + 1) is 0 with nothing in front and 1 from one window
             // in front through everything beyond it, so the mean is the share of the ray that is blocked.
-            const float4 front = sample_depth - start_depth + 1;
-            coverSum += dot(saturate(front) - saturate(front - CoverageBand), 1);
+            coverSum += dot(1 - saturate(depth_delta), 1);
             covered += 4;
         }
     }
@@ -418,8 +413,7 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
 
         if (inParameters.Coverage > 0)
         {
-            const float front = DepthData[sample_index + i] * depth_scale - start_depth + 1;
-            coverSum += saturate(front) - saturate(front - CoverageBand);
+            coverSum += 1 - saturate(depth_delta);
             ++covered;
         }
     }

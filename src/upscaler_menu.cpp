@@ -184,6 +184,10 @@ void contactShadowShape(Settings& wanted)
         "Counts the share of the trace's ray that lies inside a surface instead of how far the nearest one is from the surface, so a ray that "
         "only grazes an edge comes out partly shadowed and the contact edges read soft, as the screen-space shadows do in renodx-mgsv. It "
         "changes their shape rather than their strength; off keeps Bend Studio's own result.");
+    fxui::slider("Contact shadow thickness", wanted.contactShadowThickness,
+        {.min = Settings::MinContactShadowThickness, .max = Settings::MaxContactShadowThickness,
+            .standard = Defaults.contactShadowThickness, .format = "%.1f%%", .shown = 100,
+            .tip = "How deep a surface has to be behind the receiver to count as a contact. Bend Studio's 0.5% is thin: the trace only sees something sitting almost exactly at the receiver's depth, which is why its contact shadows are so tight. Raising it widens what counts, and darkens and softens every contact."});
     fxui::slider("Soft contact edge", wanted.contactShadowSoften,
         {.min = Settings::MinContactShadowSoften, .max = Settings::MaxContactShadowSoften, .standard = Defaults.contactShadowSoften,
             .format = "%.0f px",
