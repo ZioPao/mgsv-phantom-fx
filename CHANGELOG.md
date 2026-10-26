@@ -4,7 +4,7 @@
 
 - Fix upscaling in exclusive fullscreen: the image stayed at the render size in a box in the
   middle of the screen, HUD included, instead of filling it.
-- The menu and the Budget page name each effect the same way: global illumination shows NRD on
+- The menu and the Budget page name each effect the same way: global illumination shows RTGI on
   both, and the upscaler's item shows DLSS or FSR beside its name.
 - Remove **Old paths** from the Diagnostics page: the ray tracing's earlier behaviour, kept to compare
   against, is gone. The ray-traced shadows, lights and global illumination are unchanged.
