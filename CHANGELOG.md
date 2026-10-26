@@ -2,10 +2,12 @@
 
 ## Unreleased
 
-- Add **Lamp soft shadows (PCSS)** (Experimental): point and spot lights with a shadow map filter
-  it with contact-hardening soft shadows instead of the game's four evenly sharp comparisons, so a
-  lamp's shadow is sharp where it meets a surface and widens with distance. Off by default; rebuilt
-  copies of `SSLighting2_Point` and `SSLighting2_Spot`.
+- Add **Lamp soft shadows (PCSS)**: point and spot lights with a shadow map filter it with
+  contact-hardening soft shadows instead of the game's four evenly sharp comparisons, so a lamp's
+  shadow is sharp where it meets a surface and widens with distance. Off by default; rebuilt copies
+  of `SSLighting2_Point` and `SSLighting2_Spot`.
+- Foliage (grass, bushes, tree leaves) casts screen-space contact shadows: the trace no longer
+  skips the foliage material, so clumps shade themselves as they do in `renodx-mgsv`.
 
 ## 1.8.0
 

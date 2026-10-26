@@ -6,9 +6,9 @@ namespace phantom_fx::shadows::shaders
 // Bend Studio's screen-space shadows: bend_sss_gpu.h from "Inside Bend: Screen Space Shadows",
 // Copyright 2023 Sony Interactive Entertainment, Apache License 2.0 (Bend-Studio-SSS-LICENSE.txt).
 // Changed for FXC and Direct3D 11: the configuration macros are set here; the forward declaration
-// and a (void) cast that FXC rejects are removed; the output is unorm; the early-out votes
-// through groupshared memory, as shader model 5 has no wave intrinsics; and foliage casts no
-// shadow. Split into literals, as MSVC limits each to 16 KB.
+// and a (void) cast that FXC rejects are removed; the output is unorm; and the early-out votes
+// through groupshared memory, as shader model 5 has no wave intrinsics. Split into literals, as
+// MSVC limits each to 16 KB.
 inline constexpr char BendShadow[] = R"(
 #define WAVE_SIZE 64
 #define SAMPLE_COUNT 60
@@ -93,7 +93,6 @@ struct DispatchParameters
                                         // The 'USE_HALF_PIXEL_OFFSET' macro might need to be defined if sampling at exact pixel coordinates isn't precise (e.g., if odd patterns appear in the shadow).
 
     Texture2D<float> DepthTexture;      // Depth Buffer Texture (rasterized non-linear depth)
-    Texture2D<float4> SpecularTexture;  // Changed: the G-buffer's specular target, whose z is the material
     RWTexture2D<unorm float> OutputTexture; // Output screen-space shadow buffer (typically single-channel, 8bit)
 
     SamplerState PointBorderSampler;    // A point sampler, with Wrap Mode set to Clamp-To-Border-Color (D3D12_TEXTURE_ADDRESS_MODE_BORDER), and Border Color set to "FarDepthValue" (typically zero), or some other far-depth value out of DepthBounds.
@@ -167,9 +166,6 @@ static void ComputeWavefrontExtents(DispatchParameters inParameters, int3 inGrou
 )" R"(
 // Number of bilinear sample reads performed per-thread
 #define READ_COUNT (SAMPLE_COUNT / WAVE_SIZE + 2)
-
-// Changed: Fox Engine's material for grass, bushes and tree leaves, in 255ths.
-static const float FoliageMaterial = 43;
 
 // Common shared data
 groupshared float DepthData[READ_COUNT * WAVE_SIZE];
@@ -265,11 +261,6 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
             // Shadows cast from this depth
             shadowing_depth[i] = use_point_filter ? edge_depth : shadow_depth;
         }
-
-        // Changed: foliage casts no shadow. Taken as solid, the blades of a clump shade each other far
-        // more than thin, translucent blades do, and the sun's shadow map already holds them.
-        if (round(inParameters.SpecularTexture.Load(int3(floor(pixel_xy), 0)).z * 255) == FoliageMaterial)
-            shadowing_depth[i] = edge_skip;
 
         // Store for later
         sample_distance[i] = pixel_distance + (WAVE_SIZE * i) * direction;
@@ -419,7 +410,6 @@ cbuffer Parameters : register(b0)
     int2 BoundsMax;
 };
 Texture2D<float> Depth : register(t0);
-Texture2D<float4> Specular : register(t1);
 RWTexture2D<unorm float> Shadow : register(u0);
 SamplerState PointBorder : register(s0); // Border colour 0, the far plane
 
@@ -441,7 +431,6 @@ void main(int3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
     parameters.NearDepthValue = 1;
     parameters.InvDepthTextureSize = InvDepthTextureSize;
     parameters.DepthTexture = Depth;
-    parameters.SpecularTexture = Specular;
     parameters.OutputTexture = Shadow;
     parameters.PointBorderSampler = PointBorder;
     WriteScreenSpaceShadow(parameters, groupId, groupThreadId.x);

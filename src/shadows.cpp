@@ -76,7 +76,6 @@ bool reflectsSky(Sun sun)
     return sun == Sun::ShadowMap || sun == Sun::Far;
 }
 
-constexpr UINT SpecularSlot = 1;                                       // t1 of the light passes, whose z is the material
 constexpr UINT DepthSlot = 2;                                          // t2 of the light passes
 constexpr UINT RayTracedSlot = 6;                                      // t6 of the replacement sun shaders
 constexpr UINT ShadowSlot = 7;                                         // t7 of the add-on's pixel shaders
@@ -383,12 +382,11 @@ std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 
     return bounds;
 }
 
-// Traces the screen-space shadow towards `lightProjection` from `depth` into `target` on `context`,
-// with the game's compute state saved around it; `specular` (may be null) tells foliage, which casts
-// none. With `bounds`, it writes only within them, and the shadow draw takes the rest as lit;
-// without, it covers the whole screen and the sky stays lit. Call with resourceMutex held. Returns
-// Bend's dispatch list.
-Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* specular,
+// Traces the screen-space shadow towards `lightProjection` from `depth` into `target` on
+// `context`, with the game's compute state saved around it. With `bounds`, it writes only within
+// them, and the shadow draw takes the rest as lit; without, it covers the whole screen and the sky
+// stays lit. Call with resourceMutex held. Returns Bend's dispatch list.
+Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth,
     std::array<float, 4> lightProjection, const std::optional<TraceBounds>& bounds, ShadowTarget& target)
 {
     auto size = depthSize(depth);
@@ -399,7 +397,7 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
     int boundsMin[2]{covered.min[0], covered.min[1]}, boundsMax[2]{covered.max[0], covered.max[1]};
     const auto dispatches = Bend::BuildDispatchList(lightProjection.data(), size.data(), boundsMin, boundsMax, false, WaveSize);
 
-    const SavedComputeState saved(context, {.buffers = 1, .views = 2, .accesses = 1, .samplers = 1});
+    const SavedComputeState saved(context, {.buffers = 1, .views = 1, .accesses = 1, .samplers = 1});
 
     if (!bounds)
     {
@@ -408,8 +406,7 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
     }
 
     context->CSSetShader(traceShader.Get(), nullptr, 0);
-    ID3D11ShaderResourceView* inputs[]{depth, specular};
-    context->CSSetShaderResources(0, static_cast<UINT>(std::size(inputs)), inputs);
+    context->CSSetShaderResources(0, 1, &depth);
     context->CSSetUnorderedAccessViews(0, 1, target.access.GetAddressOf(), nullptr);
     context->CSSetSamplers(0, 1, borderSampler.GetAddressOf());
     context->CSSetConstantBuffers(0, 1, parameterBuffer.GetAddressOf());
@@ -531,9 +528,8 @@ ID3D11BlendState* shadowedBlend(ID3D11BlendState* game)
 // The sun pass, drawn with the replacement shaders.
 bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Sun sun, ID3D11PixelShader* gameShader, const Options& options)
 {
-    ComPtr<ID3D11ShaderResourceView> depth, specular;
+    ComPtr<ID3D11ShaderResourceView> depth;
     context->PSGetShaderResources(DepthSlot, 1, depth.GetAddressOf());
-    context->PSGetShaderResources(SpecularSlot, 1, specular.GetAddressOf());
 
     // The ray-traced shadow at the depth's size, once Direct3D 12 has traced one; until then the
     // game's shadows stay. The rays trace the main view only, not a smaller camera's (a mirror's).
@@ -565,7 +561,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
             const performance::Timed timed(context, performance::Pass::SunTrace);
             const float* direction = &constants->light[LightDirection];
             const auto lightProjection = project(constants->scene.data(), {direction[0], direction[1], direction[2], 0});
-            const auto where = describe(trace(context, depth.Get(), specular.Get(), lightProjection, {}, sunShadow));
+            const auto where = describe(trace(context, depth.Get(), lightProjection, {}, sunShadow));
             noteTraced(context, depth.Get());
             if (!tracedSunOnce)
             {
@@ -690,9 +686,8 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         return true;
     }
 
-    ComPtr<ID3D11ShaderResourceView> depth, specular;
+    ComPtr<ID3D11ShaderResourceView> depth;
     context->PSGetShaderResources(DepthSlot, 1, depth.GetAddressOf());
-    context->PSGetShaderResources(SpecularSlot, 1, specular.GetAddressOf());
     std::lock_guard lock(resourceMutex);
     if (!ensurePipeline()) return false;
 
@@ -710,7 +705,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     float point[4]{position[0], position[1], position[2], 1};
     if (std::abs(point[2]) < MinLightDepth) point[2] = std::copysign(MinLightDepth, point[2]);
     performance::Timed timed(context, performance::Pass::LampTraces);
-    const auto dispatches = trace(context, depth.Get(), specular.Get(), project(scene, point), bounds, lightShadow);
+    const auto dispatches = trace(context, depth.Get(), project(scene, point), bounds, lightShadow);
     timed.end();
     if (dispatches.DispatchCount == 0) return false;
 

@@ -1454,13 +1454,14 @@ screen.
   jitter; `gi_inputs.cpp` keeps them, as for the ray tracing) and looked up by the buffers the draw
   binds. Depth is reversed (near 1, far 0, the border colour). Bend's starting values: 60 samples,
   surface thickness 0.5%, bilinear threshold 2%, contrast 4, early-out on.
-- **Foliage casts no shadow.** The trace reads the material from the pass's specular target
-  (`t1`, `z` x 255; foliage is 43, as in "GTVBAO") and skips foliage samples as Bend skips edge
-  pixels. Taken as solid surfaces 0.5% deep, a clump's blades shaded each other: in a sunlit
-  scene at 11:27, the trace darkened bushes and grass clumps by 7 to 24% and bare ground by
-  nothing. The sun's shadow map already holds the blades (cascade 0 has 3 mm texels), and
-  foliage still receives the trace from everything else. Without a specular target the trace
-  reads 0 and treats nothing as foliage.
+- **Foliage casts like everything else.** The trace reads its casters from the depth buffer alone,
+  as Bend's does, so grass, bushes and tree leaves both cast and receive. Its own measured effect
+  is the reason it is worth having: a clump's blades shade each other, which the sun's shadow map
+  resolves only in cascade 0 (3 mm texels) and the rest of the range does not. An earlier build
+  skipped the foliage material (43 in the specular target's `z`, as in "GTVBAO") to keep clumps out
+  of it; the skip is gone so the term matches the screen-space shadows in `renodx-mgsv`. If a
+  clump darkens too far, `SurfaceThickness` and `ShadowContrast` (`src/shadows.cpp`) set how deep a
+  sample casts and how hard the transition is.
 - **Draw.** The game's compute bindings in the slots the trace uses are saved and restored around
   it; the replacement pixel shader, `t7` and `b6` are bound for the game's draw, made by the
   add-on, and the game's shader, `t7` and `b6` restored. The options apply from the frame after
