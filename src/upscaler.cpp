@@ -526,6 +526,44 @@ void sceneWritten(camera::SceneConstants& scene)
     if (frame.jittered) camera::applyJitter(scene, camera::jitterNdc(frame.jitter, scene.c[22][0], scene.c[22][1]));
 }
 
+// In exclusive fullscreen the game draws GammaControl at the render size, centred in the back buffer
+// (docs/DEVELOPMENT.md, "Render size"). The add-on's GammaControl draws read output-size images, so
+// they cover the whole target; the game's own draw gets its viewport and scissor back.
+class FullTargetViewport
+{
+public:
+    explicit FullTargetViewport(ID3D11DeviceContext* context) : context(context)
+    {
+        context->RSGetViewports(&viewportCount, viewports);
+        context->RSGetScissorRects(&rectCount, rects);
+
+        ComPtr<ID3D11RenderTargetView> target;
+        context->OMGetRenderTargets(1, target.GetAddressOf(), nullptr);
+        const auto [width, height] = sizeOf(target.Get());
+        const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1};
+        const D3D11_RECT rect{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+        context->RSSetViewports(1, &viewport);
+        context->RSSetScissorRects(1, &rect);
+    }
+
+    ~FullTargetViewport()
+    {
+        context->RSSetViewports(viewportCount, viewports);
+        context->RSSetScissorRects(rectCount, rects);
+    }
+
+    FullTargetViewport(const FullTargetViewport&) = delete;
+    FullTargetViewport& operator=(const FullTargetViewport&) = delete;
+
+private:
+    ID3D11DeviceContext* context;
+
+    D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    D3D11_RECT rects[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    UINT rectCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+};
+
 // GammaControl draws once more, from DLSS's image before the HUD into frame generation's hudless
 // texture, with the game's own constants and sampler.
 void drawHudless(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call)
@@ -1597,6 +1635,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
         {
             // With HDR every GammaControl draw, the hudless one too, encodes for the display.
             const hdr::OutputShader output(context);
+            const FullTargetViewport viewport(context);
             drawHudless(context, call);
 
             if (ui_redirect::drawGamma(context, call))
