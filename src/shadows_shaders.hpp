@@ -80,7 +80,7 @@ struct DispatchParameters
         ShadowContrast              = 4;
         Reach                       = SAMPLE_COUNT;
         Coverage                    = 0;
-        Gain                        = 4;
+        Gain                        = 2;
         IgnoreEdgePixels            = false;
         UsePrecisionOffset          = false;
         BilinearSamplingOffsetMode  = false;
@@ -371,11 +371,12 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
     i = HARD_SHADOW_SAMPLES;
     [loop] for (; i + 3 < reach; i += 4)
     {
-        float4 depth_delta;
-        depth_delta.x = abs(start_depth - DepthData[sample_index + i + 0] * depth_scale);
-        depth_delta.y = abs(start_depth - DepthData[sample_index + i + 1] * depth_scale);
-        depth_delta.z = abs(start_depth - DepthData[sample_index + i + 2] * depth_scale);
-        depth_delta.w = abs(start_depth - DepthData[sample_index + i + 3] * depth_scale);
+        float4 sample_depth;
+        sample_depth.x = DepthData[sample_index + i + 0] * depth_scale;
+        sample_depth.y = DepthData[sample_index + i + 1] * depth_scale;
+        sample_depth.z = DepthData[sample_index + i + 2] * depth_scale;
+        sample_depth.w = DepthData[sample_index + i + 3] * depth_scale;
+        const float4 depth_delta = abs(start_depth - sample_depth);
 
         // Add the fade value to the samples of the reach's last stretch.
         float4 fade_out;
@@ -389,7 +390,11 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
 
         if (inParameters.Coverage > 0)
         {
-            coverSum += dot(1 - saturate(depth_delta + fade_out), 1);
+            // Bend's own measure is the gap to a surface at the receiver's depth, which only a caster
+            // touching it can give. RenoDX counts any surface in front of the ray point, so that is what
+            // this sums: saturate(sample - start + 1) is 0 with nothing in front and 1 from one window
+            // in front through everything beyond it, so the mean is the share of the ray that is blocked.
+            coverSum += dot(saturate(sample_depth - start_depth + 1), 1);
             covered += 4;
         }
     }
@@ -408,7 +413,7 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
 
         if (inParameters.Coverage > 0)
         {
-            coverSum += 1 - saturate(depth_delta + fade_out);
+            coverSum += saturate(DepthData[sample_index + i] * depth_scale - start_depth + 1);
             ++covered;
         }
     }
