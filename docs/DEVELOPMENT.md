@@ -1492,15 +1492,14 @@ close to the camera keep only the shadow near their feet.
   shader's `SAMPLE_COUNT` went from 60 to 120, and the march stops at the setting, so a shorter reach
   is cheap; the last eight samples of it fade out as Bend's last eight do. It is in pixels, so at 4K
   the same reach covers half the world distance it does at 1080p.
-- **Soft contact shadows.** Two parts, both spatial: Bend's trace has no temporal accumulation to lean
-  on, and it runs before the frame's TAA. `Coverage` swaps Bend's measure for RenoDX's. Instead of the
-  gap between the receiver and the nearest surface, each sample counts when a surface lies *in front of*
-  the ray point and within four thickness windows of it, and the mean of those counts is the share of
-  the ray that is blocked. That is what turns a silhouette into a graded penumbra, and it costs one
-  compare and one add inside a loop that already runs. `Gain` scales that share before it is subtracted
-  from one, because a shadowed ray is mostly empty space. `Soften` then spreads the mask with a five-tap
-  pass: the light shaders load the mask with a point read, so nothing filters an edge once it is written.
-  0 keeps Bend's edge, and 1 to 2 pixels is the useful range.
+- **Thickness.** Bend's 0.5% window was a constant. It is a setting now (`SurfaceThickness`, 0.2% to
+  2.5% of the depth between a sample and the far plane): how deep a surface may sit behind the
+  receiver and still count as a contact. RenoDX exposes the same dial per light type.
+- **Distance fade.** Bend's shader has no fade, so a contact shadow at 100 m was as sharp as one
+  underfoot. The trace now fades its result with view depth (B and A from `cPSScene` c21 give the view
+  Z from the depth it already reads), full strength out to 60% of the setting and nothing past it.
+  RenoDX fades for the same reason: past that range the shadow map has the detail and the trace only
+  has guesses.
 
 Not handled:
 

@@ -2,13 +2,13 @@
 
 ## Unreleased
 
-- Add **Contact shadow contrast** and **Contact shadow reach** sliders, under the shadows: the first
-  sets how dark and how hard the traced contact shadows are (1 to 8, 1 by default), the second how far
-  along the screen they reach (8 to 120 pixels, 80 by default). Both apply to the sun's and the lamps'.
-- Add **Soft contact shadows**, a switch under **Contact shadows**: the trace counts the share of its ray
-  that lies inside a surface instead of the gap to the nearest one, so a grazed edge comes out partly
-  shadowed and the contact shadows read soft, as they do in `renodx-mgsv`. Off by default.
-- Its **Soft contact gain** sets how dark that coverage gets, as a shadowed ray is mostly empty space.
+- Add **Contact shadow contrast**, **reach**, **thickness** and **fade** settings, under the shadows:
+  how dark and how hard the trace is (0.5 to 4, 1 by default), how far along the screen it marches
+  (8 to 120 pixels, 80 by default), how deep a surface counts as a contact (0.2% to 2.5% of its depth
+  to the far plane, 0.5% by default) and how far away it still shows (50 to 700 m, 500 by default,
+  full strength to 60% of that). All apply to the sun's and the lamps'.
+- Contact shadows now fade out with distance: before, one at 100 m was as sharp and as strong as the
+  one underfoot, and now the trace thins out and leaves the shadow map to it.
 - Reorganise the **Shadows** page: the ray-traced lights sit beside the ray-traced shadows, and the
   contact shadows have a heading of their own under the soft shadows, with their two sliders.
 - Add **Lamp soft shadows (PCSS)**: point and spot lights with a shadow map filter it with
