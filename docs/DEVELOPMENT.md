@@ -1492,16 +1492,15 @@ close to the camera keep only the shadow near their feet.
   shader's `SAMPLE_COUNT` went from 60 to 120, and the march stops at the setting, so a shorter reach
   is cheap; the last eight samples of it fade out as Bend's last eight do. It is in pixels, so at 4K
   the same reach covers half the world distance it does at 1080p.
-- **Soft contact shadows.** Bend's value is the gap between the receiver and the nearest surface along
-  the ray, so a pixel is lit or shadowed by where that one surface sits, and the edge lands on the
-  silhouette. With this switch on, the trace also sums, for every sample it marched, how deep inside a
-  surface that sample was (`1 - saturate(depth_delta + fade)`), divides by the sample count, and blends
-  the result over Bend's. A ray that grazes an edge covers part of its length and so comes out partly
-  shadowed: that is the coverage measure `renodx-mgsv`'s march uses, in Bend's window units. The cost
-  is a sum and a count inside a loop that already runs, so the switch exists to A/B the shape rather
-  than the speed. Off, the shader computes and takes Bend's value alone. A shadowed ray spends most of
-  its length in empty space, so that mean is small on its own: **Soft contact gain** (1 to 24, 4 by
-  default) scales that share before it is subtracted from one, and is the dial that decides how dark a soft contact gets.
+- **Soft contact shadows.** Two parts, both spatial: Bend's trace has no temporal accumulation to lean
+  on, and it runs before the frame's TAA. `Coverage` swaps Bend's measure for RenoDX's. Instead of the
+  gap between the receiver and the nearest surface, each sample counts when a surface lies *in front of*
+  the ray point (`saturate(sample - start + 1)`, unbounded), and the mean of those counts is the share of
+  the ray that is blocked. That is what turns a silhouette into a graded penumbra, and it costs one
+  compare and one add inside a loop that already runs. `Gain` scales that share before it is subtracted
+  from one, because a shadowed ray is mostly empty space. `Soften` then spreads the mask with a five-tap
+  pass: the light shaders load the mask with a point read, so nothing filters an edge once it is written.
+  0 keeps Bend's edge, and 1 to 2 pixels is the useful range.
 
 Not handled:
 
