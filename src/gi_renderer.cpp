@@ -469,7 +469,7 @@ gi_scene::Geometry materialOf(const State& s, const ModelPart& part)
 {
     gi_scene::Geometry geometry;
     geometry.flags = (part.alphaTested ? GI_GEOMETRY_CUT_OUT : 0u) | (part.uvs.empty() ? 0u : GI_GEOMETRY_UV) | (part.leaf ? GI_GEOMETRY_LEAF : 0u)
-        | (part.castsNoShadow ? GI_GEOMETRY_NO_SHADOW : 0u);
+        | (part.castsNoShadow ? GI_GEOMETRY_NO_SHADOW : 0u) | (part.hair ? GI_GEOMETRY_HAIR : 0u);
     const auto texture = part.uvs.empty() ? s.textures.end() : s.textures.find(part.baseTexture);
     if (texture == s.textures.end() || !texture->second.shared.resource) return geometry;
 
@@ -1244,7 +1244,7 @@ std::string characterMesh(const ModelPart& part, const CharacterInstance& charac
     const bool drawn = partIndex < character.drawnParts.size() && character.drawnParts[partIndex];
     const auto groupState = part.group < character.groupStates.size() ? std::format("{:#04x}", character.groupStates[part.group]) : std::string("unread");
     return std::format("file mesh {} (group {} state {}, alpha {:#04x} shadow {:#04x}, technique {:x}, {}, {} triangles, {}, {})", part.mesh, part.group,
-        groupState, part.alphaBits, part.shadowBits, part.technique, part.alphaTested ? "cut-out" : "opaque", part.indices.size() / 3,
+        groupState, part.alphaBits, part.shadowBits, part.technique, part.hair ? "hair" : part.alphaTested ? "cut-out" : "opaque", part.indices.size() / 3,
         shown ? "shown" : "hidden", drawn ? "drawn" : "not drawn");
 }
 
@@ -1338,7 +1338,8 @@ std::string describeHit(const State& s, std::span<const InstancedModel> instance
             {
                 const auto& part = found->second.geometry->parts[partIndex];
                 what += std::format(", mesh {} ({}, {} triangles, alpha {:#04x} shadow {:#04x}, technique {:x})", part.mesh,
-                    part.leaf ? "leaves" : part.alphaTested ? "cut-out" : "opaque", part.indices.size() / 3, part.alphaBits, part.shadowBits, part.technique);
+                    part.hair ? "hair" : part.leaf ? "leaves" : part.alphaTested ? "cut-out" : "opaque", part.indices.size() / 3, part.alphaBits,
+                    part.shadowBits, part.technique);
             }
         }
     }
@@ -1390,7 +1391,7 @@ std::pair<std::string, std::string> describeProbe(const State& s, std::span<cons
         const bool startsMesh = exact && sh.x == h.w && sh.y == (g.z & 0x7FFFFFFFu);
         text += std::format("with every instance: hits {}, geometry {} ({}{}{}), triangle {}{}", describeHit(s, instancedModels, uint4{h.w, g.z, kind, g.w}), g.x,
             (flags & GI_GEOMETRY_CUT_OUT) ? "cut-out" : "opaque", (flags & GI_GEOMETRY_ALPHA_TEXTURE) ? " with the game's alpha" : "",
-            (flags & GI_GEOMETRY_LEAF) ? ", leaves" : "", sh.w,
+            (flags & GI_GEOMETRY_LEAF) ? ", leaves" : (flags & GI_GEOMETRY_HAIR) ? ", hair" : "", sh.w,
             !startsMesh ? "" : sh.w == sh.z ? ", the start's own triangle" : ", of the start's own mesh");
         if (kind & GI_INSTANCE_TERRAIN)
             text += std::format("; its triangle's highest corner at {:.1f} m as its ring was made, the heightmap {:.1f} m there now (level of detail {:.0f})",
@@ -1571,9 +1572,10 @@ std::pair<std::string, std::string> describeLightProbe(const State& s, std::span
                 light.shadowStart > 0 ? std::format(", the game's shadow map from {:.2f} m", light.shadowStart) : "");
         }
 
-        const bool blocked = entry.w >= 0;
-        text += std::format("{}: {:.0f}% of their light, {:.1f} m away, {}\n", what, probe.share.z > 0 ? entry.y / probe.share.z * 100 : 0.0f, entry.z,
-            blocked ? "blocked" : "reaches it");
+        // The ray met something (w: how far along) that blocked it, or hair that let some of the light through.
+        const float through = probe.through[i].x;
+        const auto outcome = entry.w < 0 ? std::string("reaches it") : through <= 0 ? std::string("blocked") : std::format("{:.0f}% gets past hair", through * 100);
+        text += std::format("{}: {:.0f}% of their light, {:.1f} m away, {}\n", what, probe.share.z > 0 ? entry.y / probe.share.z * 100 : 0.0f, entry.z, outcome);
         // Each hit on the way to the light, and how far short of it.
         for (std::uint32_t h = 0; h < GI_PROBE_LIGHT_HITS; ++h)
         {
@@ -1583,7 +1585,7 @@ std::pair<std::string, std::string> describeLightProbe(const State& s, std::span
             text += std::format("  {:.2f} m short of the light: {}\n", entry.z - std::bit_cast<float>(hit.w), describeHit(s, instancedModels, hit));
         }
 
-        key += std::format("{}:{}:{}|", index, blocked, probe.hits[i * GI_PROBE_LIGHT_HITS].x);
+        key += std::format("{}:{}:{}|", index, outcome, probe.hits[i * GI_PROBE_LIGHT_HITS].x);
     }
 
     return {text, key};

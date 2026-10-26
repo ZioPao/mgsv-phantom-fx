@@ -118,7 +118,8 @@ constexpr std::uint64_t ParseBytesPerTake = 8ull << 20;
 // A character (a skinned model) is taken as the main view shows it instead: its stand-ins left out
 // (2026-10-24: one of 40 triangles on a woman's outfit lay on her skin and blocked her chest's sun
 // rays at once), its meshes the shadow maps leave out taken (her hair: the rays saw her bald, low-poly
-// head's outline across it), see-through ones (alpha bit 6) cut out by their alpha.
+// head's outline across it), see-through ones (alpha bit 6) cut out by their alpha. Its see-through meshes
+// the game never casts with, its hair, let light through in part (GI_GEOMETRY_HAIR).
 constexpr std::uint8_t CastsNoShadow = 0x01, ShadowMapsOnly = 0x02;
 constexpr std::uint8_t GlassAlpha = 0x10, CutOutAlpha = 0x20, TranslucentAlpha = 0x40, DecalAlpha = 0x80;
 // The StrCode64s of a material's texture parameters "Base_Tex_SRGB" (the colour, and a cut-out mesh's
@@ -497,6 +498,7 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
         part.leaf = vegetation && part.alphaTested;
         // A character's main-view meshes cast in the rays (its hair, see above); a rigid model's do not, as in the game.
         part.castsNoShadow = mainViewOnly && !character;
+        part.hair = character && part.alphaTested && (mainViewOnly || (alpha & TranslucentAlpha));
         part.alphaBits = alpha;
         part.shadowBits = shadow;
         part.technique = techniqueOf(file, *layout, materialInstance);

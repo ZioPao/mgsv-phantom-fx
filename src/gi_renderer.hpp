@@ -72,6 +72,7 @@ struct ModelPart
     bool alphaTested{};
     bool leaf{}; // Leaves, which let light through (GI_GEOMETRY_LEAF)
     bool castsNoShadow{}; // The game draws it in the main view only, never into its shadow maps (GI_GEOMETRY_NO_SHADOW)
+    bool hair{}; // A character's see-through mesh the game never casts with, which lets light through in part (GI_GEOMETRY_HAIR)
     std::uint64_t baseTexture{};
     bool textureIsMask{};
     std::vector<Vertex> vertices;

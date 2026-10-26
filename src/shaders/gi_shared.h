@@ -32,6 +32,7 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 #define GI_GEOMETRY_MASK          8u // Its texture is a shadow-only mesh's mask: its alpha cuts, its colour is not the mesh's
 #define GI_GEOMETRY_LEAF          16u // Leaves (the object brush's bushes and grass): thin, they let light through (HitDirectLight)
 #define GI_GEOMETRY_NO_SHADOW     32u // The game never casts with it (a rigid model's main-view-only mesh): rays towards lights pass it (StopsShadowRay)
+#define GI_GEOMETRY_HAIR          64u // A character's see-through mesh the game never casts with (its hair): rays towards lights pass it in part (PassHair)
 
 // The game's textures the scene holds at most (g_SceneTextures, gi_textures.hpp).
 #define GI_MAX_TEXTURES 4096u
@@ -236,7 +237,9 @@ struct GILightProbe
     uint4 startHit;  // That surface, as GIShadowProbe::lightNearest; zeros at the depth's point
     uint4 view;      // The camera's ray through the centre pixel, as the scene view traces it (GIShadowProbe::view)
     float4 lights[GI_PROBE_LIGHTS]; // x: the light's index in the frame + 1, 0 for none; y: its light there without shadows
-                                    // (luminance); z: how far its centre is; w: where the ray to it is blocked, metres, or -1
+                                    // (luminance); z: how far its centre is; w: where the ray to it first meets what takes its
+                                    // light (what blocks it, or hair), metres, or -1
+    float4 through[GI_PROBE_LIGHTS]; // x: the share of that light the ray gets past it with: 0 blocked, less than 1 past hair
     // What blocks that ray, as GIShadowProbe::lightNearest, and what lies past it towards the light, GI_PROBE_LIGHT_HITS a
     // light; zeros past the last
     uint4 hits[GI_PROBE_LIGHTS * GI_PROBE_LIGHT_HITS];

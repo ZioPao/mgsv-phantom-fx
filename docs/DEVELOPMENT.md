@@ -1808,7 +1808,14 @@ traced here (see "Ray-traced lights").
   meshes the game never draws into its shadow maps (shadow bit 0, `GI_GEOMETRY_NO_SHADOW`), which the scene
   takes for where rays leave a room's walls and for the global illumination, do not stop these rays at all:
   one in a stairwell's windows (model `84a083c0196e01e1`, mesh 0) kept the moonlight, a shadow-mapped spot,
-  off the wall it lights in the game. A character's main-view meshes still cast (its hair). So the rays
+  off the wall it lights in the game. A character's main-view meshes still cast (its hair), but its
+  see-through ones the game never casts with (cut-out with shadow bit 0, or alpha bit 6:
+  `GI_GEOMETRY_HAIR`) only in part, since 2026-10-26: every ray towards a light, the sky's included,
+  keeps half its light past each layer it crosses (`HairTransmittance`, `PassHair`), the idea of deep
+  opacity maps (Yuksel and Keyser, 2008). Taken as solid, hair cards (Snake's: model `84a0c8705a4a98ca`,
+  meshes 18 and 19, alpha 0xa0 shadow 0x01) cast hard, fully dark shadows the game never shows. The lamp shadows
+  count the share that gets through, and the hair's distance for the filter's penumbra; the sun's rays,
+  whose denoiser takes a pixel as lit or not, are lit with that share as their chance. So the rays
   towards lights take what the game's shadow maps hold, but for the solid stand-ins left out. Diagnostics,
   "Shadows from every surface (old)" (`shadowDiagnostics.x`), goes back to every surface casting from both
   sides.
