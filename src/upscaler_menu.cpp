@@ -192,7 +192,6 @@ void drawShadows(Settings& wanted)
         sunSize(wanted);
 
     fxui::item({.id = "softLocalShadows",
-        .tag = "Experimental",
         .tip = "Contact-hardening soft shadows from each lamp's own shadow map: sharp where the light meets a surface, softer the further the shadow "
                "falls, as the lamp's size gives. Points and spots, in a rebuilt copy of the game's own shader. Only the lamps the game gives a shadow "
                "map take it; most of its point lights have none, and keep their light. Off keeps the game's evenly sharp edges.",
