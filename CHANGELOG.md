@@ -1,7 +1,23 @@
 # Phantom FX changelog
 
-## Unreleased
+## 1.8.0
 
+This release focuses on fixing and improving the visuals of the prologue's hospital.
+
+- Fix the intro breaking with ray-traced lights on: the lamps were drawn into the hospital mirror's
+  view too. The mirror is left to the game, and DLSS takes the frame's main camera.
+- Ray-traced lights stop at the game's light volumes for the global illumination's bounce and the
+  lamp shadows too. Big fill lights and a moon spot no longer tint the warm ward blue.
+- Ray-traced shadows follow what the game's own shadow maps hold:
+  - Light passes through a surface met from behind, so the searchlight comes in through the
+    hospital windows, and low-poly rocks no longer shadow themselves where light meets shade.
+  - Meshes the game never draws into its shadow maps cast no ray-traced shadow. A stairwell window
+    no longer keeps the moonlight off its wall.
+  - Invisible shadow-only stand-ins no longer block lamps.
+  - Mesh groups the game hides cast no shadow. The hidden rubble over the hospital entrance no
+    longer leaves dark blots on its porch.
+- A spot light's ray-traced shadow starts where the game's shadow map starts.
+- A stale sun no longer lingers after a menu, in the global illumination and the physical sky.
 - Fix upscaling in exclusive fullscreen: the image stayed at the render size in a box in the
   middle of the screen, HUD included, instead of filling it.
 - The menu and the Budget page name each effect the same way: global illumination shows RTGI on

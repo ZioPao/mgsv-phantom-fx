@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(PhantomFX VERSION 1.7.0 LANGUAGES C CXX)
+project(PhantomFX VERSION 1.8.0 LANGUAGES C CXX)
 
 if(NOT WIN32 OR NOT MSVC)
     message(FATAL_ERROR "Phantom FX requires Windows and MSVC.")
