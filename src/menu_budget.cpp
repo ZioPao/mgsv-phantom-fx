@@ -108,6 +108,7 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
     const State sunContact = stateOf(wanted.sunScreenSpaceShadows, held, wanted.rayTracedShadows, shadowsFailed, {});
     const State rayTracedLights = stateOf(wanted.rayTracedLights, held, false, false, lightsProblem);
     const State lampContact = stateOf(wanted.lightScreenSpaceShadows, held, wanted.rayTracedLights, shadowsFailed, {});
+    const State softLocal = stateOf(wanted.softLocalShadows, held, wanted.rayTracedLights, shadowsFailed, {});
     const State global = stateOf(wanted.globalIllumination, held, false, false, rayTracing);
     const State occlusion = stateOf(wanted.ambientOcclusion, held, wanted.globalIllumination, false, occlusionProblem);
     const State indirect = stateOf(wanted.indirectLight, held, wanted.globalIllumination, false, lightProblem);
@@ -196,6 +197,10 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
     add({.id = "lampContactShadows", .name = "Lamp contact shadows", .section = at(Section::Shadows), .state = lampContact, .toggle = &wanted.lightScreenSpaceShadows,
             .replacedBy = "rayTracedLights", .message = messageFor(lampContact, {}, "Contact shadows are unavailable (see PhantomFX.log).")},
         {{Pass::LampTraces, "Traces"}, {Pass::LampShadows, "Shadow draws"}});
+    add({.id = "softLocalShadows", .name = "Soft local shadows", .tech = "PCSS", .section = at(Section::Shadows), .state = softLocal,
+            .toggle = &wanted.softLocalShadows, .replacedBy = "rayTracedLights",
+            .message = messageFor(softLocal, {}, "Soft local shadows are unavailable (see PhantomFX.log).")},
+        {{Pass::LampSoftLight, "Point light draws, with the soft shadow"}});
     add({.id = "globalIllumination", .name = "Global illumination", .tech = "RTGI", .section = at(Section::Lighting), .state = global,
             .toggle = &wanted.globalIllumination, .message = messageFor(global, rayTracing)},
         {{Pass::GiRays, "Rays and the light cache"}, {Pass::GiDenoiser, "Denoiser and render size"},

@@ -1510,13 +1510,17 @@ further the shadow falls, as a real bulb's is.
   compromise scale, `3 x distance / hemisphereRes`, as renodx-mgsv does. The search radius is
   `g_lampSearchTexels`, the penumbra's growth `g_lampHardening`, its widest `g_lampSoftness` (10 cm),
   and how dark its core gets `g_lampDarkness`.
-- **Identified by checksum.** `shaderCreated` records the address of `SSLighting2_Point`
-  (`afbc12167037e4e0d653da184c7e3e82`) and the lighting draw matches on it; every other local light,
-  the points without specular and the spots among them, keeps the game's shader. The log says
-  "Identified the point light pass" and then "the point lights draw with soft shadows" once.
+- **Point and spot.** Two shaders are rebuilt: `SSLighting2_Point`, whose dual-paraboloid atlas needs
+  the compromise scale above, and `SSLighting2_Spot`, whose map is a plain projection, so its penumbra
+  follows `m_shadowProjection` the way the sun's cascades do. Both are the quartic, specular,
+  shadow-mapped variants; the others (no specular, no shadow map) keep the game's shader, and a light
+  the game draws *without* a shadow map -- most of its point lights -- has no shadow to soften at all.
+- **Identified by checksum.** `shaderCreated` records the address of each replaced shader
+  (`afbc12167037e4e0d653da184c7e3e82` for the point, `ac0947110cb0f17f4ffe930a6a11617d` for the spot)
+  and the lighting draw matches on it. The log says "Identified the light pass" per shader, and
+  "the game draws a ... with the soft shadows" once for each that draws.
 
-Not handled yet: the spot lights' own contact hardening (their shadow map is a plain projection, so
-it is the easier of the two) and the point lights without specular, which have their own shader.
+Not handled yet: the same lights without specular, and the masked spots, which have their own shaders.
 
 ## Global illumination
 

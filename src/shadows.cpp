@@ -46,9 +46,25 @@ constexpr const char* SunChecksums[]{
 constexpr const char* SunNames[]{"shadow map", "far", "shadow map, rain", "far, rain"};
 static_assert(std::size(SunChecksums) == static_cast<std::size_t>(Sun::Count) && std::size(SunNames) == std::size(SunChecksums));
 
-// The game's point light with a shadow map and specular (SSLighting2_Point, game_lights.hpp), the only
-// local light the soft shadows replace so far. Its falloff is the quartic one.
-constexpr const char* PointShadowChecksum = "afbc12167037e4e0d653da184c7e3e82";
+// A game shader can be created more than once; holding the copies keeps their addresses from being
+// reused.
+constexpr std::size_t CopiesPerShader = 4;
+
+// The game's local lights the soft shadows replace: the point light with a dual-paraboloid shadow map
+// and the spot light's plain projection, both quartic, with specular and a shadow map
+// (game_lights.hpp). Every other local light keeps the game's shader.
+struct SoftLight
+{
+    const char* checksum;
+    const char* name;
+    const char* source;
+    std::mutex mutex;
+    std::array<std::atomic<IUnknown*>, CopiesPerShader> game{};
+    std::array<ComPtr<IUnknown>, CopiesPerShader> keep;
+    ComPtr<ID3D11PixelShader> replacement;
+};
+std::array<SoftLight, 2> softLights{{{"afbc12167037e4e0d653da184c7e3e82", "SSLighting2_Point", shaders::PointLight},
+    {"ac0947110cb0f17f4ffe930a6a11617d", "SSLighting2_Spot", shaders::SpotLight}}};
 
 bool shadowMapped(Sun sun)
 {
@@ -119,23 +135,17 @@ std::atomic<bool> active{}, pipelineFailed{};
 // Counts presents, to turn the soft shadows' samples.
 std::atomic<std::uint32_t> frame{};
 
-// Identified sun shaders, read lock-free on every full-screen draw. The game can create a shader more
-// than once; holding the copies keeps their addresses from being reused.
-constexpr std::size_t CopiesPerShader = 4;
 std::mutex shaderMutex;
 std::array<std::array<std::atomic<IUnknown*>, CopiesPerShader>, std::size(SunChecksums)> sunShaders{};
 std::array<std::array<ComPtr<IUnknown>, CopiesPerShader>, std::size(SunChecksums)> shaderOwners;
 
 // Identified local light shaders, looked up on every indexed draw.
 std::shared_mutex lightShaderMutex;
-std::unordered_map<IUnknown*, Falloff> lightShaders;
+std::unordered_map<IUnknown*, const GameLight*> lightShaders;
+std::unordered_map<IUnknown*, bool> drawnLightShaders; // By shader, whether the log has named it
 std::vector<ComPtr<IUnknown>> lightShaderOwners;
 
-// The game's point light shader the soft shadows replace, read lock-free on every indexed draw; like
-// the sun's, a copy keeps its address from being reused.
-std::mutex pointShaderMutex;
-std::array<std::atomic<IUnknown*>, CopiesPerShader> pointShadowShaders{};
-std::array<ComPtr<IUnknown>, CopiesPerShader> pointShadowOwners;
+
 
 // The depth a context's recording traced the sun from since its last FinishCommandList: both parts
 // of the sun pass read the same shadow. And the light whose shadow a context's last stencil-marking
@@ -153,7 +163,6 @@ ComPtr<ID3D11Device> device;
 ComPtr<ID3D11ComputeShader> traceShader;
 std::array<ComPtr<ID3D11PixelShader>, std::size(SunChecksums)> replacements;
 ComPtr<ID3D11PixelShader> lightShadowShader;
-ComPtr<ID3D11PixelShader> pointShadowShader;
 ComPtr<ID3D11SamplerState> borderSampler;
 ComPtr<ID3D11Buffer> parameterBuffer, optionsBuffer, lampOptionsBuffer;
 // The light shadow's draw: alpha only, over the whole light volume.
@@ -184,7 +193,7 @@ bool ensurePipeline()
         }
 
         lightShadowShader = pixelShader(device.Get(), shaders::LightShadow, "light-shadow");
-        pointShadowShader = pixelShader(device.Get(), shaders::PointLight, "point-light-shadows");
+        for (auto& light : softLights) light.replacement = pixelShader(device.Get(), light.source, light.name);
 
         D3D11_SAMPLER_DESC sampler{};
         sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
@@ -223,7 +232,6 @@ bool ensurePipeline()
     {
         pipelineFailed = true;
         traceShader.Reset();
-        pointShadowShader.Reset();
         log(std::string("Shadows unavailable: ") + error.what());
 
         return false;
@@ -258,18 +266,44 @@ std::optional<Falloff> falloffOf(IUnknown* shader)
     const auto found = shader ? lightShaders.find(shader) : lightShaders.end();
     if (found == lightShaders.end()) return std::nullopt;
 
-    return found->second;
+    return found->second->falloff;
 }
 
-// Whether `shader` is the game's point light the soft local shadows replace.
-bool isPointShadowShader(IUnknown* shader)
+// The game's light a shader belongs to; null for any other shader.
+const GameLight* lightOf(IUnknown* shader)
 {
-    if (!shader) return false;
+    std::shared_lock lock(lightShaderMutex);
+    const auto found = shader ? lightShaders.find(shader) : lightShaders.end();
 
-    for (const auto& copy : pointShadowShaders)
-        if (copy.load(std::memory_order_relaxed) == shader) return true;
+    return found == lightShaders.end() ? nullptr : found->second;
+}
 
-    return false;
+// A light shader's kind, as the log names it.
+std::string describe(const GameLight& light)
+{
+    return std::string(light.shape == Shape::Point ? "point light" : light.flashlight ? "flashlight" : "spot light")
+        + (light.falloff == Falloff::Quartic ? ", quartic falloff" : ", sixteenth falloff") + (light.specular ? ", specular" : ", no specular")
+        + (light.shadowMap ? ", shadow map" : ", no shadow map");
+}
+
+// Whether this is the first draw of `shader` the log names.
+bool firstDraw(IUnknown* shader)
+{
+    std::unique_lock lock(lightShaderMutex);
+    return drawnLightShaders.try_emplace(shader, true).second;
+}
+
+// The replacement for `shader`, or null when the soft shadows do not replace it; read lock-free on
+// every indexed draw.
+ID3D11PixelShader* softReplacement(IUnknown* shader)
+{
+    if (!shader) return nullptr;
+
+    for (auto& light : softLights)
+        for (const auto& copy : light.game)
+            if (copy.load(std::memory_order_relaxed) == shader) return light.replacement.Get();
+
+    return nullptr;
 }
 
 // What this thread wrote to the light pass's cPSScene (b2) and cPSLight (b3), each at its full size.
@@ -609,7 +643,10 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         // screen-space shadow is on, or with the soft shadows' replacement of the point light.
         ComPtr<ID3D11PixelShader> gameShader;
         context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
-        bool soft = options.softLocalShadows && isPointShadowShader(gameShader.Get());
+        ID3D11PixelShader* replacement = options.softLocalShadows ? softReplacement(gameShader.Get()) : nullptr;
+        bool soft = replacement != nullptr;
+        if (const auto* kind = lightOf(gameShader.Get()); kind && firstDraw(gameShader.Get()))
+            log(std::string("Shadows: the game draws a ") + describe(*kind) + (soft ? ", with the soft shadows." : "."));
         const bool alphaMarked = takeMarked(context, position);
         if (!soft && !alphaMarked) return false;
 
@@ -633,11 +670,11 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         {
             context->PSGetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
             writeLampOptions(context);
-            context->PSSetShader(pointShadowShader.Get(), nullptr, 0);
+            context->PSSetShader(replacement, nullptr, 0);
             context->PSSetConstantBuffers(OptionsSlot, 1, lampOptionsBuffer.GetAddressOf());
         }
 
-        performance::Timed timed(context, performance::Pass::LampShadows);
+        performance::Timed timed(context, soft ? performance::Pass::LampSoftLight : performance::Pass::LampShadows);
         context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
         timed.end();
 
@@ -740,7 +777,7 @@ void detach() noexcept
     traceShader.Reset();
     for (auto& replacement : replacements) replacement.Reset();
     lightShadowShader.Reset();
-    pointShadowShader.Reset();
+    for (auto& light : softLights) light.replacement.Reset();
     borderSampler.Reset();
     parameterBuffer.Reset();
     optionsBuffer.Reset();
@@ -762,6 +799,7 @@ void detach() noexcept
     {
         std::unique_lock lightLock(lightShaderMutex);
         lightShaders.clear();
+        drawnLightShaders.clear();
         lightShaderOwners.clear();
     }
 
@@ -773,11 +811,14 @@ void detach() noexcept
             shaderOwners[sun][i].Reset();
         }
 
-    std::lock_guard pointLock(pointShaderMutex);
-    for (std::size_t i = 0; i < CopiesPerShader; ++i)
+    for (auto& light : softLights)
     {
-        pointShadowShaders[i] = nullptr;
-        pointShadowOwners[i].Reset();
+        std::lock_guard softLock(light.mutex);
+        for (std::size_t i = 0; i < CopiesPerShader; ++i)
+        {
+            light.game[i] = nullptr;
+            light.keep[i].Reset();
+        }
     }
 }
 
@@ -824,16 +865,18 @@ void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcep
     const auto* light = findGameLight(text);
     if (!light) return;
 
-    if (text == PointShadowChecksum)
+    for (auto& soft : softLights)
     {
-        std::lock_guard lock(pointShaderMutex);
+        if (text != soft.checksum) continue;
+
+        std::lock_guard lock(soft.mutex);
         for (std::size_t i = 0; i < CopiesPerShader; ++i)
         {
-            if (pointShadowShaders[i].load()) continue;
+            if (soft.game[i].load()) continue;
 
-            pointShadowOwners[i] = shader;
-            pointShadowShaders[i] = shader;
-            log("Identified the point light pass (SSLighting2_Point) for the soft local shadows.");
+            soft.keep[i] = shader;
+            soft.game[i] = shader;
+            log(std::string("Identified the light pass (") + soft.name + ") for the soft local shadows.");
             break;
         }
     }
@@ -841,7 +884,7 @@ void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcep
     try
     {
         std::unique_lock lock(lightShaderMutex);
-        lightShaders.emplace(shader, light->falloff);
+        lightShaders.emplace(shader, light);
         lightShaderOwners.emplace_back(shader);
     }
     catch (...)
