@@ -1485,10 +1485,10 @@ every frame (one dispatch with the sun off screen), the lit image looked as befo
 shadows showed under Snake's boots, in grass and around rocks. With the trace alone, characters
 close to the camera keep only the shadow near their feet.
 
-- **Contrast and reach.** Two settings shape both traces: **Contact shadow contrast** (1 to 8, 4 by
-  default, Bend's own) scales the trace's distance-to-shadow window, so higher is darker and harder
-  and lower is a soft grey wash; and **Contact shadow reach** (8 to 120 pixels of the render size, 60
-  by default) is how far along the ray the march runs. The reach costs one depth read group when the
+- **Contrast and reach.** Two settings shape both traces, under **Contact shadows** with their
+  switches: **Contact shadow contrast** (1 to 8, 1 by default) scales the trace's distance-to-shadow
+  window, so higher is darker and harder and lower is a soft grey wash, 1 being the trace itself;
+  and **Contact shadow reach** (8 to 120 pixels of the render size, 80 by default) is how far along the ray the march runs. The reach costs one depth read group when the
   shader's `SAMPLE_COUNT` went from 60 to 120, and the march stops at the setting, so a shorter reach
   is cheap; the last eight samples of it fade out as Bend's last eight do. It is in pixels, so at 4K
   the same reach covers half the world distance it does at 1080p.

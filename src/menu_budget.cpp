@@ -185,6 +185,9 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
     add({.id = "rayTracedShadows", .name = "Ray-traced shadows", .section = at(Section::Shadows), .state = rayTracedShadows, .toggle = &wanted.rayTracedShadows,
             .message = messageFor(rayTracedShadows, rayTracing, "Ray-traced shadows are unavailable (see PhantomFX.log).")},
         {{Pass::SunShadowRays, "Shadow rays"}, {Pass::SunShadowDenoiser, "Denoiser"}});
+    add({.id = "rayTracedLights", .name = "Ray-traced lights", .section = at(Section::Shadows), .state = rayTracedLights, .toggle = &wanted.rayTracedLights,
+            .message = messageFor(rayTracedLights, lightsProblem)},
+        {{Pass::LightShadowRays, "Shadow rays"}, {Pass::LightShadowFilter, "Shadow filter"}, {Pass::LocalLights, "Lights with their traced shadows"}});
     add({.id = "softShadows", .name = "Sun soft shadows", .tech = "PCSS", .section = at(Section::Shadows), .state = softShadows, .toggle = &wanted.softShadows,
             .replacedBy = "rayTracedShadows", .message = messageFor(softShadows, {}, "Soft shadows are unavailable (see PhantomFX.log).")},
         {});
@@ -195,9 +198,6 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
     add({.id = "sunContactShadows", .name = "Sun contact shadows", .section = at(Section::Shadows), .state = sunContact, .toggle = &wanted.sunScreenSpaceShadows,
             .replacedBy = "rayTracedShadows", .message = messageFor(sunContact, {}, "Contact shadows are unavailable (see PhantomFX.log).")},
         {{Pass::SunTrace, "Contact shadow trace"}});
-    add({.id = "rayTracedLights", .name = "Ray-traced lights", .section = at(Section::Shadows), .state = rayTracedLights, .toggle = &wanted.rayTracedLights,
-            .message = messageFor(rayTracedLights, lightsProblem)},
-        {{Pass::LightShadowRays, "Shadow rays"}, {Pass::LightShadowFilter, "Shadow filter"}, {Pass::LocalLights, "Lights with their traced shadows"}});
     add({.id = "lampContactShadows", .name = "Lamp contact shadows", .section = at(Section::Shadows), .state = lampContact, .toggle = &wanted.lightScreenSpaceShadows,
             .replacedBy = "rayTracedLights", .message = messageFor(lampContact, {}, "Contact shadows are unavailable (see PhantomFX.log).")},
         {{Pass::LampTraces, "Traces"}, {Pass::LampShadows, "Shadow draws"}});
