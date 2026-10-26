@@ -1500,8 +1500,8 @@ close to the camera keep only the shadow near their feet.
   shadowed: that is the coverage measure `renodx-mgsv`'s march uses, in Bend's window units. The cost
   is a sum and a count inside a loop that already runs, so the switch exists to A/B the shape rather
   than the speed. Off, the shader computes and takes Bend's value alone. A shadowed ray spends most of
-  its length in empty space, so that mean is small on its own: **Soft contact gain** (1 to 24, 8 by
-  default) scales it to full darkness, and is the dial that decides how dark a soft contact gets.
+  its length in empty space, so that mean is small on its own: **Soft contact gain** (1 to 24, 4 by
+  default) scales that share before it is subtracted from one, and is the dial that decides how dark a soft contact gets.
 
 Not handled:
 

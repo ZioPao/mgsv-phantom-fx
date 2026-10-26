@@ -37,7 +37,7 @@ struct Settings
     // in pixels of the render size. Both the sun's and the lamps' take them.
     static constexpr float MinContactShadowContrast = 1.0f, MaxContactShadowContrast = 8.0f, DefaultContactShadowContrast = 1.0f;
     static constexpr float MinContactShadowReach = 8.0f, MaxContactShadowReach = 120.0f, DefaultContactShadowReach = 80.0f;
-    static constexpr float MinContactShadowGain = 1.0f, MaxContactShadowGain = 24.0f, DefaultContactShadowGain = 8.0f;
+    static constexpr float MinContactShadowGain = 1.0f, MaxContactShadowGain = 24.0f, DefaultContactShadowGain = 4.0f;
     static constexpr float MinFNumber = 0.7f, MaxFNumber = 32.0f, DefaultFNumber = 1.4f;
     static constexpr int DefaultRayQuality = 4;
     static constexpr int DefaultGlobalIlluminationRays = 2;

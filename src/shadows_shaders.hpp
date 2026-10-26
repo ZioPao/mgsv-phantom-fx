@@ -80,7 +80,7 @@ struct DispatchParameters
         ShadowContrast              = 4;
         Reach                       = SAMPLE_COUNT;
         Coverage                    = 0;
-        Gain                        = 8;
+        Gain                        = 4;
         IgnoreEdgePixels            = false;
         UsePrecisionOffset          = false;
         BilinearSamplingOffsetMode  = false;
@@ -434,8 +434,12 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
     // contact shadow rather than their strength.
     if (inParameters.Coverage > 0 && covered > 0)
     {
-        const float cover = saturate((1 - coverSum / (float)covered) * inParameters.Gain);
-        result = lerp(result, saturate(cover * inParameters.ShadowContrast + (1 - inParameters.ShadowContrast)),
+        // `mean` is the share of the ray that lies inside a surface: 0 with nothing along it, high behind a
+        // caster. The gain belongs on that share, not on its complement: a shadowed ray is mostly empty
+        // space, so the share is small and has to be scaled up before it is subtracted from 1.
+        const float mean = coverSum / (float)covered;
+        const float lit = saturate(1 - mean * inParameters.Gain);
+        result = lerp(result, saturate(lit * inParameters.ShadowContrast + (1 - inParameters.ShadowContrast)),
             saturate(inParameters.Coverage));
     }
 
