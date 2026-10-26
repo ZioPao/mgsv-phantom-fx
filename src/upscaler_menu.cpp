@@ -191,6 +191,14 @@ void drawShadows(Settings& wanted)
         item)
         sunSize(wanted);
 
+    fxui::item({.id = "softLocalShadows",
+        .tag = "Experimental",
+        .tip = "Contact-hardening soft shadows from each lamp's own shadow map: sharp where the light meets a surface, softer the further the shadow "
+               "falls, as the lamp's size gives. Points and spots, in a rebuilt copy of the game's own shader. Only the lamps the game gives a shadow "
+               "map take it; most of its point lights have none, and keep their light. Off keeps the game's evenly sharp edges.",
+        .summary = "A lamp's shadow softens with distance, as a real bulb's does.",
+        .keywords = "PCSS point spot lamp soft"});
+
     fxui::item({.id = "sunContactShadows",
         .tip = "Bend Studio's screen-space shadows for the sun: short shadows traced through the depth buffer. They add the contact shadows the "
                "sun's shadow map misses (feet, rocks, folds of clothing). Cheap: one trace a frame.",
@@ -217,14 +225,6 @@ void drawShadows(Settings& wanted)
                        "fades to the same dimness further away. 1x is the game's: about 5 times the moonlight at 10 m and cut off at 30 m. 8x is "
                        "about a real 1980s weapon light against the game's night. Only the look: the guards see as before."});
     }
-
-    fxui::item({.id = "softLocalShadows",
-        .tag = "Experimental",
-        .tip = "Contact-hardening soft shadows from a point light's own shadow map: sharp where the light meets a surface, softer the further the "
-               "shadow falls, as the lamp's size gives. The game's own shader draws it, rebuilt, and only the point lights with a shadow map take it. "
-               "Off keeps the game's evenly sharp edges.",
-        .summary = "Point lights' shadows soften with distance, as a real lamp's do.",
-        .keywords = "PCSS lamp point light soft"});
 
     fxui::item({.id = "lampContactShadows",
         .tip = "Bend Studio's screen-space shadows for every lamp, spot light and flashlight, which gives lights that have no shadow of their own "

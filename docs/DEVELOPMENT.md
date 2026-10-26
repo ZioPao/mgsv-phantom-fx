@@ -1491,9 +1491,9 @@ Not handled:
   The shadow map gives the rest.
 - Forward and transparent objects, drawn after the sun, neither cast nor receive the trace.
 
-## Soft local shadows
+## Lamp soft shadows
 
-With **Soft local shadows** on, a point light whose shader is `SSLighting2_Point` draws with the
+With **Lamp soft shadows (PCSS)** on, a point light whose shader is `SSLighting2_Point` draws with the
 add-on's replacement (`src/local_light_shaders.hpp`) instead of the game's, and its own shadow map is
 filtered with contact-hardening soft shadows: sharp where the object meets the light, wider the
 further the shadow falls, as a real bulb's is.

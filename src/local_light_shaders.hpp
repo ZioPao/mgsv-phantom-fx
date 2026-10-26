@@ -1,7 +1,7 @@
 #pragma once
 
 // HLSL for PhantomFX's replacement of the game's point light shader, compiled at runtime with
-// d3dcompiler_47 (docs/DEVELOPMENT.md, "Soft local shadows").
+// d3dcompiler_47 (docs/DEVELOPMENT.md, "Lamp soft shadows").
 //
 // Fox Engine's SSLighting2_Point (quartic falloff, specular, shadow map) as its disassembly computes
 // it, plus the add-on's options in b6: with g_softLampShadows off the game's own four comparisons

@@ -14,8 +14,8 @@
 // - Screen-space shadows add Bend Studio's screen-space shadow, traced through the depth buffer, to
 //   the sun, to every point and spot light, or to both. The sun's is one trace a frame; the lights'
 //   is one trace per light, so it costs far more where many lights are on screen.
-// - Soft local shadows filter a point light's shadow map with the same contact-hardening soft
-//   shadows as the sun's, in a replacement of the game's point light shader.
+// - Lamp soft shadows filter a point or spot light's own shadow map with the same
+//   contact-hardening soft shadows as the sun's, in a replacement of the game's light shader.
 // - Ray-traced shadows take the sun's shadow from rays through the global illumination's scene
 //   (global_illumination::sunShadow; docs/DEVELOPMENT.md, "Ray-traced shadows"), everywhere the sun
 //   lights. The shadow map keeps only what the rays leave out, the alpha-tested meshes' shadows.

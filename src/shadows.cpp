@@ -682,7 +682,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         {
             context->PSSetShader(gameShader.Get(), nullptr, 0);
             context->PSSetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
-            logOnce("Shadows: the point lights draw with soft shadows.");
+            logOnce("Shadows: the lamps draw with soft shadows.");
         }
 
         if (shadowed) context->OMSetBlendState(gameBlend.Get(), blendFactor, sampleMask);

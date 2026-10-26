@@ -304,7 +304,7 @@ std::optional<upscaler::LeftOut> startMeasurement(LONGLONG now)
     leave(lighting && settings.ambientOcclusion && !settings.globalIllumination, "GTVBAO", &upscaler::LeftOut::ambientOcclusion);
     leave(lighting && settings.lightScreenSpaceShadows, "Lamp contact shadows", &upscaler::LeftOut::lightScreenSpaceShadows);
     leave(lighting && settings.sunScreenSpaceShadows && !rayTraced, "Sun contact shadows", &upscaler::LeftOut::sunScreenSpaceShadows);
-    leave(lighting && settings.softShadows && !rayTraced, "Soft shadows", &upscaler::LeftOut::softShadows);
+    leave(lighting && settings.softShadows && !rayTraced, "Sun soft shadows", &upscaler::LeftOut::softShadows);
     const bool upscaling = settings.mode != upscaler::Mode::Off;
     leave(upscaling && settings.sharpness > 0, "Sharpening", &upscaler::LeftOut::sharpening);
     leave(upscaling, std::string(upscaler::label(settings.upscaler)) + " (FXAA instead)", &upscaler::LeftOut::upscaler);
