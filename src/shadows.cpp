@@ -456,9 +456,9 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
         parameters.waveOffset[1] = dispatch.WaveOffset_Shader[1];
         parameters.inverseDepthSize[0] = 1.0f / static_cast<float>(size[0]);
         parameters.inverseDepthSize[1] = 1.0f / static_cast<float>(size[1]);
-        parameters.surfaceThickness = std::clamp(thickness, 0.001f, 0.1f);
+        parameters.surfaceThickness = std::clamp(thickness, 0.002f, 0.025f);
         parameters.bilinearThreshold = BilinearThreshold;
-        parameters.shadowContrast = std::clamp(contrast, 1.0f, 8.0f);
+        parameters.shadowContrast = std::clamp(contrast, 0.5f, 4.0f);
         parameters.reach = std::clamp(reach, 1.0f, MaxReach);
         std::memcpy(parameters.projection, projection.data(), sizeof(parameters.projection));
         std::memcpy(parameters.fade, fade.data(), sizeof(parameters.fade));

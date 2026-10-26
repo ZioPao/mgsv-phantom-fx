@@ -38,7 +38,7 @@ struct Options
     float contactContrast{1}; // How hard and dark the contact shadows' trace is (Bend's ShadowContrast)
     float contactReach{80};   // How far the trace marches, in pixels of the render size
     float contactThickness{0.005f}; // How deep a sample counts as a caster, as a share of its depth to the far plane
-    float contactFade{150};         // Metres: the contact shadows fade out by here
+    float contactFade{500};         // Metres: the contact shadows fade out by here
     bool softLocalShadows{};  // Contact-hardening soft shadows from a point light's own shadow map
     bool rayTraced{};         // The sun's ray-traced shadows: the rays alone shadow the sun
     bool withShadowMap{};     // With rayTraced: the shadow map's as well, near the camera (the darker of the two)
