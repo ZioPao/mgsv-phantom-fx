@@ -11,7 +11,7 @@ namespace phantom_fx::shadows::shaders
 // MSVC limits each to 16 KB.
 inline constexpr char BendShadow[] = R"(
 #define WAVE_SIZE 64
-#define SAMPLE_COUNT 60
+#define SAMPLE_COUNT 120
 #define HARD_SHADOW_SAMPLES 4
 #define FADE_OUT_SAMPLES 8
 #define USE_HALF_PIXEL_OFFSET 1
@@ -34,6 +34,9 @@ struct DispatchParameters
 
     float ShadowContrast;               // A contrast boost is applied to the transition in/out of shadow.
                                         // Recommended starting value: 2 or 4. Values >= 1 are valid.
+
+    float Reach;                        // How many samples along the ray to march, one a pixel of the render
+                                        // size. Bend's shader always takes SAMPLE_COUNT; this is how much of it.
 
     bool IgnoreEdgePixels;              // If an edge is detected, the edge pixel will not contribute to the shadow.
                                         // If a very flat surface is being lit and rendered at an grazing angles, the edge detect may incorrectly detect multiple 'edge' pixels along that flat surface.
@@ -69,6 +72,7 @@ struct DispatchParameters
         SurfaceThickness            = 0.005;
         BilinearThreshold           = 0.02;
         ShadowContrast              = 4;
+        Reach                       = SAMPLE_COUNT;
         IgnoreEdgePixels            = false;
         UsePrecisionOffset          = false;
         BilinearSamplingOffsetMode  = false;
@@ -346,25 +350,44 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
     }
 
     // Brute force go!
-    // The main shadow samples, averaged in to a set of 4 shadow values
-    [unroll] for (i = HARD_SHADOW_SAMPLES; i < SAMPLE_COUNT - FADE_OUT_SAMPLES; i++)
+    // The main shadow samples, averaged in to a set of 4 shadow values, out to the reach. Bend's shader
+    // always runs SAMPLE_COUNT of them; the add-on's reach stops the march early, so a shorter reach is
+    // cheaper as well as tighter, and the last FADE_OUT_SAMPLES of the reach fade out in case a light
+    // stands within it. Four samples a pass, one per accumulator, so the loop never indexes the vector
+    // by a runtime value: that would force FXC to unroll it to the full sample count whatever the reach.
+    const int reach = clamp((int)inParameters.Reach, HARD_SHADOW_SAMPLES, SAMPLE_COUNT);
+    const int fadeFrom = max(reach - FADE_OUT_SAMPLES, HARD_SHADOW_SAMPLES);
+    i = HARD_SHADOW_SAMPLES;
+    [loop] for (; i + 3 < reach; i += 4)
     {
-        float depth_delta = abs(start_depth - DepthData[sample_index + i] * depth_scale);
+        float4 depth_delta;
+        depth_delta.x = abs(start_depth - DepthData[sample_index + i + 0] * depth_scale);
+        depth_delta.y = abs(start_depth - DepthData[sample_index + i + 1] * depth_scale);
+        depth_delta.z = abs(start_depth - DepthData[sample_index + i + 2] * depth_scale);
+        depth_delta.w = abs(start_depth - DepthData[sample_index + i + 3] * depth_scale);
 
-        // Do the same as the hard_shadow code above, but this will accumulate to 4 separate values.
+        // Add the fade value to the samples of the reach's last stretch.
+        float4 fade_out;
+        fade_out.x = (i + 0) < fadeFrom ? 0 : (float)(i + 1 - fadeFrom) / (float)(FADE_OUT_SAMPLES + 1) * 0.75;
+        fade_out.y = (i + 1) < fadeFrom ? 0 : (float)(i + 2 - fadeFrom) / (float)(FADE_OUT_SAMPLES + 1) * 0.75;
+        fade_out.z = (i + 2) < fadeFrom ? 0 : (float)(i + 3 - fadeFrom) / (float)(FADE_OUT_SAMPLES + 1) * 0.75;
+        fade_out.w = (i + 3) < fadeFrom ? 0 : (float)(i + 4 - fadeFrom) / (float)(FADE_OUT_SAMPLES + 1) * 0.75;
+
         // By using 4 values, the average shadow can be taken, which can help soften single-pixel shadows.
-        shadow_value[i & 3] = min(shadow_value[i & 3], depth_delta);
+        shadow_value = min(shadow_value, depth_delta + fade_out);
     }
 
-    // Final fade out samples
-    [unroll] for (i = SAMPLE_COUNT - FADE_OUT_SAMPLES; i < SAMPLE_COUNT; i++)
+    // The fewer than four samples left of the reach. Four samples a pass start at 4, so each lands in the
+    // accumulator its index would have had in Bend's unrolled loop.
+    for (; i < reach; ++i)
     {
-        float depth_delta = abs(start_depth - DepthData[sample_index + i] * depth_scale);
+        const float depth_delta = abs(start_depth - DepthData[sample_index + i] * depth_scale);
+        const float fade_out = i < fadeFrom ? 0 : (float)(i + 1 - fadeFrom) / (float)(FADE_OUT_SAMPLES + 1) * 0.75;
 
-        // Add the fade value to these samples
-        const float fade_out = (float)(i + 1 - (SAMPLE_COUNT - FADE_OUT_SAMPLES)) / (float)(FADE_OUT_SAMPLES + 1) * 0.75;
-
-        shadow_value[i & 3] = min(shadow_value[i & 3], depth_delta + fade_out);
+        if ((i & 3) == 0) shadow_value.x = min(shadow_value.x, depth_delta + fade_out);
+        else if ((i & 3) == 1) shadow_value.y = min(shadow_value.y, depth_delta + fade_out);
+        else if ((i & 3) == 2) shadow_value.z = min(shadow_value.z, depth_delta + fade_out);
+        else shadow_value.w = min(shadow_value.w, depth_delta + fade_out);
     }
 
     // Apply the contrast value.
@@ -404,7 +427,7 @@ cbuffer Parameters : register(b0)
     float SurfaceThickness;
     float BilinearThreshold;
     float ShadowContrast;
-    float Padding;
+    float Reach;     // In samples
     float2 DepthBounds;     // Pixels at or beyond these depths are skipped
     int2 BoundsMin;         // The pixels BuildDispatchList covers, for the light shadow shader
     int2 BoundsMax;
@@ -421,6 +444,7 @@ void main(int3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
     parameters.SurfaceThickness = SurfaceThickness;
     parameters.BilinearThreshold = BilinearThreshold;
     parameters.ShadowContrast = ShadowContrast;
+    parameters.Reach = Reach;
     // Skips the sky, which is at the far plane, and for a local light what it cannot reach.
     parameters.UseEarlyOut = true;
     parameters.DepthBounds = DepthBounds;

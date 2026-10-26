@@ -35,6 +35,8 @@ struct Options
     bool turnPattern{};       // DLSS accumulates frames, so the soft shadows' samples turn each frame
     bool screenSpaceSun{};    // Bend Studio's screen-space shadows on the sun
     bool screenSpaceLights{}; // Bend Studio's screen-space shadows on every point and spot light
+    float contactContrast{4}; // How hard and dark the contact shadows' trace is (Bend's ShadowContrast)
+    float contactReach{60};   // How far the trace marches, in pixels of the render size
     bool softLocalShadows{};  // Contact-hardening soft shadows from a point light's own shadow map
     bool rayTraced{};         // The sun's ray-traced shadows: the rays alone shadow the sun
     bool withShadowMap{};     // With rayTraced: the shadow map's as well, near the camera (the darker of the two)

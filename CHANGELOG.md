@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add **Contact shadow contrast** and **Contact shadow reach** sliders, under the shadows: the first
+  sets how dark and how hard the traced contact shadows are (1 to 8, 4 by default), the second how far
+  along the screen they reach (8 to 120 pixels, 60 by default). Both apply to the sun's and the lamps'.
 - Add **Lamp soft shadows (PCSS)**: point and spot lights with a shadow map filter it with
   contact-hardening soft shadows instead of the game's four evenly sharp comparisons, so a lamp's
   shadow is sharp where it meets a surface and widens with distance. Off by default; rebuilt copies

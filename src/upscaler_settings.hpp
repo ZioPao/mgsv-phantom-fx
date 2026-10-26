@@ -33,6 +33,10 @@ struct Settings
     static constexpr float MaxIndirectLightStrength = 3.0f;
     static constexpr float MaxGlobalIlluminationStrength = 3.0f;
     static constexpr float MinSunSize = 0.1f, MaxSunSize = 4.0f, DefaultSunSize = 0.53f;
+    // The contact shadows' shape: how hard and dark the trace is, and how far along the ray it marches,
+    // in pixels of the render size. Both the sun's and the lamps' take them.
+    static constexpr float MinContactShadowContrast = 1.0f, MaxContactShadowContrast = 8.0f, DefaultContactShadowContrast = 4.0f;
+    static constexpr float MinContactShadowReach = 8.0f, MaxContactShadowReach = 120.0f, DefaultContactShadowReach = 60.0f;
     static constexpr float MinFNumber = 0.7f, MaxFNumber = 32.0f, DefaultFNumber = 1.4f;
     static constexpr int DefaultRayQuality = 4;
     static constexpr int DefaultGlobalIlluminationRays = 2;
@@ -63,6 +67,8 @@ struct Settings
     // whatever the mode. Apart because the lights' cost grows with how many are on screen.
     bool sunScreenSpaceShadows{};
     bool lightScreenSpaceShadows{};
+    float contactShadowContrast{DefaultContactShadowContrast};
+    float contactShadowReach{DefaultContactShadowReach};
     // Contact-hardening soft shadows from a point or spot light's own shadow map (shadows.hpp), in
     // place of the game's four evenly sharp comparisons. Its own option: the shaders it replaces are
     // the game's.

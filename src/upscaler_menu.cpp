@@ -164,6 +164,24 @@ void sunSize(Settings& wanted)
             .tip = "The sun's angular diameter, which sets how fast shadows soften with distance. It also sets the sun for the global illumination. 0.53 is the real sun."});
 }
 
+// The shape of the contact shadows, shared by the sun's and the lamps' traces.
+void contactShadowShape(Settings& wanted)
+{
+    if (!wanted.sunScreenSpaceShadows && !wanted.lightScreenSpaceShadows) return;
+
+    fxui::slider("Contact shadow contrast", wanted.contactShadowContrast,
+        {.min = Settings::MinContactShadowContrast, .max = Settings::MaxContactShadowContrast,
+            .standard = Defaults.contactShadowContrast, .format = "%.1f",
+            .tip = "How dark and how hard-edged the contact shadows come out. The trace always finds a distance to a surface, and this decides how "
+                   "much of that distance still counts as shadow: higher darkens more and sharpens the edge, lower leaves a soft grey wash. 4 is "
+                   "Bend Studio's own value."});
+    fxui::slider("Contact shadow reach", wanted.contactShadowReach,
+        {.min = Settings::MinContactShadowReach, .max = Settings::MaxContactShadowReach,
+            .standard = Defaults.contactShadowReach, .format = "%.0f px",
+            .tip = "How far along the screen the contact shadows are traced, in pixels of the render size. Longer picks up casters further from what "
+                   "they shadow, and costs more; shorter is the cheap end. At 4K the same pixels reach half as far in the world as at 1080p."});
+}
+
 void drawShadows(Settings& wanted)
 {
     const fxui::Page page(Section::Shadows, "Shadows of the sun and of lamps. The ray-traced ones replace the screen-space ones while on.");
@@ -230,6 +248,8 @@ void drawShadows(Settings& wanted)
                "one. Costly: one trace per light, so the frame rate drops where many lights are on screen, as in a base at night.",
         .summary = "Contact shadows for every lamp and flashlight. One trace per light, so it costs more where many lights are on screen.",
         .keywords = "screen-space SSS"});
+
+    contactShadowShape(wanted);
 }
 
 void drawLighting(Settings& wanted)

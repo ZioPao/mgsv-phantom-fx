@@ -311,6 +311,8 @@ void configureShadows()
         .turnPattern = replacing,
         .screenSpaceSun = enhancements && settings.sunScreenSpaceShadows && !leftOut.sunScreenSpaceShadows && !rayTraced,
         .screenSpaceLights = enhancements && settings.lightScreenSpaceShadows && !leftOut.lightScreenSpaceShadows && !rayTracedLights(),
+        .contactContrast = settings.contactShadowContrast,
+        .contactReach = settings.contactShadowReach,
         .softLocalShadows = enhancements && settings.softLocalShadows && !rayTracedLights(),
         .rayTraced = rayTraced,
         .withShadowMap = settings.vanillaShadowsWithRayTracing,
