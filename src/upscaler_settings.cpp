@@ -270,6 +270,8 @@ Settings loadSettings(const std::filesystem::path& path)
             if (number(value, rays) && validGlobalIlluminationRays(rays)) settings.globalIlluminationRays = rays;
         }
         else if (key == "f_number") readFloat(value, settings.fNumber, Settings::MinFNumber, Settings::MaxFNumber);
+        else if (key == "motion_blur") readFlag(value, settings.motionBlur);
+        else if (key == "motion_blur_strength") readFloat(value, settings.motionBlurStrength, 0.0f, Settings::MaxMotionBlurStrength);
         else if (key == "hdr") readFlag(value, settings.hdr);
         else if (key == "hdr_peak_nits")
         {
@@ -330,6 +332,7 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
                << "\natmosphere_look=" << AtmosphereLookKeys[static_cast<std::size_t>(settings.atmosphereLook)]
                << "\natmosphere_haze=" << settings.atmosphereHaze
                << "\nf_number=" << settings.fNumber
+               << "\nmotion_blur=" << settings.motionBlur << "\nmotion_blur_strength=" << settings.motionBlurStrength
                << "\nhdr=" << settings.hdr << "\nhdr_peak_nits=" << settings.peakNits
                << "\nhdr_paper_white_nits=" << settings.paperWhiteNits << '\n';
         output.close();

@@ -39,6 +39,7 @@ struct Settings
     static constexpr float MinFlashlightBrightness = 1.0f, MaxFlashlightBrightness = 16.0f, DefaultFlashlightBrightness = 8.0f;
     static constexpr float MinPeakNits = 400, MaxPeakNits = 10000;
     static constexpr float MinPaperWhiteNits = 80, MaxPaperWhiteNits = 500, DefaultPaperWhiteNits = 203;
+    static constexpr float MaxMotionBlurStrength = 2.0f, DefaultMotionBlurStrength = 1.0f;
 
     Upscaler upscaler{Upscaler::Dlss};
     Mode mode{Mode::Dlaa};
@@ -99,6 +100,10 @@ struct Settings
     float atmosphereHaze{};
     // Photo mode's aperture, as an f-number.
     float fNumber{DefaultFNumber};
+    // The game's own motion blur (motion_blur.hpp): off leaves it out even with the upscaler on, and
+    // the strength multiplies the radius the game's setting asks for.
+    bool motionBlur{true};
+    float motionBlurStrength{DefaultMotionBlurStrength};
     // HDR10 output (hdr.hpp). Turning it on or off takes a restart: the swap chain and the scene targets
     // are made for it. The display's peak brightness (0: as the display reports it) and the brightness
     // of the game's white, in nits, apply at once.
