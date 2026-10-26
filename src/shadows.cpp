@@ -21,6 +21,7 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <utility>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -106,6 +107,15 @@ struct Parameters
 };
 static_assert(sizeof(Parameters) % 16 == 0);
 
+// SoftenShadow's constants (src/shaders/shadow_shaders.hpp).
+struct SoftenConstants
+{
+    std::int32_t size[2], boundsMin[2], boundsMax[2];
+    float radius;
+    std::int32_t padding;
+};
+static_assert(sizeof(SoftenConstants) % 16 == 0);
+
 // Bend's recommended starting values, which suit Fox Engine's reversed depth as they are. The contrast
 // and the reach are the add-on's contact shadow settings instead; the reach cannot pass the shader's
 // SAMPLE_COUNT, the most it marches.
@@ -162,11 +172,11 @@ using ShadowTarget = ComputeTexture;
 // ---- Direct3D, guarded by resourceMutex ----
 std::mutex resourceMutex;
 ComPtr<ID3D11Device> device;
-ComPtr<ID3D11ComputeShader> traceShader;
+ComPtr<ID3D11ComputeShader> traceShader, softenShader;
 std::array<ComPtr<ID3D11PixelShader>, std::size(SunChecksums)> replacements;
 ComPtr<ID3D11PixelShader> lightShadowShader;
 ComPtr<ID3D11SamplerState> borderSampler;
-ComPtr<ID3D11Buffer> parameterBuffer, optionsBuffer, lampOptionsBuffer;
+ComPtr<ID3D11Buffer> parameterBuffer, optionsBuffer, lampOptionsBuffer, softenBuffer;
 // The light shadow's draw: alpha only, over the whole light volume.
 ComPtr<ID3D11BlendState> alphaOnly;
 ComPtr<ID3D11DepthStencilState> noDepth;
@@ -174,6 +184,7 @@ ComPtr<ID3D11RasterizerState> bothFaces;
 // The game's additive light blend, by the state it binds, and the same scaled by the target's alpha.
 std::unordered_map<ID3D11BlendState*, std::pair<ComPtr<ID3D11BlendState>, ComPtr<ID3D11BlendState>>> shadowedBlends;
 ShadowTarget sunShadow, lightShadow;
+ShadowTarget sunSoftened, lightSoftened;
 bool tracedSunOnce{};
 std::array<bool, 2> tracedLightOnce{}; // By falloff
 
@@ -186,6 +197,7 @@ bool ensurePipeline()
     try
     {
         traceShader = computeShader(device.Get(), shaders::BendShadow, "bend-screen-space-shadows");
+        softenShader = computeShader(device.Get(), shaders::SoftenShadow, "soften-screen-space-shadows");
 
         for (std::size_t index = 0; index < replacements.size(); ++index)
         {
@@ -207,6 +219,7 @@ bool ensurePipeline()
         parameterBuffer = makeConstantBuffer(device.Get(), sizeof(Parameters), "Creating the shadow trace constants");
         optionsBuffer = makeConstantBuffer(device.Get(), sizeof(ShaderOptions), "Creating the sun shadow options");
         lampOptionsBuffer = makeConstantBuffer(device.Get(), sizeof(LampOptions), "Creating the lamp shadow options");
+        softenBuffer = makeConstantBuffer(device.Get(), sizeof(SoftenConstants), "Creating the shadow softening constants");
 
         D3D11_BLEND_DESC blend{};
         blend.RenderTarget[0].SrcBlend = blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
@@ -234,6 +247,7 @@ bool ensurePipeline()
     {
         pipelineFailed = true;
         traceShader.Reset();
+    softenShader.Reset();
         log(std::string("Shadows unavailable: ") + error.what());
 
         return false;
@@ -391,10 +405,11 @@ std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 
 // stays lit. Call with resourceMutex held. Returns Bend's dispatch list.
 Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth,
     std::array<float, 4> lightProjection, const std::optional<TraceBounds>& bounds, ShadowTarget& target, float contrast, float reach,
-    float coverage, float gain)
+    float coverage, float gain, ShadowTarget& softened, float soften)
 {
     auto size = depthSize(depth);
     ensureShadowTarget(target, static_cast<UINT>(size[0]), static_cast<UINT>(size[1]));
+    ensureShadowTarget(softened, static_cast<UINT>(size[0]), static_cast<UINT>(size[1]));
 
     // Bend's default depth bounds skip the sky.
     const auto covered = bounds.value_or(TraceBounds{{0, 0}, {size[0], size[1]}, 0, 1});
@@ -436,6 +451,27 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
         if (FAILED(write(context, parameterBuffer.Get(), parameters))) break;
 
         context->Dispatch(static_cast<UINT>(dispatch.WaveCount[0]), static_cast<UINT>(dispatch.WaveCount[1]), static_cast<UINT>(dispatch.WaveCount[2]));
+    }
+
+    // The five-tap pass that widens the mask's edges. It is the only softness the effect can have: the
+    // light shaders load the mask with a point read, so nothing filters it once it has been written.
+    if (soften >= 1)
+    {
+        SoftenConstants constants{};
+        constants.size[0] = size[0];
+        constants.size[1] = size[1];
+        std::memcpy(constants.boundsMin, covered.min, sizeof(constants.boundsMin));
+        std::memcpy(constants.boundsMax, covered.max, sizeof(constants.boundsMax));
+        constants.radius = std::clamp(soften, 1.0f, 8.0f);
+        if (SUCCEEDED(write(context, softenBuffer.Get(), constants)))
+        {
+            context->CSSetShader(softenShader.Get(), nullptr, 0);
+            context->CSSetShaderResources(0, 1, target.view.GetAddressOf());
+            context->CSSetUnorderedAccessViews(0, 1, softened.access.GetAddressOf(), nullptr);
+            context->CSSetConstantBuffers(0, 1, softenBuffer.GetAddressOf());
+            context->Dispatch((static_cast<UINT>(size[0]) + 7) / 8, (static_cast<UINT>(size[1]) + 7) / 8, 1);
+            std::swap(target, softened);
+        }
     }
 
     return dispatches;
@@ -569,7 +605,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
             const float* direction = &constants->light[LightDirection];
             const auto lightProjection = project(constants->scene.data(), {direction[0], direction[1], direction[2], 0});
             const auto where = describe(trace(context, depth.Get(), lightProjection, {}, sunShadow, options.contactContrast, options.contactReach,
-            options.contactSoft ? 1.0f : 0.0f, options.contactGain));
+            options.contactSoft ? 1.0f : 0.0f, options.contactGain, sunSoftened, options.contactSoften));
             noteTraced(context, depth.Get());
             if (!tracedSunOnce)
             {
@@ -714,7 +750,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     if (std::abs(point[2]) < MinLightDepth) point[2] = std::copysign(MinLightDepth, point[2]);
     performance::Timed timed(context, performance::Pass::LampTraces);
     const auto dispatches = trace(context, depth.Get(), project(scene, point), bounds, lightShadow, options.contactContrast, options.contactReach,
-        options.contactSoft ? 1.0f : 0.0f, options.contactGain);
+        options.contactSoft ? 1.0f : 0.0f, options.contactGain, lightSoftened, options.contactSoften);
     timed.end();
     if (dispatches.DispatchCount == 0) return false;
 
@@ -779,6 +815,7 @@ void detach() noexcept
 {
     std::lock_guard lock(resourceMutex);
     traceShader.Reset();
+    softenShader.Reset();
     for (auto& replacement : replacements) replacement.Reset();
     lightShadowShader.Reset();
     for (auto& light : softLights) light.replacement.Reset();
@@ -786,12 +823,15 @@ void detach() noexcept
     parameterBuffer.Reset();
     optionsBuffer.Reset();
     lampOptionsBuffer.Reset();
+    softenBuffer.Reset();
     alphaOnly.Reset();
     noDepth.Reset();
     bothFaces.Reset();
     shadowedBlends.clear();
     sunShadow = {};
     lightShadow = {};
+    sunSoftened = {};
+    lightSoftened = {};
     device.Reset();
     pipelineFailed = false;
     {

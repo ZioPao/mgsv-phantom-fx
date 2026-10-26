@@ -889,4 +889,45 @@ void main(float4 position : SV_Position, out float4 diffuse : SV_Target0, out fl
     diffuse = specular = traced ? g_ScreenSpaceShadow.Load(int3(pixel, 0)) : 1;
 }
 )";
+
+// The trace's mask, softened by a five-tap cross. The sun and light shaders load the mask with a point
+// read rather than a filtered one, so the bilinear filtering inside the trace cannot widen an edge once
+// it is written: this pass is the only place a softer edge can come from, and it is why the effect can
+// keep Bend's cheap shared-memory march. Outside the light's bounds the mask is copied as it is.
+inline constexpr char SoftenShadow[] = R"(
+cbuffer Soften : register(b0)
+{
+    int2 Size;        // The mask's size
+    int2 BoundsMin;   // The pixels the trace covered
+    int2 BoundsMax;
+    float Radius;     // Between the centre tap and the outer ones, in pixels
+    int Padding;
+};
+Texture2D<float> Source : register(t0);
+RWTexture2D<unorm float> Dest : register(u0);
+
+// A read outside the mask, at its edges.
+float At(int2 pixel)
+{
+    return Source.Load(int3(clamp(pixel, int2(0, 0), Size - 1), 0));
+}
+
+[numthreads(8, 8, 1)]
+void main(int3 id : SV_DispatchThreadID)
+{
+    const int2 pixel = id.xy;
+    if (any(pixel >= Size)) return;
+    if (any(pixel < BoundsMin) || any(pixel >= BoundsMax))
+    {
+        Dest[pixel] = At(pixel);
+        return;
+    }
+
+    const int step = max((int)Radius, 1);
+    const float sum = At(pixel) * 2
+        + At(pixel + int2(step, 0)) + At(pixel - int2(step, 0))
+        + At(pixel + int2(0, step)) + At(pixel - int2(0, step));
+    Dest[pixel] = sum / 6;
+}
+)";
 }

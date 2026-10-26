@@ -315,6 +315,7 @@ void configureShadows()
         .contactReach = settings.contactShadowReach,
         .contactSoft = settings.contactShadowSoft,
         .contactGain = settings.contactShadowGain,
+        .contactSoften = settings.contactShadowSoften,
         .softLocalShadows = enhancements && settings.softLocalShadows && !rayTracedLights(),
         .rayTraced = rayTraced,
         .withShadowMap = settings.vanillaShadowsWithRayTracing,

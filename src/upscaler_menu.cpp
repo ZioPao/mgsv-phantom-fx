@@ -184,6 +184,12 @@ void contactShadowShape(Settings& wanted)
         "Counts the share of the trace's ray that lies inside a surface instead of how far the nearest one is from the surface, so a ray that "
         "only grazes an edge comes out partly shadowed and the contact edges read soft, as the screen-space shadows do in renodx-mgsv. It "
         "changes their shape rather than their strength; off keeps Bend Studio's own result.");
+    fxui::slider("Soft contact edge", wanted.contactShadowSoften,
+        {.min = Settings::MinContactShadowSoften, .max = Settings::MaxContactShadowSoften, .standard = Defaults.contactShadowSoften,
+            .format = "%.0f px",
+            .tip = "How far the trace's mask is spread before the lights read it, in pixels of the render size. The trace writes a hard 0 or 1 at "
+                   "every pixel and the lights take it as it is, so this is what turns an edge into a gradient. 1 is enough to lose the stair step, "
+                   "0 keeps Bend Studio's own edge."});
     if (wanted.contactShadowSoft)
         fxui::slider("Soft contact gain", wanted.contactShadowGain,
             {.min = Settings::MinContactShadowGain, .max = Settings::MaxContactShadowGain, .standard = Defaults.contactShadowGain, .format = "%.1fx",
