@@ -35,9 +35,10 @@ struct Settings
     static constexpr float MinSunSize = 0.1f, MaxSunSize = 4.0f, DefaultSunSize = 0.53f;
     // The contact shadows' shape: how hard and dark the trace is, and how far along the ray it marches,
     // in pixels of the render size. Both the sun's and the lamps' take them.
-    static constexpr float MinContactShadowContrast = 1.0f, MaxContactShadowContrast = 8.0f, DefaultContactShadowContrast = 1.0f;
+    static constexpr float MinContactShadowContrast = 0.5f, MaxContactShadowContrast = 4.0f, DefaultContactShadowContrast = 1.0f;
     static constexpr float MinContactShadowReach = 8.0f, MaxContactShadowReach = 120.0f, DefaultContactShadowReach = 80.0f;
-    static constexpr float MinContactShadowGain = 1.0f, MaxContactShadowGain = 24.0f, DefaultContactShadowGain = 4.0f;
+    static constexpr float MinContactShadowThickness = 0.002f, MaxContactShadowThickness = 0.025f, DefaultContactShadowThickness = 0.005f;
+    static constexpr float MinContactShadowFade = 50.0f, MaxContactShadowFade = 700.0f, DefaultContactShadowFade = 500.0f;
     static constexpr float MinFNumber = 0.7f, MaxFNumber = 32.0f, DefaultFNumber = 1.4f;
     static constexpr int DefaultRayQuality = 4;
     static constexpr int DefaultGlobalIlluminationRays = 2;
@@ -70,12 +71,11 @@ struct Settings
     bool lightScreenSpaceShadows{};
     float contactShadowContrast{DefaultContactShadowContrast};
     float contactShadowReach{DefaultContactShadowReach};
-    // The trace counts coverage rather than the gap to the nearest surface, which softens every contact
-    // edge. Its own switch: it changes their shape, not only their strength.
-    bool contactShadowSoft{};
-    // How far the coverage reaches full darkness, since a shadowed ray spends most of its length in empty
-    // space: a mean over the samples is small, and this scales it back up.
-    float contactShadowGain{DefaultContactShadowGain};
+    // How deep a sample counts as a caster, as a share of the depth between it and the far plane. Bend's
+    // own 0.5% is thin: a contact has to sit almost exactly at the receiver's depth to register.
+    float contactShadowThickness{DefaultContactShadowThickness};
+    // Where the contact shadows fade out, in metres of view depth: full underfoot, gone past this.
+    float contactShadowFade{DefaultContactShadowFade};
     // Contact-hardening soft shadows from a point or spot light's own shadow map (shadows.hpp), in
     // place of the game's four evenly sharp comparisons. Its own option: the shaders it replaces are
     // the game's.

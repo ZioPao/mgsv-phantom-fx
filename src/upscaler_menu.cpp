@@ -180,16 +180,16 @@ void contactShadowShape(Settings& wanted)
             .standard = Defaults.contactShadowReach, .format = "%.0f px",
             .tip = "How far along the screen the contact shadows are traced, in pixels of the render size. Longer picks up casters further from what "
                    "they shadow, and costs more; shorter is the cheap end. At 4K the same pixels reach half as far in the world as at 1080p."});
-    fxui::checkbox("Soft contact shadows", wanted.contactShadowSoft,
-        "Counts the share of the trace's ray that lies inside a surface instead of how far the nearest one is from the surface, so a ray that "
-        "only grazes an edge comes out partly shadowed and the contact edges read soft, as the screen-space shadows do in renodx-mgsv. It "
-        "changes their shape rather than their strength; off keeps Bend Studio's own result.");
-    if (wanted.contactShadowSoft)
-        fxui::slider("Soft contact gain", wanted.contactShadowGain,
-            {.min = Settings::MinContactShadowGain, .max = Settings::MaxContactShadowGain, .standard = Defaults.contactShadowGain, .format = "%.1fx",
-                .tip = "How far the coverage reaches full darkness. A shadowed ray spends most of its length in empty space, so the share that lies "
-                       "inside something is small; this scales it back up. Higher is darker and closes the soft edge in, lower keeps the edge but "
-                       "never gets dark."});
+    fxui::slider("Contact shadow thickness", wanted.contactShadowThickness,
+        {.min = Settings::MinContactShadowThickness, .max = Settings::MaxContactShadowThickness,
+            .standard = Defaults.contactShadowThickness, .format = "%.1f%%", .shown = 100,
+            .tip = "How deep a surface has to be behind the receiver to count as a contact. Bend Studio's 0.5% is thin: the trace only sees something sitting almost exactly at the receiver's depth, which is why its contact shadows are so tight. Raising it widens what counts, and darkens and softens every contact."});
+    fxui::slider("Contact shadow fade", wanted.contactShadowFade,
+        {.min = Settings::MinContactShadowFade, .max = Settings::MaxContactShadowFade, .standard = Defaults.contactShadowFade,
+            .format = "%.0f m",
+            .tip = "How far away the contact shadows reach, in metres. Full strength underfoot, then a straight fade to nothing by this distance, "
+                   "where the shadow map is the better tool. RenoDX fades them the same way; without it they stay as sharp at a hundred metres as at "
+                   "your feet."});
 }
 
 void drawShadows(Settings& wanted)

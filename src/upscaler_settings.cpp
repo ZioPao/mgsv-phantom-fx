@@ -246,9 +246,8 @@ Settings loadSettings(const std::filesystem::path& path)
         else if (key == "soft_local_shadows") readFlag(value, settings.softLocalShadows);
         else if (key == "contact_shadow_contrast")
             readFloat(value, settings.contactShadowContrast, Settings::MinContactShadowContrast, Settings::MaxContactShadowContrast);
-        else if (key == "contact_shadow_soft") readFlag(value, settings.contactShadowSoft);
-        else if (key == "contact_shadow_gain")
-            readFloat(value, settings.contactShadowGain, Settings::MinContactShadowGain, Settings::MaxContactShadowGain);
+        else if (key == "contact_shadow_thickness")
+            readFloat(value, settings.contactShadowThickness, Settings::MinContactShadowThickness, Settings::MaxContactShadowThickness);
         else if (key == "contact_shadow_reach")
             readFloat(value, settings.contactShadowReach, Settings::MinContactShadowReach, Settings::MaxContactShadowReach);
         else if (key == "ray_traced_shadows") readFlag(value, settings.rayTracedShadows);
@@ -328,8 +327,8 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
                << "\nlight_screen_space_shadows=" << settings.lightScreenSpaceShadows
                 << "\ncontact_shadow_contrast=" << settings.contactShadowContrast
                 << "\ncontact_shadow_reach=" << settings.contactShadowReach
-                << "\ncontact_shadow_soft=" << settings.contactShadowSoft
-                << "\ncontact_shadow_gain=" << settings.contactShadowGain
+                << "\ncontact_shadow_thickness=" << settings.contactShadowThickness
+                << "\ncontact_shadow_fade=" << settings.contactShadowFade
                 << "\nsoft_local_shadows=" << settings.softLocalShadows << "\nray_traced_shadows=" << settings.rayTracedShadows
                << "\nvanilla_shadows_with_ray_tracing=" << settings.vanillaShadowsWithRayTracing
                << "\nray_traced_lights=" << settings.rayTracedLights << "\nray_quality=" << settings.rayQuality
