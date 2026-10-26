@@ -38,12 +38,6 @@ struct DispatchParameters
     float Reach;                        // How many samples along the ray to march, one a pixel of the render
                                         // size. Bend's shader always takes SAMPLE_COUNT; this is how much of it.
 
-    float Coverage;                     // 1: count the share of the ray that lies inside a surface, rather than
-                                        // the gap to the nearest one, so a grazed edge reads soft
-
-    float Gain;                         // How far that share reaches full darkness: a shadowed ray spends most
-                                        // of its length in empty space, so the mean is small
-
     float2 Projection;                  // B, A: view Z from the reversed depth
     float2 Fade;                        // Metres: the contact shadow fades out between these
 
@@ -82,8 +76,6 @@ struct DispatchParameters
         BilinearThreshold           = 0.02;
         ShadowContrast              = 4;
         Reach                       = SAMPLE_COUNT;
-        Coverage                    = 0;
-        Gain                        = 1;
         Projection                  = float2(1, 0);
         Fade                        = float2(0, 0);
         IgnoreEdgePixels            = false;
@@ -370,9 +362,6 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
     // by a runtime value: that would force FXC to unroll it to the full sample count whatever the reach.
     const int reach = clamp((int)inParameters.Reach, HARD_SHADOW_SAMPLES, SAMPLE_COUNT);
     const int fadeFrom = max(reach - FADE_OUT_SAMPLES, HARD_SHADOW_SAMPLES);
-    // The share of the ray that lies inside a surface, for the coverage mode below.
-    float coverSum = 0;
-    int covered = 0;
     i = HARD_SHADOW_SAMPLES;
     [loop] for (; i + 3 < reach; i += 4)
     {
@@ -393,15 +382,6 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
         // By using 4 values, the average shadow can be taken, which can help soften single-pixel shadows.
         shadow_value = min(shadow_value, depth_delta + fade_out);
 
-        if (inParameters.Coverage > 0)
-        {
-            // Bend's own measure is the gap to a surface at the receiver's depth, which only a caster
-            // touching it can give. RenoDX counts any surface in front of the ray point, so that is what
-            // this sums: saturate(sample - start + 1) is 0 with nothing in front and 1 from one window
-            // in front through everything beyond it, so the mean is the share of the ray that is blocked.
-            coverSum += dot(1 - saturate(depth_delta), 1);
-            covered += 4;
-        }
     }
 
     // The fewer than four samples left of the reach. Four samples a pass start at 4, so each lands in the
@@ -416,11 +396,6 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
         else if ((i & 3) == 2) shadow_value.z = min(shadow_value.z, depth_delta + fade_out);
         else shadow_value.w = min(shadow_value.w, depth_delta + fade_out);
 
-        if (inParameters.Coverage > 0)
-        {
-            coverSum += 1 - saturate(depth_delta);
-            ++covered;
-        }
     }
 
     // Apply the contrast value.
@@ -446,21 +421,6 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
         result = lerp(1.0, result, fade);
     }
 
-    // Coverage: the share of the ray that lies inside a surface, in place of the gap to the nearest one.
-    // renodx-mgsv's march counts the samples that hit something and divides; this is the same measure in
-    // Bend's window units, so a pixel the ray only grazes comes out partly shadowed instead of either
-    // lit or dark, and the edge reads soft. Its own switch, because it changes the shape of every
-    // contact shadow rather than their strength.
-    if (inParameters.Coverage > 0 && covered > 0)
-    {
-        // `mean` is the share of the ray that lies inside a surface: 0 with nothing along it, high behind a
-        // caster. The gain belongs on that share, not on its complement: a shadowed ray is mostly empty
-        // space, so the share is small and has to be scaled up before it is subtracted from 1.
-        const float mean = coverSum / (float)covered;
-        const float lit = saturate(1 - mean * inParameters.Gain);
-        result = lerp(result, saturate(lit * inParameters.ShadowContrast + (1 - inParameters.ShadowContrast)),
-            saturate(inParameters.Coverage));
-    }
 
     //write the result
     {
@@ -489,8 +449,6 @@ cbuffer Parameters : register(b0)
     float2 DepthBounds;     // Pixels at or beyond these depths are skipped
     int2 BoundsMin;         // The pixels BuildDispatchList covers, for the light shadow shader
     int2 BoundsMax;
-    float Coverage;         // 1: coverage rather than the gap to the nearest surface
-    float Gain;             // How far the coverage reaches full darkness
     float2 Projection;      // B, A: view Z from the reversed depth
     float2 Fade;            // Metres: start and end of the distance fade
 };
@@ -507,8 +465,6 @@ void main(int3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
     parameters.BilinearThreshold = BilinearThreshold;
     parameters.ShadowContrast = ShadowContrast;
     parameters.Reach = Reach;
-    parameters.Coverage = Coverage;
-    parameters.Gain = Gain;
     parameters.Projection = Projection;
     parameters.Fade = Fade;
     // Skips the sky, which is at the far plane, and for a local light what it cannot reach.

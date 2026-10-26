@@ -103,9 +103,9 @@ struct Parameters
     float surfaceThickness, bilinearThreshold, shadowContrast, reach;
     float depthBounds[2];
     std::int32_t boundsMin[2], boundsMax[2];
-    float coverage, gain; // 1: the trace counts coverage instead of the nearest gap
     float projection[2];  // B, A: view Z from the reversed depth
     float fade[2];        // Metres: start and end of the distance fade
+    float padding[2];
 };
 static_assert(sizeof(Parameters) % 16 == 0);
 
@@ -365,10 +365,11 @@ std::array<float, 2> viewProjection(const PassConstants& constants)
 }
 
 // Where the contact shadows fade out, in metres of view depth: full underfoot, gone by the setting.
-constexpr float ContactFadeStart = 40;
+constexpr float ContactFadeStart = 0.6f; // As a share of the fade distance
 std::array<float, 2> fadeRange(const Options& options)
 {
-    return {ContactFadeStart, std::max(options.contactFade, ContactFadeStart + 1)};
+    const float end = std::max(options.contactFade, 60.0f);
+    return {end * ContactFadeStart, end};
 }
 // The width and height of the depth buffer `view` shows; throws when it is not a 2D texture, as the
 // trace needs one.
@@ -421,7 +422,7 @@ std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 
 // stays lit. Call with resourceMutex held. Returns Bend's dispatch list.
 Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth,
     std::array<float, 4> lightProjection, const std::optional<TraceBounds>& bounds, ShadowTarget& target, float contrast, float reach,
-    float coverage, float gain, ShadowTarget& softened, float soften, float thickness, const std::array<float, 2>& projection,
+    ShadowTarget& softened, float soften, float thickness, const std::array<float, 2>& projection,
     const std::array<float, 2>& fade)
 {
     auto size = depthSize(depth);
@@ -459,8 +460,6 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
         parameters.bilinearThreshold = BilinearThreshold;
         parameters.shadowContrast = std::clamp(contrast, 1.0f, 8.0f);
         parameters.reach = std::clamp(reach, 1.0f, MaxReach);
-        parameters.coverage = std::clamp(coverage, 0.0f, 1.0f);
-        parameters.gain = std::clamp(gain, 1.0f, 24.0f);
         std::memcpy(parameters.projection, projection.data(), sizeof(parameters.projection));
         std::memcpy(parameters.fade, fade.data(), sizeof(parameters.fade));
         parameters.depthBounds[0] = covered.depthMin;
@@ -623,8 +622,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
             const performance::Timed timed(context, performance::Pass::SunTrace);
             const float* direction = &constants->light[LightDirection];
             const auto lightProjection = project(constants->scene.data(), {direction[0], direction[1], direction[2], 0});
-            const auto where = describe(trace(context, depth.Get(), lightProjection, {}, sunShadow, options.contactContrast, options.contactReach,
-            options.contactSoft ? 1.0f : 0.0f, options.contactGain, sunSoftened, 0.0f, options.contactThickness, viewProjection(*constants), fadeRange(options)));
+            const auto where = describe(trace(context, depth.Get(), lightProjection, {}, sunShadow, options.contactContrast, options.contactReach, sunSoftened, 0.0f, options.contactThickness, viewProjection(*constants), fadeRange(options)));
             noteTraced(context, depth.Get());
             if (!tracedSunOnce)
             {
@@ -768,8 +766,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     float point[4]{position[0], position[1], position[2], 1};
     if (std::abs(point[2]) < MinLightDepth) point[2] = std::copysign(MinLightDepth, point[2]);
     performance::Timed timed(context, performance::Pass::LampTraces);
-    const auto dispatches = trace(context, depth.Get(), project(scene, point), bounds, lightShadow, options.contactContrast, options.contactReach,
-        options.contactSoft ? 1.0f : 0.0f, options.contactGain, lightSoftened, 0.0f, options.contactThickness, viewProjection(*constants), fadeRange(options));
+    const auto dispatches = trace(context, depth.Get(), project(scene, point), bounds, lightShadow, options.contactContrast, options.contactReach, lightSoftened, 0.0f, options.contactThickness, viewProjection(*constants), fadeRange(options));
     timed.end();
     if (dispatches.DispatchCount == 0) return false;
 

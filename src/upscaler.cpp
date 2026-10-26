@@ -313,8 +313,6 @@ void configureShadows()
         .screenSpaceLights = enhancements && settings.lightScreenSpaceShadows && !leftOut.lightScreenSpaceShadows && !rayTracedLights(),
         .contactContrast = settings.contactShadowContrast,
         .contactReach = settings.contactShadowReach,
-        .contactSoft = settings.contactShadowSoft,
-        .contactGain = settings.contactShadowGain,
         .contactThickness = settings.contactShadowThickness,
         .contactFade = settings.contactShadowFade,
         .softLocalShadows = enhancements && settings.softLocalShadows && !rayTracedLights(),
