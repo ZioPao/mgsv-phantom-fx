@@ -4,7 +4,6 @@
 #include "clock.hpp"
 #include "atmosphere.hpp"
 #include "d3d11_helpers.hpp"
-#include "draw_distance.hpp"
 #include "focus.hpp"
 #include "frame_rate.hpp"
 #include "fsr_upscaler.hpp"
@@ -380,17 +379,6 @@ void configurePhotoMode()
 void configureHdr()
 {
     hdr::configure({.peakNits = settings.peakNits, .paperWhiteNits = settings.paperWhiteNits});
-}
-
-// Call with settingsMutex held. Full detail stops at 7 x 7: 9 x 9 overruns a fixed table in the engine.
-void configureDrawDistance()
-{
-    switch (supported ? settings.drawDistance : DrawDistance::Vanilla)
-    {
-    case DrawDistance::Extended: draw_distance::configure({.fullDetail = 7, .coarse = 7, .coarsest = 7, .farDetail = true}); break;
-    case DrawDistance::Far: draw_distance::configure({.fullDetail = 7, .coarse = 9, .coarsest = 9, .farDetail = true}); break;
-    default: draw_distance::configure({}); break;
-    }
 }
 
 // A frame DLSS cannot run on shows the engine's image as it is, without anti-aliasing.
@@ -1475,7 +1463,6 @@ void initialize(const std::filesystem::path& directory, bool supportedBuild) noe
     frame_rate::setUnlocked(settings.unlockFps);
     configurePhotoMode();
     configureHdr();
-    configureDrawDistance();
     log(std::string(label(settings.upscaler)) + " mode " + std::string(label(settings.mode, settings.upscaler))
         + (supported ? "." : "; this game build is not supported, so it stays off."));
 }
@@ -1974,7 +1961,6 @@ void applySettings(const Settings& wanted)
     frame_rate::setUnlocked(settings.unlockFps);
     configurePhotoMode();
     configureHdr();
-    configureDrawDistance();
 }
 
 Diagnostics currentDiagnostics()

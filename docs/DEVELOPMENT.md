@@ -91,7 +91,7 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/ui_redirect.cpp`, `src/ui_redirect.hpp` | The grading, the 2D pass and `GammaControl` on output-size targets while the engine renders below them |
 | `src/upscaler_shaders.hpp` | HLSL: the upscaler's inputs and motion vectors, composite with RCAS and debug views, stretch fallback |
 | `src/camera.cpp`, `src/camera.hpp` | Scene constants: main-view recognition, jitter, reprojection, camera cuts |
-| `src/upscaler_settings.cpp`, `src/upscaler_settings.hpp` | Upscaler, mode, custom scale, preset, texture bias, sharpening, frame rate unlock, frame generation, soft shadows, sun and lamp contact shadows, ambient occlusion, indirect lighting, volumetric fog, draw distance; `PhantomFX.ini` |
+| `src/upscaler_settings.cpp`, `src/upscaler_settings.hpp` | Upscaler, mode, custom scale, preset, texture bias, sharpening, frame rate unlock, frame generation, soft shadows, sun and lamp contact shadows, ambient occlusion, indirect lighting, volumetric fog; `PhantomFX.ini` |
 | `src/upscaler_menu.cpp` | The "Phantom FX" overlay window: its pages (Upscaling, Shadows, Lighting, Atmosphere, Camera, Display, World, Diagnostics) |
 | `src/menu_budget.cpp`, `src/menu_budget.hpp` | The window's sections, and each effect as a budget line: its state, its switch and its timed passes |
 | `src/fxui/` | fxui, the reusable frame budget settings window for ReShade add-ons (see its README.md) |
@@ -107,8 +107,7 @@ and local settings are left out. ReShade is installed separately by the player.
 | `src/fidelityfx.cpp`, `src/fidelityfx.hpp` | Loads the AMD FSR API |
 | `src/fsr_upscaler.cpp`, `src/fsr_upscaler.hpp` | FSR upscaling on Direct3D 12 for the upscaler |
 | `src/fsr_frame_generation.cpp`, `src/fsr_frame_generation.hpp` | FSR frame generation: AMD's swap chain and its inputs |
-| `src/game_loop.cpp`, `src/game_loop.hpp` | Hooks on the main loop's frame start and end, for Reflex, the weather menu and the draw distance |
-| `src/draw_distance.cpp`, `src/draw_distance.hpp` | Draw distance: wider streaming windows at a location's load, the level of detail and the models' and vegetation's cull lengths (see "Draw distance") |
+| `src/game_loop.cpp`, `src/game_loop.hpp` | Hooks on the main loop's frame start and end, for Reflex and the weather menu |
 | `src/weather.cpp`, `src/weather.hpp` | The overlay's weather and time control, in Utility (see "Weather and time") |
 | `src/sun_movement.cpp`, `src/sun_movement.hpp` | The sun and moon move every frame instead of in the game's steps (see "Sun movement") |
 | `src/dev_tools.hpp` | Whether the build has the Developer page (the dev preset) |
@@ -840,10 +839,10 @@ the shaders' disassembly.
 | `0x537DD0` | `WeatherManager` update; its pause bit 8 test at `0x537FBF`, made to run in photo mode |
 | `0x22C6F0`, `0x22C8B0` | Model visibility tests (see "Scene objects"); `rcx` the visibility manager, `r8d` its capacity |
 | `0x165BD0` | `StageBlockControllerData` setup: copies a location's streaming settings into a description and creates its stream controller (see "Draw distance") |
-| `0x15F010` | Creates the stream controller from that description (only the setup calls it), hooked for the draw distance |
+| `0x15F010` | Creates the stream controller from that description (only the setup calls it) |
 | `0x2B73434` | The level of detail's reference resolution, set by `GrTools.SetLodFactorResolution` (`0x1BB2D0`); 0 uses each view's width |
 | `0x2B74330`, `0x2B77FB0` | The models' and the vegetation's `RejectionLengthBias` settings; `+0x64` the value the draw jobs read |
-| `0x205AF0` | Selects those two settings' value by a graphics quality's name, hooked for the draw distance |
+| `0x205AF0` | Selects those two settings' value by a graphics quality's name |
 | `0x79D330` | Sun and moon light update (see "Sun movement"); its stepped test at `0x79D51D`, patched |
 | `0x6B96E0` | Sets the light's settings from the weather's parameters every frame (`0x550410` reads one) |
 
@@ -2491,15 +2490,8 @@ How far the game draws and loads its world, measured 2026-10-23 in Afghanistan f
   (models at `0x1CA8E8`, `0x1CBC0F`, `0x1CD2AF`; vegetation at `0x206A63`, `0x206D46`, `0x206EF3`). How
   the length enters the cull is not decoded; the objects' `drawRejectionLevel`s name sizes (0.5 to
   32 m for models, 400 to 1 pixels for vegetation).
-- **What the add-on does** (`src/draw_distance.cpp`). Vanilla changes nothing. Extended hooks
-  `0x15F010` and sets the counts to 7, 7 and 7 where the description has the open world's layout (block
-  sizes 128, 2 and 4, counts 5); at each game frame start it sets the resolution to 8192 and the
-  applied lengths to 1024 and 2048. Far does the same with 7, 9 and 9. The game skips a selection whose
-  value equals the applied one, so with the applied lengths overwritten it would never record its own:
-  a hook on `0x205AF0` gives the selection the game's value to compare with, and a change it leaves
-  pending runs on the game's values until applied or reverted, then counts as the game's. Back to
-  Vanilla, the game's resolution and lengths return at once and its windows at the next location load.
-  Untested: Central Africa, Mother Base (its own controller class), the cost in frame time.
+- **The add-on** changes none of this. Its draw distance setting (1.5.0 to 1.7.0) widened the windows
+  with a hook on `0x15F010` and raised the resolution and lengths each frame; it was removed.
 
 ## Photo mode
 

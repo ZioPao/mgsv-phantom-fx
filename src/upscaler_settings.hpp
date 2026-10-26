@@ -16,10 +16,6 @@ enum class Mode : std::uint8_t { Off, Dlaa, Quality, Balanced, Performance, Ultr
 enum class Preset : std::uint8_t { Default = 0, J = 10, K = 11, L = 12, M = 13 };
 // The volumetric fog's look: the game's own sky and fog colours, or Hillaire's physical sky and air.
 enum class AtmosphereLook : std::uint8_t { Mgsv, Physical, Count };
-// How far the world is drawn and loaded: the game's own, or full detail and the world's coarser copies
-// loaded farther (Far loads the coarser copies farther still), with more detail and longer draw
-// distances (draw_distance.hpp).
-enum class DrawDistance : std::uint8_t { Vanilla, Extended, Far, Count };
 // Frames presented per rendered frame, by DLSS Frame Generation up to Dynamic, which chooses them to
 // reach the display's refresh rate. Fsr is FSR frame generation, 2x on any GPU.
 enum class FrameGeneration : std::uint8_t { Off, X2, X3, X4, X5, X6, Dynamic, Fsr, Count };
@@ -101,8 +97,6 @@ struct Settings
     bool volumetricFog{};
     AtmosphereLook atmosphereLook{AtmosphereLook::Mgsv};
     float atmosphereHaze{};
-    // Whatever the mode. The loading distance takes effect when a location loads, the rest at once.
-    DrawDistance drawDistance{DrawDistance::Vanilla};
     // Photo mode's aperture, as an f-number.
     float fNumber{DefaultFNumber};
     // HDR10 output (hdr.hpp). Turning it on or off takes a restart: the swap chain and the scene targets
@@ -120,7 +114,6 @@ std::string_view label(Mode mode, Upscaler upscaler);
 std::string_view label(Preset preset);
 std::string_view label(FrameGeneration mode);
 std::string_view label(AtmosphereLook look);
-std::string_view label(DrawDistance distance);
 // 2 to 6 for the fixed DLSS modes, 0 for Off, Dynamic and FSR.
 unsigned multiplier(FrameGeneration mode);
 bool validPreset(int value);

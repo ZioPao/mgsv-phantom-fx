@@ -32,7 +32,6 @@ More comparisons: [Previews](docs/PREVIEWS.md)
 - **Ambient occlusion** (GTVBAO)
 - **Indirect lighting** (SSILVB)
 - **Volumetric fog** with light shafts and a physical sky
-- **Draw distance:** loads full detail and the distant world farther, with more detail at a distance
 - **Photo mode**
 - **Weather and time of day controls**
 - **Character swapper:** Snake, the avatar, soldiers, Ocelot or Quiet, in any outfit
@@ -67,7 +66,6 @@ Photo mode: WASD to move, mouse to look, Space/Ctrl up/down, Shift faster.
 ## Notes
 
 - Enabling frame generation, switching it between DLSS and FSR, or enabling HDR requires a game restart.
-- A new draw distance loads farther or nearer once a location loads, as on Continue from the title screen.
 
 ## Uninstall
 

@@ -70,12 +70,11 @@ void settingsPersist(const fs::path& root)
     const Settings chosen{.upscaler = Upscaler::Fsr, .mode = Mode::Off, .preset = Preset::J, .sharpness = 0.5f, .unlockFps = true, .frameGeneration = FrameGeneration::X3,
         .softShadows = true, .sunSize = 1.25f, .sunScreenSpaceShadows = true, .lightScreenSpaceShadows = true, .rayTracedShadows = true,
         .vanillaShadowsWithRayTracing = true, .rayTracedLights = true, .rayQuality = 8, .flashlightBrightness = 3.5f, .ambientOcclusion = true, .occlusionRadius = 2, .occlusionStrength = 1.5f, .indirectLight = true, .indirectLightRadius = 3,
-        .indirectLightStrength = 0.5f, .globalIlluminationRays = 4, .volumetricFog = true, .atmosphereLook = AtmosphereLook::Physical, .atmosphereHaze = 0.5f,
-        .drawDistance = DrawDistance::Far};
+        .indirectLightStrength = 0.5f, .globalIlluminationRays = 4, .volumetricFog = true, .atmosphereLook = AtmosphereLook::Physical, .atmosphereHaze = 0.5f};
     saveSettings(path, chosen);
     expect(loadSettings(path) == chosen,
         "Restart restores the upscaler, mode, preset, sharpening, frame rate unlock, frame generation, soft, screen-space and ray-traced "
-        "shadows, GTVBAO, SSILVB, the global illumination's rays, the volumetric fog and the draw distance.");
+        "shadows, GTVBAO, SSILVB, the global illumination's rays and the volumetric fog.");
     write(path, "frame_generation=dynamic\n");
     expect(loadSettings(path).frameGeneration == FrameGeneration::Dynamic, "Dynamic frame generation is read back.");
     write(path, "frame_generation=fsr\n");

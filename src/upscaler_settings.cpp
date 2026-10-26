@@ -21,8 +21,6 @@ static_assert(std::size(ModeKeys) == static_cast<std::size_t>(Mode::Count));
 constexpr std::string_view FrameGenerationKeys[]{"off", "2x", "3x", "4x", "5x", "6x", "dynamic", "fsr"};
 constexpr std::string_view AtmosphereLookKeys[]{"mgsv", "physical"};
 static_assert(std::size(AtmosphereLookKeys) == static_cast<std::size_t>(AtmosphereLook::Count));
-constexpr std::string_view DrawDistanceKeys[]{"vanilla", "extended", "far"};
-static_assert(std::size(DrawDistanceKeys) == static_cast<std::size_t>(DrawDistance::Count));
 static_assert(std::size(FrameGenerationKeys) == static_cast<std::size_t>(FrameGeneration::Count));
 
 std::string_view trim(std::string_view text)
@@ -105,17 +103,6 @@ std::string_view label(AtmosphereLook look)
     {
     case AtmosphereLook::Mgsv: return "MGSV";
     case AtmosphereLook::Physical: return "Physical";
-    default: return "Unknown";
-    }
-}
-
-std::string_view label(DrawDistance distance)
-{
-    switch (distance)
-    {
-    case DrawDistance::Vanilla: return "Vanilla";
-    case DrawDistance::Extended: return "Extended";
-    case DrawDistance::Far: return "Far";
     default: return "Unknown";
     }
 }
@@ -272,7 +259,6 @@ Settings loadSettings(const std::filesystem::path& path)
         else if (key == "volumetric_fog") readFlag(value, settings.volumetricFog);
         else if (key == "atmosphere_look") readKey(value, AtmosphereLookKeys, settings.atmosphereLook);
         else if (key == "atmosphere_haze") readFloat(value, settings.atmosphereHaze, 0.0f, 1.0f);
-        else if (key == "draw_distance") readKey(value, DrawDistanceKeys, settings.drawDistance);
         else if (key == "indirect_light") readFlag(value, settings.indirectLight);
         else if (key == "indirect_light_radius") readFloat(value, settings.indirectLightRadius, Settings::MinIndirectLightRadius, Settings::MaxIndirectLightRadius);
         else if (key == "indirect_light_strength") readFloat(value, settings.indirectLightStrength, 0.0f, Settings::MaxIndirectLightStrength);
@@ -343,7 +329,7 @@ void saveSettings(const std::filesystem::path& path, const Settings& settings)
                << "\nglobal_illumination_rays=" << settings.globalIlluminationRays << "\nvolumetric_fog=" << settings.volumetricFog
                << "\natmosphere_look=" << AtmosphereLookKeys[static_cast<std::size_t>(settings.atmosphereLook)]
                << "\natmosphere_haze=" << settings.atmosphereHaze
-               << "\ndraw_distance=" << DrawDistanceKeys[static_cast<std::size_t>(settings.drawDistance)] << "\nf_number=" << settings.fNumber
+               << "\nf_number=" << settings.fNumber
                << "\nhdr=" << settings.hdr << "\nhdr_peak_nits=" << settings.peakNits
                << "\nhdr_paper_white_nits=" << settings.paperWhiteNits << '\n';
         output.close();

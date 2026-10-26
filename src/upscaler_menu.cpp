@@ -3,7 +3,6 @@
 // performance_menu.cpp.
 #include "character.hpp"
 #include "dev_tools.hpp"
-#include "draw_distance.hpp"
 #include "frame_generation.hpp"
 #include "frame_log.hpp"
 #include "fsr_frame_generation.hpp"
@@ -464,29 +463,10 @@ void drawCharacter()
         character::chooseFace(faces[*picked].id);
 }
 
-void drawWorld(Settings& wanted)
+void drawWorld()
 {
-    const fxui::Page page(Section::World, "How far the world is drawn, its weather and time, and who you play.");
+    const fxui::Page page(Section::World, "The world's weather and time, and who you play.");
     if (!page) return;
-
-    const auto problem = draw_distance::problem();
-    if (const fxui::Item item({.id = "drawDistance",
-            .name = "Draw distance",
-            .tip = "How far the world is drawn. Vanilla leaves the game's own settings. Extended loads full detail (props, bushes, trees, rocks) out to "
-                   "about 450 m instead of 320 m, and the game's coarser copies of the world out to about 900 m and 1.8 km instead of 640 m and 1.3 km. "
-                   "It also keeps more detail at a distance, upscaled or not, and draws models and vegetation farther, whatever Model Detail is. Far "
-                   "loads the coarser copies out to about 1.2 km and 2.3 km. Loading farther takes effect when a location loads, as on Continue from "
-                   "the title screen. It costs memory and CPU time.",
-            .summary = "Full detail and the distant world load farther. It costs memory and CPU time, not GPU time.",
-            .keywords = "LOD vanilla extended far",
-            .state = problem.empty() ? std::nullopt : std::optional(State::Unavailable),
-            .message = problem});
-        item)
-    {
-        constexpr Choice<DrawDistance> distances[]{{DrawDistance::Vanilla, "Vanilla"}, {DrawDistance::Extended, "Extended"}, {DrawDistance::Far, "Far"}};
-        fxui::segmented("Draw distance", wanted.drawDistance, distances);
-        if (draw_distance::waitsForLocation()) fxui::note(Tone::Dim, "Loading farther or nearer takes effect when a location loads, as on Continue.");
-    }
 
     drawWeather();
     drawCharacter();
@@ -662,7 +642,7 @@ void drawMenu()
         drawAtmosphere(wanted);
         drawCamera(wanted);
         drawDisplay(wanted);
-        drawWorld(wanted);
+        drawWorld();
         drawDiagnostics(state);
         if constexpr (DevTools) drawDeveloper();
     }

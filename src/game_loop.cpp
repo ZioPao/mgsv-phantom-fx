@@ -3,7 +3,6 @@
 #include "character.hpp"
 #include "dev_tools.hpp"
 #include "device_check.hpp"
-#include "draw_distance.hpp"
 #include "frame_generation.hpp"
 #include "game_code.hpp"
 #include "game_lua.hpp"
@@ -47,7 +46,6 @@ void frameStart(std::uint8_t* loop, void* argument)
     frame_generation::beginSimulation(frame);
     weather::onFrameStart();
     character::onFrameStart();
-    draw_distance::onFrameStart();
     if constexpr (DevTools)
     {
         travel::onFrameStart();

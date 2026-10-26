@@ -17,7 +17,6 @@
 #include "character.hpp"
 #include "d3d12_helpers.hpp"
 #include "device_check.hpp"
-#include "draw_distance.hpp"
 #include "frame_log.hpp"
 #include "frame_rate.hpp"
 #include "focus.hpp"
@@ -548,7 +547,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     log(render_scale::hook());
     log(photo_mode::hook());
     log(game_loop::hook());
-    log(draw_distance::hook());
     log(engine_scene::hook());
     log(character::allowFobCharacters());
     log(sun_movement::makeSmooth());

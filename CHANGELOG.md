@@ -11,6 +11,7 @@
 - **Sun size** now also sets the sun's disc for the ray-traced global illumination, which had a
   fixed 0.54 degrees, and shows under **Global illumination** too. At the default 0.53 degrees it
   looks as before.
+- Remove **Draw distance**. The game loads and draws its world as it does without the add-on.
 
 ## 1.7.0
 
