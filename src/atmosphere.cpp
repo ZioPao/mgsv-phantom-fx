@@ -138,7 +138,6 @@ std::vector<ComPtr<IUnknown>> shaderOwners;
 std::mutex captureMutex;
 ComPtr<ID3D11ShaderResourceView> rainView;
 bool fogPassSeen{};
-bool sunSeen{}; // The sun pass's constants have been copied once: the physical look's sky needs them
 bool skySunSeen{}; // The last sky draw had the sun, and its constants were copied
 // The shadow map each context's sun pass bound, for the resolve it records next in the same command
 // list. The game records the next frame while it presents the last, so presents do not divide frames.
@@ -161,7 +160,7 @@ std::array<Target, 2> visibility;
 std::size_t visibilityWritten{};
 Target transmittance, multipleScattering, skyParameters, skyView;
 bool atmosphereTables{}; // The transmittance and multiple scattering tables are made
-bool skyReady{};         // A physical fill made this session's sky parameters and sky view
+bool skyReady{};         // The last fill was physical and made the sky parameters and sky view
 // The sky parameters on their way to the log, and when they last went.
 ComPtr<ID3D11Texture2D> skyParameterReadback;
 bool skyReadbackPending{};
@@ -396,7 +395,6 @@ void noteSun(ID3D11DeviceContext* context)
 
     std::lock_guard lock(captureMutex);
     sunShadows[context] = shadow;
-    sunSeen = true;
 }
 
 // The physical look's sky: Hillaire's fixed tables once, then this frame's sky parameters, sky view
@@ -438,7 +436,6 @@ void fill(ID3D11DeviceContext* context, bool physical)
         if (!fogPassSeen) return;
 
         rain = rainView;
-        physical = physical && sunSeen;
         skySun = skySunSeen;
         if (const auto found = sunShadows.find(context); found != sunShadows.end())
         {
@@ -446,6 +443,10 @@ void fill(ID3D11DeviceContext* context, bool physical)
             sunShadows.erase(found);
         }
         shadowed = shadow != nullptr;
+        // The physical look's sky needs the sun pass's constants, this frame's: a frame without a sun
+        // pass (indoors) keeps the game's look. Until 2026-10-26 the last sun pass's were kept, and the
+        // main menu's daytime sun lit the sky outside a night-time hospital.
+        physical = physical && shadowed;
     }
 
     std::lock_guard lock(resourceMutex);
@@ -475,6 +476,7 @@ void fill(ID3D11DeviceContext* context, bool physical)
         context->CSSetConstantBuffers(0, static_cast<UINT>(std::size(buffers)), buffers);
         context->CSSetSamplers(0, static_cast<UINT>(std::size(samplers)), samplers);
         if (physical) updateSky(context);
+        else skyReady = false;
         if (shadowed)
         {
             const performance::Timed timed(context, performance::Pass::FogShadow);
@@ -654,7 +656,6 @@ void detach() noexcept
         rainView.Reset();
         sunShadows.clear();
         fogPassSeen = false;
-        sunSeen = false;
         skySunSeen = false;
     }
 

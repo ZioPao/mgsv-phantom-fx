@@ -39,6 +39,7 @@ struct Options
     bool showScene{}; // Diagnostics: the output shows the traced scene
     bool debugShadows{}; // Diagnostics: the shadow debug view and probe (shadowDebug, shadowProbe), with the shadows
     bool shadowStarts{}; // Diagnostics: the debug view shows where the shadow rays leave each pixel
+    bool twoSidedShadows{}; // Diagnostics: every surface blocks rays towards lights from both sides, as until 2026-10-26
     bool debugHistory{};      // Diagnostics: the light's denoiser history over the image (lightDebug)
 
     bool logOften{};         // Diagnostics: the light's statistics logged every few frames (as each readback returns), not every ten seconds
@@ -94,6 +95,8 @@ ID3D11ShaderResourceView* shadowDebug(UINT width, UINT height) noexcept;
 // Diagnostics: the light's denoiser history at the render size, R8G8B8A8_UNORM to blend over the image by
 // its alpha (CompositeLight in shaders/gi_light.hlsl). Null while off.
 ID3D11ShaderResourceView* lightDebug(UINT width, UINT height) noexcept;
+// Diagnostics: the probes at the screen's centre as text, with the debug view on: the sun's, while there is
+// a sun, and the lamps', with the ray-traced lights.
 std::string shadowProbe();
 bool active() noexcept;
 // On and lighting frames: the game's probe light and SSAO make way for it. Until then they stay.

@@ -6,6 +6,7 @@
 #include "gi_d3d12.hpp"
 #include "gi_light.hpp"
 #include "gi_scene.hpp"
+#include "frame_log.hpp"
 #include "gi_shadow.hpp"
 #include "log.hpp"
 #include "shaders/gi_shared.h"
@@ -19,7 +20,9 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -44,6 +47,7 @@
 #include "PopulateCells.h"
 #include "PopulateMultibounceCells.h"
 #include "PrepareGuides.h"
+#include "ProbeLocalLights.h"
 #include "ProbeShadows.h"
 #include "PurgeTiles.h"
 #include "ResolveLight.h"
@@ -102,7 +106,7 @@ constexpr std::uint32_t TerrainRingVertices = GI_TERRAIN_CELLS * GI_TERRAIN_CELL
 constexpr std::span<const unsigned char> Bytecode[]{GI_ClearNewGeometries, GI_DebugScene, GI_TerrainGrid, GI_Skin,
     GI_ClearCounters, GI_GenerateDispatch, GI_PrepareGuides, GI_TraceLight, GI_LearnAlbedo, GI_PurgeTiles, GI_PopulateMultibounceCells,
     GI_PopulateCells, GI_UpdateTiles, GI_UpdateMultibounceCells, GI_ResolveLight, GI_UpdateFoliageMemory, GI_CompositeLight, GI_TraceSunShadows, GI_ClassifyShadowTiles,
-    GI_FilterShadows, GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows};
+    GI_FilterShadows, GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows, GI_ProbeLocalLights};
 static_assert(std::size(Bytecode) == static_cast<std::size_t>(Kernel::Count));
 
 // One of the game's models on the GPU side: its meshes in the pool from `poolOffset`, made once it is
@@ -111,15 +115,32 @@ static_assert(std::size(Bytecode) == static_cast<std::size_t>(Kernel::Count));
 // its material; `skins`: where each one's skin lies) into their own structures.
 struct ModelRecord
 {
+    // A structure of the model's meshes but those in the mesh groups its placements hide
+    // (ModelInstance::hiddenGroups): the meshes it holds (`parts`, in the model's order), none when
+    // they hide every one; the last frame a placement asked for it.
+    struct Variant
+    {
+        std::uint64_t hiddenGroups{};
+        std::optional<BlasId> blas;
+        std::vector<std::uint32_t> parts;
+        std::uint32_t lastUsed{};
+    };
+
     std::shared_ptr<const Model> geometry;
     std::optional<std::uint64_t> poolOffset;
     std::uint64_t poolBytes{};
     std::optional<BlasId> blas;
-    std::vector<gi_scene::Geometry> parts;
+    std::vector<gi_scene::Geometry> parts; // Each mesh's place in the pool and material, once laid out
     std::vector<std::uint64_t> skins;
+    std::vector<Variant> variants;
     std::uint32_t lastPlaced{};
     std::array<float, 6> bounds{}; // Diagnostics (the shadow probe): object space, lowest then highest
 };
+
+template<class Record> auto findVariant(Record& record, std::uint64_t hiddenGroups)
+{
+    return std::find_if(record.variants.begin(), record.variants.end(), [&](const auto& variant) { return variant.hiddenGroups == hiddenGroups; });
+}
 
 // One of the game's characters on the GPU side: its model's meshes it shows (`parts`, in the model's
 // order), posed into the pool from `poolOffset` in that order, a geometry each of its structure; where
@@ -141,7 +162,8 @@ struct InstancedModel
     std::uint32_t instance{};
     std::uint64_t hash{};
     std::array<float, 3> position{};
-    std::uint64_t character{}; // A character's id (CharacterInstance::id); 0 for a placed model
+    std::uint64_t character{};    // A character's id (CharacterInstance::id); 0 for a placed model
+    std::uint64_t hiddenGroups{}; // A placed model's (ModelInstance::hiddenGroups)
 };
 
 // A ring of the terrain: its vertices in the pool and its structure, kept while the renderer runs.
@@ -239,6 +261,11 @@ struct State
     std::array<ComPtr<ID3D12Resource>, FramesInFlight> probeReadback;
     std::array<bool, FramesInFlight> probeWritten{};
     std::array<std::vector<InstancedModel>, FramesInFlight> instancedModels; // Each slot's frame's, by instance
+    // And the lamp probe, with each slot's frame's lights, which it lists by index.
+    ComPtr<ID3D12Resource> lightProbe;
+    std::array<ComPtr<ID3D12Resource>, FramesInFlight> lightProbeReadback;
+    std::array<bool, FramesInFlight> lightProbeWritten{};
+    std::array<std::vector<LocalLight>, FramesInFlight> probedLights;
 
     // GPU timestamps between the named phases of each frame's list (Recorder::mark), read when the
     // frame's slot comes round again: into the settings window's costs, by pass. The scene's, the light's
@@ -282,6 +309,9 @@ std::unique_ptr<State> state;
 std::mutex probeMutex;
 std::string probeText, lastProbeKey;
 std::uint64_t lastProbeLog{};
+// The same of the lamp probe, under probeMutex.
+std::string lightProbeText, lastLightProbeKey;
+std::uint64_t lastLightProbeLog{};
 
 ComPtr<ID3D12Resource> openShared(State& s, Shared& shared, ID3D11Texture2D* texture, const char* what)
 {
@@ -369,6 +399,10 @@ void createResources(State& s)
     for (auto& readback : s.probeReadback)
         readback = createBuffer(device, sizeof(GIShadowProbe), D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE,
             "Creating the shadow probe's readback");
+    s.lightProbe = createStorage(device, sizeof(GILightProbe), "Creating the lamp probe");
+    for (auto& readback : s.lightProbeReadback)
+        readback = createBuffer(device, sizeof(GILightProbe), D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE,
+            "Creating the lamp probe's readback");
     s.dispatchArguments = createStorage(device, GI_DISPATCH_SLOTS * 16, "Creating the dispatch arguments");
 
     for (std::uint32_t slot = 0; slot < FramesInFlight; ++slot)
@@ -434,7 +468,8 @@ void waitFor(State& s, std::uint64_t value)
 gi_scene::Geometry materialOf(const State& s, const ModelPart& part)
 {
     gi_scene::Geometry geometry;
-    geometry.flags = (part.alphaTested ? GI_GEOMETRY_CUT_OUT : 0u) | (part.uvs.empty() ? 0u : GI_GEOMETRY_UV) | (part.leaf ? GI_GEOMETRY_LEAF : 0u);
+    geometry.flags = (part.alphaTested ? GI_GEOMETRY_CUT_OUT : 0u) | (part.uvs.empty() ? 0u : GI_GEOMETRY_UV) | (part.leaf ? GI_GEOMETRY_LEAF : 0u)
+        | (part.castsNoShadow ? GI_GEOMETRY_NO_SHADOW : 0u);
     const auto texture = part.uvs.empty() ? s.textures.end() : s.textures.find(part.baseTexture);
     if (texture == s.textures.end() || !texture->second.shared.resource) return geometry;
 
@@ -555,10 +590,19 @@ void updateTextures(State& s, const Frame& frame)
                 if (modelRecord.blas) s.scene->setMaterial(*modelRecord.blas, i, geometry.flags, geometry.texture, geometry.alphaThreshold);
                 if (i >= modelRecord.parts.size()) continue;
 
-                // A skinned model's mesh: its characters' structures have it among the meshes they show.
+                // Its structures without hidden mesh groups, and a skinned model's characters' structures, that
+                // have it among the meshes they show.
                 modelRecord.parts[i].flags = geometry.flags;
                 modelRecord.parts[i].texture = geometry.texture;
                 modelRecord.parts[i].alphaThreshold = geometry.alphaThreshold;
+                for (const auto& variant : modelRecord.variants)
+                {
+                    const auto shown = std::find(variant.parts.begin(), variant.parts.end(), i);
+                    if (variant.blas && shown != variant.parts.end())
+                        s.scene->setMaterial(*variant.blas, static_cast<std::uint32_t>(shown - variant.parts.begin()), geometry.flags, geometry.texture,
+                            geometry.alphaThreshold);
+                }
+
                 for (const auto& [id, character] : s.characters)
                 {
                     const auto shown = std::find(character.parts.begin(), character.parts.end(), i);
@@ -656,9 +700,17 @@ void updateModels(State& s, const Frame& frame, Result& result)
     for (auto it = s.models.begin(); it != s.models.end();)
     {
         auto& record = it->second;
+        std::erase_if(record.variants, [&](const ModelRecord::Variant& variant) {
+            if (frame.frameIndex - variant.lastUsed <= ModelRetentionFrames) return false;
+
+            if (variant.blas) s.scene->destroyBlas(*variant.blas);
+            return true;
+        });
         if (frame.frameIndex - record.lastPlaced > ModelRetentionFrames)
         {
             if (record.blas) s.scene->destroyBlas(*record.blas);
+            for (const auto& variant : record.variants)
+                if (variant.blas) s.scene->destroyBlas(*variant.blas);
             if (record.poolOffset) s.scene->release(*record.poolOffset, record.poolBytes);
             useTextures(s, *record.geometry, false, frame, result);
             result.releasedModels.push_back(it->first);
@@ -685,11 +737,8 @@ void updateModels(State& s, const Frame& frame, Result& result)
                 record.poolOffset = offset;
                 record.poolBytes = needed;
                 record.blas = blas;
-                if (skinned)
-                {
-                    record.parts = std::move(geometries);
-                    record.skins = std::move(skins);
-                }
+                record.parts = std::move(geometries);
+                record.skins = std::move(skins);
             }
             else
             {
@@ -701,6 +750,39 @@ void updateModels(State& s, const Frame& frame, Result& result)
             ++s.modelsTooLarge;
 
         ++it;
+    }
+
+    // A placement that hides mesh groups (engine_scene's hiddenGroupsOf) takes a structure of its model's
+    // other meshes, made once its model's is.
+    found = s.models.end();
+    lastHash = 0;
+    for (const auto& placement : s.modelInstances)
+    {
+        if (!placement.hiddenGroups) continue;
+        if (placement.hash != lastHash) found = s.models.find(lastHash = placement.hash);
+        if (found == s.models.end() || !found->second.blas) continue;
+
+        auto& record = found->second;
+        if (const auto variant = findVariant(record, placement.hiddenGroups); variant != record.variants.end())
+        {
+            variant->lastUsed = frame.frameIndex;
+            continue;
+        }
+
+        auto& variant = record.variants.emplace_back();
+        variant.hiddenGroups = placement.hiddenGroups;
+        variant.lastUsed = frame.frameIndex;
+        std::vector<gi_scene::Geometry> geometries;
+        for (std::uint32_t i = 0; i < record.parts.size(); ++i)
+        {
+            const auto group = record.geometry->parts[i].group;
+            if (group < 64 && ((placement.hiddenGroups >> group) & 1)) continue;
+
+            variant.parts.push_back(i);
+            geometries.push_back(record.parts[i]);
+        }
+
+        variant.blas = s.scene->createBlas(gi_scene::Use::Static, geometries);
     }
 }
 
@@ -905,7 +987,9 @@ GIFrameConstants constantsOf(const Frame& frame, std::uint32_t newGeometries, st
         const auto& light = frame.localLights[i];
         constants.localLights[i] = {{light.position[0], light.position[1], light.position[2], light.range},
             {light.axis[0], light.axis[1], light.axis[2], light.cosOuter}, {light.clearance, light.penumbraScale, light.coneExponent, light.maxFalloff},
-            {light.color[0], light.color[1], light.color[2], light.factor}, {light.sixteenth ? 1.0f : 0.0f, light.addedDistance, light.leastDistance, light.radius}};
+            {light.color[0], light.color[1], light.color[2], light.factor}, {light.sixteenth ? 1.0f : 0.0f, light.addedDistance, light.leastDistance, light.radius},
+            {light.shadowStart, 0, 0, 0}, {light.volumeLowest[0], light.volumeLowest[1], light.volumeLowest[2], light.volumeKnown ? 1.0f : 0.0f},
+            {light.volumeHighest[0], light.volumeHighest[1], light.volumeHighest[2], 0}};
     }
     constants.localLightCount = {static_cast<std::uint32_t>(localLights), frame.localLightRays, 0, 0};
 
@@ -1159,9 +1243,9 @@ std::string characterMesh(const ModelPart& part, const CharacterInstance& charac
 {
     const bool drawn = partIndex < character.drawnParts.size() && character.drawnParts[partIndex];
     const auto groupState = part.group < character.groupStates.size() ? std::format("{:#04x}", character.groupStates[part.group]) : std::string("unread");
-    return std::format("file mesh {} (group {} state {}, alpha {:#04x} shadow {:#04x}, {}, {} triangles, {}, {})", part.mesh, part.group, groupState,
-        part.alphaBits, part.shadowBits, part.alphaTested ? "cut-out" : "opaque", part.indices.size() / 3, shown ? "shown" : "hidden",
-        drawn ? "drawn" : "not drawn");
+    return std::format("file mesh {} (group {} state {}, alpha {:#04x} shadow {:#04x}, technique {:x}, {}, {} triangles, {}, {})", part.mesh, part.group,
+        groupState, part.alphaBits, part.shadowBits, part.technique, part.alphaTested ? "cut-out" : "opaque", part.indices.size() / 3,
+        shown ? "shown" : "hidden", drawn ? "drawn" : "not drawn");
 }
 
 // Diagnostics: the character `id`'s shown mesh `shownIndex` (a geometry of its structure) as its model file has it.
@@ -1220,6 +1304,16 @@ const InstancedModel* instancedAt(std::span<const InstancedModel> instancedModel
     return placed == instancedModels.end() || placed->instance != instance ? nullptr : &*placed;
 }
 
+// The model's mesh (an index into Model::parts) a placement's structure holds as its geometry
+// `geometry`: the same, unless the placement hides mesh groups (ModelRecord::Variant).
+std::uint32_t partOfGeometry(const ModelRecord& record, std::uint64_t hiddenGroups, std::uint32_t geometry)
+{
+    const auto variant = hiddenGroups ? findVariant(record, hiddenGroups) : record.variants.end();
+    if (variant == record.variants.end()) return geometry;
+
+    return geometry < variant->parts.size() ? variant->parts[geometry] : UINT32_MAX;
+}
+
 // A hit the probe lists (GIShadowProbe::lightNearest) as text: what it hit, which side, how far.
 std::string describeHit(const State& s, std::span<const InstancedModel> instancedModels, const uint4& hit)
 {
@@ -1239,11 +1333,12 @@ std::string describeHit(const State& s, std::span<const InstancedModel> instance
         {
             what = std::format("model {:x} placed at ({:.1f} {:.1f} {:.1f})", placed->hash, placed->position[0], placed->position[1], placed->position[2]);
             const auto found = s.models.find(placed->hash);
-            if (found != s.models.end() && geometry < found->second.geometry->parts.size())
+            const auto partIndex = found != s.models.end() ? partOfGeometry(found->second, placed->hiddenGroups, geometry) : UINT32_MAX;
+            if (found != s.models.end() && partIndex < found->second.geometry->parts.size())
             {
-                const auto& part = found->second.geometry->parts[geometry];
-                what += std::format(", mesh {} ({}, {} triangles)", part.mesh, part.leaf ? "leaves" : part.alphaTested ? "cut-out" : "opaque",
-                    part.indices.size() / 3);
+                const auto& part = found->second.geometry->parts[partIndex];
+                what += std::format(", mesh {} ({}, {} triangles, alpha {:#04x} shadow {:#04x}, technique {:x})", part.mesh,
+                    part.leaf ? "leaves" : part.alphaTested ? "cut-out" : "opaque", part.indices.size() / 3, part.alphaBits, part.shadowBits, part.technique);
             }
         }
     }
@@ -1433,6 +1528,96 @@ void readProbe(State& s, std::uint32_t slot)
     }
 }
 
+// The lamp probe as text, and a key that changes when which lights reach the centre pixel, or what
+// blocks them, changes.
+std::pair<std::string, std::string> describeLightProbe(const State& s, std::span<const InstancedModel> instancedModels,
+    std::span<const LocalLight> lights, const GILightProbe& probe)
+{
+    if (probe.receiver.w <= 0) return {"lamps: the centre pixel is the sky", "sky"};
+
+    const auto& p = probe.receiver;
+    std::string text = std::format("lamps at the centre pixel, its surface {:.1f} m away at ({:.1f} {:.1f} {:.1f}): {} of the frame's {} lights light "
+        "it; the rays to their centres let {:.0f}% of their light through, the filtered share they are drawn with {:.2f}\n",
+        p.w, p.x, p.y, p.z, static_cast<int>(probe.share.w), lights.size(), probe.share.x * 100, probe.share.y);
+    const auto& start = probe.start;
+    const float offset = std::sqrt(start.x * start.x + start.y * start.y + start.z * start.z) * 1000.0f;
+    text += start.w > 0.5f ? std::format("the rays leave the scene's own surface, {:.1f} mm from the depth's point: {}\n", offset,
+                                 describeHit(s, instancedModels, probe.startHit))
+                           : std::string("the rays leave the depth's point: the scene has no surface there\n");
+    text += std::format("the camera's ray (the scene view's): {}\n", describeHit(s, instancedModels, probe.view));
+
+    // A character the rays leave, or the strongest light's blocker: every mesh of it.
+    const auto characterOf = [&](const uint4& hit) {
+        return hit.x && (hit.z & GI_INSTANCE_CHARACTER) ? instancedAt(instancedModels, hit.x - 1) : nullptr;
+    };
+    const auto* character = characterOf(probe.startHit);
+    if (!character) character = characterOf(probe.hits[0]);
+    if (character) text += std::format("the character's meshes:{}\n", charactersAt(s, character->position));
+
+    std::string key;
+    for (std::uint32_t i = 0; i < GI_PROBE_LIGHTS; ++i)
+    {
+        const auto& entry = probe.lights[i];
+        if (entry.x < 1) break;
+
+        const auto index = static_cast<std::size_t>(entry.x) - 1;
+        std::string what = "light " + std::to_string(index);
+        if (index < lights.size())
+        {
+            const auto& light = lights[index];
+            const bool spot = light.cosOuter >= -1;
+            what += std::format(" ({} at ({:.1f} {:.1f} {:.1f}){}, reach {:.1f} m{})", spot ? "spot" : "point", light.position[0], light.position[1],
+                light.position[2], spot ? std::format(" towards ({:.2f} {:.2f} {:.2f})", light.axis[0], light.axis[1], light.axis[2]) : "", light.range,
+                light.shadowStart > 0 ? std::format(", the game's shadow map from {:.2f} m", light.shadowStart) : "");
+        }
+
+        const bool blocked = entry.w >= 0;
+        text += std::format("{}: {:.0f}% of their light, {:.1f} m away, {}\n", what, probe.share.z > 0 ? entry.y / probe.share.z * 100 : 0.0f, entry.z,
+            blocked ? "blocked" : "reaches it");
+        // Each hit on the way to the light, and how far short of it.
+        for (std::uint32_t h = 0; h < GI_PROBE_LIGHT_HITS; ++h)
+        {
+            const auto& hit = probe.hits[i * GI_PROBE_LIGHT_HITS + h];
+            if (!hit.x) break;
+
+            text += std::format("  {:.2f} m short of the light: {}\n", entry.z - std::bit_cast<float>(hit.w), describeHit(s, instancedModels, hit));
+        }
+
+        key += std::format("{}:{}:{}|", index, blocked, probe.hits[i * GI_PROBE_LIGHT_HITS].x);
+    }
+
+    return {text, key};
+}
+
+// The lamp probe the slot's last frame wrote, as readProbe does the shadow probe's.
+void readLightProbe(State& s, std::uint32_t slot)
+{
+    if (!s.lightProbeWritten[slot]) return;
+
+    s.lightProbeWritten[slot] = false;
+    void* data{};
+    if (FAILED(s.lightProbeReadback[slot]->Map(0, nullptr, &data))) return;
+
+    GILightProbe probe{};
+    std::memcpy(&probe, data, sizeof(probe));
+    const D3D12_RANGE none{};
+    s.lightProbeReadback[slot]->Unmap(0, &none);
+
+    auto [text, key] = describeLightProbe(s, s.instancedModels[slot], s.probedLights[slot], probe);
+    const auto now = GetTickCount64();
+    std::lock_guard lock(probeMutex);
+    lightProbeText = text;
+    if constexpr (DiagnosticLog)
+    {
+        if (key != lastLightProbeKey && now - lastLightProbeLog >= 200)
+        {
+            lastLightProbeKey = key;
+            lastLightProbeLog = now;
+            log("Lamp probe:\n" + text);
+        }
+    }
+}
+
 // Diagnostics: every ten seconds, what a frame cost on average.
 void logTally(State& s)
 {
@@ -1467,6 +1652,37 @@ void logTally(State& s)
     t.since = now;
 }
 
+// Developer: while F10 records a frame, every model the scene holds and where it is placed, each mesh with
+// the index range the game draws it with and its material's technique, into models.txt: a draw in the frame
+// log is matched to its mesh by that range (2026-10-26: which technique the game's glass draws use).
+void dumpModels(const State& s, const std::filesystem::path& folder)
+{
+    std::unordered_map<std::uint64_t, std::vector<const ModelInstance*>> placements;
+    for (const auto& placement : s.modelInstances) placements[placement.hash].push_back(&placement);
+
+    std::ofstream file(folder / "models.txt", std::ios::trunc);
+    for (const auto& [hash, record] : s.models)
+    {
+        const auto placed = placements.find(hash);
+        const auto count = placed == placements.end() ? std::size_t{} : placed->second.size();
+        file << std::format("model {:x}, placed {} times", hash, count);
+        for (std::size_t i = 0; i < count && i < 4; ++i)
+        {
+            const auto& placement = *placed->second[i];
+            const auto& t = placement.transform;
+            file << std::format(" ({:.1f} {:.1f} {:.1f})", t[3], t[7], t[11]);
+            if (placement.hiddenGroups) file << std::format(" hiding groups {:#x}", placement.hiddenGroups);
+        }
+
+        file << '\n';
+        for (const auto& part : record.geometry->parts)
+            file << std::format("  mesh {} group {} first {} count {} technique {:x} alpha {:#04x} shadow {:#04x}{}\n", part.mesh, part.group, part.firstIndex,
+                part.indexCount, part.technique, part.alphaBits, part.shadowBits, part.alphaTested ? " cut-out" : "");
+        for (const auto& mesh : record.geometry->leftOut)
+            file << std::format("  mesh {} left out, technique {:x} alpha {:#04x} shadow {:#04x}\n", mesh.mesh, mesh.technique, mesh.alphaBits, mesh.shadowBits);
+    }
+}
+
 Result render(const Frame& frame)
 {
     auto& s = *state;
@@ -1487,7 +1703,17 @@ Result render(const Frame& frame)
     if constexpr (DiagnosticLog) logStats(s);
     readTimes(s, slot);
     readProbe(s, slot);
+    readLightProbe(s, slot);
     lap(ProbeStep);
+    if constexpr (DiagnosticLog)
+    {
+        static std::filesystem::path dumped;
+        if (const auto folder = frame_log::recordingDirectory(); !folder.empty() && folder != dumped)
+        {
+            dumped = folder;
+            dumpModels(s, folder);
+        }
+    }
     if constexpr (DiagnosticLog) logTally(s);
 
     // A new render size starts the light and the shadows over. Each has memory only once traced;
@@ -1529,10 +1755,11 @@ Result render(const Frame& frame)
         s.localShadowWidth = frame.width;
         s.localShadowHeight = frame.height;
     }
-    if (!debugShadows)
+    const bool probeLights = traceLocalLights && frame.probeLights;
     {
         std::lock_guard lock(probeMutex);
-        probeText.clear();
+        if (!debugShadows) probeText.clear();
+        if (!probeLights) lightProbeText.clear();
     }
 
     // ---- The game's models and characters ----
@@ -1589,13 +1816,26 @@ Result render(const Frame& frame)
             if (placement.hash != lastHash) found = s.models.find(lastHash = placement.hash);
             if (found == s.models.end() || !found->second.blas) continue;
 
-            const auto instance = scene.addInstance(*found->second.blas, placement.transform.data(), GI_INSTANCE_MODEL);
+            // A placement that hides mesh groups takes its own structure, the whole model's until made.
+            const auto& record = found->second;
+            const auto variant = placement.hiddenGroups ? findVariant(record, placement.hiddenGroups) : record.variants.end();
+            const bool trimmed = variant != record.variants.end();
+            const auto blas = trimmed ? variant->blas : record.blas;
+            if (!blas) continue;
+
+            const auto instance = scene.addInstance(*blas, placement.transform.data(), GI_INSTANCE_MODEL);
             if (!instance) continue;
 
-            if (debugShadows) instancedModels.push_back({*instance, placement.hash, {placement.transform[3], placement.transform[7], placement.transform[11]}});
+            if (debugShadows || probeLights)
+                instancedModels.push_back(
+                    {*instance, placement.hash, {placement.transform[3], placement.transform[7], placement.transform[11]}, 0, trimmed ? placement.hiddenGroups : 0});
 
             ++modelInstances;
-            for (const auto& part : found->second.geometry->parts) modelTriangles += part.indices.size() / 3;
+            const auto& parts = record.geometry->parts;
+            if (trimmed)
+                for (const auto i : variant->parts) modelTriangles += parts[i].indices.size() / 3;
+            else
+                for (const auto& part : parts) modelTriangles += part.indices.size() / 3;
         }
 
         triangles += modelTriangles;
@@ -1608,7 +1848,7 @@ Result render(const Frame& frame)
             const auto instance = scene.addInstance(character.blas, character.transform.data(), GI_INSTANCE_MODEL | GI_INSTANCE_CHARACTER);
             if (!instance) continue;
 
-            if (debugShadows)
+            if (debugShadows || probeLights)
                 instancedModels.push_back({*instance, character.hash, {character.transform[3], character.transform[7], character.transform[11]}, id});
 
             ++charactersTraced;
@@ -1673,7 +1913,7 @@ Result render(const Frame& frame)
         if (traceLight) s.light->fill(constants, frame.verticalFov, parity);
         if (traceShadows) s.shadows->fill(constants);
         constants.objectMotion = {velocity ? 1u : 0u, 0, 0, 0};
-        constants.shadowDiagnostics = {0, frame.shadowStarts ? 1u : 0u, 0, 0};
+        constants.shadowDiagnostics = {frame.twoSidedShadows ? 1u : 0u, frame.shadowStarts ? 1u : 0u, 0, 0};
         constants.lightDiagnostics = {0, 0, lightDebug ? 1u : 0u, 0};
         constants.lightRays = {frame.lightRays, 0, 0, 0};
         std::memcpy(uploads.data + constantsOffset, &constants, sizeof(constants));
@@ -1713,6 +1953,7 @@ Result render(const Frame& frame)
             descriptors.outputTexture(89, localLightShadow, DXGI_FORMAT_R16_FLOAT);
             descriptors.outputTexture(90, s.localShadowRays.Get(), DXGI_FORMAT_R16G16_FLOAT);
             descriptors.outputTexture(91, s.localShadowFirst.Get(), DXGI_FORMAT_R16G16_FLOAT);
+            if (probeLights) descriptors.outputBuffer(92, s.lightProbe.Get(), sizeof(GILightProbe), 1);
         }
 
         ID3D12DescriptorHeap* heaps[]{s.heap.Get()};
@@ -1789,6 +2030,17 @@ Result render(const Frame& frame)
                 recorder.dispatch(Kernel::FilterLocalLightShadows, groups(frame.width, 8), groups(frame.height, 8), {pass, 1u << pass});
                 recorder.barrier();
             }
+
+            if (probeLights)
+            {
+                recorder.dispatch(Kernel::ProbeLocalLights, 1, 1);
+                recorder.barrier();
+                recorder.transition(s.lightProbe.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                list.CopyBufferRegion(s.lightProbeReadback[slot].Get(), 0, s.lightProbe.Get(), 0, sizeof(GILightProbe));
+                recorder.transition(s.lightProbe.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                s.lightProbeWritten[slot] = true;
+                s.probedLights[slot] = frame.localLights;
+            }
         }
         if (traceShadows) s.shadows->record(recorder);
         if (debugShadows)
@@ -1853,6 +2105,12 @@ std::string shadowProbe()
 {
     std::lock_guard lock(probeMutex);
     return probeText;
+}
+
+std::string lightProbe()
+{
+    std::lock_guard lock(probeMutex);
+    return lightProbeText;
 }
 
 std::string status()

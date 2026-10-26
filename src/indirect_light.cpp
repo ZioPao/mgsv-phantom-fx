@@ -747,6 +747,24 @@ bool drawResolveForGlobal(ID3D11DeviceContext* context, const ui_redirect::DrawC
     return true;
 }
 
+// A smaller camera's resolve while the global illumination runs, as the intro mirror's: the rays trace
+// the main view only, so the game's own light, with white in place of its occlusion, which is skipped.
+bool drawSmallerViewResolve(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call)
+{
+    if (!global_illumination::running()) return false;
+
+    std::lock_guard lock(resourceMutex);
+    if (!ensurePipeline()) return false;
+
+    ComPtr<ID3D11ShaderResourceView> gameOcclusion;
+    context->PSGetShaderResources(OcclusionSlot, 1, gameOcclusion.GetAddressOf());
+    context->PSSetShaderResources(OcclusionSlot, 1, whiteView.GetAddressOf());
+    context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
+    context->PSSetShaderResources(OcclusionSlot, 1, gameOcclusion.GetAddressOf());
+
+    return true;
+}
+
 // Call with resourceMutex held.
 std::string problemOf(const Progress& progress)
 {
@@ -892,12 +910,15 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
             options = current;
         }
 
-        if (options.rayTracing) noteForRayTracing(context, *role);
+        // The rays trace the main view only, one kick a frame: a smaller camera's view in a corner of the
+        // same targets, as the intro's mirror, keeps the game's light.
+        const bool mainView = viewportFillsTarget(context);
+        if (options.rayTracing && mainView) noteForRayTracing(context, *role);
         if (options.globalIllumination)
             switch (*role)
             {
-            case Role::Upscale: return drawUpscaleForGlobal(context, call);
-            case Role::Resolve: return drawResolveForGlobal(context, call, options);
+            case Role::Upscale: return mainView && drawUpscaleForGlobal(context, call);
+            case Role::Resolve: return mainView ? drawResolveForGlobal(context, call, options) : drawSmallerViewResolve(context, call);
             case Role::GameOcclusion: return global_illumination::running();
             case Role::Sun:
             case Role::SunShadowMap: noteSpecular(context); return false;

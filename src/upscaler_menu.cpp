@@ -505,7 +505,8 @@ void drawDiagnostics(const Status& state)
             {LightHistoryView, "Global illumination history"}, {ShadowStartsView, "Shadow ray starts"}};
         changed |= fxui::combo("Debug view", options.debugView, views,
             "Ray-traced shadow rays: with ray-traced shadows and an upscaler on, what blocks each pixel's ray to the sun's centre, over the image. The "
-            "cross is the probe, whose findings show below (and, in a dev build, go to PhantomFX.log whenever they change).");
+            "cross is the probe: its sun ray and, with ray-traced lights on, sun or none, the strongest lamps' rays and what blocks each. Its "
+            "findings show below (and, in a dev build, go to PhantomFX.log whenever they change).");
         if (options.debugView == LightHistoryView)
             fxui::note(Tone::Dim, "With global illumination and an upscaler on: red where the denoiser started a pixel's light over this frame or "
                                   "the last two, yellow where it holds under ten frames. Clear: a full history.");
@@ -519,7 +520,8 @@ void drawDiagnostics(const Status& state)
         if (options.debugView == ShadowRaysView || options.debugView == ShadowStartsView)
         {
             if (const auto probe = global_illumination::shadowProbe(); !probe.empty()) fxui::note(Tone::Dim, probe);
-            else fxui::note(Tone::Warn, "Waiting for the ray-traced shadows (on, with an upscaler).");
+            else fxui::note(Tone::Warn, "Waiting for ray-traced shadows or lights (on, with an upscaler). The sun's rays need a sun: indoors, only "
+                                        "the lamps' probe shows.");
         }
     }
 
@@ -536,8 +538,16 @@ void drawDiagnostics(const Status& state)
         changed |= fxui::checkbox("Global illumination only", options.showGlobalIllumination, "With global illumination on, the scene shows its indirect light alone.");
         changed |= fxui::checkbox("Global illumination scene", options.showTracedScene,
             "With global illumination on, the scene shows the geometry it traces, coloured by its normals: red where it disagrees with the game's "
-            "depth, magenta where it lacks what the game drew, yellow where it has something in the sky.");
+            "depth, magenta and black stripes where it lacks what the game drew, yellow where it has something in the sky.");
         if (const auto scene = global_illumination::status(); options.showTracedScene && !scene.empty()) fxui::note(Tone::Dim, scene);
+        constexpr Choice<int> volumes[]{{0, "The game's volumes"}, {1, "Shadow-mapped lights beyond"}, {2, "Every light beyond"}};
+        changed |= fxui::combo("Light volumes", options.lightVolumes, volumes,
+            "With ray-traced lights on: the game bounds each light by a box (a spot by its cone within one), and they stop at it as the "
+            "game's do. Beyond, a light shines over all its reach, stopped by the rays alone: those the game gives a shadow map, or every one.");
+        changed |= fxui::checkbox("Shadows from every surface (old)", options.twoSidedShadows,
+            "Ray-traced shadows of the sun and lamps: every surface in the scene blocks light, from both sides, as before. By default they take "
+            "what the game's shadow maps hold: an opaque surface casts only from its back as the light sees it, and meshes the game shows in the "
+            "main view only cast nothing, so windows let light through as the game's do.");
     }
     if (changed) applyDiagnostics(options);
 

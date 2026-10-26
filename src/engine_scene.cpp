@@ -77,7 +77,10 @@ constexpr std::uint32_t MaxTypes = 256, MaxListedModels = 1 << 16;
 // A skinned model (docs/DEVELOPMENT.md, "Characters"): its bone count (16 bits: a flag above it is set
 // on animals' and some characters' models, the dog's 0x1004E for 78 bones), the object whose +0x78 holds
 // its skinning palette, and its mesh groups' count and state, a byte each: drawn while none of
-// HiddenGroupBits is set (measured against a soldier's draws: 13 groups drawn, 33 not).
+// HiddenGroupBits is set (measured against a soldier's draws: 13 groups drawn, 33 not). Read for a rigid
+// model too (hiddenGroupsOf): the game never drew 17 of the 29 meshes the scene took of the hospital
+// entrance, rubble slabs that floated over its porch in the rays and cast blots on it (the lamp probe,
+// 2026-10-26).
 constexpr std::size_t ModelBoneCount = 0xF8, ModelSkin = 0x188, SkinPalette = 0x78, ModelGroupCount = 0x1E8, ModelGroupStates = 0x178;
 constexpr std::uint8_t HiddenGroupBits = 0x33;
 constexpr std::uint32_t MaxBones = 1024;
@@ -106,7 +109,12 @@ constexpr std::uint64_t ParseBytesPerTake = 8ull << 20;
 // a shadow-only decal's; alpha 16 (glass) is drawn into the shadow maps without the test (m_param.w 0):
 // solid. Glass the game draws in the main view only stays out, for any model: taken, a helicopter's
 // windows (alpha 16, shadow 5) kept the sun out of its cabin (the shadow probe, 2026-10-25).
-// Shadow bit 1: drawn into the shadow maps only, a stand-in for what the main view shows.
+// Shadow bit 1: drawn into the shadow maps only, a stand-in for what the main view shows. A solid one
+// stays out: the main view's own meshes are in the scene, and its stand-in, an offset, simpler copy of
+// them the camera never sees, blocked light where nothing was drawn (a building's 25-triangle stand-in
+// kept 80 to 100% of a room's main lamp, an unshadowed spot, off its wall; the lamp probe, 2026-10-26).
+// A cut-out one stays in, for the cut-out meshes the main view shows and the scene leaves out (a pylon's
+// lattice casts through its stand-in, alpha 128, shadow 66).
 // A character (a skinned model) is taken as the main view shows it instead: its stand-ins left out
 // (2026-10-24: one of 40 triangles on a woman's outfit lay on her skin and blocked her chest's sun
 // rays at once), its meshes the shadow maps leave out taken (her hair: the rays saw her bald, low-poly
@@ -170,7 +178,7 @@ std::atomic<std::uint64_t> terrainFrame{};
 
 // Diagnostics.
 std::atomic<std::uint64_t> snapshots{}, filesRead{}, skinnedFiles{}, unreadableFiles{}, modelsParsed{}, parseFailures{}, shadowlessMeshes{};
-std::atomic<std::uint32_t> lastInstances{}, lastOwners{}, lastOtherOwners{}, lastLeftOut{}, lastHidden{}, lastCharacters{}, lastListedModels{};
+std::atomic<std::uint32_t> lastInstances{}, lastOwners{}, lastOtherOwners{}, lastLeftOut{}, lastHidden{}, lastHidingGroups{}, lastCharacters{}, lastListedModels{};
 // The model list was found in the last snapshot: the characters come from it.
 std::atomic<bool> modelListFound{};
 
@@ -332,6 +340,23 @@ std::uint64_t textureOf(const FileReader& file, const FileLayout& layout, std::u
     return 0;
 }
 
+// Diagnostics: the StrCode64 of a mesh's material's technique (as fox3DDF_Blin_NC): its material
+// instance's material (block 4: material at +4), whose type (block 8: name at +0, type at +2) indexes
+// block 22. 0 when the file does not say.
+std::uint64_t techniqueOf(const FileReader& file, const FileLayout& layout, std::uint16_t materialInstance)
+{
+    const auto& b = layout.blocks;
+    constexpr int MaterialInstances = 4, Materials = 8, StrCodes = 22;
+    std::uint16_t material{}, type{};
+    std::uint64_t technique{};
+    if (materialInstance >= b[MaterialInstances].count || !file.at(b[MaterialInstances].offset + 16ull * materialInstance + 4, material)
+        || material >= b[Materials].count || !file.at(b[Materials].offset + 4ull * material + 2, type) || type >= b[StrCodes].count
+        || !file.at(b[StrCodes].offset + 8ull * type, technique))
+        return 0;
+
+    return technique;
+}
+
 // A skinned mesh's vertices' bones and weights (ModelPart::bones, weights): its four bone numbers a
 // vertex index its bone group (block 5, 68 bytes: the count at +2, then 32 of the model's bone numbers;
 // the mesh's group at +6), as the game's palette for the mesh is the model's through the group.
@@ -414,12 +439,13 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
         const bool mainViewOnly = (shadow & CastsNoShadow) && !vegetation;
         const bool mainViewTaken = !(alpha & (CutOutAlpha | DecalAlpha));
         const bool mainViewGlass = mainViewOnly && (alpha & GlassAlpha);
-        const bool leftOut = mainViewGlass
+        const bool solidStandIn = (shadow & ShadowMapsOnly) && !(alpha & (CutOutAlpha | DecalAlpha));
+        const bool leftOut = mainViewGlass || solidStandIn
             || (character ? (shadow & ShadowMapsOnly) != 0 : (mainViewOnly && !mainViewTaken) || (alpha & TranslucentAlpha));
         if (leftOut)
         {
             ++shadowlessMeshes;
-            model->leftOut.push_back({mesh, alpha, shadow});
+            model->leftOut.push_back({mesh, alpha, shadow, techniqueOf(file, *layout, materialInstance)});
             continue;
         }
 
@@ -469,8 +495,11 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
         part.group = (*meshGroups)[mesh];
         part.alphaTested = (alpha & (CutOutAlpha | DecalAlpha)) != 0 || (character && (alpha & TranslucentAlpha));
         part.leaf = vegetation && part.alphaTested;
+        // A character's main-view meshes cast in the rays (its hair, see above); a rigid model's do not, as in the game.
+        part.castsNoShadow = mainViewOnly && !character;
         part.alphaBits = alpha;
         part.shadowBits = shadow;
+        part.technique = techniqueOf(file, *layout, materialInstance);
         part.baseTexture = textureOf(file, *layout, materialInstance, BaseTextureParameter);
         if (!part.baseTexture)
         {
@@ -547,6 +576,25 @@ std::optional<std::uint64_t> modelResource(std::uintptr_t resource, FileKind wan
     }
 
     return kind == wanted ? hash : std::nullopt;
+}
+
+// A rigid model's mesh groups the game hides, as a character's (ModelGroupStates), a bit each for the
+// first 64; 0 when it shows them all or they cannot be read.
+std::uint64_t hiddenGroupsOf(std::uintptr_t model)
+{
+    const auto groups = read<std::uint16_t>(model + ModelGroupCount);
+    const auto states = read<std::uintptr_t>(model + ModelGroupStates);
+    if (!groups || !*groups || !states || !*states) return 0;
+
+    std::array<std::uint8_t, 64> bytes{};
+    const auto count = std::min<std::size_t>(*groups, bytes.size());
+    if (!readRaw(bytes.data(), *states, count)) return 0;
+
+    std::uint64_t hidden{};
+    for (std::size_t g = 0; g < count; ++g)
+        if (bytes[g] & HiddenGroupBits) hidden |= 1ull << g;
+
+    return hidden;
 }
 
 std::optional<std::uint64_t> rigidModel(std::uintptr_t model)
@@ -652,8 +700,8 @@ void snapshot()
     owners.erase(std::unique(owners.begin(), owners.end()), owners.end());
 
     std::vector<gi_renderer::ModelInstance> instances;
-    std::uint32_t others{}, leftOut{}, hidden{};
-    const auto place = [&](std::uint64_t hash, const float* matrix) {
+    std::uint32_t others{}, leftOut{}, hidden{}, hidingGroups{};
+    const auto place = [&](std::uint64_t hash, const float* matrix, std::uint64_t hiddenGroups) {
         const auto transform = transformOf(matrix);
         if (!transform)
         {
@@ -661,7 +709,8 @@ void snapshot()
             return;
         }
 
-        instances.push_back({hash, *transform});
+        if (hiddenGroups) ++hidingGroups;
+        instances.push_back({hash, *transform, hiddenGroups});
     };
 
     for (const auto owner : owners)
@@ -685,7 +734,8 @@ void snapshot()
             matrixBuffer.resize((*end - *begin) / 4);
             if (!readRaw(matrixBuffer.data(), *begin, *end - *begin)) continue;
 
-            for (std::size_t i = 0; i < matrixBuffer.size(); i += 16) place(*hash, matrixBuffer.data() + i);
+            const auto hiddenGroups = hiddenGroupsOf(*model);
+            for (std::size_t i = 0; i < matrixBuffer.size(); i += 16) place(*hash, matrixBuffer.data() + i, hiddenGroups);
         }
         else if (*vtable == base + ModelVtable)
         {
@@ -697,7 +747,7 @@ void snapshot()
 
             float matrix[16]{};
             const auto hash = rigidModel(owner);
-            if (hash && readRaw(matrix, owner + ModelMatrix, sizeof(matrix))) place(*hash, matrix);
+            if (hash && readRaw(matrix, owner + ModelMatrix, sizeof(matrix))) place(*hash, matrix, hiddenGroupsOf(owner));
             else ++leftOut;
         }
         else
@@ -707,7 +757,7 @@ void snapshot()
     // The object brush's vegetation, a plugin's placements in a block at a time.
     engine_brush::collect([&](std::uintptr_t resource, std::span<const gi_renderer::Transform> transforms) {
         if (const auto hash = modelResource(resource, FileKind::Rigid, true))
-            for (const auto& transform : transforms) instances.push_back({*hash, transform});
+            for (const auto& transform : transforms) instances.push_back({*hash, transform, 0});
     });
 
     std::vector<gi_renderer::CharacterInstance> characters;
@@ -720,6 +770,7 @@ void snapshot()
     lastOtherOwners = others;
     lastLeftOut = leftOut;
     lastHidden = hidden;
+    lastHidingGroups = hidingGroups;
     lastCharacters = static_cast<std::uint32_t>(characters.size());
     lastListedModels = listed;
     std::lock_guard lock(publishMutex);
@@ -1033,7 +1084,8 @@ std::string status()
 
     return "the game's scene: " + std::to_string(lastInstances.load()) + " instances from " + std::to_string(lastOwners.load()) + " owners ("
         + std::to_string(lastOtherOwners.load()) + " of other kinds, " + std::to_string(lastLeftOut.load()) + " left out, "
-        + std::to_string(lastHidden.load()) + " models the game hides), " + std::to_string(lastCharacters.load()) + " characters of "
+        + std::to_string(lastHidden.load()) + " models the game hides, " + std::to_string(lastHidingGroups.load())
+        + " placed with mesh groups hidden), " + std::to_string(lastCharacters.load()) + " characters of "
         + std::to_string(lastListedModels.load()) + " models listed" + (modelListFound.load() ? "" : " (no model list)") + ", "
         + std::to_string(snapshots.load()) + " snapshots; model files: " + std::to_string(filesRead.load()) + " rigid, "
         + std::to_string(skinnedFiles.load()) + " skinned, " + std::to_string(unreadableFiles.load()) + " unreadable, "

@@ -65,8 +65,9 @@ void Skin(uint did : SV_DispatchThreadID)
 }
 
 // The traced scene from the camera, shaded by its normals; red where it disagrees with the game's
-// depth, magenta where the game drew something the scene lacks, yellow where the scene has
-// something in the game's sky.
+// depth, magenta and black stripes where the game drew something the scene lacks, yellow where the
+// scene has something in the game's sky. Stripes, as plain magenta is the shade of a surface facing
+// down: a ward's ceiling read as missing (2026-10-26).
 [numthreads(8, 8, 1)]
 void DebugScene(uint2 did : SV_DispatchThreadID)
 {
@@ -88,7 +89,7 @@ void DebugScene(uint2 did : SV_DispatchThreadID)
         else if (abs(hit.distance - gameDistance) > 0.05f * gameDistance + 0.1f) color = lerp(color, float3(1.0f, 0.0f, 0.0f), 0.6f);
     }
     else if (depth > 0.0f)
-        color = float3(1.0f, 0.0f, 1.0f);
+        color = ((did.x + did.y) / 8u) % 2u ? float3(1.0f, 0.0f, 1.0f) : 0.0f;
 
     g_Output[did] = float4(color, 1.0f);
 }

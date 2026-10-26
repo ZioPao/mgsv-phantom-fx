@@ -1039,8 +1039,11 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
   Where `c0-c3` is P x (something affine), `c0 += jx·c3` and `c1 += jy·c3` as well (motion blur's
   pass keeps other matrices in `c8-c11` and is still jittered). Shadow views are orthographic and
   untouched. Halton(2, 3), 8 phases at DLAA; DLSS gets (jx, jy) in render pixels, x right, y down,
-  confirmed with 4x jitter (only that sign is sharp). The first upload whose `c0-c3` is `P x V`
-  with `V` in `c8-c11` is the frame's camera, captured before the jitter. A frame DLSS did not run
+  confirmed with 4x jitter (only that sign is sharp). The upload whose `c0-c3` is `P x V` with `V`
+  in `c8-c11` and the largest viewport (`c22.xy`) is the frame's camera, captured before the jitter;
+  the first one with ties. Until 2026-10-26 the first won, and DLSS never ran in the intro: its mirror's
+  reflection is a camera of its own, drawn first at 1080x608 ("the camera's viewport is not the FXAA
+  pass's size"). A frame DLSS did not run
   on leaves the next unjittered, so menus and 3D views without FXAA never shake.
 - **Motion vectors.** A compute shader before DLSS: camera motion from the depth copy (the FXAA
   pass's depth target, `R32_FLOAT_X8X24_TYPELESS` view; the G-buffer depth plus forward geometry)
@@ -1589,6 +1592,18 @@ noise a pixel at a time (Epic's MegaLights left ReSTIR out for the same reason).
 Next step planned, once measured as needed: a history confidence for the denoiser from samples traced
 again with the last frame's random numbers (NRD's `IN_DIFF_CONFIDENCE`).
 
+### Smaller views
+
+The rays trace the main view only, one kick a frame. The intro's mirror is a camera of its own, drawn
+whole before the main view into a corner of the same targets (1080x608 in 2560x1440, `frame-22272`,
+2026-10-26): its own sky light, upscale, lights, `SunLight_ES` and resolve (`DeferredRendering_VolFog`).
+Until then its upscale kicked the rays too, so they ran twice a frame there, and each kick's denoiser
+history was the other camera's. A pass whose viewport does not cover its render target
+(`viewportFillsTarget`) is now such a view and keeps the game's light: no kick, wait or draw point; its
+lights drawn by the game, unshadowed; no ray-traced sun shadow in its sun pass; and its resolve the
+game's probe light with white in place of the occlusion, as the game's SSAO is skipped while the global
+illumination runs (both cameras' SSAO passes fill their half-size target, so they cannot be told apart).
+
 ## Ray-traced scene
 
 What the global illumination and the ray-traced shadows trace (`src/gi_scene.cpp`, its use in
@@ -1660,6 +1675,18 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   bits) and its geometry within the structure (12 bits) into one word.
 - **Recording order.** The pool's uploads and the table's rows; `ClearNewGeometries`, `TerrainGrid`,
   `Skin`; the bottom levels and compactions; the instances' copy; the top level. Between frames the pool, the table and the instances are in the non-pixel shader resource state.
+- **Hidden mesh groups** (2026-10-26). A rigid model has its mesh groups' states too, as a character
+  does (`hiddenGroupsOf` in `engine_scene.cpp`: the same count and state bytes on the model object, a
+  group hidden while any of bits 0x33 is set), and a placement carries the groups its model hides
+  (`ModelInstance::hiddenGroups`, the first 64). One that hides any takes a structure of its model's
+  other meshes (`ModelRecord::Variant`, a structure a set of hidden groups, made once the model's is, let
+  go when no placement asked for it in the models' retention time), and the probes find a hit's mesh
+  through it (`partOfGeometry`). Before, the hospital's entrance (`84a224c8a02fc625`) put all its meshes
+  in the scene: the game drew its group 1 (meshes 0 to 11) and never its group 2 (12 to 30), rubble slabs
+  that floated over its porch in the rays and cast blots on it from a lamp the game draws unshadowed (the
+  lamp probe and the scene view). In two captures there, 11 placements hid groups and the game drew none
+  of their 29 hidden meshes. F10's `models.txt` prints each mesh's group and each placement's hidden
+  groups.
 - **Characters** (2026-10-23). The snapshot also walks the object registry's model list (see "Scene
   objects", "Every model") for the skinned models the game shows, each with its world matrix, its
   skinning palette and its mesh groups' states, and the files' parse takes skinned models too: each
@@ -1704,6 +1731,13 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   `84a120f9301becbe`, mesh 21) 7 cm behind the wall, with 61 of the wall's 64 global illumination rays on
   back faces. Main-view cut-out meshes and decals stay out: taken, crossed cards (model
   `84a1da1c1308e887`, mesh 3) 44 cm above a road, where the game showed nothing, cast a moon shadow.
+  Since 2026-10-26 a rigid model's solid stand-ins (shadow bit 1 without alpha bits 5 or 7) stay out
+  too: with the main view's own meshes in the scene they are offset, simpler copies the camera never
+  sees, and blocked light where nothing was drawn. In the prologue's hospital a building's 25-triangle
+  stand-in (model `84a1b19dea6952c1`, mesh 9) kept 80 to 100% of a room's main lamp, an unshadowed spot,
+  off its wall 0.9 m from it (the lamp probe), and the scene view went red over the room: the camera's
+  rays met stand-ins short of what the game drew. Cut-out stand-ins stay in, for the main-view cut-out
+  meshes left out (the pylon's lattice).
   Open: a tarp on a fence (model `84a1bc5b4702c16b`) is a
   main-view cut-out (mesh 2) cast in the game by a flat 4-triangle stand-in (mesh 3, shadow bit 1) up
   to 25 cm off it, so its shadow rays start on the stand-in or meet it, in patches that change with the
@@ -1762,6 +1796,23 @@ traced here (see "Ray-traced lights").
   the sun size's angular radius, a new point each frame), up to 5 km. The sun's direction is the sun
   pass's (`cPSLight` `c0`), noted the frame before, as the scene is traced before that frame's sun
   pass is recorded.
+- **Which faces cast** (`StopsShadowRay`, 2026-10-26). The game draws its shadow maps with front faces
+  culled (1,227 of 1,267 shadow map draws in a capture of the prologue's hospital; the main view culls
+  back faces), so an opaque surface casts from its back alone, as the light sees it. Rays towards the
+  sun and the lamps do the same: an opaque surface they meet on its back lets them through, past copies
+  of the surface and in the closest stretch by the next hit, further on by tracing the ray again with
+  every triangle looked at, only when the first hit found was such a surface. Cut-out geometry, which
+  the game mostly draws two-sided (most of the 40 two-sided shadow draws), casts from both sides. The
+  global illumination's light and sun rays at its hits do the same; its sky rays and bounces see both
+  sides. Before, the hospital corridor's windows, one-sided cards facing out (seen from outside, culled
+  from inside), kept an outside searchlight out where the game lets it in through them. A rigid model's
+  meshes the game never draws into its shadow maps (shadow bit 0, `GI_GEOMETRY_NO_SHADOW`), which the scene
+  takes for where rays leave a room's walls and for the global illumination, do not stop these rays at all:
+  one in a stairwell's windows (model `84a083c0196e01e1`, mesh 0) kept the moonlight, a shadow-mapped spot,
+  off the wall it lights in the game. A character's main-view meshes still cast (its hair). So the rays
+  towards lights take what the game's shadow maps hold, but for the solid stand-ins left out. Diagnostics,
+  "Shadows from every surface (old)" (`shadowDiagnostics.x`), goes back to every surface casting from both
+  sides.
 - **Where a ray leaves** (`ShadowSurfaceAt`, for the sun's rays, the lights' and the debug view's). A
   ray from the eye through the pixel looks for the scene's own surface near the depth's point (within
   3 cm plus 2% of the distance; cut-out geometry by its alpha), searching that stretch alone: the game
@@ -1998,15 +2049,21 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   0.036 within a quarter second, what the probes read from the cache took 1.3 s and the final light
   3 s). Indoors the game's probe light, which the global illumination replaces, held the lamps' baked
   bounce; without this an indoor hall lit by 47 lamps was dark but for their direct light (2026-10-24).
-- **Drawn again.** At the first list with a draw point, which waits for Direct3D 12, the immediate
-  context draws the frame's lights before the list runs: each its volume as the game drew it (below), cut
+- **Drawn again.** At each list with a draw point, which waits for Direct3D 12, the immediate
+  context draws the lights of the lists run so far before the list runs: each its volume as the game drew it (below), cut
   by a scissor to the light's sphere (a spot's: the bounding sphere of its cone) on screen, in the light
   vertex shaders' form (the clip-space position twice, then where it samples the light targets). On the
   volume's far faces the share (1 for a light not traced) goes into both light targets' alpha, 0 where
   the surface lies past them; on its near faces 0 where the surface lies short of them; then on the far
   faces its shader with specular, with the noted bindings and constants, adds its light scaled by that
-  alpha (`DEST_ALPHA`, `ONE`), as the lamp contact shadows do. A light in a list run after it is drawn
-  at once. A draw point is a pass after the game's lights and before anything
+  alpha (`DEST_ALPHA`, `ONE`), as the lamp contact shadows do. Never at once, before its own list has
+  run: the copy of its volume (below) is on that list, and a later kick's rays are not waited for until
+  the next draw point. Until 2026-10-26 a light in a list run after the frame's first draw point was
+  drawn at once, which broke the intro: its mirror is a second camera drawn whole first (1080x608 in the
+  2560x1440 targets, its own kick, lights and `SunLight_ES`), so all the main view's lights were drawn
+  before their lists ran, inside stale volumes (`frame-22272`: the main view's six lights added at most
+  0.0003 and left 0 in the targets' alpha everywhere).
+  A draw point is a pass after the game's lights and before anything
   reads them: the sun pass; indoors, where no sun shines, the sky's specular alone in its place
   (`SunLight_ES`, `367e8f6128befd48f2840ab3d6ed19b4`: `cPSLight` `c2.x` and `c3`, the sky reflection at
   `t15`; its list waits as the sun pass's does, `global_illumination::noteSkySpecular`); or the
@@ -2029,7 +2086,19 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   against the light shaders' depth (`t2`, reversed). A volume that does not fit leaves its light drawn
   over its reach as before; the log counts those. A spot's volume is not always along the world's axes:
   the cells' moonlight has its cone within a box turned along the beam, which meets the floor only where
-  the light through the vent falls.
+  the light through the vent falls. Where a box cuts across an open floor its light stops in a straight
+  line along the tiles (the prologue's hospital, `frame-71823`, 2026-10-26). Diagnostics, "Light
+  volumes", draws the lights over all their reach instead, those with a shadow map or every one: with
+  every one, the room's fill lights showed as pools on its floor and round a picture on its wall, where
+  the game's boxes keep them; a rule that frees only real lamps is still to be found.
+- **Where the rays end** (2026-10-26). A light's shadow rays end 10 cm short of it (or its size), the lamp
+  around it; a spot the game shadows with a shadow map's end where that map starts, its near plane:
+  `m_shadowProjection` (`cPSScene` `c12` to `c15`, view space to the map, the depth reversed: cleared to 0,
+  tested greater-equal) gives depth 1 that far along the axis, and along a ray it lies that over the ray's
+  cosine to the axis. Nothing nearer is in the game's map. The prologue hospital's corridor lamps sit 13 cm
+  above its ceiling in a box (a building mesh the game does cast with, `shadow 0x00`) that every ray met 0.3
+  to 0.6 m short of the light, so the corridor stayed dark (the lamp probe). The global illumination's
+  bounce and the lamp probe end theirs the same way.
 - **Beams** (2026-10-24). A spot with a shadow map and a hard-edged cone (`c7.y`, 1 / its penumbra, at
   least 1000) stays the game's, drawn with its shadow map, and is not traced: the padded cells'
   moonlight through the vent (colour (16712, 23442, 41553), a 7 degree cone, `c7.y` 100000; every other
@@ -2046,13 +2115,29 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   the 128 bits, and those lost. The cost table times the drawing and the Direct3D 12 rays ("Ray-traced
   lights") and measures the whole by leaving it out; the log has the rays too ("shadow rays for lights"). The flashlights alone took 0.18 ms of rays at 2560 x 1440 in their first session,
   every one traced at the kick.
+- **Lamp probe** (`ProbeLocalLights`, 2026-10-26). With the shadow rays' debug view chosen, one thread
+  at the centre pixel works out every light there without shadows and traces a ray to each one's centre
+  as the shadow rays leave (`ShadowSurfaceAt`, `SurfaceRayBlocked`, short of the lamp): the share those
+  rays let through, the filtered share the lights are drawn with, and the six strongest lights, each with
+  its part of the light, its distance and what blocks it. It shows under the debug view and goes to the
+  log as it changes ("Lamp probe"), sun or none: the sun's probe needs a sun pass, which rooms lack.
 
 Not handled:
 
 - Lights recorded after the kick are drawn without their shadow; the log tells how often.
-- The rays know only each light's reach, not its volume (that is on the GPU alone): the bounce lights
-  surfaces outside the volumes, a light whose volume is off screen can still take one of the 128, and a
-  light weighs in the share where its volume leaves it undrawn.
+- The rays know each light's volume by its bounds in the world, a frame or two late (since
+  2026-10-26): as a light is drawn again, a compute pass takes its volume's vertices (clip space, as
+  copied from its draw) through the inverse of its pass's `m_projectionView` into their lowest and
+  highest corners, read back three frames later and kept by light (its kind, its place to the
+  centimetre, its colour; the game's lights hold still). `LocalLightAt` gives no light outside them (2 cm
+  spare), so the bounce, the share's picks and the lamp probe keep each light within its box, as the
+  game and the light drawn again do. Before, the global illumination's bounce lit every surface within a
+  light's reach: in the prologue's hospital three bluish fill lights 200 m wide and a 250 m spot
+  standing in for the moon (colours about 1 : 1.3 : 2) lit the rooms they are boxed out of, and the
+  light came out blue (its mean 1 : 1.4 : 2, the night sky's 1 : 1.8 : 3.5) where the game's is warm. A
+  box is not turned with a spot's beam, so a spot's bounds are those of its turned box and cone, a
+  little more than the game's. A flashlight's volume moves with it and is not kept; nor is a light
+  whose bounds have not come back, which lights over all its reach.
 - One share for all the lights: where a far brighter light is blocked, it draws most of a pixel's rays
   and the share falls for the lights that reach it too (the beams above, until they were left out).
 - A light's specular takes the share its diffuse light gives; where lights overlap with different
@@ -2278,6 +2363,12 @@ planet's centre is the origin, in km; the game's world has y up in metres.
   sky came out about five times brighter than that (75 to 125 nits against 15 to 30 with HDR, paper
   white 203). The camera's height is `m_eyepos.y`. Every ten seconds of the physical look the sky's
   values go to the log ("Physical sky: ..."), read back a frame late at present.
+- **Without a sun pass.** Only a fill whose command list had a sun pass before its resolve is physical,
+  and only after one does the sky draw take the physical sky; indoors, without one, the game's look
+  stays. Until 2026-10-26 the first sun pass's constants stood for the sun from then on: the main
+  menu's daytime sun (towards 0.49, 0.75, 0.44) lit the sky outside the prologue's hospital at night,
+  which has no sun pass (`frame-73986`: only `SunLight_ES`). The global illumination's sun went the
+  same way; it now has none after a frame without a sun pass.
 - **Fog.** Per froxel: the air at its height, lit by the sun through the air above it (transmittance
   table) and the air's multiple scattering, and a height fog: albedo 0.9 tinted by the fog pass's
   `betaM`, Cornette-Shanks phase with the `g` the fog pass's Schlick `mieK` stands for (`k = 1.55 g -

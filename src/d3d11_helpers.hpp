@@ -140,6 +140,23 @@ inline std::pair<UINT, UINT> sizeOf(ID3D11View* view)
     return {desc.Width, desc.Height};
 }
 
+// Whether the bound viewport covers render target 0, as every pass of the main view does. A smaller
+// camera's view drawn into a corner of the same targets does not: the intro's mirror is drawn whole at
+// 1080x608 in the 2560x1440 targets before the main view (2026-10-26). True without a target.
+inline bool viewportFillsTarget(ID3D11DeviceContext* context)
+{
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> target;
+    context->OMGetRenderTargets(1, target.GetAddressOf(), nullptr);
+    const auto [width, height] = sizeOf(target.Get());
+    if (!width) return true;
+
+    UINT count = 1;
+    D3D11_VIEWPORT viewport{};
+    context->RSGetViewports(&count, &viewport);
+
+    return count && viewport.Width >= static_cast<float>(width) && viewport.Height >= static_cast<float>(height);
+}
+
 // Thread groups for the 8 x 8 kernels to cover `texels` along an axis.
 inline UINT groups(UINT texels)
 {
