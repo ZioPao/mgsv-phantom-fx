@@ -64,7 +64,7 @@ void TraceSunShadows(uint2 gtid : SV_GroupThreadID, uint2 gid : SV_GroupID, uint
             // spreading the rays over its disc; a cone widened by it as well took cut-out alpha from
             // coarse levels of detail, where a pylon's thin bars fell under the threshold.
             float blocker, transmittance;
-            bool blocked = SurfaceRayBlocked(origin, facing, tolerance, toSun, g_Frame.shadowParams.z, PixelCone(position, 0.0f), true, blocking, ShadowFaces(),
+            bool blocked = SurfaceRayBlocked(origin, facing, tolerance, toSun, g_Frame.shadowParams.z, PixelCone(position, 0.0f), true, blocking, ShadowRayTowards(RayTowardsSun),
                 random, blocker, transmittance);
             // The denoiser takes a pixel as lit or not: past hair, lit with the chance its light gets through.
             lit = !blocked && random.rand() < transmittance;
@@ -115,13 +115,13 @@ DebugRay TraceDebugRay(float3 position, float3 normal, float depth)
     r.beyond = BeyondShadowMap(position, depth);
     float rayLength = g_Frame.shadowParams.z;
     r.nearEnd = NearEnd(r.normal, r.tolerance, r.direction, rayLength);
-    r.nearHit = TraceFromSurface(r.origin, r.normal, r.tolerance, r.direction, r.nearEnd, GI_MASK_SCENE, true, PixelCone(position, 0.0f), ShadowFaces(), r.copies);
+    r.nearHit = TraceFromSurface(r.origin, r.normal, r.tolerance, r.direction, r.nearEnd, GI_MASK_SCENE, true, PixelCone(position, 0.0f), ShadowRayTowards(RayTowardsSun), r.copies);
 
     // Beyond the shadow map the shadow rays take cut-out geometry without the game's alpha as blocking
     // with chance: here always. Inside, they let the sun through it.
     r.farHit = TraceClosest(r.origin, r.direction, r.nearEnd, rayLength, GI_MASK_SCENE, true, r.beyond > 0.0f, PixelCone(position, 0.0f));
     uint wholeRayCopies;
-    r.anyHit = TraceFromSurface(r.origin, r.normal, r.tolerance, r.direction, rayLength, GI_MASK_SCENE, true, PixelCone(position, 0.0f), ShadowFaces(),
+    r.anyHit = TraceFromSurface(r.origin, r.normal, r.tolerance, r.direction, rayLength, GI_MASK_SCENE, true, PixelCone(position, 0.0f), ShadowRayTowards(RayTowardsSun),
         wholeRayCopies);
     return r;
 }

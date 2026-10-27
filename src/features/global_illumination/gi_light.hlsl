@@ -435,7 +435,7 @@ float3 SampledLocalLight(float3 world, float3 normal, float3 origin, float toler
     if (!(chosenWeight > 0.0f)) return 0.0f;
 
     float rayLength = chosenDistance - chosenClearance;
-    float visibility = rayLength > 0.0f ? VisibilityFromSurface(origin, normal, tolerance, chosenDirection, rayLength, ShadowFaces()) : 1.0f;
+    float visibility = rayLength > 0.0f ? VisibilityFromSurface(origin, normal, tolerance, chosenDirection, rayLength, ShadowRayTowards(RayTowardsLamp)) : 1.0f;
     return chosenLight * (total / chosenWeight * visibility);
 }
 
@@ -460,7 +460,7 @@ float3 SunLight(float3 world, float3 normal, float3 origin, float tolerance, boo
 
     float3 direction = SunSample(random.rand2());
     float3 sunOrigin = sunFar ? OffsetFromTriangle(world, sunSide) : origin;
-    float visibility = VisibilityFromSurface(sunOrigin, sunSide, tolerance, direction, 1e4f, ShadowFaces());
+    float visibility = VisibilityFromSurface(sunOrigin, sunSide, tolerance, direction, 1e4f, ShadowRayTowards(RayTowardsSun));
     if (visibility <= 0.0f) return 0.0f;
 
     return g_Frame.sunColor.rgb * (cosine * visibility * (sunFar ? LeafTransmittance : 1.0f));
@@ -487,7 +487,7 @@ float3 HitDirectLight(float3 world, float3 normal, float3 albedo, bool leaf, ino
     float3 skySide = BounceSide(normal, leaf, random, skyWeight);
     float3 skyDirection = mapToCosineHemisphere(random.rand2(), skySide);
     float3 skyOrigin = all(skySide == normal) ? origin : OffsetFromTriangle(world, skySide);
-    light += SkyRadiance(skyDirection) * (skyWeight * VisibilityFromSurface(skyOrigin, skySide, tolerance, skyDirection, 1e4f, false));
+    light += SkyRadiance(skyDirection) * (skyWeight * VisibilityFromSurface(skyOrigin, skySide, tolerance, skyDirection, 1e4f, RayTowardsSurface));
 
     light += SampledLocalLight(world, normal, origin, tolerance, random);
     return albedo * light;

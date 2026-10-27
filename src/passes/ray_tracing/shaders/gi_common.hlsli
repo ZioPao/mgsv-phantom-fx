@@ -605,29 +605,38 @@ bool IsCopyOfSurface(SceneHit hit, float3 normal, float3 direction, float tolera
 // rays'. Cut-out geometry, which the game mostly draws two-sided, casts from both sides. The game's faces
 // on its models are DXR's back faces (its projection mirrors x); the terrain is one-sided already. A
 // mesh the game never draws into its shadow maps (a rigid model's main-view-only one) does not stop it
-// at all: one in a stairwell's windows kept the moonlight off its wall (the lamp probe, 2026-10-26).
-bool StopsShadowRay(uint instance, uint geometry, bool dxrFrontFace)
+// at all: one in a stairwell's windows kept the moonlight off its wall (the lamp probe, 2026-10-26). A
+// building's stand-in (GI_GEOMETRY_SUN_ONLY) stops the sun's rays alone: the game draws it into every sun
+// cascade, and it stands in for main-view-only walls and rock that let the sun into a room and a cave
+// (2026-10-27); a lamp's rays pass it, as it kept a room's lamp off a wall where nothing was drawn.
+bool StopsShadowRay(uint instance, uint geometry, bool dxrFrontFace, bool isTowardsLamp)
 {
     GIInstanceDesc desc = g_Instances[instance];
     if (!(InstanceKind(desc) & GI_INSTANCE_MODEL)) return true;
 
     uint flags = g_Geometries[FirstGeometry(desc) + geometry].flags;
     if (flags & GI_GEOMETRY_NO_SHADOW) return false;
+    if (isTowardsLamp && (flags & GI_GEOMETRY_SUN_ONLY)) return false;
 
     return !dxrFrontFace || (flags & GI_GEOMETRY_CUT_OUT) != 0;
 }
 
+// What a ray leaving a surface goes towards, for what stops it (StopsRay).
+static const uint RayTowardsSurface = 0u; // The camera's and the global illumination's rays
+static const uint RayTowardsSun = 1u;
+static const uint RayTowardsLamp = 2u;
+
 // Rays towards a light take the game's shadow maps' faces (StopsShadowRay), unless the diagnostics ask
-// for every surface from both sides, as until 2026-10-26 (shadowDiagnostics.x).
-bool ShadowFaces()
+// for every surface from both sides, as until 2026-10-26 (shadowDiagnostics.x): they are then taken as
+// rays towards a surface.
+uint ShadowRayTowards(uint light)
 {
-    return g_Frame.shadowDiagnostics.x == 0u;
+    return g_Frame.shadowDiagnostics.x == 0u ? light : RayTowardsSurface;
 }
 
-// Whether a hit stops a ray: one towards a light (`shadowFaces`) as the game's shadow maps would have it
-// (StopsShadowRay); any other ray passes what the game draws into its shadow maps alone (a tarp's
-// stand-in, GI_GEOMETRY_SHADOW_ONLY), as the camera never sees it. With the diagnostics' every surface
-// (ShadowFaces false), rays towards lights pass it too.
+// Whether a hit stops a ray: one towards a light as the game's shadow maps would have it
+// (StopsShadowRay); any other ray passes what the game draws into its shadow maps alone (a stand-in,
+// GI_GEOMETRY_SHADOW_ONLY), as the camera never sees it.
 bool IsShadowOnly(uint instance, uint geometry)
 {
     GIInstanceDesc desc = g_Instances[instance];
@@ -636,9 +645,11 @@ bool IsShadowOnly(uint instance, uint geometry)
     return (g_Geometries[FirstGeometry(desc) + geometry].flags & GI_GEOMETRY_SHADOW_ONLY) != 0;
 }
 
-bool StopsRay(uint instance, uint geometry, bool dxrFrontFace, bool shadowFaces)
+bool StopsRay(uint instance, uint geometry, bool dxrFrontFace, uint towards)
 {
-    return shadowFaces ? StopsShadowRay(instance, geometry, dxrFrontFace) : !IsShadowOnly(instance, geometry);
+    if (towards == RayTowardsSurface) return !IsShadowOnly(instance, geometry);
+
+    return StopsShadowRay(instance, geometry, dxrFrontFace, towards == RayTowardsLamp);
 }
 
 // Hair lets light through. It is a cloud of thin strands, and renderers shadow with it by how much light
@@ -663,10 +674,10 @@ void PassHair(float distance, inout float transmittance, inout float nearestHair
 
 // The closest hit of a ray leaving a surface of `normal` from `origin`, past copies of the surface, and
 // in `copies` how many it skipped; `alphaTest` as TraceClosest. Past what does not stop it too (StopsRay:
-// with `shadowFaces`, a ray towards a light). With `throughHair`, past hair too, which takes its share of
+// by what it goes `towards`). With `throughHair`, past hair too, which takes its share of
 // the ray's `transmittance` and leaves the nearest layer's distance in `nearestHair` (PassHair).
 SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance, uint mask, bool alphaTest, float2 cone,
-    bool shadowFaces, bool throughHair, inout float transmittance, inout float nearestHair, out uint copies)
+    uint towards, bool throughHair, inout float transmittance, inout float nearestHair, out uint copies)
 {
     copies = 0;
     float start = 0.0f;
@@ -676,7 +687,7 @@ SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 
         hit = TraceClosest(origin, direction, start, maxDistance, mask, alphaTest, false, cone);
         bool copy = hit.hit && IsCopyOfSurface(hit, normal, direction, tolerance);
         CountDiagnostic(GI_COUNTER_COPIES, copy);
-        bool passed = copy || (hit.hit && !StopsRay(hit.instance, hit.geometry, hit.frontFace, shadowFaces));
+        bool passed = copy || (hit.hit && !StopsRay(hit.instance, hit.geometry, hit.frontFace, towards));
         bool hair = !passed && throughHair && hit.hit && IsHair(FirstGeometry(g_Instances[hit.instance]) + hit.geometry);
         if (!passed && !hair) return hit;
 
@@ -691,22 +702,22 @@ SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 
 }
 
 SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance, uint mask, bool alphaTest, float2 cone,
-    bool shadowFaces, out uint copies)
+    uint towards, out uint copies)
 {
     float transmittance = 1.0f, nearestHair = FLT_MAX;
-    return TraceFromSurface(origin, normal, tolerance, direction, maxDistance, mask, alphaTest, cone, shadowFaces, false, transmittance, nearestHair, copies);
+    return TraceFromSurface(origin, normal, tolerance, direction, maxDistance, mask, alphaTest, cone, towards, false, transmittance, nearestHair, copies);
 }
 
 SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance, uint mask, bool alphaTest, float2 cone,
     out uint copies)
 {
-    return TraceFromSurface(origin, normal, tolerance, direction, maxDistance, mask, alphaTest, cone, false, copies);
+    return TraceFromSurface(origin, normal, tolerance, direction, maxDistance, mask, alphaTest, cone, RayTowardsSurface, copies);
 }
 
 SceneHit TraceFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance, uint mask, bool alphaTest, float2 cone)
 {
     uint copies;
-    return TraceFromSurface(origin, normal, tolerance, direction, maxDistance, mask, alphaTest, cone, false, copies);
+    return TraceFromSurface(origin, normal, tolerance, direction, maxDistance, mask, alphaTest, cone, RayTowardsSurface, copies);
 }
 
 // A global illumination ray leaving a surface (LightCone).
@@ -728,15 +739,15 @@ float NearEnd(float3 normal, float tolerance, float3 direction, float maxDistanc
 // there the first hit found ends it. Cut-out geometry with the game's alpha blocks it where its alpha
 // does. Cut-out geometry without its texture lets it through; with `chance`, it blocks it with chance
 // `blocking`, a random number drawn a candidate, so the denoiser averages a partial shadow. Only what
-// stops it blocks it (StopsRay: with `shadowFaces`, a ray towards a light).
+// stops it blocks it (StopsRay: by what it goes `towards`).
 bool SurfaceRayBlocked(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance, float2 cone, bool chance, float blocking,
-    bool shadowFaces, inout Random random, out float blocker, out float transmittance)
+    uint towards, inout Random random, out float blocker, out float transmittance)
 {
     transmittance = 1.0f;
     float nearestHair = FLT_MAX;
     float nearEnd = NearEnd(normal, tolerance, direction, maxDistance);
     uint copies;
-    SceneHit nearHit = TraceFromSurface(origin, normal, tolerance, direction, nearEnd, GI_MASK_SCENE, true, cone, shadowFaces, true, transmittance,
+    SceneHit nearHit = TraceFromSurface(origin, normal, tolerance, direction, nearEnd, GI_MASK_SCENE, true, cone, towards, true, transmittance,
         nearestHair, copies);
     blocker = min(nearHit.distance, nearestHair);
     if (nearHit.hit) return true;
@@ -771,7 +782,7 @@ bool SurfaceRayBlocked(float3 origin, float3 normal, float tolerance, float3 dir
 
     // Any hit that stops it settles it. One that does not (a surface met from its back, a stand-in) leaves
     // it open: the ray again, every triangle looked at.
-    if (!blocked || StopsRay(query.CommittedInstanceIndex(), query.CommittedGeometryIndex(), query.CommittedTriangleFrontFace(), shadowFaces))
+    if (!blocked || StopsRay(query.CommittedInstanceIndex(), query.CommittedGeometryIndex(), query.CommittedTriangleFrontFace(), towards))
         return blocked;
 
     transmittance = nearTransmittance;
@@ -781,7 +792,7 @@ bool SurfaceRayBlocked(float3 origin, float3 normal, float tolerance, float3 dir
     while (every.Proceed())
     {
         uint instance = every.CandidateInstanceIndex(), geometry = every.CandidateGeometryIndex();
-        if (!StopsRay(instance, geometry, every.CandidateTriangleFrontFace(), shadowFaces)) continue;
+        if (!StopsRay(instance, geometry, every.CandidateTriangleFrontFace(), towards)) continue;
 
         uint row = every.CandidateInstanceContributionToHitGroupIndex() + geometry;
         bool untextured = false;
@@ -803,12 +814,12 @@ bool SurfaceRayBlocked(float3 origin, float3 normal, float tolerance, float3 dir
 
 // The share of its light a global illumination ray (LightCone) leaving a surface gets away with: 0 where
 // something stops it, what the hair it passes lets through otherwise; cut-out geometry without its texture
-// lets it through. With `shadowFaces`, a ray towards a light (SurfaceRayBlocked).
-float VisibilityFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance, bool shadowFaces)
+// lets it through. Stopped by what it goes `towards` (SurfaceRayBlocked).
+float VisibilityFromSurface(float3 origin, float3 normal, float tolerance, float3 direction, float maxDistance, uint towards)
 {
     Random unused = (Random)0;
     float blocker, transmittance;
-    bool blocked = SurfaceRayBlocked(origin, normal, tolerance, direction, maxDistance, LightCone(origin), false, 0.0f, shadowFaces, unused, blocker,
+    bool blocked = SurfaceRayBlocked(origin, normal, tolerance, direction, maxDistance, LightCone(origin), false, 0.0f, towards, unused, blocker,
         transmittance);
     return blocked ? 0.0f : transmittance;
 }

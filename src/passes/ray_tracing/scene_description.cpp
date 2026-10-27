@@ -39,11 +39,14 @@ constexpr float CutOutThreshold = 0.5f;
 //   decals the main view alone shows. Every other decal is taken as cut out, until the game's own
 //   per-mesh pass mask is read. A solid mesh the main view alone shows (a room's inner walls) stops
 //   every ray but those towards lights.
-// - A rigid model's solid stand-in is dropped: the main view's own meshes are in the scene, and an
-//   offset, simpler copy of them blocks light where nothing was drawn. Where the main view's cut-out
-//   meshes are dropped, it is all the rays have of them: it is kept, for the rays towards lights
-//   alone, unless the main view draws it too (no ray would meet it). A cut-out stand-in stays in (a
-//   pylon's lattice casts through one).
+// - A rigid model's solid stand-in is kept for the sun's rays alone: the game draws it into every sun
+//   cascade, and the main-view-only meshes it stands in for pass them. A lamp's rays pass it: an offset,
+//   simpler copy of the main view's meshes, it kept a lamp off a wall where nothing was drawn. Where the
+//   main view's cut-out meshes are dropped, it is all the rays have of them: it is kept for every ray
+//   towards a light. One the main view draws too is dropped (no ray would meet it). A cut-out stand-in
+//   stays in (a pylon's lattice casts through one). Should the sun-only rule mislead too, the game's
+//   per-draw pass masks say which shadow maps each mesh is drawn into (docs/DEVELOPMENT.md, "Ray-traced
+//   shadows").
 // - The object brush's bushes and grass cast no shadow in the game: their meshes are taken as leaves
 //   all the same, for the rays' shadows; the brush's props are solid.
 std::optional<MeshRole> roleOf(std::uint8_t alpha, std::uint8_t shadow, bool isCharacter, bool isVegetation, bool areMainViewCutOutsDropped)
@@ -64,7 +67,12 @@ std::optional<MeshRole> roleOf(std::uint8_t alpha, std::uint8_t shadow, bool isC
 
     if (isSeeThrough || (isCutOut && isMainViewOnly)) return std::nullopt;
     if (isCutOut) return isVegetation ? MeshRole::Leaf : MeshRole::CutOut;
-    if (isStandIn) return areMainViewCutOutsDropped && !isMainViewOnly ? std::optional(MeshRole::ShadowOnly) : std::nullopt;
+    if (isStandIn)
+    {
+        if (isMainViewOnly) return std::nullopt;
+
+        return areMainViewCutOutsDropped ? MeshRole::ShadowOnly : MeshRole::SunShadowOnly;
+    }
 
     return isMainViewOnly ? MeshRole::MainViewOnly : MeshRole::Solid;
 }
@@ -83,6 +91,8 @@ std::uint32_t flagsOf(MeshRole role)
         return GI_GEOMETRY_NO_SHADOW;
     case MeshRole::ShadowOnly:
         return GI_GEOMETRY_SHADOW_ONLY;
+    case MeshRole::SunShadowOnly:
+        return GI_GEOMETRY_SHADOW_ONLY | GI_GEOMETRY_SUN_ONLY;
     case MeshRole::Solid:
         break;
     }
