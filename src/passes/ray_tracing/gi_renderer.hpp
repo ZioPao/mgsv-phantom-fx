@@ -1,6 +1,7 @@
 #pragma once
 
 #include "passes/ray_tracing/scene_description.hpp"
+#include "passes/ray_tracing/scene_memory.hpp"
 
 #include <d3d11_4.h>
 #include <array>
@@ -64,16 +65,7 @@ struct LocalLight
 
 using Matrix = std::array<float, 16>; // Rows applied as dot(row, v), as the engine's
 
-// One of the game's textures for the scene, by its path hash (ModelPart::baseTexture): a shared copy
-// of its levels of detail from the first no larger than the scene keeps (gi_textures.hpp), viewed as
-// `viewFormat`.
-struct SceneTexture
-{
-    std::uint64_t path{};
-    ID3D11Texture2D* texture{};
-    DXGI_FORMAT viewFormat{};
-    std::uint32_t mips{};
-};
+using SceneTexture = scene_contents::SceneTexture;
 
 // The game's terrain heightmap as its terrain shaders read it (engine_scene::TerrainInputs), shared
 // copies of its most detailed level, for the rays' terrain rings (TerrainGrid in gi_scene.hlsl).
