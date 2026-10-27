@@ -9,6 +9,7 @@
 #include "features/upscaling/fsr_upscaler.hpp"
 #include "features/upscaling/fxaa.hpp"
 #include "features/upscaling/upscaler_shaders.hpp"
+#include "game_constants.hpp"
 #include "game_loop.hpp"
 #include "log.hpp"
 #include "passes/ray_tracing/ray_tracing.hpp"
@@ -41,8 +42,6 @@ namespace phantom_fx::upscaler
 namespace
 {
 using Microsoft::WRL::ComPtr;
-
-constexpr UINT SceneConstantsSize = sizeof(camera::SceneConstants);
 
 // The game's pixel shaders the add-on looks for, each drawn as one full-screen triangle. From Copy on
 // they are the post processing after the depth of field, which the upscaler runs before.
@@ -399,7 +398,7 @@ void startFrame()
     frame.view.reset();
 }
 
-void sceneWritten(camera::SceneConstants& scene)
+void sceneWritten(game_constants::SceneConstants& scene)
 {
     const auto kind = camera::classify(scene);
     if (kind == camera::SceneView::Other) return;
@@ -413,9 +412,9 @@ void sceneWritten(camera::SceneConstants& scene)
 
     // The frame's largest camera view: a mirror's reflection is drawn first, and smaller (the intro's,
     // 1080x608 of a 2560x1440 frame, 2026-10-26).
-    const float area = scene.c[22][0] * scene.c[22][1];
+    const float area = scene.width * scene.height;
     if (kind == camera::SceneView::MainCamera && (!frame.view || area > frame.view->width * frame.view->height)) frame.view = camera::viewOf(scene);
-    if (frame.jittered) camera::applyJitter(scene, camera::jitterNdc(frame.jitter, scene.c[22][0], scene.c[22][1]));
+    if (frame.jittered) camera::applyJitter(scene, camera::jitterNdc(frame.jitter, scene.width, scene.height));
 }
 
 // In exclusive fullscreen the game draws GammaControl into a viewport of its scene's size, centred in
@@ -1633,7 +1632,7 @@ void bufferMapped(ID3D11Resource* buffer, void* data) noexcept
 
     D3D11_BUFFER_DESC desc{};
     static_cast<ID3D11Buffer*>(buffer)->GetDesc(&desc);
-    if (desc.ByteWidth != SceneConstantsSize || !(desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER)) return;
+    if (desc.ByteWidth != sizeof(game_constants::SceneConstants) || !(desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER)) return;
 
     mappedScene = buffer;
     mappedSceneData = data;
@@ -1649,7 +1648,7 @@ void bufferUnmapped(ID3D11Resource* buffer) noexcept
 
     try
     {
-        sceneWritten(*static_cast<camera::SceneConstants*>(data));
+        sceneWritten(*static_cast<game_constants::SceneConstants*>(data));
     }
     catch (...)
     {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "game_constants.hpp"
 #include "passes/ray_tracing/gi_inputs.hpp"
 #include "passes/ray_tracing/gi_renderer.hpp"
 
@@ -54,7 +55,7 @@ struct TerrainInputs
 
 // Before a terrain draw of the main view: notes its inputs, once a game frame, with the object and material
 // constants the game wrote for it (the material's buffer holds other draws' by the time the frame is lit).
-void noteTerrain(ID3D11DeviceContext* context, const float* objectConstants, const float* materialConstants) noexcept;
+void noteTerrain(ID3D11DeviceContext* context, const game_constants::ObjectConstants& object, const game_constants::TerrainMaterialConstants& material) noexcept;
 
 // On the render thread: the inputs last noted, once each.
 std::optional<TerrainInputs> takeTerrain();

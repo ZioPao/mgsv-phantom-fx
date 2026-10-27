@@ -1,6 +1,6 @@
 #pragma once
 
-#include "camera.hpp"
+#include "game_constants.hpp"
 #include "ui_redirect.hpp"
 
 #include <d3d11.h>
@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <array>
 #include <optional>
-#include <span>
 #include <vector>
 
 // What the ray tracing takes from the game's draws (docs/DEVELOPMENT.md, "Global illumination"): the
@@ -32,10 +31,39 @@ void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept;
 // scene (b2), material (b4), object (b5), light (b3) and probe (b7) constants.
 void bufferMapped(ID3D11Resource* buffer, void* data) noexcept;
 void bufferUnmapped(ID3D11Resource* buffer) noexcept;
-// What this thread last wrote to `buffer`, as many floats as `into` holds; false when it wrote nothing.
-bool written(ID3D11Buffer* buffer, std::span<float> into) noexcept;
-// The same, only when that write was exactly the size of `into`.
-bool writtenExactly(ID3D11Buffer* buffer, std::span<float> into) noexcept;
+// What this thread last wrote to `buffer`, `size` bytes of it into `into`; false when it wrote nothing,
+// or, `exactly`, when that write had another size.
+bool copyWritten(ID3D11Buffer* buffer, void* into, std::size_t size, bool exactly) noexcept;
+
+// What this thread last wrote to `buffer` as C, whatever that write's size; none when it wrote nothing.
+template<class C> std::optional<C> written(ID3D11Buffer* buffer) noexcept
+{
+    C read{};
+    if (!copyWritten(buffer, &read, sizeof(C), false)) return std::nullopt;
+
+    return read;
+}
+
+// The same, only when that write was exactly C's size.
+template<class C> std::optional<C> writtenExactly(ID3D11Buffer* buffer) noexcept
+{
+    C read{};
+    if (!copyWritten(buffer, &read, sizeof(C), true)) return std::nullopt;
+
+    return read;
+}
+
+// What the pixel shader bound on `context` reads at C's slot, by writtenExactly.
+template<class C> std::optional<C> pixelShaderReads(ID3D11DeviceContext* context) noexcept
+{
+    ID3D11Buffer* buffer{};
+    context->PSGetConstantBuffers(C::Slot, 1, &buffer);
+    auto read = writtenExactly<C>(buffer);
+    if (buffer) buffer->Release();
+
+    return read;
+}
+
 // Before an indexed draw of the game's models or terrain: notes the camera and the terrain's inputs.
 void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
 // FinishCommandList: what `context` noted now belongs to `list`.
@@ -50,14 +78,14 @@ void executing(std::uint64_t list) noexcept;
 // and the game loop's frame they were recorded in (game_loop.hpp); none when no such draw ran.
 struct Camera
 {
-    camera::SceneConstants constants{};
+    game_constants::SceneConstants constants{};
     std::uint32_t gameFrame{};
 };
 std::optional<Camera> takeCamera() noexcept;
 
 // A skinned mesh as the main camera's draw posed it: where its model is in the world, which of its
-// meshes it is (the draw's index range), and the bones it drew with (VSBones' g_vsBone: 32 3x4 rows,
-// the model's palette through the mesh's bone group).
+// meshes it is (the draw's index range), and the bones it drew with (game_constants::BonesConstants'
+// bones).
 struct DrawnBones
 {
     std::array<float, 3> position{};
@@ -66,7 +94,7 @@ struct DrawnBones
     std::array<float, 32 * 12> bones{};
 };
 // At the kick: the skinned meshes drawn for the frame `camera` draws since the last call.
-std::vector<DrawnBones> takeDrawnBones(const camera::SceneConstants& camera) noexcept;
+std::vector<DrawnBones> takeDrawnBones(const game_constants::SceneConstants& camera) noexcept;
 
 // Diagnostics: the hooks' time on the game's threads, all threads together, and the draws they
 // looked at, since the last call.

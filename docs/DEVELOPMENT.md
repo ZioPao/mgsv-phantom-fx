@@ -57,8 +57,9 @@ ctest --test-dir build/release
 This runs `tests/upscaler_tests.cpp`, which needs neither the game nor a GPU: settings (defaults,
 round trip, clamping, invalid files and values), the mode maths (render scales, texture LOD bias)
 and the camera maths (main-view recognition, jitter direction and units, reprojection, camera cuts,
-jitter phases and the Halton sequence, the camera frame generation gets). Everything else is checked
-in the game.
+jitter phases and the Halton sequence, the camera frame generation gets). The main view and a sun
+pass from frame logs, pasted in as the log printed them, check main-view recognition and a light
+pass's view space on the game's own numbers. Everything else is checked in the game.
 
 ## Package a release
 
@@ -140,7 +141,7 @@ what draws it, when that is the feature's own.
 | --- | --- |
 | `src/passes/sun_light_pass.*` | The game's sun light pass drawn with replacement shaders, with soft shadows, the sun's contact shadows and the ray-traced shadow composed in. `sun_light_pass_shaders.hpp`: the game's sun light shaders rebuilt with them |
 | `src/passes/local_light_pass.*` | The game's point and spot light draws, with the lamps' contact shadows and soft shadows composed in: the light shaders by checksum, the marking and lighting draws |
-| `src/passes/contact_shadow_trace.*` | Bend Studio's screen-space shadow trace, for the sun's and the lamps' contact shadows; the light passes' constants. `contact_shadow_trace_shaders.hpp`: Bend's trace ported to FXC |
+| `src/passes/contact_shadow_trace.*` | Bend Studio's screen-space shadow trace, for the sun's and the lamps' contact shadows. `contact_shadow_trace_shaders.hpp`: Bend's trace ported to FXC |
 | `third_party/bend_sss/bend_sss_cpu.h` | Bend Studio's dispatch layout, unchanged (Apache License 2.0) |
 | `src/passes/indirect_light_pass.*` | The game's sky light, upscale and resolve: pass recognition, the G-buffer notes, the resolve's white occlusion and diffuse light, the diagnostics views, the ray-traced scene's notes. `indirect_light_pass_shaders.hpp`: the diagnostics views |
 | `src/passes/visibility_bitmask.*` | The visibility bitmask march GTVBAO and SSILVB share: the depth prefilter, the march, the denoiser. `visibility_bitmask_shaders.hpp`: the march (GTVBAO from three-gtvbao, SSILVB's light as SSRT3 gathers it), XeGTAO's noise and denoiser |
@@ -161,8 +162,9 @@ what draws it, when that is the feature's own.
 | --- | --- |
 | `src/render_scale.cpp`, `src/render_scale.hpp` | Hook on the renderer's per-frame step: the engine renders at the requested size |
 | `src/ui_redirect.cpp`, `src/ui_redirect.hpp` | The draw call every module sees; the grading, the 2D pass and `GammaControl` on output-size targets while the engine renders below them |
-| `src/camera.cpp`, `src/camera.hpp` | Scene constants: main-view recognition, jitter, reprojection, camera cuts |
-| `src/game_lights.hpp` | The game's point and spot light shaders and their constants, for the local light pass and the ray-traced lights: the checksums, a light's range, its sphere on screen |
+| `src/game_constants.hpp` | The game's constant buffers by name (see "Constant buffers"): the system, scene, sun and lamp light, material, object, bones and probe constants, each with its slot, and a light pass's view space in the world |
+| `src/camera.cpp`, `src/camera.hpp` | The main camera in the scene constants: main-view recognition, jitter, reprojection, camera cuts |
+| `src/game_lights.hpp` | The game's point and spot light shaders, for the local light pass and the ray-traced lights: the checksums, a light's range, its sphere on screen |
 | `src/device_check.cpp`, `src/device_check.hpp` | Lets the game start under ReShade (see below); the build check |
 | `src/game_code.hpp` | The game's image, checks of its code, hooks (MinHook) and code patches |
 | `src/game_memory.hpp` | Guarded reads of the game's objects |
@@ -547,6 +549,9 @@ Checksums are the DXBC header checksum (bytes 4 to 20) as lowercase hex.
 - It runs in a deferred command list together with the LUT pass, before the UI's list.
 
 ### Constant buffers
+
+The add-on reads these by name through `src/game_constants.hpp`, whose `static_assert`s check each
+register's offset.
 
 `cPSSystem`, slot `b0` (64 bytes):
 

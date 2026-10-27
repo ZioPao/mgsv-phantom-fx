@@ -1,6 +1,7 @@
 // The ray tracing's inputs from the game's draws; gi_inputs.hpp describes them.
 #include "passes/ray_tracing/gi_inputs.hpp"
 
+#include "camera.hpp"
 #include "clock.hpp"
 #include "game_loop.hpp"
 #include "log.hpp"
@@ -26,6 +27,7 @@ namespace phantom_fx::gi_inputs
 namespace
 {
 using Microsoft::WRL::ComPtr;
+using namespace game_constants;
 
 // What a vertex shader draws, from its source name: the game's models (their G-buffer and shadow
 // passes), its terrain, or neither.
@@ -36,15 +38,9 @@ enum class Kind : std::uint8_t
     Terrain,
 };
 
-constexpr UINT SceneSlot = 2, BonesSlot = 6;
-// The constant buffers whose contents are kept: scene (b2), object (b5), light (b3), probes (b7), material
-// (b4: the terrain's page table converter).
-constexpr UINT SceneConstantsSize = 480, ObjectConstantsSize = 208, LightConstantsSize = 176, ProbeConstantsSize = 576, MaterialConstantsSize = 128;
-// VSBones (b6): g_vsBone, 32 3x4 rows, then g_vsPrevBone.
-constexpr UINT BonesConstantsSize = 3072;
-constexpr UINT LargestConstants = BonesConstantsSize / 4;
-// cVSObject (b5): m_viewWorld c0 to c3, m_useWeightCount c8.x (set on skinned draws).
-constexpr std::size_t UseWeightCount = 8 * 4;
+// The constant buffers whose contents are kept: scene (b2), light (b3) and, for the ray tracing, material
+// (b4), object (b5), bones (b6) and probes (b7). The bones are the largest.
+constexpr UINT LargestConstants = sizeof(BonesConstants) / 4;
 // The skinned meshes noted between kicks at most.
 constexpr std::size_t MaxDrawnBones = 2048;
 
@@ -125,6 +121,12 @@ const Written* writtenTo(ID3D11Buffer* buffer)
     return found != contents.end() ? &found->second : nullptr;
 }
 
+// A write as C, whatever its size.
+template<class C> const C& as(const Written& written)
+{
+    return *reinterpret_cast<const C*>(written.values.data());
+}
+
 UINT byteWidth(ID3D11Buffer* buffer)
 {
     D3D11_BUFFER_DESC desc{};
@@ -133,41 +135,31 @@ UINT byteWidth(ID3D11Buffer* buffer)
     return desc.ByteWidth;
 }
 
-// Notes a skinned mesh's draw: its model's place in the world, the view's inverse (cVSScene m_view, c8
-// to c10, a rotation and a translation) times m_viewWorld's translation, as m_world is not kept current;
-// the draw's index range; the bones it drew with.
-void noteBones(ID3D11DeviceContext* context, const float* scene, const float* object, const ui_redirect::DrawCall& call)
+// Notes a skinned mesh's draw: its model's place in the world, the view's inverse (a rotation and a
+// translation) times viewWorld's translation, as world is not kept current; the draw's index range; the
+// bones it drew with.
+void noteBones(ID3D11DeviceContext* context, const SceneConstants& scene, const ObjectConstants& object, const ui_redirect::DrawCall& call)
 {
     ComPtr<ID3D11Buffer> buffer;
-    context->VSGetConstantBuffers(BonesSlot, 1, buffer.GetAddressOf());
-    if (!buffer || byteWidth(buffer.Get()) != BonesConstantsSize) return;
+    context->VSGetConstantBuffers(BonesConstants::Slot, 1, buffer.GetAddressOf());
+    if (!buffer || byteWidth(buffer.Get()) != sizeof(BonesConstants)) return;
 
     const auto* bones = writtenTo(buffer.Get());
     if (!bones) return;
 
     DrawnBones drawn{.firstIndex = call.first, .indexCount = call.count};
-    const float offset[3]{object[3] - scene[8 * 4 + 3], object[7] - scene[9 * 4 + 3], object[11] - scene[10 * 4 + 3]};
+    const auto& view = scene.view;
+    const float offset[3]{object.viewWorld[0][3] - view[0][3], object.viewWorld[1][3] - view[1][3], object.viewWorld[2][3] - view[2][3]};
     for (int i = 0; i < 3; ++i)
     {
-        drawn.position[i] = scene[8 * 4 + i] * offset[0] + scene[9 * 4 + i] * offset[1] + scene[10 * 4 + i] * offset[2];
-        drawn.eye[i] = scene[20 * 4 + i];
+        drawn.position[i] = view[0][i] * offset[0] + view[1][i] * offset[1] + view[2][i] * offset[2];
+        drawn.eye[i] = scene.eye[i];
     }
 
-    std::copy_n(bones->values.begin(), drawn.bones.size(), drawn.bones.begin());
+    static_assert(sizeof(drawn.bones) == sizeof(BonesConstants::bones));
+    std::memcpy(drawn.bones.data(), as<BonesConstants>(*bones).bones, sizeof(drawn.bones));
     std::lock_guard lock(bonesMutex);
     if (drawnBones.size() < MaxDrawnBones) drawnBones.push_back(drawn);
-}
-
-// The main camera's constants, with the add-on's jitter taken back out for the test.
-bool mainCamera(const std::array<float, LargestConstants>& scene)
-{
-    camera::SceneConstants unjittered;
-    std::memcpy(&unjittered, scene.data(), sizeof(unjittered));
-    const float x = unjittered.c[28][0], y = unjittered.c[28][1];
-    camera::applyJitter(unjittered, {-x, -y});
-    unjittered.c[28][0] = unjittered.c[28][1] = 0;
-
-    return camera::classify(unjittered) == camera::SceneView::MainCamera;
 }
 }
 
@@ -243,8 +235,9 @@ void bufferMapped(ID3D11Resource* buffer, void* data) noexcept
     D3D11_BUFFER_DESC desc{};
     static_cast<ID3D11Buffer*>(buffer)->GetDesc(&desc);
     const UINT size = desc.ByteWidth;
-    const bool lightPass = size == SceneConstantsSize || size == LightConstantsSize;
-    const bool rayTracingOnly = size == ObjectConstantsSize || size == ProbeConstantsSize || size == MaterialConstantsSize || size == BonesConstantsSize;
+    const bool lightPass = size == sizeof(SceneConstants) || size == sizeof(SunLightConstants) || size == sizeof(LampLightConstants);
+    const bool rayTracingOnly = size == sizeof(LampMaterialConstants) || size == sizeof(TerrainMaterialConstants) || size == sizeof(ObjectConstants)
+        || size == sizeof(BonesConstants) || size == sizeof(ProbeConstants);
     if (!(lightPass || (tracing && rayTracingOnly)) || !(desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER)) return;
 
     mappedBuffer = buffer;
@@ -262,7 +255,8 @@ void bufferUnmapped(ID3D11Resource* buffer) noexcept
         auto& written = contents[buffer];
         std::memcpy(written.values.data(), mappedData, mappedSize);
         written.size = mappedSize;
-        if (mappedSize == SceneConstantsSize) written.mainCamera = active.load(std::memory_order_relaxed) && mainCamera(written.values);
+        if (mappedSize == sizeof(SceneConstants))
+            written.mainCamera = active.load(std::memory_order_relaxed) && camera::isMainCamera(as<SceneConstants>(written));
     }
     catch (...)
     {
@@ -272,21 +266,12 @@ void bufferUnmapped(ID3D11Resource* buffer) noexcept
     mappedData = nullptr;
 }
 
-bool written(ID3D11Buffer* buffer, std::span<float> into) noexcept
+bool copyWritten(ID3D11Buffer* buffer, void* into, std::size_t size, bool exactly) noexcept
 {
     const auto* found = writtenTo(buffer);
-    if (!found || into.size() > found->values.size()) return false;
+    if (!found || (exactly ? size != found->size : size > sizeof(found->values))) return false;
 
-    std::copy_n(found->values.begin(), into.size(), into.begin());
-    return true;
-}
-
-bool writtenExactly(ID3D11Buffer* buffer, std::span<float> into) noexcept
-{
-    const auto* found = writtenTo(buffer);
-    if (!found || into.size_bytes() != found->size) return false;
-
-    std::copy_n(found->values.begin(), into.size(), into.begin());
+    std::memcpy(into, found->values.data(), size);
     return true;
 }
 
@@ -300,19 +285,20 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     {
         std::array<ComPtr<ID3D11Buffer>, 4> constants; // b2 to b5
         ID3D11Buffer* rawConstants[4]{};
-        context->VSGetConstantBuffers(SceneSlot, 4, rawConstants);
+        context->VSGetConstantBuffers(SceneConstants::Slot, 4, rawConstants);
         for (int i = 0; i < 4; ++i) constants[i].Attach(rawConstants[i]);
 
-        const auto* scene = writtenTo(constants[0].Get());
-        if (!scene || !scene->mainCamera) return;
+        const auto* written = writtenTo(constants[0].Get());
+        if (!written || !written->mainCamera) return;
 
         // The camera the rays trace from: the list's first main-camera draw's.
+        const auto& scene = as<SceneConstants>(*written);
         {
             std::lock_guard lock(recordMutex);
             auto [noted, first] = pending.try_emplace(reinterpret_cast<std::uint64_t>(context));
             if (first)
             {
-                std::memcpy(&noted->second.constants, scene->values.data(), sizeof(camera::SceneConstants));
+                noted->second.constants = scene;
                 noted->second.gameFrame = game_loop::currentFrame();
             }
         }
@@ -320,10 +306,12 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
         // The terrain's inputs, with the object and material constants the game wrote for the draw.
         const auto* material = writtenTo(constants[2].Get());
         const auto* object = writtenTo(constants[3].Get());
-        if (boundKind == Kind::Terrain && object && material) engine_scene::noteTerrain(context, object->values.data(), material->values.data());
+        if (boundKind == Kind::Terrain && object && material)
+            engine_scene::noteTerrain(context, as<ObjectConstants>(*object), as<TerrainMaterialConstants>(*material));
 
-        // A skinned mesh (m_useWeightCount set): its bones as drawn, for the scene's characters.
-        if (boundKind == Kind::Model && object && object->values[UseWeightCount] != 0) noteBones(context, scene->values.data(), object->values.data(), call);
+        // A skinned mesh (useWeightCount set): its bones as drawn, for the scene's characters.
+        if (boundKind == Kind::Model && object && as<ObjectConstants>(*object).useWeightCount[0] != 0)
+            noteBones(context, scene, as<ObjectConstants>(*object), call);
     }
     catch (...)
     {
@@ -363,7 +351,7 @@ void executing(std::uint64_t list) noexcept
     pending.erase(found);
 }
 
-std::vector<DrawnBones> takeDrawnBones(const camera::SceneConstants& camera) noexcept
+std::vector<DrawnBones> takeDrawnBones(const SceneConstants& camera) noexcept
 {
     std::vector<DrawnBones> taken;
     try
@@ -372,7 +360,7 @@ std::vector<DrawnBones> takeDrawnBones(const camera::SceneConstants& camera) noe
         for (const auto& drawn : drawnBones)
         {
             bool sameEye = true;
-            for (int i = 0; i < 3; ++i) sameEye = sameEye && std::abs(drawn.eye[i] - camera.c[20][i]) <= 1e-3f;
+            for (int i = 0; i < 3; ++i) sameEye = sameEye && std::abs(drawn.eye[i] - camera.eye[i]) <= 1e-3f;
             if (sameEye) taken.push_back(drawn);
         }
 

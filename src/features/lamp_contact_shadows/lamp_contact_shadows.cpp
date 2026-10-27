@@ -5,6 +5,7 @@
 #include "game_lights.hpp"
 #include "log.hpp"
 #include "passes/contact_shadow_trace.hpp"
+#include "passes/ray_tracing/gi_inputs.hpp"
 #include "performance.hpp"
 
 #include <wrl/client.h>
@@ -91,11 +92,10 @@ bool ensurePipeline()
     }
 }
 
-// The light's position in view space, from its cPSLight.
-std::array<float, 3> positionOf(const contact_shadow_trace::PassConstants& constants)
+// The light's position in view space.
+std::array<float, 3> positionOf(const game_constants::LampLightConstants& light)
 {
-    const float* light = constants.light.data();
-    return {light[LightPosition], light[LightPosition + 1], light[LightPosition + 2]};
+    return {light.position[0], light.position[1], light.position[2]};
 }
 
 void noteMarked(ID3D11DeviceContext* context, const std::array<float, 3>& position)
@@ -198,16 +198,15 @@ Health health()
 // alpha of both light targets wherever the light can reach.
 bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Falloff falloff, const BoundBlend& gameBlend)
 {
-    const auto constants = contact_shadow_trace::passConstants(context);
-    if (!constants)
+    const auto scene = gi_inputs::pixelShaderReads<game_constants::SceneConstants>(context);
+    const auto light = gi_inputs::pixelShaderReads<game_constants::LampLightConstants>(context);
+    if (!scene || !light)
     {
         logOnce("Shadows: a light without its constants keeps the game's shadows.");
         return false;
     }
 
-    const float* scene = constants->scene.data();
-    const float* light = constants->light.data();
-    const auto position = positionOf(*constants);
+    const auto position = positionOf(*light);
 
     ComPtr<ID3D11ShaderResourceView> depth;
     context->PSGetShaderResources(DepthSlot, 1, depth.GetAddressOf());
@@ -221,14 +220,14 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     }
 
     // A light that cannot reach the screen keeps the game's draws.
-    const float range = eitherShapeRangeOf(light, falloff);
-    const auto bounds = contact_shadow_trace::boundsOf(scene, position, range, contact_shadow_trace::depthSize(depth.Get()));
+    const float range = eitherShapeRangeOf(*light, falloff);
+    const auto bounds = contact_shadow_trace::boundsOf(*scene, position, range, contact_shadow_trace::depthSize(depth.Get()));
     if (!bounds) return false;
 
     float point[4]{position[0], position[1], position[2], 1};
     if (std::abs(point[2]) < MinLightDepth) point[2] = std::copysign(MinLightDepth, point[2]);
     performance::Timed timed(context, performance::Pass::LampTraces);
-    const auto dispatched = contact_shadow_trace::trace(context, depth.Get(), scene, contact_shadow_trace::project(scene, point), bounds, lightShadow);
+    const auto dispatched = contact_shadow_trace::trace(context, depth.Get(), *scene, contact_shadow_trace::project(*scene, point), bounds, lightShadow);
     timed.end();
     if (!dispatched || dispatched->dispatches == 0) return false;
 
@@ -278,8 +277,8 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
 
 ID3D11BlendState* takeShadowedBlend(ID3D11DeviceContext* context, ID3D11BlendState* gameBlend)
 {
-    const auto constants = contact_shadow_trace::passConstants(context);
-    if (!constants || !takeMarked(context, positionOf(*constants))) return nullptr;
+    const auto light = gi_inputs::pixelShaderReads<game_constants::LampLightConstants>(context);
+    if (!light || !takeMarked(context, positionOf(*light))) return nullptr;
 
     std::lock_guard lock(resourceMutex);
     auto* shadowed = scaledByAlpha(gameBlend);

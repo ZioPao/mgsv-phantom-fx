@@ -1,6 +1,6 @@
 #pragma once
 
-#include "camera.hpp"
+#include "game_constants.hpp"
 
 #include <algorithm>
 #include <array>
@@ -11,7 +11,7 @@
 #include <string_view>
 
 // The game's point and spot light shaders of its light pass (docs/DEVELOPMENT.md, "Ray-traced lights"),
-// and the constants they read. Lamp contact shadows (lamp_contact_shadows.hpp) and the ray-traced lights
+// and what their constants (game_constants::LampLightConstants) say. Lamp contact shadows (lamp_contact_shadows.hpp) and the ray-traced lights
 // (local_lights.hpp) both recognise them.
 namespace phantom_fx::game_lights
 {
@@ -87,28 +87,15 @@ inline const GameLight* findGameLight(std::string_view checksum)
     return found != std::end(GameLights) ? found : nullptr;
 }
 
-// cPSScene (b2, camera::SceneConstants), in floats: c8 to c10 take the light passes' view space to the
-// world, c12 to c15 (m_shadowProjection) a shadow-mapped light's view space to its shadow map, rows applied
-// as dot(row, v), c20 is the eye, c21 the projection's parameters (1 / P00, 1 / P11, B, A), c28 the jitter
-// in NDC.
-constexpr std::uint32_t SceneConstantsSize = sizeof(camera::SceneConstants); // Bytes
-constexpr std::size_t ViewToWorld = 8 * 4, ShadowProjection = 12 * 4, Eye = 20 * 4, ProjectionParam = 21 * 4, CenterOffset = 28 * 4;
-// cPSLight (b3), in floats, view space: c0 the way towards the sun (the sun passes), c3 the light, c4 its
-// colour and size, c5 the way a spot points, c6 its falloff, c7 a spot's cone (x the cosine past which it
-// cuts its light off, y 1 / its penumbra, z the exponent), c8.x its specular's scale.
-constexpr std::uint32_t LightConstantsSize = 176; // Bytes
-constexpr std::size_t LightDirection = 0, LightPosition = 3 * 4, LightColor = 4 * 4, LightSize = 4 * 4 + 3, LightAxis = 5 * 4,
-                      LightFalloff = 6 * 4, LightCone = 7 * 4, LightUmbra = 7 * 4, SpecularScale = 8 * 4;
-
 // How far a light reaches when its falloff does not end, metres.
 constexpr float UnendingRange = 1000.0f;
 
-// How far a light reaches, from the falloff in its cPSLight `light` (see Falloff). The ray-traced lights
-// take it by the light's shape, never below 0, and UnendingRange where unknown; lamp contact shadows by
+// How far a light reaches, from the falloff in its constants (see Falloff). The ray-traced lights take it by
+// the light's shape, never below 0, and UnendingRange where unknown; lamp contact shadows by
 // eitherShapeRangeOf.
-inline float rangeOf(const float* light, const GameLight& game)
+inline float rangeOf(const game_constants::LampLightConstants& light, const GameLight& game)
 {
-    const float* falloff = light + LightFalloff;
+    const auto& falloff = light.falloff;
     const float factor = game.falloff == Falloff::Quartic ? falloff[3] : falloff[2];
     if (!(factor > 0)) return UnendingRange;
 
@@ -119,9 +106,9 @@ inline float rangeOf(const float* light, const GameLight& game)
 
 // How far a light reaches for lamp contact shadows, which do not look at its shape: the larger of a
 // point's range and a spot's, infinite or NaN where unknown, which their trace takes as the whole screen.
-inline float eitherShapeRangeOf(const float* light, Falloff falloff)
+inline float eitherShapeRangeOf(const game_constants::LampLightConstants& light, Falloff falloff)
 {
-    const float* fade = light + LightFalloff;
+    const auto& fade = light.falloff;
     const float reach = falloff == Falloff::Quartic ? std::pow(fade[3], -1.0f / 4) : std::pow(fade[2], -1.0f / 16);
 
     return reach - std::min(fade[0], 0.0f);
@@ -133,14 +120,15 @@ struct PixelRect
     std::array<int, 2> min, max;
 };
 
-// The pixels a sphere at view-space `center` covers on a screen of `size` pixels, as the light passes'
-// projection in cPSScene `scene` puts it: on each axis, the planes through the eye that touch the
-// sphere, at x / z (or y / z) = t, bound it. None when it is off the screen. The sphere must lie past
-// the camera plane (center z > radius).
-inline std::optional<PixelRect> sphereOnScreen(const float* scene, const std::array<float, 3>& center, float radius, std::array<float, 2> size)
+// The pixels a sphere at view-space `center` covers on a screen of `size` pixels, as the light pass's
+// projection in `scene` puts it: on each axis, the planes through the eye that touch the sphere, at
+// x / z (or y / z) = t, bound it. None when it is off the screen. The sphere must lie past the camera
+// plane (center z > radius).
+inline std::optional<PixelRect> sphereOnScreen(const game_constants::SceneConstants& scene, const std::array<float, 3>& center, float radius,
+    std::array<float, 2> size)
 {
-    const float* projection = scene + ProjectionParam;
-    const float* offset = scene + CenterOffset;
+    const auto& projection = scene.projectionParam;
+    const auto& offset = scene.cameraCenterOffset;
     const float z = center[2];
     const float clearance = z * z - radius * radius;
     PixelRect rect{};

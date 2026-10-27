@@ -1,6 +1,7 @@
 #include "camera.hpp"
 #include "features/global_illumination/gi_lighting.hpp"
 #include "frame_latch.hpp"
+#include "game_constants.hpp"
 #include "phantom_fx_settings.hpp"
 #include "range_allocator.hpp"
 #include "shader_bytecode.hpp"
@@ -232,32 +233,47 @@ constexpr float ViewRows[4][4]{
     {0, 0, 0, 1},
 };
 
-void fill(camera::SceneConstants& scene, const float (&view)[4][4], const float eye[3])
+void fill(game_constants::SceneConstants& scene, const float (&view)[4][4], const float eye[3])
 {
     scene = {};
     const float projection[4][4]{{-1.75f, 0, 0, 0}, {0, 28.0f / 9, 0, 0}, {0, 0, A, B}, {0, 0, 1, 0}};
     for (int row = 0; row < 4; ++row)
         for (int column = 0; column < 4; ++column)
         {
-            scene.c[4 + row][column] = projection[row][column];
-            scene.c[8 + row][column] = view[row][column];
-            for (int k = 0; k < 4; ++k) scene.c[row][column] += projection[row][k] * view[k][column];
+            scene.projection[row][column] = projection[row][column];
+            scene.view[row][column] = view[row][column];
+            for (int k = 0; k < 4; ++k) scene.projectionView[row][column] += projection[row][k] * view[k][column];
         }
 
-    for (int i = 0; i < 3; ++i) scene.c[20][i] = eye[i];
-    scene.c[20][3] = 1;
-    scene.c[22][0] = 1920;
-    scene.c[22][1] = 1080;
-    scene.c[22][2] = 0.069f;
-    scene.c[22][3] = 4000;
+    for (int i = 0; i < 3; ++i) scene.eye[i] = eye[i];
+    scene.eye[3] = 1;
+    scene.width = 1920;
+    scene.height = 1080;
+    scene.nearPlane = 0.069f;
+    scene.farPlane = 4000;
 }
 
+// The main view's scene constants (vs b2) in frame 390038 of the frame log (2560x1440), as it printed
+// them: to six significant digits.
+constexpr game_constants::SceneConstants DumpedMainView{
+    .projectionView = {{-0.0166166f, 0, -2.4142f, -4059.87f}, {-1.12057f, 4.14315f, 0.00771272f, -449.885f},
+        {1.20663e-05f, 3.26366e-06f, -8.30504e-08f, 0.0502964f}, {-0.965292f, -0.261089f, 0.00664395f, -23.6653f}},
+    .projection = {{-2.41426f, 0, 0, 0}, {0, 4.29202f, 0, 0}, {0, 0, -1.25002e-05f, 0.0500006f}, {0, 0, 1, 0}},
+    .view = {{0.00688267f, 0, 0.999976f, 1681.62f}, {-0.261083f, 0.965315f, 0.00179699f, -104.819f},
+        {-0.965292f, -0.261089f, 0.00664395f, -23.6653f}, {0, 0, 0, 1}},
+    .eye = {-61.7844f, 95.0046f, -1681.23f, 1},
+    .width = 2560,
+    .height = 1440,
+    .nearPlane = 0.05f,
+    .farPlane = 4000,
+};
+
 // Pixel position (x right, y down) of a world point through the scene's projection-view.
-std::array<double, 2> project(const camera::SceneConstants& scene, const double (&point)[3])
+std::array<double, 2> project(const game_constants::SceneConstants& scene, const double (&point)[3])
 {
+    const auto& m = scene.projectionView;
     double clip[4]{};
-    for (int row = 0; row < 4; ++row)
-        clip[row] = scene.c[row][0] * point[0] + scene.c[row][1] * point[1] + scene.c[row][2] * point[2] + scene.c[row][3];
+    for (int row = 0; row < 4; ++row) clip[row] = m[row][0] * point[0] + m[row][1] * point[1] + m[row][2] * point[2] + m[row][3];
 
     return {(clip[0] / clip[3] + 1) * 960, (1 - clip[1] / clip[3]) * 540};
 }
@@ -265,21 +281,21 @@ std::array<double, 2> project(const camera::SceneConstants& scene, const double 
 void mainViewRecognised()
 {
     constexpr float eye[3]{93.75f, 314.25f, 244.15f};
-    camera::SceneConstants scene;
+    game_constants::SceneConstants scene;
     fill(scene, ViewRows, eye);
     expect(camera::classify(scene) == camera::SceneView::MainCamera, "The main view's upload is the camera.");
 
     auto motionBlur = scene;
-    motionBlur.c[8][3] += 5; // MotionBlurCameraVelocity keeps the previous projection-view in c8-c11
-    expect(camera::classify(motionBlur) == camera::SceneView::MainProjection, "Passes with other matrices in c8-c11 still get the jitter.");
+    motionBlur.view[0][3] += 5; // MotionBlurCameraVelocity keeps the previous projection-view in view
+    expect(camera::classify(motionBlur) == camera::SceneView::MainProjection, "Passes with other matrices in view still get the jitter.");
 
     auto shadow = scene;
-    shadow.c[7][2] = 0;
-    shadow.c[7][3] = 1;
+    shadow.projection[3][2] = 0;
+    shadow.projection[3][3] = 1;
     expect(camera::classify(shadow) == camera::SceneView::Other, "Orthographic shadow views are left alone.");
 
     auto square = scene;
-    square.c[4][0] = -square.c[5][1];
+    square.projection[0][0] = -square.projection[1][1];
     expect(camera::classify(square) == camera::SceneView::Other, "A square perspective view is not the main camera.");
 
     auto jittered = scene;
@@ -287,10 +303,67 @@ void mainViewRecognised()
     expect(camera::classify(jittered) == camera::SceneView::Other, "An upload is never jittered twice.");
 }
 
+// The numbers the game wrote, which the frame log rounds to six digits, stay within the classifier's
+// tolerance.
+void dumpedMainViewIsTheMainCamera()
+{
+    expect(camera::classify(DumpedMainView) == camera::SceneView::MainCamera && camera::isMainCamera(DumpedMainView),
+        "The main view the game wrote is the main camera.");
+}
+
+// The ray tracing notes the main camera's scene constants as the upscaler leaves them: jittered.
+void jitteredMainViewIsStillTheMainCamera()
+{
+    constexpr float eye[3]{93.75f, 314.25f, 244.15f};
+    game_constants::SceneConstants scene;
+    fill(scene, ViewRows, eye);
+    auto jittered = scene;
+    camera::applyJitter(jittered, camera::jitterNdc({0.25f, -0.375f}, 1920, 1080));
+    auto dumped = DumpedMainView;
+    camera::applyJitter(dumped, camera::jitterNdc({-0.5f, 0.5f}, 2560, 1440));
+    expect(camera::isMainCamera(jittered) && camera::isMainCamera(dumped), "The main camera, jittered, is still the main camera.");
+
+    auto motionBlur = jittered;
+    motionBlur.view[0][3] += 5;
+    expect(!camera::isMainCamera(motionBlur), "A jittered pass with other matrices is not the main camera.");
+}
+
+// A sun pass's constants in frame 21132 of the frame log (ps b2 and b3), at daytime.
+void sunPassDirectionPointsToTheSun()
+{
+    constexpr game_constants::SceneConstants scene{
+        .projectionView = {{-1.49411f, 0, -0.911126f, 2413.01f}, {0.517112f, 2.94831f, -0.847983f, 949.309f},
+            {8.51127e-06f, -5.50713e-06f, -1.39572e-05f, 0.099199f}, {-0.493399f, 0.319248f, 0.809097f, -1750.57f}},
+        .projection = {{-1.75f, 0, 0, 0}, {0, 3.11111f, 0, 0}, {0, 0, -1.72503e-05f, 0.0690012f}, {0, 0, 1, 0}},
+        .view = {{0.853774f, 0.166214f, -0.493399f, 262.796f}, {-1.49012e-08f, 0.947671f, 0.319248f, 269.697f},
+            {0.520643f, -0.272566f, 0.809097f, 2217.44f}, {0, 0, 0, 1}},
+        .eye = {262.796f, 269.697f, 2217.44f, 1},
+    };
+    constexpr game_constants::SunLightConstants light{.direction = {0.592003f, 0.597131f, 0.541264f}};
+
+    const auto eye = game_constants::toWorld(scene, {0, 0, 0}, 1);
+    expect(close(eye[0], scene.eye[0], 1e-3) && close(eye[1], scene.eye[1], 1e-3) && close(eye[2], scene.eye[2], 1e-3),
+        "A light pass's view space has the camera at its origin.");
+
+    // Back to view space through the pass's own camera: P x V's rows 0, 1 and 3 are P00 V0, P11 V1 and V2.
+    const auto sun = game_constants::toWorld(scene, light.direction, 0);
+    const auto& m = scene.projectionView;
+    const double scales[3]{scene.projection[0][0], scene.projection[1][1], 1};
+    const int rows[3]{0, 1, 3};
+    for (int i = 0; i < 3; ++i)
+    {
+        const auto& row = m[rows[i]];
+        const double view = (row[0] * sun[0] + row[1] * sun[1] + row[2] * sun[2]) / scales[i];
+        expect(close(view, light.direction[i], 1e-3), "The sun's way in the world goes back to the pass's view space through its camera.");
+    }
+
+    expect(sun[1] > 0.5f, "The daytime sun is above the horizon.");
+}
+
 void jitterShiftsTheImage()
 {
     constexpr float eye[3]{93.75f, 314.25f, 244.15f};
-    camera::SceneConstants scene;
+    game_constants::SceneConstants scene;
     fill(scene, ViewRows, eye);
     const auto view = camera::viewOf(scene);
     const std::array<float, 2> pixels{0.25f, -0.375f};
@@ -302,15 +375,16 @@ void jitterShiftsTheImage()
     const auto before = project(scene, point), after = project(jittered, point);
     expect(close(after[0] - before[0], pixels[0], 1e-3) && close(after[1] - before[1], pixels[1], 1e-3),
         "The image moves by the jitter in render pixels, x right and y down, as DLSS takes it.");
-    expect(jittered.c[28][0] == camera::jitterNdc(pixels, 1920, 1080)[0] && jittered.c[28][1] == camera::jitterNdc(pixels, 1920, 1080)[1],
-        "m_cameraCenterOffset carries the NDC offset the screen-space passes subtract.");
+    expect(jittered.cameraCenterOffset[0] == camera::jitterNdc(pixels, 1920, 1080)[0]
+            && jittered.cameraCenterOffset[1] == camera::jitterNdc(pixels, 1920, 1080)[1],
+        "cameraCenterOffset carries the NDC offset the screen-space passes subtract.");
     expect(camera::viewOf(scene).projectionView == view.projectionView, "The camera is captured before the jitter.");
 }
 
 void reprojection()
 {
     constexpr float eye[3]{93.75f, 314.25f, 244.15f};
-    camera::SceneConstants scene;
+    game_constants::SceneConstants scene;
     fill(scene, ViewRows, eye);
     const auto view = camera::viewOf(scene);
     const auto still = camera::previousFromCurrent(view, view);
@@ -319,7 +393,7 @@ void reprojection()
             expect(close(still[row * 4 + column], row == column ? 1 : 0, 1e-9), "A camera that stands still has no motion.");
 
     // Previous frame: the camera 0.2 m to the side, so a point straight ahead was elsewhere on screen.
-    camera::SceneConstants before;
+    game_constants::SceneConstants before;
     const float previousEye[3]{eye[0] - 0.2f * ViewRows[0][0], eye[1] - 0.2f * ViewRows[0][1], eye[2] - 0.2f * ViewRows[0][2]};
     float previousRows[4][4];
     std::memcpy(previousRows, ViewRows, sizeof(previousRows));
@@ -331,9 +405,9 @@ void reprojection()
 
     const double point[3]{eye[0] + 10.0 * ViewRows[2][0], eye[1] + 10.0 * ViewRows[2][1], eye[2] + 10.0 * ViewRows[2][2]};
     const auto now = project(scene, point), then = project(before, point);
+    const auto& m = scene.projectionView;
     double clip[4]{};
-    for (int row = 0; row < 4; ++row)
-        clip[row] = scene.c[row][0] * point[0] + scene.c[row][1] * point[1] + scene.c[row][2] * point[2] + scene.c[row][3];
+    for (int row = 0; row < 4; ++row) clip[row] = m[row][0] * point[0] + m[row][1] * point[1] + m[row][2] * point[2] + m[row][3];
 
     const double position[4]{clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3], 1};
     double previous[4]{};
@@ -348,7 +422,7 @@ void reprojection()
 void cuts()
 {
     constexpr float eye[3]{93.75f, 314.25f, 244.15f};
-    camera::SceneConstants scene;
+    game_constants::SceneConstants scene;
     fill(scene, ViewRows, eye);
     const auto view = camera::viewOf(scene);
 
@@ -377,7 +451,7 @@ void streamlineCamera()
     for (int i = 0; i < 3; ++i)
         for (int row = 0; row < 3; ++row) eye[i] -= ViewRows[row][i] * ViewRows[row][3];
 
-    camera::SceneConstants scene;
+    game_constants::SceneConstants scene;
     fill(scene, ViewRows, eye);
     const auto view = camera::viewOf(scene);
     const auto still = camera::streamlineCamera(view, view);
@@ -651,6 +725,9 @@ int main()
         effectPlan();
         frameLatch();
         mainViewRecognised();
+        dumpedMainViewIsTheMainCamera();
+        jitteredMainViewIsStillTheMainCamera();
+        sunPassDirectionPointsToTheSun();
         jitterShiftsTheImage();
         reprojection();
         cuts();

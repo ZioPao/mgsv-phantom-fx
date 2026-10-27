@@ -1018,7 +1018,7 @@ void forget(const std::vector<std::uint64_t>& hashes)
     }
 }
 
-void noteTerrain(ID3D11DeviceContext* context, const float* objectConstants, const float* materialConstants) noexcept
+void noteTerrain(ID3D11DeviceContext* context, const game_constants::ObjectConstants& object, const game_constants::TerrainMaterialConstants& material) noexcept
 {
     const std::uint64_t frame = game_loop::currentFrame() ? game_loop::currentFrame() : GetTickCount64() / 16;
     if (terrainFrame.exchange(frame, std::memory_order_relaxed) == frame) return;
@@ -1030,8 +1030,9 @@ void noteTerrain(ID3D11DeviceContext* context, const float* objectConstants, con
         context->VSGetShaderResources(0, 2, views);
         inputs.pages.Attach(views[0]);
         inputs.heights.Attach(views[1]);
-        std::memcpy(inputs.converter.data(), materialConstants, sizeof(inputs.converter));
-        std::memcpy(inputs.scaleOffset.data(), objectConstants + 40, sizeof(inputs.scaleOffset));
+        static_assert(sizeof(inputs.converter) == sizeof(material.pageTableConverter));
+        std::memcpy(inputs.converter.data(), material.pageTableConverter, sizeof(inputs.converter));
+        std::memcpy(inputs.scaleOffset.data(), &object.localParam[1], sizeof(inputs.scaleOffset));
         if (!inputs.pages || !inputs.heights) return;
 
         std::lock_guard lock(terrainMutex);
