@@ -1415,8 +1415,6 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
 
             return true;
         }
-
-        if (row->pass == GamePass::CameraVelocity) recordVelocity(context);
     }
     catch (...)
     {
@@ -1435,6 +1433,12 @@ bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         if (!row) return false;
 
         const auto pass = row->pass;
+        if (pass == GamePass::CameraVelocity)
+        {
+            recordVelocity(context);
+            return false;
+        }
+
         // CopyRenderBuffer is a plain copy the game makes anywhere; the layer's composite shares its
         // list with the LUT build.
         if (pass == GamePass::LutBuild || pass == GamePass::Grade || pass == GamePass::Fxaa) recordGrading(context);

@@ -31,8 +31,12 @@ bool failed() noexcept;
 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> specularTarget(UINT width, UINT height) noexcept;
 
 // ---- Recording, on the game's render and worker threads ----
-// Before a draw. The upscale and the resolve, while an effect changes them, are drawn here instead;
-// returns true when the game's draw must be skipped.
+// Before a draw, whoever draws it: what the ray-traced scene needs (ray_tracing::noteNormals and the
+// others), the G-buffer's normals and specular target, and with the global illumination the game's
+// probe light, drawn aside for the light to replace.
+void note(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
+// The upscale and the resolve, while an effect changes them, are drawn here instead, and the game's
+// SSAO is skipped while one replaces it; returns true when the game's draw must be skipped.
 bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
 // Each present. The game records a whole frame between presents, so all of a frame's passes see the
 // same effects.

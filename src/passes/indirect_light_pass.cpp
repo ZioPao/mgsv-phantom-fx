@@ -29,10 +29,12 @@ namespace
 using Microsoft::WRL::ComPtr;
 using game_shaders::GamePass, game_shaders::GameShader;
 
-// The game passes the effects work with (docs/DEVELOPMENT.md, "Ambient occlusion"): every resolve and
-// every sun pass, inside the shadow range or beyond it. The sky light binds the G-buffer normals right
-// before the upscale in the same command list.
-constexpr GamePass Passes[]{GamePass::SkyLight, GamePass::IndirectUpscale, GamePass::GameOcclusion, GamePass::Sun, GamePass::SkySpecular, GamePass::Resolve};
+// The game passes the effects note (docs/DEVELOPMENT.md, "Ambient occlusion"): every sun pass, inside the
+// shadow range or beyond it, and every resolve. The sky light binds the G-buffer normals right before
+// the upscale in the same command list.
+constexpr GamePass NotedPasses[]{GamePass::SkyLight, GamePass::IndirectUpscale, GamePass::Sun, GamePass::SkySpecular, GamePass::Resolve};
+// And those they draw in the game's place, or skip.
+constexpr GamePass DrawnPasses[]{GamePass::IndirectUpscale, GamePass::Resolve, GamePass::GameOcclusion};
 
 constexpr UINT NormalSlot = 0;   // The sky light's g_NormalTexture
 constexpr UINT SpecularSlot = 1; // The sun's g_SpecularTexture
@@ -377,14 +379,14 @@ ComPtr<ID3D11ShaderResourceView> specularTarget(UINT width, UINT height) noexcep
     }
 }
 
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
+void note(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
-    if (!active.load(std::memory_order_relaxed) || call.indexed || call.count != 3 || call.instances != 1) return false;
+    if (!active.load(std::memory_order_relaxed) || call.indexed || call.count != 3 || call.instances != 1) return;
 
     try
     {
         const auto* row = shader.row();
-        if (!row || std::ranges::find(Passes, row->pass) == std::end(Passes)) return false;
+        if (!row || std::ranges::find(NotedPasses, row->pass) == std::end(NotedPasses)) return;
 
         const auto composition = latch.frame();
 
@@ -392,26 +394,53 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
         // same targets, as the intro's mirror, keeps the game's light.
         const bool mainView = viewportFillsTarget(context);
         if (composition.rayTracing && mainView) noteForRayTracing(context, *row);
+
+        switch (row->pass)
+        {
+        case GamePass::SkyLight:
+            if (!composition.globalIllumination) noteNormals(context);
+            return;
+        case GamePass::IndirectUpscale:
+            if (composition.globalIllumination && mainView && ray_tracing::lightRuns()) light_combine::drawProbeLightAside(context, call);
+            return;
+        case GamePass::Sun: noteSpecular(context); return;
+        default: return;
+        }
+    }
+    catch (const std::exception& error)
+    {
+        std::lock_guard lock(resourceMutex);
+        logOnce(std::string("GTVBAO or SSILVB: a pass kept the game's drawing: ") + error.what());
+    }
+    catch (...)
+    {
+    }
+}
+
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
+{
+    if (!active.load(std::memory_order_relaxed) || call.indexed || call.count != 3 || call.instances != 1) return false;
+
+    try
+    {
+        const auto* row = shader.row();
+        if (!row || std::ranges::find(DrawnPasses, row->pass) == std::end(DrawnPasses)) return false;
+
+        const auto composition = latch.frame();
         if (composition.globalIllumination)
             switch (row->pass)
             {
-            case GamePass::IndirectUpscale:
-                if (mainView && ray_tracing::lightRuns()) light_combine::drawProbeLightAside(context, call);
-                return false;
             case GamePass::Resolve:
-                return mainView ? drawResolveForGlobal(context, call, composition, shader.object()) : drawSmallerViewResolve(context, call);
+                return viewportFillsTarget(context) ? drawResolveForGlobal(context, call, composition, shader.object()) : drawSmallerViewResolve(context, call);
             case GamePass::GameOcclusion: return ray_tracing::lightRuns();
-            case GamePass::Sun: noteSpecular(context); return false;
             default: return false;
             }
 
         switch (row->pass)
         {
-        case GamePass::SkyLight: noteNormals(context); return false;
         case GamePass::IndirectUpscale: return composition.occlusion && drawUpscale(context, call);
         case GamePass::Resolve: return drawResolve(context, call, composition, shader.object());
         case GamePass::GameOcclusion: return composition.occlusion;
-        case GamePass::Sun: noteSpecular(context); return false;
         default: return false;
         }
     }

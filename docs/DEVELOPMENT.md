@@ -214,8 +214,12 @@ A new lighting effect takes:
    `detach`. Its `configure` keeps its settings (in a `FrameLatch`) and whether the effect plan
    runs it (`configuration.effects.runs`), so the game build, the cost measurement and the
    enhancements switch follow. Where it changes a game pass others change too, it plugs
-   into that pass (`src/passes/`); where it handles the game's draws itself, its `draw` goes in the
-   draw events (`onDraw`, `onDrawIndexed` in `src/addon.cpp`).
+   into that pass (`src/passes/`). Where it handles the game's draws itself, it knows them by their
+   game pass (`row()` of the draw's `game_shaders::DrawnShader`; a shader the table lacks is a new
+   row in `src/game_shaders.hpp`) and goes in the draw events (`onDraw`, `onDrawIndexed` in
+   `src/addon.cpp`): what it only takes from a draw is a `note`, which returns nothing and runs with
+   the other notes, before every owner; what may draw it in the game's place, or skip it, is a `draw`,
+   which goes with the owners and takes game passes no other owner takes.
 4. Its timed passes in `Pass` (`src/performance.hpp`), and its budget row in `EffectLines`
    (`src/menu_budget.cpp`): their names and its `health`, which says whether it waits or failed.
 

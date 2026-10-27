@@ -740,7 +740,7 @@ void vertexShaderBound(ID3D11DeviceContext* context, game_shaders::VertexShader 
     gi_inputs::vertexShaderBound(context, kind);
 }
 
-void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
+void note(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
     if (!enabled.load(std::memory_order_relaxed)) return;
     if (call.indexed)
