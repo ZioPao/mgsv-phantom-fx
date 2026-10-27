@@ -1,7 +1,7 @@
 #pragma once
 
 #include "d3d11_helpers.hpp"
-#include "game_lights.hpp"
+#include "game_constants.hpp"
 #include "phantom_fx_settings.hpp"
 
 #include <d3d11.h>
@@ -27,13 +27,6 @@ struct TraceBounds
 // A screen-space shadow, 1 where the light reaches, at the depth buffer's size.
 using ShadowTarget = ComputeTexture;
 
-// What this thread wrote to the light pass's cPSScene (b2) and cPSLight (b3), each at its full size.
-struct PassConstants
-{
-    std::array<float, game_lights::SceneConstantsSize / 4> scene{};
-    std::array<float, game_lights::LightConstantsSize / 4> light{};
-};
-
 // What a trace dispatched: where its light is on screen, and how many dispatches it took.
 struct Traced
 {
@@ -41,7 +34,7 @@ struct Traced
     int dispatches;
 };
 
-// Who traces this frame, so the light passes' constants are kept for them (gi_inputs.hpp).
+// Who traces this frame, so the light passes' constants are kept for them (constant_capture.hpp).
 enum class Tracer : std::uint8_t { Sun, Lamps };
 
 void attach(ID3D11Device* device) noexcept;
@@ -55,24 +48,24 @@ void present() noexcept;
 bool failed() noexcept;
 void tracesThisFrame(Tracer tracer, bool traces) noexcept;
 
-// None where unknown.
-std::optional<PassConstants> passConstants(ID3D11DeviceContext* context);
-// Bend's inLightProjection: a view-space point (w 1) or direction (w 0) through the pass's own
-// projection, c21 and c28, which it reconstructs positions from, so it matches the depth.
-std::array<float, 4> project(const float* scene, const float (&light)[4]);
+// Bend's inLightProjection: a view-space point (w 1) or direction (w 0) through the light pass's own
+// projection (projectionParam, cameraCenterOffset), which it reconstructs positions from, so it matches
+// the depth.
+std::array<float, 4> project(const game_constants::SceneConstants& scene, const float (&light)[4]);
 // The width and height of the depth buffer `view` shows; throws when it is not a 2D texture, as the
 // trace needs one.
 std::array<int, 2> depthSize(ID3D11ShaderResourceView* view);
 // What a light at view-space `center` that reaches `range` can light on a screen of `size`: its
 // sphere's bounds on screen and in depth, the whole screen when the range is unknown. None when the
 // sphere is behind the camera or off the screen.
-std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 3>& center, float range, std::array<int, 2> size);
+std::optional<TraceBounds> boundsOf(const game_constants::SceneConstants& scene, const std::array<float, 3>& center, float range,
+    std::array<int, 2> size);
 // Traces the screen-space shadow towards `lightProjection` from `depth` into `target` on `context`,
-// with the game's compute state saved around it; `scene` is the light pass's cPSScene, for the
-// distance fade. With `bounds`, it writes only within them, and the shadow draw takes the rest as
-// lit; without, it covers the whole screen and the sky stays lit. None when the trace is unavailable.
-std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, const float* scene, std::array<float, 4> lightProjection,
-    const std::optional<TraceBounds>& bounds, ShadowTarget& target);
+// with the game's compute state saved around it; `scene` is the light pass's, for the distance fade.
+// With `bounds`, it writes only within them, and the shadow draw takes the rest as lit; without, it
+// covers the whole screen and the sky stays lit. None when the trace is unavailable.
+std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, const game_constants::SceneConstants& scene,
+    std::array<float, 4> lightProjection, const std::optional<TraceBounds>& bounds, ShadowTarget& target);
 // The last trace's constants, which the lamps' shadow draw reads its bounds from.
 ID3D11Buffer* parameters() noexcept;
 // For the log.

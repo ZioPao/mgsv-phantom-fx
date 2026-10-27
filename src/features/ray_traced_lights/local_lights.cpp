@@ -1,10 +1,11 @@
 #include "features/ray_traced_lights/local_lights.hpp"
 
+#include "camera.hpp"
+#include "constant_capture.hpp"
 #include "d3d11_helpers.hpp"
 #include "frame_log.hpp"
 #include "game_lights.hpp"
 #include "log.hpp"
-#include "passes/ray_tracing/gi_inputs.hpp"
 #include "passes/ray_tracing/ray_tracing.hpp"
 #include "passes/ray_tracing/shaders/gi_shared.h"
 #include "performance.hpp"
@@ -33,23 +34,19 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 using namespace game_lights;
+using game_constants::LampLightConstants, game_constants::LampMaterialConstants, game_constants::SceneConstants;
 
 // Diagnostics: which lights are drawn over all their reach, shadowed by the rays alone, rather than
 // within the volume the game bounds each by: none, those the game gives a shadow map, or every one.
 enum class BeyondVolumes : std::uint8_t { None, ShadowMapped, All };
 
 // What the light shaders read: t0 to t10 (the G-buffer, its depth at t2, the mask at t4, the specular
-// tables at t8 and t9, the material table at t10), s8 to s11, and cPSScene, cPSLight and cPSMaterial at
-// b2 to b4.
-constexpr UINT ResourceSlots = 11, DepthSlot = 2, FirstSampler = 8, SamplerCount = 4, FirstConstants = 2;
+// tables at t8 and t9, the material table at t10), s8 to s11, and the scene, light and material constants
+// at b2 to b4.
+constexpr UINT ResourceSlots = 11, DepthSlot = 2, FirstSampler = 8, SamplerCount = 4;
 // A light's volume as copied from its draw: its indices, then from VolumeVertexStart its vertices. The
 // game's had at most 138 indices and 46 vertices of 16 bytes (2026-10-24).
 constexpr UINT VolumeBytes = 4096, VolumeVertexStart = 1024;
-constexpr UINT SceneConstants = SceneConstantsSize / 4, LightConstants = LightConstantsSize / 4, MaterialConstants = 32; // Floats
-
-// cPSMaterial c7: x a point's least distance, w the most a spot's falloff gives (cPSScene and cPSLight
-// in game_lights.hpp).
-constexpr std::size_t LeastDistance = 7 * 4, MaxFalloff = 7 * 4 + 3;
 
 // The game's lights with specular have a scale of 1; it is 0 for those without, as its flashlights.
 constexpr float AddedSpecular = 1.0f;
@@ -61,7 +58,7 @@ constexpr float LightClearance = 0.1f;
 constexpr float BulbRadius = 0.03f;
 // GILocalLight::axis.w of a point light: below any cosine, so every way is in its "cone".
 constexpr float PointCone = -2.0f;
-// 1 / the penumbra (cPSLight c7.y) from which a shadow-mapped spot is a beam the game shines in from
+// 1 / the penumbra (penumbraScale) from which a shadow-mapped spot is a beam the game shines in from
 // outside through an opening (isBeam). The cells' moonlight has 100000; every other light in 13
 // captures had at most 66 (2026-10-24).
 constexpr float BeamEdge = 1000.0f;
@@ -204,9 +201,9 @@ struct Volume
 struct Light
 {
     const GameLight* game{};
-    std::array<float, SceneConstants> scene{};
-    std::array<float, LightConstants> light{};
-    std::array<float, MaterialConstants> material{};
+    SceneConstants scene{};
+    LampLightConstants light{};
+    LampMaterialConstants material{};
     std::array<ComPtr<ID3D11ShaderResourceView>, ResourceSlots> resources;
     std::array<ComPtr<ID3D11SamplerState>, SamplerCount> samplers;
     std::array<ComPtr<ID3D11RenderTargetView>, 2> targets;
@@ -333,9 +330,9 @@ bool ensurePipeline()
         check(device->CreateDepthStencilState(&depth, noDepth.ReleaseAndGetAddressOf()), "Creating the lights' depth state");
 
         passBuffer = makeConstantBuffer(device.Get(), sizeof(PassConstants), "Creating the lights' pass constants");
-        sceneBuffer = makeConstantBuffer(device.Get(), SceneConstants * 4, "Creating the lights' scene constants");
-        lightBuffer = makeConstantBuffer(device.Get(), LightConstants * 4, "Creating the lights' light constants");
-        materialBuffer = makeConstantBuffer(device.Get(), MaterialConstants * 4, "Creating the lights' material constants");
+        sceneBuffer = makeConstantBuffer(device.Get(), sizeof(SceneConstants), "Creating the lights' scene constants");
+        lightBuffer = makeConstantBuffer(device.Get(), sizeof(LampLightConstants), "Creating the lights' light constants");
+        materialBuffer = makeConstantBuffer(device.Get(), sizeof(LampMaterialConstants), "Creating the lights' material constants");
 
         boundsShader = computeShader(device.Get(), BoundsSource, "light-volume-bounds");
         boundsConstants = makeConstantBuffer(device.Get(), sizeof(BoundsConstants), "Creating the lights' bounds constants");
@@ -386,15 +383,16 @@ const GameLight* gameLightOf(IUnknown* shader)
 // What the light's lighting draw binds, or nothing when its constants are unknown.
 std::optional<Light> noteOf(ID3D11DeviceContext* context, const GameLight* game)
 {
-    Light noted{.game = game};
-    std::array<ID3D11Buffer*, 3> constants{};
-    context->PSGetConstantBuffers(FirstConstants, static_cast<UINT>(constants.size()), constants.data());
-    const bool known = gi_inputs::written(constants[0], noted.scene) && gi_inputs::written(constants[1], noted.light)
-        && gi_inputs::written(constants[2], noted.material);
+    std::array<ID3D11Buffer*, 3> constants{}; // b2 to b4
+    context->PSGetConstantBuffers(SceneConstants::Slot, static_cast<UINT>(constants.size()), constants.data());
+    const auto scene = constant_capture::written<SceneConstants>(constants[0]);
+    const auto light = constant_capture::written<LampLightConstants>(constants[1]);
+    const auto material = constant_capture::written<LampMaterialConstants>(constants[2]);
     for (auto* buffer : constants)
         if (buffer) buffer->Release();
-    if (!known) return std::nullopt;
+    if (!scene || !light || !material) return std::nullopt;
 
+    Light noted{.game = game, .scene = *scene, .light = *light, .material = *material};
     std::array<ID3D11ShaderResourceView*, ResourceSlots> resources{};
     context->PSGetShaderResources(0, ResourceSlots, resources.data());
     for (UINT i = 0; i < ResourceSlots; ++i) noted.resources[i].Attach(resources[i]);
@@ -416,8 +414,8 @@ std::optional<Light> noteOf(ID3D11DeviceContext* context, const GameLight* game)
     if (game->flashlight)
     {
         const float brightness = flashlightBrightness.load(std::memory_order_relaxed);
-        for (int i = 0; i < 3; ++i) noted.light[LightColor + i] *= brightness;
-        noted.light[LightFalloff + 2] /= std::pow(brightness, 8.0f);
+        for (auto& channel : noted.light.color) channel *= brightness;
+        noted.light.falloff[2] /= std::pow(brightness, 8.0f);
     }
 
     return noted;
@@ -432,13 +430,9 @@ bool isBeam(ID3D11DeviceContext* context, const GameLight& game)
 {
     if (!game.shadowMap || game.shape != Shape::Spot) return false;
 
-    ID3D11Buffer* buffer{};
-    context->PSGetConstantBuffers(FirstConstants + 1, 1, &buffer);
-    std::array<float, LightConstants> light{};
-    const bool known = gi_inputs::written(buffer, light);
-    if (buffer) buffer->Release();
+    const auto light = constant_capture::pixelShaderReads<LampLightConstants>(context);
 
-    return known && light[LightCone + 1] >= BeamEdge;
+    return light && light->penumbraScale >= BeamEdge;
 }
 
 // A buffer for a light's volume: a drawn light's, or a new one.
@@ -516,19 +510,6 @@ Volume volumeOf(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call)
     }
 }
 
-// The light passes' view space to the world, through cPSScene c8 to c10; `w` 1 for a point, 0 for a way.
-std::array<float, 3> toWorld(const Light& light, const float* view, float w)
-{
-    std::array<float, 3> world{};
-    for (int row = 0; row < 3; ++row)
-    {
-        const float* m = &light.scene[ViewToWorld + 4 * row];
-        world[row] = m[0] * view[0] + m[1] * view[1] + m[2] * view[2] + m[3] * w;
-    }
-
-    return world;
-}
-
 std::array<float, 3> normalized(std::array<float, 3> v)
 {
     const float length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
@@ -538,7 +519,7 @@ std::array<float, 3> normalized(std::array<float, 3> v)
     return v;
 }
 
-// How far along a shadow-mapped spot's axis the game's shadow map starts: where m_shadowProjection gives
+// How far along a shadow-mapped spot's axis the game's shadow map starts: where shadowProjection gives
 // the map's near depth, 1 (its depth is reversed: cleared to 0, tested greater-equal). Nothing nearer the
 // light is in the map, so the game's shadows never see the recess its lamp sits in; the corridor's lamps
 // in the prologue's hospital sit 13 cm above its ceiling, in a box the rays met 0.3 to 0.6 m short of
@@ -548,25 +529,25 @@ float shadowMapStart(const Light& light)
 {
     if (!light.game->shadowMap || light.game->shape != Shape::Spot) return 0;
 
-    const float* depthRow = &light.scene[ShadowProjection + 2 * 4];
-    const float* wRow = &light.scene[ShadowProjection + 3 * 4];
-    const float* position = &light.light[LightPosition];
-    const auto axis = normalized({light.light[LightAxis], light.light[LightAxis + 1], light.light[LightAxis + 2]});
+    const float* depthRow = light.scene.shadowProjection[2];
+    const float* wRow = light.scene.shadowProjection[3];
+    const float* position = light.light.position;
+    const auto axis = normalized({light.light.axis[0], light.light.axis[1], light.light.axis[2]});
     const auto atLight = [&](const float* row) { return row[0] * position[0] + row[1] * position[1] + row[2] * position[2] + row[3]; };
     const auto alongAxis = [&](const float* row) { return row[0] * axis[0] + row[1] * axis[1] + row[2] * axis[2]; };
     const float start = (atLight(wRow) - atLight(depthRow)) / (alongAxis(depthRow) - alongAxis(wRow));
 
-    return std::isfinite(start) && start > 0 && start < rangeOf(light.light.data(), *light.game) ? start : 0;
+    return std::isfinite(start) && start > 0 && start < rangeOf(light.light, *light.game) ? start : 0;
 }
 
 // A light the same from frame to frame: its kind, where it is in the world to the centimetre, and its colour.
 std::uint64_t keyOf(const Light& light)
 {
-    const auto at = toWorld(light, &light.light[LightPosition], 1);
+    const auto at = game_constants::toWorld(light.scene, light.light.position, 1);
     std::uint64_t key = reinterpret_cast<std::uintptr_t>(light.game);
     const auto mix = [&](std::uint64_t value) { key = (key ^ value) * 0x100000001B3ull; };
     for (const float coordinate : at) mix(static_cast<std::uint64_t>(std::llround(coordinate * 100)));
-    for (int i = 0; i < 3; ++i) mix(std::bit_cast<std::uint32_t>(light.light[LightColor + i]));
+    for (const float channel : light.light.color) mix(std::bit_cast<std::uint32_t>(channel));
 
     return key;
 }
@@ -587,22 +568,23 @@ gi_renderer::LocalLight forRays(const Light& light)
 {
     const bool spot = light.game->shape == Shape::Spot;
     const bool sixteenth = light.game->falloff == Falloff::Sixteenth;
-    const float* falloff = &light.light[LightFalloff];
+    const auto& constants = light.light;
+    const auto& falloff = constants.falloff;
 
-    gi_renderer::LocalLight rays{.position = toWorld(light, &light.light[LightPosition], 1),
-        .axis = spot ? normalized(toWorld(light, &light.light[LightAxis], 0)) : std::array<float, 3>{0, 1, 0},
-        .range = rangeOf(light.light.data(), *light.game),
-        .cosOuter = spot ? light.light[LightUmbra] : PointCone,
-        .clearance = std::max(LightClearance, light.light[LightSize]),
-        .penumbraScale = spot ? light.light[LightCone + 1] : 0,
-        .coneExponent = spot ? light.light[LightCone + 2] : 0,
-        .maxFalloff = spot ? light.material[MaxFalloff] : std::numeric_limits<float>::max(),
-        .color = {light.light[LightColor], light.light[LightColor + 1], light.light[LightColor + 2]},
+    gi_renderer::LocalLight rays{.position = game_constants::toWorld(light.scene, constants.position, 1),
+        .axis = spot ? normalized(game_constants::toWorld(light.scene, constants.axis, 0)) : std::array<float, 3>{0, 1, 0},
+        .range = rangeOf(constants, *light.game),
+        .cosOuter = spot ? constants.cutOffCosine : PointCone,
+        .clearance = std::max(LightClearance, constants.size),
+        .penumbraScale = spot ? constants.penumbraScale : 0,
+        .coneExponent = spot ? constants.coneExponent : 0,
+        .maxFalloff = spot ? light.material.maxFalloff : std::numeric_limits<float>::max(),
+        .color = {constants.color[0], constants.color[1], constants.color[2]},
         .sixteenth = sixteenth,
         .factor = sixteenth ? falloff[2] : falloff[3],
         .addedDistance = spot ? 0 : falloff[0],
-        .leastDistance = spot ? 0 : light.material[LeastDistance],
-        .radius = !light.game->shadowMap && light.light[LightSize] > 0 ? light.light[LightSize] : BulbRadius,
+        .leastDistance = spot ? 0 : light.material.leastDistance,
+        .radius = !light.game->shadowMap && constants.size > 0 ? constants.size : BulbRadius,
         .shadowStart = shadowMapStart(light)};
     if (const auto bounds = volumeBoundsOf(light))
     {
@@ -616,10 +598,10 @@ gi_renderer::LocalLight forRays(const Light& light)
 
 // Drawn for the frame `camera` draws: the same eye, within a millimetre. Lists recorded before the kick
 // are this frame's, unless one was left from an earlier frame or the next frame's recording started early.
-bool sameFrame(const Light& light, const camera::SceneConstants& camera)
+bool sameFrame(const Light& light, const SceneConstants& camera)
 {
     for (int i = 0; i < 3; ++i)
-        if (std::abs(light.scene[Eye + i] - camera.c[20][i]) > 1e-3f) return false;
+        if (std::abs(light.scene.eye[i] - camera.eye[i]) > 1e-3f) return false;
 
     return true;
 }
@@ -629,16 +611,16 @@ bool sameFrame(const Light& light, const camera::SceneConstants& camera)
 // is behind or off screen.
 std::optional<D3D11_RECT> reachOf(const Light& light)
 {
-    const float range = rangeOf(light.light.data(), *light.game);
-    const float* position = &light.light[LightPosition];
+    const float range = rangeOf(light.light, *light.game);
+    const float* position = light.light.position;
     std::array<float, 3> centre{position[0], position[1], position[2]};
     float radius = range;
 
     // Up to a 60 degree cone, the sphere through its apex and the rim of its end holds it all.
-    const float cosine = light.light[LightUmbra];
+    const float cosine = light.light.cutOffCosine;
     if (light.game->shape == Shape::Spot && cosine >= 0.5f)
     {
-        const auto axis = normalized({light.light[LightAxis], light.light[LightAxis + 1], light.light[LightAxis + 2]});
+        const auto axis = normalized({light.light.axis[0], light.light.axis[1], light.light.axis[2]});
         radius = range / (2 * cosine);
         for (int i = 0; i < 3; ++i) centre[i] += axis[i] * radius;
     }
@@ -651,7 +633,7 @@ std::optional<D3D11_RECT> reachOf(const Light& light)
     if (z + radius <= 0) return std::nullopt;
     if (z - radius <= 0) return whole;
 
-    const auto rect = sphereOnScreen(light.scene.data(), centre, radius, size);
+    const auto rect = sphereOnScreen(light.scene, centre, radius, size);
     if (!rect) return std::nullopt;
 
     return D3D11_RECT{left + rect->min[0], top + rect->min[1], left + rect->max[0], top + rect->max[1]};
@@ -682,7 +664,7 @@ void drawAgain(const Light& light)
                                  viewport.TopLeftX / static_cast<float>(width), viewport.TopLeftY / static_cast<float>(height)},
         {0, share ? 1u : 0u, 0, 0}, {volume.wideIndices ? 1u : 0u, volume.stride, VolumeVertexStart, 0}};
     auto constants = light.light;
-    if (!light.game->specular) constants[SpecularScale] = AddedSpecular;
+    if (!light.game->specular) constants.specularScale = AddedSpecular;
     check(write(immediate, passBuffer.Get(), pass), "Writing the lights' constants");
     check(write(immediate, sceneBuffer.Get(), light.scene), "Writing the lights' constants");
     check(write(immediate, lightBuffer.Get(), constants), "Writing the lights' constants");
@@ -721,11 +703,11 @@ void drawAgain(const Light& light)
     for (UINT i = 0; i < ResourceSlots; ++i) resources[i] = light.resources[i].Get();
     std::array<ID3D11SamplerState*, SamplerCount> samplers{};
     for (UINT i = 0; i < SamplerCount; ++i) samplers[i] = light.samplers[i].Get();
-    ID3D11Buffer* lightConstants[]{sceneBuffer.Get(), lightBuffer.Get(), materialBuffer.Get()};
+    ID3D11Buffer* lightConstants[]{sceneBuffer.Get(), lightBuffer.Get(), materialBuffer.Get()}; // b2 to b4
     immediate->PSSetShader(twins[static_cast<std::size_t>(light.game->twin)].Get(), nullptr, 0);
     immediate->PSSetShaderResources(0, ResourceSlots, resources.data());
     immediate->PSSetSamplers(FirstSampler, SamplerCount, samplers.data());
-    immediate->PSSetConstantBuffers(FirstConstants, 3, lightConstants);
+    immediate->PSSetConstantBuffers(SceneConstants::Slot, 3, lightConstants);
     immediate->OMSetBlendState(shadowed.Get(), nullptr, 0xFFFFFFFF);
     immediate->Draw(withinVolume ? volume.count : 3, 0);
 }
@@ -741,7 +723,7 @@ void measureVolumes()
         if (!volume.view || light.game->flashlight || frameBoundsLights.size() >= GI_MAX_LOCAL_LIGHTS) continue;
 
         camera::Matrix projectionView{};
-        for (std::size_t i = 0; i < projectionView.size(); ++i) projectionView[i] = light.scene[i];
+        for (std::size_t i = 0; i < projectionView.size(); ++i) projectionView[i] = light.scene.projectionView[i / 4][i % 4];
         const auto clipToWorld = camera::inverse(projectionView);
         BoundsConstants constants{{}, {volume.wideIndices ? 1u : 0u, volume.stride, VolumeVertexStart, volume.count},
             {static_cast<std::uint32_t>(frameBoundsLights.size()), 0, 0, 0}};
@@ -830,16 +812,16 @@ void saveForRecord(const std::filesystem::path& folder, int batch, const char* w
     std::ofstream list(folder / (prefix + "lights.txt"), std::ios::trunc);
     for (const auto& light : frameLights)
     {
-        const auto at = toWorld(light, &light.light[LightPosition], 1);
-        const auto way = toWorld(light, &light.light[LightAxis], 0);
+        const auto at = game_constants::toWorld(light.scene, light.light.position, 1);
+        const auto way = game_constants::toWorld(light.scene, light.light.axis, 0);
         list << light.game->checksum << (light.traced ? " traced" : " untraced") << (light.volume.view ? " volume " : " no volume ")
              << light.volume.count << " at " << at[0] << ' ' << at[1] << ' ' << at[2] << " way " << way[0] << ' ' << way[1] << ' ' << way[2]
-             << " colour " << light.light[LightColor] << ' ' << light.light[LightColor + 1] << ' ' << light.light[LightColor + 2] << " range "
-             << rangeOf(light.light.data(), *light.game) << " shadow map from " << shadowMapStart(light);
+             << " colour " << light.light.color[0] << ' ' << light.light.color[1] << ' ' << light.light.color[2] << " range "
+             << rangeOf(light.light, *light.game) << " shadow map from " << shadowMapStart(light);
         if (const auto bounds = volumeBoundsOf(light))
             list << " volume from " << (*bounds)[0] << ' ' << (*bounds)[1] << ' ' << (*bounds)[2] << " to " << (*bounds)[3] << ' ' << (*bounds)[4] << ' '
                  << (*bounds)[5];
-        list << " eye " << light.scene[Eye] << ' ' << light.scene[Eye + 1] << ' ' << light.scene[Eye + 2] << '\n';
+        list << " eye " << light.scene.eye[0] << ' ' << light.scene.eye[1] << ' ' << light.scene.eye[2] << '\n';
     }
 }
 
@@ -1121,7 +1103,7 @@ void forget(std::uint64_t list) noexcept
     byList.erase(list);
 }
 
-std::vector<gi_renderer::LocalLight> takeForTrace(const camera::SceneConstants& camera) noexcept
+std::vector<gi_renderer::LocalLight> takeForTrace(const SceneConstants& camera) noexcept
 {
     std::vector<gi_renderer::LocalLight> lights;
     if (!active.load(std::memory_order_relaxed)) return lights;
@@ -1152,7 +1134,7 @@ std::vector<gi_renderer::LocalLight> takeForTrace(const camera::SceneConstants& 
                 const auto reach = reachOf(light);
                 if (!reach) continue;
 
-                const float* position = &light.light[LightPosition];
+                const float* position = light.light.position;
                 reaching.push_back({(reach->right - reach->left) * (reach->bottom - reach->top),
                     std::sqrt(position[0] * position[0] + position[1] * position[1] + position[2] * position[2]), &light});
             }

@@ -1,8 +1,8 @@
 #include "ui_redirect.hpp"
 
-#include "camera.hpp"
 #include "d3d11_helpers.hpp"
 #include "features/hdr/hdr.hpp"
+#include "game_constants.hpp"
 #include "log.hpp"
 #include "render_scale.hpp"
 #include "shader_bytecode.hpp"
@@ -141,7 +141,7 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
         || FAILED(device->CreateBuffer(&postSystemDesc, nullptr, created->postSystemConstants.GetAddressOf())))
         return nullptr;
 
-    const D3D11_BUFFER_DESC sceneDesc{sizeof(camera::SceneConstants), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
+    const D3D11_BUFFER_DESC sceneDesc{sizeof(game_constants::SceneConstants), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
     const float viewport[4]{static_cast<float>(width), static_cast<float>(height)};
     const D3D11_BUFFER_DESC viewportDesc{sizeof(viewport), D3D11_USAGE_IMMUTABLE, D3D11_BIND_CONSTANT_BUFFER};
     const D3D11_SUBRESOURCE_DATA viewportData{viewport};
@@ -227,10 +227,11 @@ bool copySystem(ID3D11DeviceContext* context, const Targets& output, ID3D11Buffe
 {
     D3D11_BUFFER_DESC desc{};
     if (gameSystem) gameSystem->GetDesc(&desc);
-    if (!gameSystem || desc.ByteWidth != 4 * sizeof(float[4])) return false;
+    using game_constants::SystemConstants;
+    if (!gameSystem || desc.ByteWidth != sizeof(SystemConstants)) return false;
 
-    constexpr UINT renderInfoOffset = sizeof(float[4]);
-    const D3D11_BOX sizes{renderInfoOffset, 0, 0, 3 * sizeof(float[4]), 1, 1};
+    constexpr UINT renderInfoOffset = offsetof(SystemConstants, renderInfo), sizesEnd = offsetof(SystemConstants, dominantLightDir);
+    const D3D11_BOX sizes{renderInfoOffset, 0, 0, sizesEnd, 1, 1};
     context->CopyResource(output.postSystemConstants.Get(), gameSystem);
     context->CopySubresourceRegion(output.postSystemConstants.Get(), 0, renderInfoOffset, 0, 0, output.systemConstants.Get(), 0, &sizes);
 
@@ -243,9 +244,9 @@ bool copyScene(ID3D11DeviceContext* context, const Targets& output, ID3D11Buffer
 {
     D3D11_BUFFER_DESC desc{};
     if (gameScene) gameScene->GetDesc(&desc);
-    if (!gameScene || desc.ByteWidth != sizeof(camera::SceneConstants)) return false;
+    if (!gameScene || desc.ByteWidth != sizeof(game_constants::SceneConstants)) return false;
 
-    constexpr UINT viewportSizeOffset = 22 * sizeof(float[4]);
+    constexpr UINT viewportSizeOffset = offsetof(game_constants::SceneConstants, width);
     const D3D11_BOX viewportSize{0, 0, 0, 2 * sizeof(float), 1, 1};
     context->CopyResource(output.sceneConstants.Get(), gameScene);
     context->CopySubresourceRegion(output.sceneConstants.Get(), 0, viewportSizeOffset, 0, 0, output.viewportSize.Get(), 0, &viewportSize);

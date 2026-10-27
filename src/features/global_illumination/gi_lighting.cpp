@@ -80,17 +80,4 @@ Color evaluate(const SphericalHarmonics& sh, const std::array<float, 3>& directi
 
     return result;
 }
-
-std::array<float, 3> toWorld(const std::array<std::array<float, 4>, 3>& viewToWorld, const std::array<float, 3>& direction)
-{
-    std::array<float, 3> world{};
-    for (int row = 0; row < 3; ++row)
-        world[row] = viewToWorld[row][0] * direction[0] + viewToWorld[row][1] * direction[1] + viewToWorld[row][2] * direction[2];
-
-    const float length = std::sqrt(world[0] * world[0] + world[1] * world[1] + world[2] * world[2]);
-    if (length > 0)
-        for (auto& value : world) value /= length;
-
-    return world;
-}
 }

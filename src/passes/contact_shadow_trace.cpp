@@ -1,9 +1,10 @@
 #include "passes/contact_shadow_trace.hpp"
 
+#include "constant_capture.hpp"
 #include "frame_latch.hpp"
+#include "game_lights.hpp"
 #include "log.hpp"
 #include "passes/contact_shadow_trace_shaders.hpp"
-#include "passes/ray_tracing/gi_inputs.hpp"
 
 #include <bend_sss/bend_sss_cpu.h>
 #include <wrl/client.h>
@@ -19,7 +20,7 @@ namespace phantom_fx::contact_shadow_trace
 namespace
 {
 using Microsoft::WRL::ComPtr;
-using namespace game_lights;
+using game_constants::SceneConstants;
 
 constexpr int WaveSize = 64; // WAVE_SIZE in shaders::BendShadow
 
@@ -138,26 +139,13 @@ bool failed() noexcept
 void tracesThisFrame(Tracer tracer, bool traces) noexcept
 {
     (tracer == Tracer::Sun ? sunTraces : lampsTrace) = traces;
-    gi_inputs::keepLightPassConstants(sunTraces || lampsTrace);
+    constant_capture::keepLightPasses(sunTraces || lampsTrace);
 }
 
-std::optional<PassConstants> passConstants(ID3D11DeviceContext* context)
+std::array<float, 4> project(const SceneConstants& scene, const float (&light)[4])
 {
-    std::array<ID3D11Buffer*, 2> constants{};
-    context->PSGetConstantBuffers(2, 2, constants.data());
-    PassConstants written;
-    const bool known = gi_inputs::writtenExactly(constants[0], written.scene) && gi_inputs::writtenExactly(constants[1], written.light);
-    for (auto* buffer : constants)
-        if (buffer) buffer->Release();
-    if (!known) return std::nullopt;
-
-    return written;
-}
-
-std::array<float, 4> project(const float* scene, const float (&light)[4])
-{
-    const float* projection = scene + ProjectionParam;
-    const float* offset = scene + CenterOffset;
+    const auto& projection = scene.projectionParam;
+    const auto& offset = scene.cameraCenterOffset;
 
     return {light[0] / projection[0] + offset[0] * light[2], light[1] / projection[1] + offset[1] * light[2],
         projection[3] * light[2] + projection[2] * light[3], light[2]};
@@ -171,7 +159,7 @@ std::array<int, 2> depthSize(ID3D11ShaderResourceView* view)
     return {static_cast<int>(width), static_cast<int>(height)};
 }
 
-std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 3>& center, float range, std::array<int, 2> size)
+std::optional<TraceBounds> boundsOf(const SceneConstants& scene, const std::array<float, 3>& center, float range, std::array<int, 2> size)
 {
     // Pixels at any depth but the sky's.
     TraceBounds bounds{{0, 0}, {size[0], size[1]}, 0, 2};
@@ -181,7 +169,7 @@ std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 
     if (z + range <= 0) return std::nullopt;
 
     // The light passes reconstruct the view depth as z = B / (depth - A).
-    const float* projection = scene + ProjectionParam;
+    const auto& projection = scene.projectionParam;
     const auto depthAt = [&](float viewZ) { return projection[2] / viewZ + projection[3]; };
     bounds.depthMin = std::max(depthAt(z + range), 0.0f);
 
@@ -191,7 +179,7 @@ std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 
     bounds.depthMax = depthAt(z - range);
 
     // Pixels as Bend places the light.
-    const auto rect = sphereOnScreen(scene, center, range, {static_cast<float>(size[0]), static_cast<float>(size[1])});
+    const auto rect = game_lights::sphereOnScreen(scene, center, range, {static_cast<float>(size[0]), static_cast<float>(size[1])});
     if (!rect) return std::nullopt;
 
     for (int axis = 0; axis < 2; ++axis)
@@ -203,7 +191,7 @@ std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 
     return bounds;
 }
 
-std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, const float* scene, std::array<float, 4> lightProjection,
+std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, const SceneConstants& scene, std::array<float, 4> lightProjection,
     const std::optional<TraceBounds>& bounds, ShadowTarget& target)
 {
     auto size = depthSize(depth);
@@ -245,8 +233,8 @@ std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceVi
         parameters.shadowContrast = shape.contrast;
         parameters.reach = shape.reachPixels;
         // The light passes reconstruct the view depth as z = B / (depth - A).
-        parameters.projection[0] = scene[ProjectionParam + 2];
-        parameters.projection[1] = scene[ProjectionParam + 3];
+        parameters.projection[0] = scene.projectionParam[2];
+        parameters.projection[1] = scene.projectionParam[3];
         parameters.fade[0] = shape.fadeMetres * FadeStart;
         parameters.fade[1] = shape.fadeMetres;
         parameters.depthBounds[0] = covered.depthMin;

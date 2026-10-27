@@ -41,8 +41,6 @@ std::string status();
 void pixelShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
 void vertexShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
 void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept;
-void bufferMapped(ID3D11Resource* buffer, void* data) noexcept;
-void bufferUnmapped(ID3D11Resource* buffer) noexcept;
 // Before a draw; never takes it. Notes the sky's probe constants, the camera and the terrain's inputs.
 void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
 

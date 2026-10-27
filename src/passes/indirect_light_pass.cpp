@@ -6,6 +6,7 @@
 #include "features/indirect_light/ssilvb.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
 #include "frame_latch.hpp"
+#include "game_constants.hpp"
 #include "log.hpp"
 #include "passes/indirect_light_pass_shaders.hpp"
 #include "passes/ray_tracing/ray_tracing.hpp"
@@ -74,7 +75,7 @@ constexpr GameShader Shaders[]{
 constexpr UINT NormalSlot = 0;   // The sky light's g_NormalTexture
 constexpr UINT SpecularSlot = 1; // The sun's g_SpecularTexture
 constexpr UINT DepthSlot = 2;    // The upscale's inDepthBuffer
-constexpr UINT SceneSlot = 2;    // cPSScene, in the upscale and the resolves
+constexpr UINT SceneSlot = game_constants::SceneConstants::Slot; // In the upscale and the resolves
 // Every resolve's inAlbedo, inLightDiffuse, inDepth and inOcclusion.
 constexpr UINT AlbedoSlot = 8, DiffuseSlot = 9, ResolveDepthSlot = 11, OcclusionSlot = 13;
 

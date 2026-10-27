@@ -2,6 +2,7 @@
 #include "passes/ray_tracing/gi_inputs.hpp"
 
 #include "clock.hpp"
+#include "constant_capture.hpp"
 #include "game_loop.hpp"
 #include "log.hpp"
 #include "passes/ray_tracing/engine_scene.hpp"
@@ -26,6 +27,7 @@ namespace phantom_fx::gi_inputs
 namespace
 {
 using Microsoft::WRL::ComPtr;
+using namespace game_constants;
 
 // What a vertex shader draws, from its source name: the game's models (their G-buffer and shadow
 // passes), its terrain, or neither.
@@ -36,19 +38,10 @@ enum class Kind : std::uint8_t
     Terrain,
 };
 
-constexpr UINT SceneSlot = 2, BonesSlot = 6;
-// The constant buffers whose contents are kept: scene (b2), object (b5), light (b3), probes (b7), material
-// (b4: the terrain's page table converter).
-constexpr UINT SceneConstantsSize = 480, ObjectConstantsSize = 208, LightConstantsSize = 176, ProbeConstantsSize = 576, MaterialConstantsSize = 128;
-// VSBones (b6): g_vsBone, 32 3x4 rows, then g_vsPrevBone.
-constexpr UINT BonesConstantsSize = 3072;
-constexpr UINT LargestConstants = BonesConstantsSize / 4;
-// cVSObject (b5): m_viewWorld c0 to c3, m_useWeightCount c8.x (set on skinned draws).
-constexpr std::size_t UseWeightCount = 8 * 4;
 // The skinned meshes noted between kicks at most.
 constexpr std::size_t MaxDrawnBones = 2048;
 
-std::atomic<bool> active{}, lightPassKept{};
+std::atomic<bool> active{};
 
 // Known vertex shaders, by the object the game binds. Holding them keeps their addresses from being reused.
 std::shared_mutex shaderMutex;
@@ -59,27 +52,13 @@ std::vector<ComPtr<IUnknown>> shaderOwners;
 thread_local ID3D11DeviceContext* boundContext{};
 thread_local Kind boundKind{};
 
-// What the thread last wrote to each kept constant buffer, and its size in bytes; for scene constants,
-// whether they are the main camera's, worked out once a write while active.
-struct Written
-{
-    std::array<float, LargestConstants> values{};
-    UINT size{};
-    bool mainCamera{};
-};
-
-thread_local ID3D11Resource* mappedBuffer{};
-thread_local void* mappedData{};
-thread_local UINT mappedSize{};
-thread_local std::unordered_map<ID3D11Resource*, Written> contents;
-
 // The camera by deferred context while recorded, by command list once finished, and that of the lists
 // executed since the last kick.
 std::mutex recordMutex;
 std::unordered_map<std::uint64_t, Camera> pending;
 std::optional<Camera> executed;
 
-// Diagnostics: the hooks' time in performance counter ticks, and the draws, since takeWork.
+// Diagnostics: the draw hook's time in performance counter ticks, and the draws, since takeWork.
 std::atomic<std::int64_t> hookTicks{};
 std::atomic<std::uint64_t> workDraws{};
 
@@ -117,14 +96,6 @@ Kind kindOf(std::string_view name)
 std::mutex bonesMutex;
 std::vector<DrawnBones> drawnBones;
 
-const Written* writtenTo(ID3D11Buffer* buffer)
-{
-    if (!buffer) return nullptr;
-
-    const auto found = contents.find(buffer);
-    return found != contents.end() ? &found->second : nullptr;
-}
-
 UINT byteWidth(ID3D11Buffer* buffer)
 {
     D3D11_BUFFER_DESC desc{};
@@ -133,47 +104,38 @@ UINT byteWidth(ID3D11Buffer* buffer)
     return desc.ByteWidth;
 }
 
-// Notes a skinned mesh's draw: its model's place in the world, the view's inverse (cVSScene m_view, c8
-// to c10, a rotation and a translation) times m_viewWorld's translation, as m_world is not kept current;
-// the draw's index range; the bones it drew with.
-void noteBones(ID3D11DeviceContext* context, const float* scene, const float* object, const ui_redirect::DrawCall& call)
+// Notes a skinned mesh's draw: its model's place in the world, the view's inverse (a rotation and a
+// translation) times viewWorld's translation, as world is not kept current; the draw's index range; the
+// bones it drew with.
+void noteBones(ID3D11DeviceContext* context, const SceneConstants& scene, const ObjectConstants& object, const ui_redirect::DrawCall& call)
 {
     ComPtr<ID3D11Buffer> buffer;
-    context->VSGetConstantBuffers(BonesSlot, 1, buffer.GetAddressOf());
-    if (!buffer || byteWidth(buffer.Get()) != BonesConstantsSize) return;
+    context->VSGetConstantBuffers(BonesConstants::Slot, 1, buffer.GetAddressOf());
+    if (!buffer || byteWidth(buffer.Get()) != sizeof(BonesConstants)) return;
 
-    const auto* bones = writtenTo(buffer.Get());
+    const auto* bones = constant_capture::writtenTo<BonesConstants>(buffer.Get());
     if (!bones) return;
 
     DrawnBones drawn{.firstIndex = call.first, .indexCount = call.count};
-    const float offset[3]{object[3] - scene[8 * 4 + 3], object[7] - scene[9 * 4 + 3], object[11] - scene[10 * 4 + 3]};
+    const auto& view = scene.view;
+    const float offset[3]{object.viewWorld[0][3] - view[0][3], object.viewWorld[1][3] - view[1][3], object.viewWorld[2][3] - view[2][3]};
     for (int i = 0; i < 3; ++i)
     {
-        drawn.position[i] = scene[8 * 4 + i] * offset[0] + scene[9 * 4 + i] * offset[1] + scene[10 * 4 + i] * offset[2];
-        drawn.eye[i] = scene[20 * 4 + i];
+        drawn.position[i] = view[0][i] * offset[0] + view[1][i] * offset[1] + view[2][i] * offset[2];
+        drawn.eye[i] = scene.eye[i];
     }
 
-    std::copy_n(bones->values.begin(), drawn.bones.size(), drawn.bones.begin());
+    static_assert(sizeof(drawn.bones) == sizeof(BonesConstants::bones));
+    std::memcpy(drawn.bones.data(), bones->bones, sizeof(drawn.bones));
     std::lock_guard lock(bonesMutex);
     if (drawnBones.size() < MaxDrawnBones) drawnBones.push_back(drawn);
-}
-
-// The main camera's constants, with the add-on's jitter taken back out for the test.
-bool mainCamera(const std::array<float, LargestConstants>& scene)
-{
-    camera::SceneConstants unjittered;
-    std::memcpy(&unjittered, scene.data(), sizeof(unjittered));
-    const float x = unjittered.c[28][0], y = unjittered.c[28][1];
-    camera::applyJitter(unjittered, {-x, -y});
-    unjittered.c[28][0] = unjittered.c[28][1] = 0;
-
-    return camera::classify(unjittered) == camera::SceneView::MainCamera;
 }
 }
 
 void detach() noexcept
 {
     active = false;
+    constant_capture::keepAll(false);
     {
         std::lock_guard lock(recordMutex);
         pending.clear();
@@ -185,17 +147,13 @@ void detach() noexcept
     shaderOwners.clear();
 }
 
-void keepLightPassConstants(bool keep) noexcept
-{
-    lightPassKept = keep;
-}
-
 void setActive(bool on) noexcept
 {
     if (on == active.load()) return;
 
     std::lock_guard lock(recordMutex);
     active = on;
+    constant_capture::keepAll(on);
     pending.clear();
     executed.reset();
 }
@@ -231,65 +189,6 @@ void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept
     boundKind = kind;
 }
 
-void bufferMapped(ID3D11Resource* buffer, void* data) noexcept
-{
-    const bool tracing = active.load(std::memory_order_relaxed);
-    if ((!tracing && !lightPassKept.load(std::memory_order_relaxed)) || !data) return;
-
-    D3D11_RESOURCE_DIMENSION dimension{};
-    buffer->GetType(&dimension);
-    if (dimension != D3D11_RESOURCE_DIMENSION_BUFFER) return;
-
-    D3D11_BUFFER_DESC desc{};
-    static_cast<ID3D11Buffer*>(buffer)->GetDesc(&desc);
-    const UINT size = desc.ByteWidth;
-    const bool lightPass = size == SceneConstantsSize || size == LightConstantsSize;
-    const bool rayTracingOnly = size == ObjectConstantsSize || size == ProbeConstantsSize || size == MaterialConstantsSize || size == BonesConstantsSize;
-    if (!(lightPass || (tracing && rayTracingOnly)) || !(desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER)) return;
-
-    mappedBuffer = buffer;
-    mappedData = data;
-    mappedSize = desc.ByteWidth;
-}
-
-void bufferUnmapped(ID3D11Resource* buffer) noexcept
-{
-    if (!mappedBuffer || buffer != mappedBuffer) return;
-
-    const HookTimer timer;
-    try
-    {
-        auto& written = contents[buffer];
-        std::memcpy(written.values.data(), mappedData, mappedSize);
-        written.size = mappedSize;
-        if (mappedSize == SceneConstantsSize) written.mainCamera = active.load(std::memory_order_relaxed) && mainCamera(written.values);
-    }
-    catch (...)
-    {
-    }
-
-    mappedBuffer = nullptr;
-    mappedData = nullptr;
-}
-
-bool written(ID3D11Buffer* buffer, std::span<float> into) noexcept
-{
-    const auto* found = writtenTo(buffer);
-    if (!found || into.size() > found->values.size()) return false;
-
-    std::copy_n(found->values.begin(), into.size(), into.begin());
-    return true;
-}
-
-bool writtenExactly(ID3D11Buffer* buffer, std::span<float> into) noexcept
-{
-    const auto* found = writtenTo(buffer);
-    if (!found || into.size_bytes() != found->size) return false;
-
-    std::copy_n(found->values.begin(), into.size(), into.begin());
-    return true;
-}
-
 void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
 {
     if (!active.load(std::memory_order_relaxed) || boundContext != context || boundKind == Kind::None || !call.count) return;
@@ -300,11 +199,11 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     {
         std::array<ComPtr<ID3D11Buffer>, 4> constants; // b2 to b5
         ID3D11Buffer* rawConstants[4]{};
-        context->VSGetConstantBuffers(SceneSlot, 4, rawConstants);
+        context->VSGetConstantBuffers(SceneConstants::Slot, 4, rawConstants);
         for (int i = 0; i < 4; ++i) constants[i].Attach(rawConstants[i]);
 
-        const auto* scene = writtenTo(constants[0].Get());
-        if (!scene || !scene->mainCamera) return;
+        const auto* scene = constant_capture::mainCameraWrite(constants[0].Get());
+        if (!scene) return;
 
         // The camera the rays trace from: the list's first main-camera draw's.
         {
@@ -312,18 +211,23 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
             auto [noted, first] = pending.try_emplace(reinterpret_cast<std::uint64_t>(context));
             if (first)
             {
-                std::memcpy(&noted->second.constants, scene->values.data(), sizeof(camera::SceneConstants));
+                noted->second.constants = *scene;
                 noted->second.gameFrame = game_loop::currentFrame();
             }
         }
 
-        // The terrain's inputs, with the object and material constants the game wrote for the draw.
-        const auto* material = writtenTo(constants[2].Get());
-        const auto* object = writtenTo(constants[3].Get());
-        if (boundKind == Kind::Terrain && object && material) engine_scene::noteTerrain(context, object->values.data(), material->values.data());
+        const auto* object = constant_capture::writtenTo<ObjectConstants>(constants[3].Get());
+        if (!object) return;
 
-        // A skinned mesh (m_useWeightCount set): its bones as drawn, for the scene's characters.
-        if (boundKind == Kind::Model && object && object->values[UseWeightCount] != 0) noteBones(context, scene->values.data(), object->values.data(), call);
+        // The terrain's inputs, with the object and material constants the game wrote for the draw.
+        if (boundKind == Kind::Terrain)
+        {
+            const auto* material = constant_capture::writtenTo<TerrainMaterialConstants>(constants[2].Get());
+            if (material) engine_scene::noteTerrain(context, *object, *material);
+        }
+
+        // A skinned mesh (useWeightCount set): its bones as drawn, for the scene's characters.
+        if (boundKind == Kind::Model && object->useWeightCount[0] != 0) noteBones(context, *scene, *object, call);
     }
     catch (...)
     {
@@ -363,7 +267,7 @@ void executing(std::uint64_t list) noexcept
     pending.erase(found);
 }
 
-std::vector<DrawnBones> takeDrawnBones(const camera::SceneConstants& camera) noexcept
+std::vector<DrawnBones> takeDrawnBones(const SceneConstants& camera) noexcept
 {
     std::vector<DrawnBones> taken;
     try
@@ -372,7 +276,7 @@ std::vector<DrawnBones> takeDrawnBones(const camera::SceneConstants& camera) noe
         for (const auto& drawn : drawnBones)
         {
             bool sameEye = true;
-            for (int i = 0; i < 3; ++i) sameEye = sameEye && std::abs(drawn.eye[i] - camera.c[20][i]) <= 1e-3f;
+            for (int i = 0; i < 3; ++i) sameEye = sameEye && std::abs(drawn.eye[i] - camera.eye[i]) <= 1e-3f;
             if (sameEye) taken.push_back(drawn);
         }
 

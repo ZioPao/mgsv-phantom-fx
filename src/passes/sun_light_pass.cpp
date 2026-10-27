@@ -1,5 +1,6 @@
 #include "passes/sun_light_pass.hpp"
 
+#include "constant_capture.hpp"
 #include "d3d11_helpers.hpp"
 #include "features/upscaling/upscaler.hpp"
 #include "features/sun_contact_shadows/sun_contact_shadows.hpp"
@@ -163,7 +164,8 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
     // Beyond the shadow range there is no shadow map to soften.
     if (!composition.contactShadows && !(composition.softShadows && shadowMapped(sun)) && !rayTraced) return false;
 
-    const auto constants = contact_shadow_trace::passConstants(context);
+    const auto scene = constant_capture::pixelShaderReads<game_constants::SceneConstants>(context);
+    const auto light = constant_capture::pixelShaderReads<game_constants::SunLightConstants>(context);
 
     std::lock_guard lock(resourceMutex);
     if (!ensurePipeline()) return false;
@@ -171,13 +173,13 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
     ID3D11ShaderResourceView* contactShadow{};
     if (composition.contactShadows)
     {
-        if (!depth || !constants)
+        if (!depth || !scene || !light)
         {
             logOnce("Shadows: a sun pass without its depth or constants keeps the game's shadows.");
             return false;
         }
 
-        contactShadow = sun_contact_shadows::trace(context, depth.Get(), *constants);
+        contactShadow = sun_contact_shadows::trace(context, depth.Get(), *scene, *light);
         if (!contactShadow) return false;
 
         // The diagnostics view lights everything as beyond the shadow range, with the trace's shadow.

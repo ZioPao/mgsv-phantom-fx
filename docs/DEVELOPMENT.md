@@ -32,7 +32,9 @@ only feeds them (`DiagnosticLog` in `src/log.hpp`, tested with `if constexpr`):
 
 - the global illumination's light, rays, largest values and cost (the output and counters copied
   back from the GPU every ten seconds), its lights and exposures, its scene, its characters' bones
-  and its CPU time a frame, with the time of every draw hook (`gi_inputs`' `HookTimer`);
+  and its CPU time a frame, with the time of every draw hook (`gi_inputs`' `HookTimer`) and of the
+  constant capture's unmaps, and the reads the capture refused for a write of another size (the first
+  also logged with its sizes);
 - the ray-traced lights' "Lights in ten seconds";
 - the physical sky's parameters, copied back from the GPU every ten seconds;
 - the upscaler's frame counts every 1800 presents;
@@ -57,7 +59,10 @@ ctest --test-dir build/release
 This runs two tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
 (defaults, round trip, clamping, invalid files and values), the mode maths (render scales, texture LOD
 bias) and the camera maths (main-view recognition, jitter direction and units, reprojection, camera
-cuts, jitter phases and the Halton sequence, the camera frame generation gets).
+cuts, jitter phases and the Halton sequence, the camera frame generation gets). The main view and a sun
+pass from frame logs, pasted in as the log printed them, check main-view recognition and a light
+pass's view space on the game's own numbers. The constant capture runs on a WARP device: a thread
+reads only its own writes and only at their size, and each effect keeps only what it reads.
 `tests/scene_description_tests.cpp`: what the ray-traced scene takes of a model file, from small FMDL
 files it writes: the mesh roles of each case measured in the game (a tarp's stand-in, a pylon's
 lattice, glass, sky domes, inner walls, decals, hair, bushes), what each role gives its rays, a
@@ -143,7 +148,7 @@ what draws it, when that is the feature's own.
 | --- | --- |
 | `src/passes/sun_light_pass.*` | The game's sun light pass drawn with replacement shaders, with soft shadows, the sun's contact shadows and the ray-traced shadow composed in. `sun_light_pass_shaders.hpp`: the game's sun light shaders rebuilt with them |
 | `src/passes/local_light_pass.*` | The game's point and spot light draws, with the lamps' contact shadows and soft shadows composed in: the light shaders by checksum, the marking and lighting draws |
-| `src/passes/contact_shadow_trace.*` | Bend Studio's screen-space shadow trace, for the sun's and the lamps' contact shadows; the light passes' constants. `contact_shadow_trace_shaders.hpp`: Bend's trace ported to FXC |
+| `src/passes/contact_shadow_trace.*` | Bend Studio's screen-space shadow trace, for the sun's and the lamps' contact shadows. `contact_shadow_trace_shaders.hpp`: Bend's trace ported to FXC |
 | `third_party/bend_sss/bend_sss_cpu.h` | Bend Studio's dispatch layout, unchanged (Apache License 2.0) |
 | `src/passes/indirect_light_pass.*` | The game's sky light, upscale and resolve: pass recognition, the G-buffer notes, the resolve's white occlusion and diffuse light, the diagnostics views, the ray-traced scene's notes. `indirect_light_pass_shaders.hpp`: the diagnostics views |
 | `src/passes/visibility_bitmask.*` | The visibility bitmask march GTVBAO and SSILVB share: the depth prefilter, the march, the denoiser. `visibility_bitmask_shaders.hpp`: the march (GTVBAO from three-gtvbao, SSILVB's light as SSRT3 gathers it), XeGTAO's noise and denoiser |
@@ -153,7 +158,7 @@ what draws it, when that is the feature's own.
 | `src/passes/ray_tracing/engine_scene.*` | The game's loaded models from its visibility managers and object brush, its characters from its model list, their model files read once, its texture manager, the terrain's heightmap inputs (see "Scene objects") |
 | `src/passes/ray_tracing/scene_description.*` | What the ray-traced scene takes of a model file: its FMDL meshes, each with its mesh role from its alpha and shadow bytes and its model source, their base textures and skins; the flags, texture and alpha threshold a role gives its row of the geometry table (see "Ray-traced scene", "Mesh roles") |
 | `src/passes/ray_tracing/engine_brush.*` | The game's object brush: its loaded blocks' vegetation and props, read from their placement records (see "Scene objects") |
-| `src/passes/ray_tracing/gi_inputs.*` | What the ray tracing takes from the game's draws: the constants it writes (also the contact shadows' light pass constants), the main camera of the frame drawn, the terrain's inputs |
+| `src/passes/ray_tracing/gi_inputs.*` | What the ray tracing takes from the game's draws: the main camera of the frame drawn, its skinned meshes' bones, the terrain's inputs |
 | `src/passes/ray_tracing/gi_textures.*` | Shared copies of the game's textures the ray-traced scene's meshes use, from its texture manager (see "Ray-traced scene") |
 | `src/passes/ray_tracing/gi_d3d12.hpp` | The kernels, root signature and descriptor tables every ray-traced feature shares |
 | `src/passes/ray_tracing/shaders/` | HLSL the ray-traced features share: `gi_shared.h` (also C++), `gi_common.hlsli`, `gi_shadow.hlsli` (where shadow rays leave a surface; the FidelityFX Shadow Denoiser's data access), `gi_scene.hlsl` |
@@ -165,8 +170,10 @@ what draws it, when that is the feature's own.
 | --- | --- |
 | `src/render_scale.cpp`, `src/render_scale.hpp` | Hook on the renderer's per-frame step: the engine renders at the requested size |
 | `src/ui_redirect.cpp`, `src/ui_redirect.hpp` | The draw call every module sees; the grading, the 2D pass and `GammaControl` on output-size targets while the engine renders below them |
-| `src/camera.cpp`, `src/camera.hpp` | Scene constants: main-view recognition, jitter, reprojection, camera cuts |
-| `src/game_lights.hpp` | The game's point and spot light shaders and their constants, for the local light pass and the ray-traced lights: the checksums, a light's range, its sphere on screen |
+| `src/game_constants.hpp` | The game's constant buffers by name (see "Constant buffers"): the system, scene, sun and lamp light, material, object, bones and probe constants, each with its slot, and a light pass's view space in the world |
+| `src/constant_capture.cpp`, `src/constant_capture.hpp` | The constant capture: what each of the game's threads last wrote to the constant buffers the contact shadows and the ray tracing read, copied at the game's unmap after the upscaler's jitter, read by type and only at the size written |
+| `src/camera.cpp`, `src/camera.hpp` | The main camera in the scene constants: main-view recognition, jitter, reprojection, camera cuts |
+| `src/game_lights.hpp` | The game's point and spot light shaders, for the local light pass and the ray-traced lights: the checksums, a light's range, its sphere on screen |
 | `src/device_check.cpp`, `src/device_check.hpp` | Lets the game start under ReShade (see below); the build check |
 | `src/game_code.hpp` | The game's image, checks of its code, hooks (MinHook) and code patches |
 | `src/game_memory.hpp` | Guarded reads of the game's objects |
@@ -551,6 +558,9 @@ Checksums are the DXBC header checksum (bytes 4 to 20) as lowercase hex.
 - It runs in a deferred command list together with the LUT pass, before the UI's list.
 
 ### Constant buffers
+
+The add-on reads these by name through `src/game_constants.hpp`, whose `static_assert`s check each
+register's offset.
 
 `cPSSystem`, slot `b0` (64 bytes):
 
@@ -1529,7 +1539,7 @@ screen.
   from `cPSScene` `c21` (`1 / P00`, `1 / P11`, B, A) and `c28` (the jitter, while DLSS jitters), so
   it matches the depth. The direction is `cPSLight` `c0`. Both buffers are kept per thread as the
   game writes them (Map, memcpy, Unmap on the recording thread, after the upscaler has added the
-  jitter; `gi_inputs.cpp` keeps them, as for the ray tracing) and looked up by the buffers the draw
+  jitter; the constant capture keeps them, as for the ray tracing) and looked up by the buffers the draw
   binds. Depth is reversed (near 1, far 0, the border colour). Bend's starting values: 60 samples,
   surface thickness 0.5%, bilinear threshold 2%, contrast 4, early-out on.
 - **Foliage casts like everything else.** The trace reads its casters from the depth buffer alone,
@@ -2158,7 +2168,7 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   game's other lights have. A kind whose shader the game has not loaded keeps the game's draws.
 - **Recording** (`features/ray_traced_lights/local_lights.cpp`). A light's marking draw is made as the game makes it; its lighting
   draw is made without a pixel shader, so the stencil is left as the game leaves it, and noted:
-  `cPSScene`, `cPSLight`, `cPSMaterial` (as `gi_inputs.cpp` keeps them), `t0` to `t10`, `s8` to `s11`,
+  `cPSScene`, `cPSLight`, `cPSMaterial` (as the constant capture keeps them), `t0` to `t10`, `s8` to `s11`,
   the light targets and the viewport. Both draws are taken before the lamp contact shadows see them.
 - **Which lights.** At the kick, the lights of the lists recorded and not run yet whose `cPSScene` eye
   is the kick camera's (within a millimetre) go to Direct3D 12 in world space (`cPSScene` `c8` to `c10`

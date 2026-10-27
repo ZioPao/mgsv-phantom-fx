@@ -6,6 +6,7 @@
 #include "features/hdr/hdr.hpp"
 #include "features/volumetric_fog/atmosphere_shaders.hpp"
 #include "frame_latch.hpp"
+#include "game_constants.hpp"
 #include "log.hpp"
 #include "performance.hpp"
 #include "shader_bytecode.hpp"
@@ -30,6 +31,7 @@ namespace phantom_fx::atmosphere
 namespace
 {
 using Microsoft::WRL::ComPtr;
+using game_constants::ObjectConstants, game_constants::SceneConstants, game_constants::SunLightConstants, game_constants::SystemConstants;
 
 // The game's fog texture: 128 depth slices in 32 x 4 tiles of 16x64 texels. The add-on's tiles are
 // finer across the view, for the edges of the light shafts: a froxel spans about 16 pixels at 4K.
@@ -82,9 +84,12 @@ constexpr GameShader Shaders[]{
 
 // The fog pass draws two triangles per slice.
 constexpr unsigned FogPassVertices = Slices * 6;
-// Constant buffer slots and sizes of the game's passes: cPSSystem, cPSScene, cPSLight, cPSMaterial, cPSObject.
-constexpr UINT SystemSlot = 0, SceneSlot = 2, LightSlot = 3, MaterialSlot = 4, ObjectSlot = 5;
-constexpr UINT SystemSize = 64, SceneSize = 480, LightSize = 176, MaterialSize = 128, ObjectSize = 208;
+// Constant buffer slots and sizes of the game's passes: cPSSystem, cPSScene, the sun pass's cPSLight,
+// cPSMaterial (the fog pass's and the sky's, whose registers nothing reads by name), cPSObject.
+constexpr UINT SystemSlot = SystemConstants::Slot, SceneSlot = SceneConstants::Slot, LightSlot = SunLightConstants::Slot, MaterialSlot = 4,
+               ObjectSlot = ObjectConstants::Slot;
+constexpr UINT SystemSize = sizeof(SystemConstants), SceneSize = sizeof(SceneConstants), LightSize = sizeof(SunLightConstants), MaterialSize = 128,
+               ObjectSize = sizeof(ObjectConstants);
 constexpr UINT RainSlot = 0;   // The fog pass's inInterruptTexture
 constexpr UINT ShadowSlot = 3; // The sun pass's g_ShadowTexture
 constexpr UINT FogSlot = 12;   // g_tex_fog of every pass that reads the fog

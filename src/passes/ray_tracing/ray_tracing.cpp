@@ -3,10 +3,12 @@
 
 #include "camera.hpp"
 #include "clock.hpp"
+#include "constant_capture.hpp"
 #include "d3d11_helpers.hpp"
 #include "features/global_illumination/gi_lighting.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
 #include "frame_latch.hpp"
+#include "game_constants.hpp"
 #include "log.hpp"
 #include "passes/indirect_light_pass.hpp"
 #include "passes/ray_tracing/engine_scene.hpp"
@@ -41,6 +43,7 @@ namespace phantom_fx::ray_tracing
 namespace
 {
 using Microsoft::WRL::ComPtr;
+using game_constants::SceneConstants;
 
 struct Options
 {
@@ -71,7 +74,6 @@ constexpr char SkyProbeChecksum[] = "4a3faf87b9ec54a401060a5b736eae5a";
 // the G-buffer (docs/DEVELOPMENT.md, "Velocity").
 constexpr char CameraVelocityChecksum[] = "5d0241dd9804f41c780cd36669c71198";
 constexpr UINT ObjectVelocitySlot = 3;
-constexpr UINT SceneSlot = 2, LightSlot = 3, ProbeSlot = 7;
 
 // Packs what the kernels read from the G-buffer: the depth, the normals in world space (0 where
 // the sky is; alpha 1/3 on foliage, the specular target's material 43, else 1) and the albedo, linear.
@@ -176,7 +178,7 @@ ComPtr<ID3D11Fence> fence;
 HANDLE fenceHandle{};
 std::uint64_t fenceValue{}, lightSignalled{}, lightWaited{};
 std::uint32_t kicks{};
-std::optional<camera::SceneConstants> sceneCamera, previousCamera;
+std::optional<SceneConstants> sceneCamera, previousCamera;
 // The game's velocity for its moving meshes, whether a list that drew it ran since the last present and
 // before the kick (only then does it hold this frame's), and its shared copy for the shadow denoiser.
 ComPtr<ID3D11ShaderResourceView> objectVelocity;
@@ -257,7 +259,7 @@ void ensurePipeline()
 }
 
 // The G-buffer into the shared textures, on the immediate context; call with executionMutex held.
-void pack(ID3D11ShaderResourceView* depth, const camera::SceneConstants& scene)
+void pack(ID3D11ShaderResourceView* depth, const SceneConstants& scene)
 {
     const auto [width, height] = sizeOf(depth);
     if (depthOut.width != width || depthOut.height != height)
@@ -270,7 +272,7 @@ void pack(ID3D11ShaderResourceView* depth, const camera::SceneConstants& scene)
 
     const bool hasAlbedo = albedo && sizeOf(albedo.Get()) == std::pair{width, height};
     PackParameters parameters{};
-    for (int row = 0; row < 3; ++row) std::memcpy(parameters.view[row], scene.c[8 + row], sizeof(parameters.view[row]));
+    for (int row = 0; row < 3; ++row) std::memcpy(parameters.view[row], scene.view[row], sizeof(parameters.view[row]));
     parameters.width = width;
     parameters.height = height;
     parameters.hasAlbedo = hasAlbedo;
@@ -358,23 +360,13 @@ void copyTerrain(const engine_scene::TerrainInputs& inputs, gi_renderer::Frame& 
     frame.terrain = terrain;
 }
 
-// The rows of one of cPSScene's matrices from its first register: m_projectionView c0, m_projection c4, m_view c8.
-constexpr int ProjectionRows = 4, ViewRows = 8;
-// cPSScene's m_cameraCenterOffset: the upscaler's jitter in NDC (camera::applyJitter).
-constexpr int JitterRow = 28;
-
-gi_renderer::Matrix rowsOf(const camera::SceneConstants& scene, int first)
+gi_renderer::Matrix matrixOf(const float (&rows)[4][4])
 {
     gi_renderer::Matrix matrix{};
-    for (int row = 0; row < 4; ++row)
-        for (int column = 0; column < 4; ++column) matrix[row * 4 + column] = scene.c[first + row][column];
+    static_assert(sizeof(matrix) == sizeof(rows));
+    std::memcpy(matrix.data(), rows, sizeof(matrix));
 
     return matrix;
-}
-
-gi_renderer::Matrix projectionViewOf(const camera::SceneConstants& scene)
-{
-    return rowsOf(scene, 0);
 }
 
 // Diagnostics: the light the scene gets, every ten seconds.
@@ -422,6 +414,7 @@ void logStatus()
         + std::to_string(kicksWithObjectVelocity.exchange(0)) + " frames, not in " + std::to_string(kicksWithoutObjectVelocity.exchange(0)));
 
     const auto work = gi_inputs::takeWork();
+    const auto capture = constant_capture::takeWork();
     const double frames = static_cast<double>(std::max<std::uint64_t>(kicksSinceLog.exchange(0), 1));
     const auto milliseconds = [](std::atomic<std::int64_t>& ticks) { return clock::millisecondsOf(ticks.exchange(0)); };
     const auto perFrame = [&](double value) { return std::to_string(value / frames); };
@@ -434,8 +427,10 @@ void logStatus()
     for (const auto& value : lastConverter) steps += " " + std::to_string(value.load());
     steps += "), its heightmap textures " + std::to_string(heightmapChanges.exchange(0)) + " times";
 
-    log("Global illumination's CPU time a frame: hooks " + perFrame(work.hookMilliseconds) + " ms (all threads) over " + perFrame(static_cast<double>(work.draws))
-        + " mesh draws; the kick " + perFrame(kick) + " ms (render thread: " + steps + ").");
+    // The hooks: the draws' and the constant capture's unmaps.
+    log("Global illumination's CPU time a frame: hooks " + perFrame(work.hookMilliseconds + capture.unmapMilliseconds) + " ms (all threads) over "
+        + perFrame(static_cast<double>(work.draws)) + " mesh draws; the kick " + perFrame(kick) + " ms (render thread: " + steps + "); "
+        + std::to_string(capture.refusedReads) + " constant reads refused (a write of another size).");
 }
 
 // Remakes `texture` at this size unless it has it; whether it did.
@@ -555,20 +550,21 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
         velocityCopied ? objectVelocityCopy.Get() : nullptr, velocityFormat, localLightShadow, lightDebug};
     frame.width = depthOut.width;
     frame.height = depthOut.height;
-    frame.viewProjection = projectionViewOf(*sceneCamera);
-    frame.previousViewProjection = projectionViewOf(*previousCamera);
-    frame.view = rowsOf(*sceneCamera, ViewRows);
-    frame.projection = rowsOf(*sceneCamera, ProjectionRows);
-    frame.previousView = rowsOf(*previousCamera, ViewRows);
-    frame.previousProjection = rowsOf(*previousCamera, ProjectionRows);
-    frame.cameraCut = camera::cameraCut(camera::viewOf(*previousCamera), camera::viewOf(*sceneCamera));
-    frame.jitter = {sceneCamera->c[JitterRow][0], sceneCamera->c[JitterRow][1], previousCamera->c[JitterRow][0], previousCamera->c[JitterRow][1]};
-    for (int i = 0; i < 3; ++i) frame.eye[i] = sceneCamera->c[20][i];
-
-    frame.nearPlane = sceneCamera->c[22][2];
-    frame.farPlane = sceneCamera->c[22][3];
-    // P11 (c5.y) is 1 / tan(half the vertical field of view).
-    frame.verticalFov = 2 * std::atan(1 / std::max(std::abs(sceneCamera->c[5][1]), 1e-3f));
+    const auto view = camera::viewOf(*sceneCamera);
+    frame.viewProjection = matrixOf(sceneCamera->projectionView);
+    frame.previousViewProjection = matrixOf(previousCamera->projectionView);
+    frame.view = matrixOf(sceneCamera->view);
+    frame.projection = matrixOf(sceneCamera->projection);
+    frame.previousView = matrixOf(previousCamera->view);
+    frame.previousProjection = matrixOf(previousCamera->projection);
+    frame.cameraCut = camera::cameraCut(camera::viewOf(*previousCamera), view);
+    frame.jitter = {sceneCamera->cameraCenterOffset[0], sceneCamera->cameraCenterOffset[1], previousCamera->cameraCenterOffset[0],
+        previousCamera->cameraCenterOffset[1]};
+    frame.eye = view.eye;
+    frame.nearPlane = view.nearPlane;
+    frame.farPlane = view.farPlane;
+    // P11 is 1 / tan(half the vertical field of view).
+    frame.verticalFov = 2 * std::atan(1 / std::max(std::abs(view.focal), 1e-3f));
     if (sun)
     {
         frame.sunDirection = sun->direction;
@@ -581,9 +577,9 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
         for (int i = 0; i < 9; ++i) frame.skyRadiance[i] = radiance[i];
     }
 
-    // The main view's m_exposure.z, as this frame's lighting passes have it; the sun pass's before
-    // the main view's has one.
-    const float cameraExposure = sceneCamera->c[23][2];
+    // The main view's exposure, as this frame's lighting passes have it; the sun pass's before the main
+    // view's has one.
+    const float cameraExposure = sceneCamera->exposure;
     const float exposure = cameraExposure > 0 ? cameraExposure : sun ? sun->exposure : 0;
     frame.outputScale = exposure / LightScale;
 
@@ -784,15 +780,6 @@ void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept
     gi_inputs::vertexShaderBound(context, shader);
 }
 
-void bufferMapped(ID3D11Resource* buffer, void* data) noexcept
-{
-    gi_inputs::bufferMapped(buffer, data);
-}
-
-void bufferUnmapped(ID3D11Resource* buffer) noexcept
-{
-    gi_inputs::bufferUnmapped(buffer);
-}
 
 void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
 {
@@ -827,23 +814,20 @@ void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
 
         if (!skyProbe) return;
 
-        // PsWork (SH_SphereMap_ps): the probe's light, g_psParamSH (c0 to c11, then its sky occlusion
-        // c12 to c15), and the sky's, g_psParamSHSky (c16 to c27); the scene's exposure (c23.z). The
-        // game's ambient light is the probe's plus the sky's times the occlusion. Where the game gives no
-        // sky (Mother Base: sky and occlusion zero, the probe's light all of it), the probe's light stands
-        // in for the sky.
-        ComPtr<ID3D11Buffer> scene, probes;
-        context->PSGetConstantBuffers(SceneSlot, 1, scene.GetAddressOf());
-        context->PSGetConstantBuffers(ProbeSlot, 1, probes.GetAddressOf());
-        std::array<float, 120> sceneConstants{};
-        std::array<float, 144> probeConstants{};
-        if (!gi_inputs::written(scene.Get(), sceneConstants) || !gi_inputs::written(probes.Get(), probeConstants)) return;
+        // PsWork (SH_SphereMap_ps): the probe's light and the sky's; the scene's exposure. The game's
+        // ambient light is the probe's plus the sky's times the occlusion. Where the game gives no sky
+        // (Mother Base: sky and occlusion zero, the probe's light all of it), the probe's light stands in
+        // for the sky.
+        const auto scene = constant_capture::pixelShaderReads<SceneConstants>(context);
+        const auto probes = constant_capture::pixelShaderReads<game_constants::ProbeConstants>(context);
+        if (!scene || !probes) return;
 
         Sky noted;
-        noted.fromProbe = std::all_of(probeConstants.begin() + 16 * 4, probeConstants.begin() + 28 * 4, [](float value) { return value == 0.0f; });
-        const int first = noted.fromProbe ? 0 : 16;
-        for (int color = 0; color < 3; ++color) std::memcpy(noted.matrices[color].data(), &probeConstants[(first + 4 * color) * 4], 16 * sizeof(float));
-        noted.exposure = sceneConstants[23 * 4 + 2];
+        const auto isZero = [](float value) { return value == 0.0f; };
+        noted.fromProbe = std::ranges::all_of(probes->paramSHSky, [&](const float (&matrix)[16]) { return std::ranges::all_of(matrix, isZero); });
+        const auto& light = noted.fromProbe ? probes->paramSH : probes->paramSHSky;
+        for (int color = 0; color < 3; ++color) std::memcpy(noted.matrices[color].data(), light[color], sizeof(light[color]));
+        noted.exposure = scene->exposure;
         std::lock_guard lock(notesMutex);
         notesOf(context).sky = noted;
     }
@@ -888,28 +872,24 @@ void noteSun(ID3D11DeviceContext* context, bool shadowMapped) noexcept
 
     try
     {
-        ComPtr<ID3D11Buffer> scene, light;
-        context->PSGetConstantBuffers(SceneSlot, 1, scene.GetAddressOf());
-        context->PSGetConstantBuffers(LightSlot, 1, light.GetAddressOf());
-        std::array<float, 120> sceneConstants{};
-        std::array<float, 44> lightConstants{};
-        if (!gi_inputs::written(scene.Get(), sceneConstants) || !gi_inputs::written(light.Get(), lightConstants)) return;
+        const auto scene = constant_capture::pixelShaderReads<SceneConstants>(context);
+        const auto light = constant_capture::pixelShaderReads<game_constants::SunLightConstants>(context);
+        if (!scene || !light) return;
 
-        // cPSLight c0: towards the sun in view space; c1: its colour, which the pass multiplies by
-        // m_exposure.z. The lighting passes' m_view rows (c8 to c10) take view to world.
-        std::array<std::array<float, 4>, 3> viewToWorld{};
-        for (int row = 0; row < 3; ++row) std::memcpy(viewToWorld[row].data(), &sceneConstants[(8 + row) * 4], 4 * sizeof(float));
-
-        const float exposure = sceneConstants[23 * 4 + 2];
         Sun noted;
-        noted.direction = gi_lighting::toWorld(viewToWorld, {lightConstants[0], lightConstants[1], lightConstants[2]});
-        noted.color = {lightConstants[4], lightConstants[5], lightConstants[6]};
-        noted.exposure = exposure;
+        noted.direction = game_constants::toWorld(*scene, light->direction, 0);
+        const auto& direction = noted.direction;
+        const float length = std::sqrt(direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2]);
+        if (length > 0)
+            for (auto& value : noted.direction) value /= length;
+
+        noted.color = {light->color[0], light->color[1], light->color[2]};
+        noted.exposure = scene->exposure;
         std::lock_guard lock(notesMutex);
         auto& contextNotes = notesOf(context);
         contextNotes.sun = noted;
-        // c8.x, c8.y: the range's centre depth and start distance; c6.x: its fade (sun_light_pass_shaders.hpp, SunShadow).
-        if (shadowMapped) contextNotes.shadowRange = std::array<float, 4>{lightConstants[32], lightConstants[33], lightConstants[24], 1};
+        // The range as SunShadow reads it (sun_light_pass_shaders.hpp).
+        if (shadowMapped) contextNotes.shadowRange = std::array<float, 4>{light->shadowRangeCentre, light->shadowRangeStart, light->shadowRangeFade, 1};
         // The sun pass reads the shadows, and the point and spot lights are drawn before its list: it waits for them.
         if (shadowing.load(std::memory_order_relaxed) || localShadowing.load(std::memory_order_relaxed)) contextNotes.wait = true;
     }

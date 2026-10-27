@@ -1,6 +1,7 @@
 #pragma once
 
 #include "d3d11_helpers.hpp"
+#include "game_constants.hpp"
 #include "phantom_fx_settings.hpp"
 
 #include <d3d11.h>
@@ -36,7 +37,7 @@ constexpr ComputeSlots PassSlots{.buffers = 5, .views = 5, .accesses = 5};
 // The march stops at this share of the render height, for surfaces close to the camera.
 constexpr float MaxRadiusShare = 0.15f;
 // The scene constants the march reads (b1): the game's cPSScene, in bytes.
-constexpr UINT SceneConstantsSize = 480;
+constexpr UINT SceneConstantsSize = sizeof(game_constants::SceneConstants);
 
 // When an effect last ran, and otherwise what it waits for, for the overlay.
 struct Progress

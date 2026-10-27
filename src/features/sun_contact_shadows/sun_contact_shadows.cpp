@@ -53,15 +53,16 @@ Health health()
     return {};
 }
 
-ID3D11ShaderResourceView* trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, const contact_shadow_trace::PassConstants& constants)
+ID3D11ShaderResourceView* trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, const game_constants::SceneConstants& scene,
+    const game_constants::SunLightConstants& light)
 {
     std::lock_guard lock(shadowMutex);
     if (tracedFrom(context, depth)) return shadow.view.Get();
 
     const performance::Timed timed(context, performance::Pass::SunTrace);
-    const float* direction = &constants.light[game_lights::LightDirection];
-    const auto lightProjection = contact_shadow_trace::project(constants.scene.data(), {direction[0], direction[1], direction[2], 0});
-    const auto dispatched = contact_shadow_trace::trace(context, depth, constants.scene.data(), lightProjection, {}, shadow);
+    const auto& direction = light.direction;
+    const auto lightProjection = contact_shadow_trace::project(scene, {direction[0], direction[1], direction[2], 0});
+    const auto dispatched = contact_shadow_trace::trace(context, depth, scene, lightProjection, {}, shadow);
     if (!dispatched) return nullptr;
 
     noteTraced(context, depth);

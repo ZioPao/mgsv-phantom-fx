@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game_constants.hpp"
+
 #include <array>
 #include <cstdint>
 
@@ -8,13 +10,6 @@
 // tests can check it without the game.
 namespace phantom_fx::camera
 {
-// cVSScene / cPSScene (slot b2, 480 bytes): c[n] is register cn as docs/DEVELOPMENT.md lists them.
-// Matrices are rows applied as dot(row, v).
-struct SceneConstants
-{
-    float c[30][4];
-};
-
 // Row-major 4x4 in the engine's convention.
 using Matrix = std::array<double, 16>;
 
@@ -25,13 +20,17 @@ Matrix inverse(Matrix matrix);
 enum class SceneView : std::uint8_t
 {
     Other,
-    // c4-c7 hold the main camera's perspective projection for the render size in c22, unjittered.
+    // The projection is the main camera's perspective projection for the render size (width, height),
+    // unjittered.
     MainProjection,
-    // Also c0-c3 = projection x view with the view in c8-c11: the camera itself.
+    // Also projectionView = projection x view: the camera itself.
     MainCamera,
 };
 
-SceneView classify(const SceneConstants& scene);
+SceneView classify(const game_constants::SceneConstants& scene);
+// Whether scene constants as the upscaler leaves them (jittered, the jitter in cameraCenterOffset) are
+// the main camera's.
+bool isMainCamera(const game_constants::SceneConstants& jittered);
 
 // The main camera as one upload had it before the jitter.
 struct View
@@ -43,12 +42,12 @@ struct View
     float nearPlane{}, farPlane{};
 };
 
-View viewOf(const SceneConstants& scene);
+View viewOf(const game_constants::SceneConstants& scene);
 
-// Offsets a MainProjection upload by `ndc`: the projection (c4, c5), the projection-view in c0-c3
-// when it has one, and m_cameraCenterOffset (c28), which the engine's screen-space passes subtract
-// before reconstructing positions from depth.
-void applyJitter(SceneConstants& scene, std::array<float, 2> ndc);
+// Offsets a MainProjection upload by `ndc`: the projection, the projection-view when it has one, and
+// cameraCenterOffset, which the engine's screen-space passes subtract before reconstructing positions
+// from depth.
+void applyJitter(game_constants::SceneConstants& scene, std::array<float, 2> ndc);
 
 // DLSS takes the jitter in render pixels, x right and y down; the projection takes it in NDC, y up.
 std::array<float, 2> jitterNdc(std::array<float, 2> pixels, float width, float height);

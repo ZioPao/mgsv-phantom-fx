@@ -18,8 +18,4 @@ SphericalHarmonics skyRadiance(const std::array<std::array<float, 16>, 3>& matri
 
 // Evaluates `sh` in a unit world direction, as the kernels do.
 Color evaluate(const SphericalHarmonics& sh, const std::array<float, 3>& direction);
-
-// A direction in the lighting passes' view space to the world: their m_view rows (c8 to c10)
-// take view to world.
-std::array<float, 3> toWorld(const std::array<std::array<float, 4>, 3>& viewToWorld, const std::array<float, 3>& direction);
 }
