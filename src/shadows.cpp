@@ -4,6 +4,7 @@
 #include "game_lights.hpp"
 #include "gi_inputs.hpp"
 #include "global_illumination.hpp"
+#include "local_light_shaders.hpp"
 #include "log.hpp"
 #include "performance.hpp"
 #include "shader_bytecode.hpp"
@@ -20,6 +21,7 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <utility>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -45,6 +47,26 @@ constexpr const char* SunChecksums[]{
 constexpr const char* SunNames[]{"shadow map", "far", "shadow map, rain", "far, rain"};
 static_assert(std::size(SunChecksums) == static_cast<std::size_t>(Sun::Count) && std::size(SunNames) == std::size(SunChecksums));
 
+// A game shader can be created more than once; holding the copies keeps their addresses from being
+// reused.
+constexpr std::size_t CopiesPerShader = 4;
+
+// The game's local lights the soft shadows replace: the point light with a dual-paraboloid shadow map
+// and the spot light's plain projection, both quartic, with specular and a shadow map
+// (game_lights.hpp). Every other local light keeps the game's shader.
+struct SoftLight
+{
+    const char* checksum;
+    const char* name;
+    const char* source;
+    std::mutex mutex;
+    std::array<std::atomic<IUnknown*>, CopiesPerShader> game{};
+    std::array<ComPtr<IUnknown>, CopiesPerShader> keep;
+    ComPtr<ID3D11PixelShader> replacement;
+};
+std::array<SoftLight, 2> softLights{{{"afbc12167037e4e0d653da184c7e3e82", "SSLighting2_Point", shaders::PointLight},
+    {"ac0947110cb0f17f4ffe930a6a11617d", "SSLighting2_Spot", shaders::SpotLight}}};
+
 bool shadowMapped(Sun sun)
 {
     return sun == Sun::ShadowMap || sun == Sun::RainShadowMap;
@@ -55,7 +77,6 @@ bool reflectsSky(Sun sun)
     return sun == Sun::ShadowMap || sun == Sun::Far;
 }
 
-constexpr UINT SpecularSlot = 1;                                       // t1 of the light passes, whose z is the material
 constexpr UINT DepthSlot = 2;                                          // t2 of the light passes
 constexpr UINT RayTracedSlot = 6;                                      // t6 of the replacement sun shaders
 constexpr UINT ShadowSlot = 7;                                         // t7 of the add-on's pixel shaders
@@ -79,15 +100,20 @@ struct Parameters
     float lightCoordinate[4];
     std::int32_t waveOffset[2];
     float inverseDepthSize[2];
-    float surfaceThickness, bilinearThreshold, shadowContrast, padding;
+    float surfaceThickness, bilinearThreshold, shadowContrast, reach;
     float depthBounds[2];
     std::int32_t boundsMin[2], boundsMax[2];
-    float padding2[2];
+    float projection[2];  // B, A: view Z from the reversed depth
+    float fade[2];        // Metres: start and end of the distance fade
+    float padding[2];
 };
 static_assert(sizeof(Parameters) % 16 == 0);
 
-// Bend's recommended starting values, which suit Fox Engine's reversed depth as they are.
-constexpr float SurfaceThickness = 0.005f, BilinearThreshold = 0.02f, ShadowContrast = 4;
+// Bend's recommended starting values, which suit Fox Engine's reversed depth as they are. The contrast
+// and the reach are the add-on's contact shadow settings instead; the reach cannot pass the shader's
+// SAMPLE_COUNT, the most it marches.
+constexpr float BilinearThreshold = 0.02f;
+constexpr float MaxReach = 120;
 
 // cSunShadows (b6) of the replacement shaders.
 struct ShaderOptions
@@ -96,6 +122,17 @@ struct ShaderOptions
 };
 static_assert(sizeof(ShaderOptions) % 16 == 0);
 
+// cLampShadows (b6) of the point light replacement (src/local_light_shaders.hpp).
+struct LampOptions
+{
+    float soft, searchTexels, hardening, softness, darkness, padding[3];
+};
+static_assert(sizeof(LampOptions) % 16 == 0);
+
+// The penumbra's shape for the lamps, in metres and texels: a 10 cm softness at a 30 cm blocker
+// separation, 24 texels of search, as renodx-mgsv's point lights start.
+constexpr float LampSearchTexels = 24, LampHardening = 20, LampSoftness = 0.1f, LampDarkness = 1;
+
 // What the overlay asked for, and what the frame being recorded uses.
 std::mutex optionsMutex;
 Options wanted, current;
@@ -103,17 +140,17 @@ std::atomic<bool> active{}, pipelineFailed{};
 // Counts presents, to turn the soft shadows' samples.
 std::atomic<std::uint32_t> frame{};
 
-// Identified sun shaders, read lock-free on every full-screen draw. The game can create a shader more
-// than once; holding the copies keeps their addresses from being reused.
-constexpr std::size_t CopiesPerShader = 4;
 std::mutex shaderMutex;
 std::array<std::array<std::atomic<IUnknown*>, CopiesPerShader>, std::size(SunChecksums)> sunShaders{};
 std::array<std::array<ComPtr<IUnknown>, CopiesPerShader>, std::size(SunChecksums)> shaderOwners;
 
 // Identified local light shaders, looked up on every indexed draw.
 std::shared_mutex lightShaderMutex;
-std::unordered_map<IUnknown*, Falloff> lightShaders;
+std::unordered_map<IUnknown*, const GameLight*> lightShaders;
+std::unordered_map<IUnknown*, bool> drawnLightShaders; // By shader, whether the log has named it
 std::vector<ComPtr<IUnknown>> lightShaderOwners;
+
+
 
 // The depth a context's recording traced the sun from since its last FinishCommandList: both parts
 // of the sun pass read the same shadow. And the light whose shadow a context's last stencil-marking
@@ -132,7 +169,7 @@ ComPtr<ID3D11ComputeShader> traceShader;
 std::array<ComPtr<ID3D11PixelShader>, std::size(SunChecksums)> replacements;
 ComPtr<ID3D11PixelShader> lightShadowShader;
 ComPtr<ID3D11SamplerState> borderSampler;
-ComPtr<ID3D11Buffer> parameterBuffer, optionsBuffer;
+ComPtr<ID3D11Buffer> parameterBuffer, optionsBuffer, lampOptionsBuffer;
 // The light shadow's draw: alpha only, over the whole light volume.
 ComPtr<ID3D11BlendState> alphaOnly;
 ComPtr<ID3D11DepthStencilState> noDepth;
@@ -161,6 +198,7 @@ bool ensurePipeline()
         }
 
         lightShadowShader = pixelShader(device.Get(), shaders::LightShadow, "light-shadow");
+        for (auto& light : softLights) light.replacement = pixelShader(device.Get(), light.source, light.name);
 
         D3D11_SAMPLER_DESC sampler{};
         sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
@@ -171,6 +209,7 @@ bool ensurePipeline()
 
         parameterBuffer = makeConstantBuffer(device.Get(), sizeof(Parameters), "Creating the shadow trace constants");
         optionsBuffer = makeConstantBuffer(device.Get(), sizeof(ShaderOptions), "Creating the sun shadow options");
+        lampOptionsBuffer = makeConstantBuffer(device.Get(), sizeof(LampOptions), "Creating the lamp shadow options");
 
         D3D11_BLEND_DESC blend{};
         blend.RenderTarget[0].SrcBlend = blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
@@ -232,7 +271,44 @@ std::optional<Falloff> falloffOf(IUnknown* shader)
     const auto found = shader ? lightShaders.find(shader) : lightShaders.end();
     if (found == lightShaders.end()) return std::nullopt;
 
-    return found->second;
+    return found->second->falloff;
+}
+
+// The game's light a shader belongs to; null for any other shader.
+const GameLight* lightOf(IUnknown* shader)
+{
+    std::shared_lock lock(lightShaderMutex);
+    const auto found = shader ? lightShaders.find(shader) : lightShaders.end();
+
+    return found == lightShaders.end() ? nullptr : found->second;
+}
+
+// A light shader's kind, as the log names it.
+std::string describe(const GameLight& light)
+{
+    return std::string(light.shape == Shape::Point ? "point light" : light.flashlight ? "flashlight" : "spot light")
+        + (light.falloff == Falloff::Quartic ? ", quartic falloff" : ", sixteenth falloff") + (light.specular ? ", specular" : ", no specular")
+        + (light.shadowMap ? ", shadow map" : ", no shadow map");
+}
+
+// Whether this is the first draw of `shader` the log names.
+bool firstDraw(IUnknown* shader)
+{
+    std::unique_lock lock(lightShaderMutex);
+    return drawnLightShaders.try_emplace(shader, true).second;
+}
+
+// The replacement for `shader`, or null when the soft shadows do not replace it; read lock-free on
+// every indexed draw.
+ID3D11PixelShader* softReplacement(IUnknown* shader)
+{
+    if (!shader) return nullptr;
+
+    for (auto& light : softLights)
+        for (const auto& copy : light.game)
+            if (copy.load(std::memory_order_relaxed) == shader) return light.replacement.Get();
+
+    return nullptr;
 }
 
 // What this thread wrote to the light pass's cPSScene (b2) and cPSLight (b3), each at its full size.
@@ -267,6 +343,21 @@ std::array<float, 4> project(const float* scene, const float (&light)[4])
         projection[3] * light[2] + projection[2] * light[3], light[2]};
 }
 
+// B and A of the light pass's projection, for the view Z the trace computes from the depth it reads:
+// viewZ = B / (depth - A), the same pair the sun's replacement shaders use.
+std::array<float, 2> viewProjection(const PassConstants& constants)
+{
+    const float* projection = constants.scene.data() + ProjectionParam;
+    return {projection[2], projection[3]};
+}
+
+// Where the contact shadows fade out, in metres of view depth: full underfoot, gone by the setting.
+constexpr float ContactFadeStart = 0.6f; // As a share of the fade distance
+std::array<float, 2> fadeRange(const Options& options)
+{
+    const float end = std::max(options.contactFade, 60.0f);
+    return {end * ContactFadeStart, end};
+}
 // The width and height of the depth buffer `view` shows; throws when it is not a 2D texture, as the
 // trace needs one.
 std::array<int, 2> depthSize(ID3D11ShaderResourceView* view)
@@ -312,13 +403,14 @@ std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 
     return bounds;
 }
 
-// Traces the screen-space shadow towards `lightProjection` from `depth` into `target` on `context`,
-// with the game's compute state saved around it; `specular` (may be null) tells foliage, which casts
-// none. With `bounds`, it writes only within them, and the shadow draw takes the rest as lit;
-// without, it covers the whole screen and the sky stays lit. Call with resourceMutex held. Returns
-// Bend's dispatch list.
-Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* specular,
-    std::array<float, 4> lightProjection, const std::optional<TraceBounds>& bounds, ShadowTarget& target)
+// Traces the screen-space shadow towards `lightProjection` from `depth` into `target` on
+// `context`, with the game's compute state saved around it. With `bounds`, it writes only within
+// them, and the shadow draw takes the rest as lit; without, it covers the whole screen and the sky
+// stays lit. Call with resourceMutex held. Returns Bend's dispatch list.
+Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth,
+    std::array<float, 4> lightProjection, const std::optional<TraceBounds>& bounds, ShadowTarget& target, float contrast, float reach,
+    float thickness, const std::array<float, 2>& projection,
+    const std::array<float, 2>& fade)
 {
     auto size = depthSize(depth);
     ensureShadowTarget(target, static_cast<UINT>(size[0]), static_cast<UINT>(size[1]));
@@ -328,7 +420,7 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
     int boundsMin[2]{covered.min[0], covered.min[1]}, boundsMax[2]{covered.max[0], covered.max[1]};
     const auto dispatches = Bend::BuildDispatchList(lightProjection.data(), size.data(), boundsMin, boundsMax, false, WaveSize);
 
-    const SavedComputeState saved(context, {.buffers = 1, .views = 2, .accesses = 1, .samplers = 1});
+    const SavedComputeState saved(context, {.buffers = 1, .views = 1, .accesses = 1, .samplers = 1});
 
     if (!bounds)
     {
@@ -337,8 +429,7 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
     }
 
     context->CSSetShader(traceShader.Get(), nullptr, 0);
-    ID3D11ShaderResourceView* inputs[]{depth, specular};
-    context->CSSetShaderResources(0, static_cast<UINT>(std::size(inputs)), inputs);
+    context->CSSetShaderResources(0, 1, &depth);
     context->CSSetUnorderedAccessViews(0, 1, target.access.GetAddressOf(), nullptr);
     context->CSSetSamplers(0, 1, borderSampler.GetAddressOf());
     context->CSSetConstantBuffers(0, 1, parameterBuffer.GetAddressOf());
@@ -351,9 +442,12 @@ Bend::DispatchList trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView*
         parameters.waveOffset[1] = dispatch.WaveOffset_Shader[1];
         parameters.inverseDepthSize[0] = 1.0f / static_cast<float>(size[0]);
         parameters.inverseDepthSize[1] = 1.0f / static_cast<float>(size[1]);
-        parameters.surfaceThickness = SurfaceThickness;
+        parameters.surfaceThickness = std::clamp(thickness, 0.002f, 0.025f);
         parameters.bilinearThreshold = BilinearThreshold;
-        parameters.shadowContrast = ShadowContrast;
+        parameters.shadowContrast = std::clamp(contrast, 0.5f, 4.0f);
+        parameters.reach = std::clamp(reach, 1.0f, MaxReach);
+        std::memcpy(parameters.projection, projection.data(), sizeof(parameters.projection));
+        std::memcpy(parameters.fade, fade.data(), sizeof(parameters.fade));
         parameters.depthBounds[0] = covered.depthMin;
         parameters.depthBounds[1] = covered.depthMax;
         std::memcpy(parameters.boundsMin, covered.min, sizeof(parameters.boundsMin));
@@ -417,6 +511,13 @@ void writeOptions(ID3D11DeviceContext* context, const Options& options, bool ray
     check(write(context, optionsBuffer.Get(), values), "Writing the sun shadow options");
 }
 
+// Writes the point light replacement's options on `context`; call with resourceMutex held.
+void writeLampOptions(ID3D11DeviceContext* context)
+{
+    const LampOptions values{1, LampSearchTexels, LampHardening, LampSoftness, LampDarkness, {}};
+    check(write(context, lampOptionsBuffer.Get(), values), "Writing the lamp shadow options");
+}
+
 // The game's additive light blend (ONE, ONE) with its light scaled by the target's alpha, which it
 // keeps; null for any other blend. Call with resourceMutex held.
 ID3D11BlendState* shadowedBlend(ID3D11BlendState* game)
@@ -453,9 +554,8 @@ ID3D11BlendState* shadowedBlend(ID3D11BlendState* game)
 // The sun pass, drawn with the replacement shaders.
 bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Sun sun, ID3D11PixelShader* gameShader, const Options& options)
 {
-    ComPtr<ID3D11ShaderResourceView> depth, specular;
+    ComPtr<ID3D11ShaderResourceView> depth;
     context->PSGetShaderResources(DepthSlot, 1, depth.GetAddressOf());
-    context->PSGetShaderResources(SpecularSlot, 1, specular.GetAddressOf());
 
     // The ray-traced shadow at the depth's size, once Direct3D 12 has traced one; until then the
     // game's shadows stay. The rays trace the main view only, not a smaller camera's (a mirror's).
@@ -487,7 +587,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
             const performance::Timed timed(context, performance::Pass::SunTrace);
             const float* direction = &constants->light[LightDirection];
             const auto lightProjection = project(constants->scene.data(), {direction[0], direction[1], direction[2], 0});
-            const auto where = describe(trace(context, depth.Get(), specular.Get(), lightProjection, {}, sunShadow));
+            const auto where = describe(trace(context, depth.Get(), lightProjection, {}, sunShadow, options.contactContrast, options.contactReach, options.contactThickness, viewProjection(*constants), fadeRange(options)));
             noteTraced(context, depth.Get());
             if (!tracedSunOnce)
             {
@@ -531,7 +631,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
 // shadow is traced within the light's reach, and the light's volume drawn once more, both faces and
 // without depth test, to put the shadow in the alpha of both light targets wherever the light can
 // reach. The lighting draw that follows then scales its light by that alpha.
-bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Falloff falloff)
+bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Falloff falloff, const Options& options)
 {
     ComPtr<ID3D11BlendState> gameBlend;
     float blendFactor[4]{};
@@ -542,6 +642,11 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     D3D11_BLEND_DESC blend{};
     gameBlend->GetDesc(&blend);
     const bool marking = blend.RenderTarget[0].RenderTargetWriteMask == 0;
+
+    // The alpha the screen-space shadow puts the light's dimming in is marked on the game's own
+    // marking draw; with that option off, the game draws the marking draw as it always does.
+    if (marking && !options.screenSpaceLights) return false;
+
     const auto constants = passConstants(context);
     if (!constants)
     {
@@ -556,26 +661,59 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     const std::array position{light[LightPosition], light[LightPosition + 1], light[LightPosition + 2]};
     if (!marking)
     {
-        if (!takeMarked(context, position)) return false;
+        // The lighting draw: the game's own, scaled by the alpha the marking draw left when the
+        // screen-space shadow is on, or with the soft shadows' replacement of the point light.
+        ComPtr<ID3D11PixelShader> gameShader;
+        context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
+        ID3D11PixelShader* replacement = options.softLocalShadows ? softReplacement(gameShader.Get()) : nullptr;
+        bool soft = replacement != nullptr;
+        if (const auto* kind = lightOf(gameShader.Get()); kind && firstDraw(gameShader.Get()))
+            log(std::string("Shadows: the game draws a ") + describe(*kind) + (soft ? ", with the soft shadows." : "."));
+        const bool alphaMarked = takeMarked(context, position);
+        if (!soft && !alphaMarked) return false;
 
         std::lock_guard lock(resourceMutex);
-        auto* shadowed = shadowedBlend(gameBlend.Get());
-        if (!shadowed)
+        if (soft && !ensurePipeline()) soft = false;
+
+        ID3D11BlendState* shadowed{};
+        if (alphaMarked)
         {
-            logOnce("Shadows: a light with another blend than (one, one) keeps the game's shadows.");
-            return false;
+            shadowed = shadowedBlend(gameBlend.Get());
+            if (!shadowed)
+            {
+                logOnce("Shadows: a light with another blend than (one, one) keeps the game's shadows.");
+                return false;
+            }
         }
 
-        context->OMSetBlendState(shadowed, blendFactor, sampleMask);
+        ComPtr<ID3D11Buffer> gameOptions;
+        if (shadowed) context->OMSetBlendState(shadowed, blendFactor, sampleMask);
+        if (soft)
+        {
+            context->PSGetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
+            writeLampOptions(context);
+            context->PSSetShader(replacement, nullptr, 0);
+            context->PSSetConstantBuffers(OptionsSlot, 1, lampOptionsBuffer.GetAddressOf());
+        }
+
+        performance::Timed timed(context, soft ? performance::Pass::LampSoftLight : performance::Pass::LampShadows);
         context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
-        context->OMSetBlendState(gameBlend.Get(), blendFactor, sampleMask);
+        timed.end();
+
+        if (soft)
+        {
+            context->PSSetShader(gameShader.Get(), nullptr, 0);
+            context->PSSetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
+            logOnce("Shadows: the lamps draw with soft shadows.");
+        }
+
+        if (shadowed) context->OMSetBlendState(gameBlend.Get(), blendFactor, sampleMask);
 
         return true;
     }
 
-    ComPtr<ID3D11ShaderResourceView> depth, specular;
+    ComPtr<ID3D11ShaderResourceView> depth;
     context->PSGetShaderResources(DepthSlot, 1, depth.GetAddressOf());
-    context->PSGetShaderResources(SpecularSlot, 1, specular.GetAddressOf());
     std::lock_guard lock(resourceMutex);
     if (!ensurePipeline()) return false;
 
@@ -593,7 +731,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     float point[4]{position[0], position[1], position[2], 1};
     if (std::abs(point[2]) < MinLightDepth) point[2] = std::copysign(MinLightDepth, point[2]);
     performance::Timed timed(context, performance::Pass::LampTraces);
-    const auto dispatches = trace(context, depth.Get(), specular.Get(), project(scene, point), bounds, lightShadow);
+    const auto dispatches = trace(context, depth.Get(), project(scene, point), bounds, lightShadow, options.contactContrast, options.contactReach, options.contactThickness, viewProjection(*constants), fadeRange(options));
     timed.end();
     if (dispatches.DispatchCount == 0) return false;
 
@@ -646,7 +784,7 @@ void attach(ID3D11Device* gameDevice) noexcept
     bool wantedOn;
     {
         std::lock_guard lock(optionsMutex);
-        wantedOn = wanted.soft || wanted.screenSpaceSun || wanted.screenSpaceLights || wanted.rayTraced;
+        wantedOn = wanted.soft || wanted.screenSpaceSun || wanted.screenSpaceLights || wanted.softLocalShadows || wanted.rayTraced;
     }
 
     std::lock_guard lock(resourceMutex);
@@ -660,9 +798,11 @@ void detach() noexcept
     traceShader.Reset();
     for (auto& replacement : replacements) replacement.Reset();
     lightShadowShader.Reset();
+    for (auto& light : softLights) light.replacement.Reset();
     borderSampler.Reset();
     parameterBuffer.Reset();
     optionsBuffer.Reset();
+    lampOptionsBuffer.Reset();
     alphaOnly.Reset();
     noDepth.Reset();
     bothFaces.Reset();
@@ -680,6 +820,7 @@ void detach() noexcept
     {
         std::unique_lock lightLock(lightShaderMutex);
         lightShaders.clear();
+        drawnLightShaders.clear();
         lightShaderOwners.clear();
     }
 
@@ -690,6 +831,16 @@ void detach() noexcept
             sunShaders[sun][i] = nullptr;
             shaderOwners[sun][i].Reset();
         }
+
+    for (auto& light : softLights)
+    {
+        std::lock_guard softLock(light.mutex);
+        for (std::size_t i = 0; i < CopiesPerShader; ++i)
+        {
+            light.game[i] = nullptr;
+            light.keep[i].Reset();
+        }
+    }
 }
 
 void configure(const Options& options) noexcept
@@ -699,7 +850,7 @@ void configure(const Options& options) noexcept
         wanted = options;
     }
 
-    if (!options.soft && !options.screenSpaceSun && !options.screenSpaceLights && !options.rayTraced) return;
+    if (!options.soft && !options.screenSpaceSun && !options.screenSpaceLights && !options.softLocalShadows && !options.rayTraced) return;
 
     std::lock_guard lock(resourceMutex);
     ensurePipeline();
@@ -735,10 +886,26 @@ void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcep
     const auto* light = findGameLight(text);
     if (!light) return;
 
+    for (auto& soft : softLights)
+    {
+        if (text != soft.checksum) continue;
+
+        std::lock_guard lock(soft.mutex);
+        for (std::size_t i = 0; i < CopiesPerShader; ++i)
+        {
+            if (soft.game[i].load()) continue;
+
+            soft.keep[i] = shader;
+            soft.game[i] = shader;
+            log(std::string("Identified the light pass (") + soft.name + ") for the soft local shadows.");
+            break;
+        }
+    }
+
     try
     {
         std::unique_lock lock(lightShaderMutex);
-        lightShaders.emplace(shader, light->falloff);
+        lightShaders.emplace(shader, light);
         lightShaderOwners.emplace_back(shader);
     }
     catch (...)
@@ -766,7 +933,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
 
         if (sun != Sun::None) return drawSun(context, call, sun, gameShader.Get(), options);
 
-        return options.screenSpaceLights && drawLocalLight(context, call, *falloff);
+        return (options.screenSpaceLights || options.softLocalShadows) && drawLocalLight(context, call, *falloff, options);
     }
     catch (const std::exception& error)
     {
@@ -798,7 +965,7 @@ void present() noexcept
     frame.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard lock(optionsMutex);
     current = wanted;
-    active = (current.soft || current.screenSpaceSun || current.screenSpaceLights || current.rayTraced) && !pipelineFailed;
+    active = (current.soft || current.screenSpaceSun || current.screenSpaceLights || current.softLocalShadows || current.rayTraced) && !pipelineFailed;
     gi_inputs::keepLightPassConstants(active && (current.screenSpaceSun || current.screenSpaceLights));
 }
 }

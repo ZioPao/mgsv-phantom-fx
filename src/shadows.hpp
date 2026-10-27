@@ -14,6 +14,8 @@
 // - Screen-space shadows add Bend Studio's screen-space shadow, traced through the depth buffer, to
 //   the sun, to every point and spot light, or to both. The sun's is one trace a frame; the lights'
 //   is one trace per light, so it costs far more where many lights are on screen.
+// - Lamp soft shadows filter a point or spot light's own shadow map with the same
+//   contact-hardening soft shadows as the sun's, in a replacement of the game's light shader.
 // - Ray-traced shadows take the sun's shadow from rays through the global illumination's scene
 //   (global_illumination::sunShadow; docs/DEVELOPMENT.md, "Ray-traced shadows"), everywhere the sun
 //   lights. The shadow map keeps only what the rays leave out, the alpha-tested meshes' shadows.
@@ -33,6 +35,11 @@ struct Options
     bool turnPattern{};       // DLSS accumulates frames, so the soft shadows' samples turn each frame
     bool screenSpaceSun{};    // Bend Studio's screen-space shadows on the sun
     bool screenSpaceLights{}; // Bend Studio's screen-space shadows on every point and spot light
+    float contactContrast{1}; // How hard and dark the contact shadows' trace is (Bend's ShadowContrast)
+    float contactReach{80};   // How far the trace marches, in pixels of the render size
+    float contactThickness{0.005f}; // How deep a sample counts as a caster, as a share of its depth to the far plane
+    float contactFade{500};         // Metres: the contact shadows fade out by here
+    bool softLocalShadows{};  // Contact-hardening soft shadows from a point light's own shadow map
     bool rayTraced{};         // The sun's ray-traced shadows: the rays alone shadow the sun
     bool withShadowMap{};     // With rayTraced: the shadow map's as well, near the camera (the darker of the two)
     bool onlyScreenSpace{};   // Diagnostics: the sun is shadowed by the screen-space shadow alone

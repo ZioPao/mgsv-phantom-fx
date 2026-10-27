@@ -164,6 +164,34 @@ void sunSize(Settings& wanted)
             .tip = "The sun's angular diameter, which sets how fast shadows soften with distance. It also sets the sun for the global illumination. 0.53 is the real sun."});
 }
 
+// The shape of the contact shadows, shared by the sun's and the lamps' traces.
+void contactShadowShape(Settings& wanted)
+{
+    if (!wanted.sunScreenSpaceShadows && !wanted.lightScreenSpaceShadows) return;
+
+    fxui::slider("Contact shadow contrast", wanted.contactShadowContrast,
+        {.min = Settings::MinContactShadowContrast, .max = Settings::MaxContactShadowContrast,
+            .standard = Defaults.contactShadowContrast, .format = "%.1f",
+            .tip = "How dark and how hard-edged the contact shadows come out. The trace always finds a distance to a surface, and this decides how "
+                   "much of that distance still counts as shadow: higher darkens more and sharpens the edge, lower leaves a soft grey wash. 1 is the trace "
+                   "itself, the softest it gets; Bend Studio's own value is 4."});
+    fxui::slider("Contact shadow reach", wanted.contactShadowReach,
+        {.min = Settings::MinContactShadowReach, .max = Settings::MaxContactShadowReach,
+            .standard = Defaults.contactShadowReach, .format = "%.0f px",
+            .tip = "How far along the screen the contact shadows are traced, in pixels of the render size. Longer picks up casters further from what "
+                   "they shadow, and costs more; shorter is the cheap end. At 4K the same pixels reach half as far in the world as at 1080p."});
+    fxui::slider("Contact shadow thickness", wanted.contactShadowThickness,
+        {.min = Settings::MinContactShadowThickness, .max = Settings::MaxContactShadowThickness,
+            .standard = Defaults.contactShadowThickness, .format = "%.1f%%", .shown = 100,
+            .tip = "How deep a surface has to be behind the receiver to count as a contact. Bend Studio's 0.5% is thin: the trace only sees something sitting almost exactly at the receiver's depth, which is why its contact shadows are so tight. Raising it widens what counts, and darkens and softens every contact."});
+    fxui::slider("Contact shadow fade", wanted.contactShadowFade,
+        {.min = Settings::MinContactShadowFade, .max = Settings::MaxContactShadowFade, .standard = Defaults.contactShadowFade,
+            .format = "%.0f m",
+            .tip = "How far away the contact shadows reach, in metres. Full strength underfoot, then a straight fade to nothing by this distance, "
+                   "where the shadow map is the better tool. RenoDX fades them the same way; without it they stay as sharp at a hundred metres as at "
+                   "your feet."});
+}
+
 void drawShadows(Settings& wanted)
 {
     const fxui::Page page(Section::Shadows, "Shadows of the sun and of lamps. The ray-traced ones replace the screen-space ones while on.");
@@ -182,20 +210,6 @@ void drawShadows(Settings& wanted)
         fxui::checkbox("Show the game's shadows too, near you", wanted.vanillaShadowsWithRayTracing,
             "The game's own shadow map as well, near you (about 90 m): the darker of its shadow and the rays' shows. Off, the rays alone shadow the sun.");
     }
-
-    if (const fxui::Item item({.id = "softShadows",
-            .tip = "Contact-hardening soft shadows from the sun's shadow map: sharp where an object meets the ground, softer the further the shadow "
-                   "falls from it, as the sun's disc gives. Off keeps the game's evenly sharp shadow edges.",
-            .summary = "Sharp where an object meets the ground, softer the further the shadow falls.",
-            .keywords = "sun size"});
-        item)
-        sunSize(wanted);
-
-    fxui::item({.id = "sunContactShadows",
-        .tip = "Bend Studio's screen-space shadows for the sun: short shadows traced through the depth buffer. They add the contact shadows the "
-               "sun's shadow map misses (feet, rocks, folds of clothing). Cheap: one trace a frame.",
-        .summary = "The short shadows the shadow map misses: feet, rocks, folds of clothing.",
-        .keywords = "screen-space SSS"});
 
     if (const fxui::Item item({.id = "rayTracedLights",
             .tag = "Experimental",
@@ -218,11 +232,36 @@ void drawShadows(Settings& wanted)
                        "about a real 1980s weapon light against the game's night. Only the look: the guards see as before."});
     }
 
+    if (const fxui::Item item({.id = "softShadows",
+            .tip = "Contact-hardening soft shadows from the sun's shadow map: sharp where an object meets the ground, softer the further the shadow "
+                   "falls from it, as the sun's disc gives. Off keeps the game's evenly sharp shadow edges.",
+            .summary = "Sharp where an object meets the ground, softer the further the shadow falls.",
+            .keywords = "sun size"});
+        item)
+        sunSize(wanted);
+
+    fxui::item({.id = "softLocalShadows",
+        .tip = "Contact-hardening soft shadows from each lamp's own shadow map: sharp where the light meets a surface, softer the further the shadow "
+               "falls, as the lamp's size gives. Points and spots, in a rebuilt copy of the game's own shader. Only the lamps the game gives a shadow "
+               "map take it; most of its point lights have none, and keep their light. Off keeps the game's evenly sharp edges.",
+        .summary = "A lamp's shadow softens with distance, as a real bulb's does.",
+        .keywords = "PCSS point spot lamp soft"});
+
+    fxui::subheading("Contact shadows");
+
+    fxui::item({.id = "sunContactShadows",
+        .tip = "Bend Studio's screen-space shadows for the sun: short shadows traced through the depth buffer. They add the contact shadows the "
+               "sun's shadow map misses (feet, rocks, folds of clothing). Cheap: one trace a frame.",
+        .summary = "The short shadows the shadow map misses: feet, rocks, folds of clothing.",
+        .keywords = "screen-space SSS"});
+
     fxui::item({.id = "lampContactShadows",
         .tip = "Bend Studio's screen-space shadows for every lamp, spot light and flashlight, which gives lights that have no shadow of their own "
                "one. Costly: one trace per light, so the frame rate drops where many lights are on screen, as in a base at night.",
         .summary = "Contact shadows for every lamp and flashlight. One trace per light, so it costs more where many lights are on screen.",
         .keywords = "screen-space SSS"});
+
+    contactShadowShape(wanted);
 }
 
 void drawLighting(Settings& wanted)

@@ -33,6 +33,12 @@ struct Settings
     static constexpr float MaxIndirectLightStrength = 3.0f;
     static constexpr float MaxGlobalIlluminationStrength = 3.0f;
     static constexpr float MinSunSize = 0.1f, MaxSunSize = 4.0f, DefaultSunSize = 0.53f;
+    // The contact shadows' shape: how hard and dark the trace is, and how far along the ray it marches,
+    // in pixels of the render size. Both the sun's and the lamps' take them.
+    static constexpr float MinContactShadowContrast = 0.5f, MaxContactShadowContrast = 4.0f, DefaultContactShadowContrast = 1.0f;
+    static constexpr float MinContactShadowReach = 8.0f, MaxContactShadowReach = 120.0f, DefaultContactShadowReach = 80.0f;
+    static constexpr float MinContactShadowThickness = 0.002f, MaxContactShadowThickness = 0.025f, DefaultContactShadowThickness = 0.005f;
+    static constexpr float MinContactShadowFade = 50.0f, MaxContactShadowFade = 700.0f, DefaultContactShadowFade = 500.0f;
     static constexpr float MinFNumber = 0.7f, MaxFNumber = 32.0f, DefaultFNumber = 1.4f;
     static constexpr int DefaultRayQuality = 4;
     static constexpr int DefaultGlobalIlluminationRays = 2;
@@ -64,6 +70,17 @@ struct Settings
     // whatever the mode. Apart because the lights' cost grows with how many are on screen.
     bool sunScreenSpaceShadows{};
     bool lightScreenSpaceShadows{};
+    float contactShadowContrast{DefaultContactShadowContrast};
+    float contactShadowReach{DefaultContactShadowReach};
+    // How deep a sample counts as a caster, as a share of the depth between it and the far plane. Bend's
+    // own 0.5% is thin: a contact has to sit almost exactly at the receiver's depth to register.
+    float contactShadowThickness{DefaultContactShadowThickness};
+    // Where the contact shadows fade out, in metres of view depth: full underfoot, gone past this.
+    float contactShadowFade{DefaultContactShadowFade};
+    // Contact-hardening soft shadows from a point or spot light's own shadow map (shadows.hpp), in
+    // place of the game's four evenly sharp comparisons. Its own option: the shaders it replaces are
+    // the game's.
+    bool softLocalShadows{};
     // The sun's ray-traced shadows through the global illumination's scene (shadows.hpp), whatever
     // the mode; soft shadows and sun contact shadows are off while it is on. Uses the sun size. With
     // vanilla shadows the game's shadow map adds its shadow near the camera: the darker of the two.

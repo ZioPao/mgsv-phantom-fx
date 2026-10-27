@@ -108,6 +108,7 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
     const State sunContact = stateOf(wanted.sunScreenSpaceShadows, held, wanted.rayTracedShadows, shadowsFailed, {});
     const State rayTracedLights = stateOf(wanted.rayTracedLights, held, false, false, lightsProblem);
     const State lampContact = stateOf(wanted.lightScreenSpaceShadows, held, wanted.rayTracedLights, shadowsFailed, {});
+    const State softLocal = stateOf(wanted.softLocalShadows, held, wanted.rayTracedLights, shadowsFailed, {});
     const State global = stateOf(wanted.globalIllumination, held, false, false, rayTracing);
     const State occlusion = stateOf(wanted.ambientOcclusion, held, wanted.globalIllumination, false, occlusionProblem);
     const State indirect = stateOf(wanted.indirectLight, held, wanted.globalIllumination, false, lightProblem);
@@ -184,18 +185,23 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
     add({.id = "rayTracedShadows", .name = "Ray-traced shadows", .section = at(Section::Shadows), .state = rayTracedShadows, .toggle = &wanted.rayTracedShadows,
             .message = messageFor(rayTracedShadows, rayTracing, "Ray-traced shadows are unavailable (see PhantomFX.log).")},
         {{Pass::SunShadowRays, "Shadow rays"}, {Pass::SunShadowDenoiser, "Denoiser"}});
-    add({.id = "softShadows", .name = "Soft shadows", .tech = "PCSS", .section = at(Section::Shadows), .state = softShadows, .toggle = &wanted.softShadows,
-            .replacedBy = "rayTracedShadows", .message = messageFor(softShadows, {}, "Soft shadows are unavailable (see PhantomFX.log).")},
-        {});
-    add({.id = "sunContactShadows", .name = "Sun contact shadows", .section = at(Section::Shadows), .state = sunContact, .toggle = &wanted.sunScreenSpaceShadows,
-            .replacedBy = "rayTracedShadows", .message = messageFor(sunContact, {}, "Contact shadows are unavailable (see PhantomFX.log).")},
-        {{Pass::SunTrace, "Contact shadow trace"}});
     add({.id = "rayTracedLights", .name = "Ray-traced lights", .section = at(Section::Shadows), .state = rayTracedLights, .toggle = &wanted.rayTracedLights,
             .message = messageFor(rayTracedLights, lightsProblem)},
         {{Pass::LightShadowRays, "Shadow rays"}, {Pass::LightShadowFilter, "Shadow filter"}, {Pass::LocalLights, "Lights with their traced shadows"}});
+    add({.id = "softShadows", .name = "Sun soft shadows", .tech = "PCSS", .section = at(Section::Shadows), .state = softShadows, .toggle = &wanted.softShadows,
+            .replacedBy = "rayTracedShadows", .message = messageFor(softShadows, {}, "Soft shadows are unavailable (see PhantomFX.log).")},
+        {});
+    add({.id = "softLocalShadows", .name = "Lamp soft shadows", .tech = "PCSS", .section = at(Section::Shadows), .state = softLocal,
+            .toggle = &wanted.softLocalShadows, .replacedBy = "rayTracedLights",
+            .message = messageFor(softLocal, {}, "Soft local shadows are unavailable (see PhantomFX.log).")},
+        {{Pass::LampSoftLight, "Light draws, with the soft shadow"}});
+    add({.id = "sunContactShadows", .name = "Sun contact shadows", .section = at(Section::Shadows), .state = sunContact, .toggle = &wanted.sunScreenSpaceShadows,
+            .replacedBy = "rayTracedShadows", .message = messageFor(sunContact, {}, "Contact shadows are unavailable (see PhantomFX.log).")},
+        {{Pass::SunTrace, "Contact shadow trace"}});
     add({.id = "lampContactShadows", .name = "Lamp contact shadows", .section = at(Section::Shadows), .state = lampContact, .toggle = &wanted.lightScreenSpaceShadows,
             .replacedBy = "rayTracedLights", .message = messageFor(lampContact, {}, "Contact shadows are unavailable (see PhantomFX.log).")},
         {{Pass::LampTraces, "Traces"}, {Pass::LampShadows, "Shadow draws"}});
+
     add({.id = "globalIllumination", .name = "Global illumination", .tech = "RTGI", .section = at(Section::Lighting), .state = global,
             .toggle = &wanted.globalIllumination, .message = messageFor(global, rayTracing)},
         {{Pass::GiRays, "Rays and the light cache"}, {Pass::GiDenoiser, "Denoiser and render size"},

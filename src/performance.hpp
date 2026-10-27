@@ -34,7 +34,7 @@ namespace phantom_fx::performance
 enum class Pass : std::size_t
 {
     UpscalerInputs, Upscaler, UpscalerOutput,
-    SunTrace, SunLight, LampTraces, LampShadows,
+    SunTrace, SunLight, LampTraces, LampShadows, LampSoftLight,
     OcclusionPrefilter, OcclusionMarch, OcclusionDenoise, OcclusionApply,
     LightPrefilter, LightMarch, LightDenoise, LightUpsample,
     FogPass, SkyTables, FogShadow, FogScattering, FogIntegration, Sky,
