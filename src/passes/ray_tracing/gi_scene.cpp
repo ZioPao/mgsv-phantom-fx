@@ -23,7 +23,8 @@ constexpr std::uint32_t BuildsPerFrame = 128;
 constexpr std::uint64_t BuildTrianglesPerFrame = 300'000;
 }
 
-Scene::Scene(ID3D12Device5* device) : device(device), blasAllocator(BlasPoolBytes)
+Scene::Scene(ID3D12Device5* device, D3D12_CPU_DESCRIPTOR_HANDLE textures, UINT descriptorSize)
+    : device(device), blasAllocator(BlasPoolBytes), textureDescriptors(textures), descriptorSize(descriptorSize)
 {
     geometryPool = createBuffer(device, PoolBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, "Creating the geometry pool");
@@ -58,6 +59,8 @@ Scene::Scene(ID3D12Device5* device) : device(device), blasAllocator(BlasPoolByte
         postbuildReadback[i] = createBuffer(device, std::uint64_t{BuildsPerFrame} * 8, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
             D3D12_RESOURCE_FLAG_NONE, "Creating the compacted sizes' readback");
     }
+
+    for (std::uint32_t textureSlot = 0; textureSlot < GI_MAX_TEXTURES; ++textureSlot) writeTexture(textureSlot, nullptr, DXGI_FORMAT_R8G8B8A8_UNORM, 1);
 }
 
 void Scene::beginFrame(std::uint32_t frameSlot, std::uint64_t completedFence, std::uint64_t frameSignal)
@@ -70,6 +73,12 @@ void Scene::beginFrame(std::uint32_t frameSlot, std::uint64_t completedFence, st
         if (release.pool == Pool::Geometry) poolAllocator.release(release.offset, release.size);
         else if (release.pool == Pool::Structures) blasAllocator.release(release.offset, release.size);
         else if (release.pool == Pool::Rows) rowAllocator.release(release.offset, release.size);
+        return true;
+    });
+    std::erase_if(closedTextures, [&](const ClosedTexture& closed) {
+        if (closed.fenceValue > completedFence) return false;
+
+        freeTextures.push_back(closed.slot);
         return true;
     });
 
@@ -432,15 +441,15 @@ bool Scene::refit(BlasId id)
     return true;
 }
 
-void Scene::setMaterial(BlasId id, std::uint32_t geometry, std::uint32_t flags, std::uint32_t texture, float alphaThreshold)
+void Scene::setMaterial(BlasId id, std::uint32_t geometry, const scene_description::Material& material)
 {
     const auto& blas = structures[id];
     if (!blas.live || geometry >= blas.geometries.size()) return;
 
     auto row = rows[blas.firstGeometry + geometry];
-    row.flags = (row.flags & GI_GEOMETRY_CUT_OUT) | (flags & ~GI_GEOMETRY_CUT_OUT);
-    row.texture = texture;
-    row.alphaThreshold = alphaThreshold;
+    row.flags = (row.flags & GI_GEOMETRY_CUT_OUT) | (material.flags & ~GI_GEOMETRY_CUT_OUT);
+    row.texture = material.texture;
+    row.alphaThreshold = material.alphaThreshold;
     writeRow(blas.firstGeometry + geometry, row);
 }
 
@@ -477,6 +486,25 @@ std::optional<std::uint32_t> Scene::addInstance(BlasId id, const float* transfor
     desc.blas = {static_cast<std::uint32_t>(blasAddress), static_cast<std::uint32_t>(blasAddress >> 32)};
     instances.push_back(desc);
     return static_cast<std::uint32_t>(instances.size() - 1);
+}
+
+std::optional<std::uint32_t> Scene::openTexture(const SceneTexture& texture)
+{
+    if (freeTextures.empty()) return std::nullopt;
+
+    const auto textureSlot = freeTextures.back();
+    auto& opened = textures[textureSlot];
+    check(opened.open(device, texture.texture), "Opening one of the game's textures");
+    freeTextures.pop_back();
+    writeTexture(textureSlot, opened.resource.Get(), texture.viewFormat, texture.mips);
+
+    return textureSlot;
+}
+
+void Scene::closeTexture(std::uint32_t textureSlot)
+{
+    closedTextures.push_back({signalValue, textureSlot, std::move(textures[textureSlot].resource)});
+    textures[textureSlot] = {};
 }
 
 Scene::Stats Scene::stats() const
@@ -520,6 +548,19 @@ void Scene::writeRow(std::uint32_t row, const GIGeometry& geometry)
 {
     rows[row] = geometry;
     dirtyRows.push_back(row);
+}
+
+// A descriptor of the scene's texture range: the texture's levels of detail, or a null view.
+void Scene::writeTexture(std::uint32_t textureSlot, ID3D12Resource* texture, DXGI_FORMAT format, std::uint32_t mips)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+    desc.Format = format;
+    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    desc.Texture2D.MipLevels = mips;
+    auto at = textureDescriptors;
+    at.ptr += std::size_t{textureSlot} * descriptorSize;
+    device->CreateShaderResourceView(texture, &desc, at);
 }
 
 // Room in the slot's upload buffer, aligned for any copy; UploadBytes when there is none.

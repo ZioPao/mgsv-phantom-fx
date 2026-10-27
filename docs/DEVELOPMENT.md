@@ -153,8 +153,10 @@ what draws it, when that is the feature's own.
 | `src/passes/indirect_light_pass.*` | The game's sky light, upscale and resolve: pass recognition, the G-buffer notes, the resolve's white occlusion and diffuse light, the diagnostics views, the ray-traced scene's notes. `indirect_light_pass_shaders.hpp`: the diagnostics views |
 | `src/passes/visibility_bitmask.*` | The visibility bitmask march GTVBAO and SSILVB share: the depth prefilter, the march, the denoiser. `visibility_bitmask_shaders.hpp`: the march (GTVBAO from three-gtvbao, SSILVB's light as SSRT3 gathers it), XeGTAO's noise and denoiser |
 | `src/passes/ray_tracing/ray_tracing.*` | The ray-traced scene's frame on Direct3D 11: the kick, the waits, the shared textures the global illumination and the ray-traced shadows hand back |
-| `src/passes/ray_tracing/gi_renderer.*` | The Direct3D 12 side: the device, the scene's frame, each feature's passes recorded in turn |
-| `src/passes/ray_tracing/gi_scene.*` | The ray-traced scene on Direct3D 12: the geometry pool, bottom-level structures (a geometry per mesh, compacted), the geometry table, the frame's instances and top level (see "Ray-traced scene") |
+| `src/passes/ray_tracing/gi_renderer.*` | The Direct3D 12 side: the device, the scene's frame (the scene contents' update, then the recording), each feature's passes recorded in turn, the probes |
+| `src/passes/ray_tracing/scene_contents.*` | The scene contents: the game's models, their variants, characters, terrain rings and textures the ray-traced scene holds, made as the scene memory has room and let go after a while unplaced; each frame's instances of them; their diagnostics (status, the probes' hits, F10's `models.txt`) (see "Ray-traced scene") |
+| `src/passes/ray_tracing/scene_memory.hpp` | The scene memory: the seam the scene contents reach the GPU through (the pool, structures, texture slots, instances) |
+| `src/passes/ray_tracing/gi_scene.*` | The ray-traced scene on Direct3D 12, the scene memory: the geometry pool, bottom-level structures (a geometry per mesh, compacted), the geometry table, the game's textures' slots, the frame's instances and top level (see "Ray-traced scene") |
 | `src/passes/ray_tracing/engine_scene.*` | The game's loaded models from its visibility managers and object brush, its characters from its model list, their model files read once, its texture manager, the terrain's heightmap inputs (see "Scene objects") |
 | `src/passes/ray_tracing/scene_description.*` | What the ray-traced scene takes of a model file: its FMDL meshes, each with its mesh role from its alpha and shadow bytes and its model source, their base textures and skins; the flags, texture and alpha threshold a role gives its row of the geometry table (see "Ray-traced scene", "Mesh roles") |
 | `src/passes/ray_tracing/engine_brush.*` | The game's object brush: its loaded blocks' vegetation and props, read from their placement records (see "Scene objects") |
@@ -1743,8 +1745,8 @@ illumination runs (both cameras' SSAO passes fill their half-size target, so the
 
 ## Ray-traced scene
 
-What the global illumination and the ray-traced shadows trace (`src/passes/ray_tracing/gi_scene.cpp`, its use in
-`gi_renderer.cpp`), laid out as DXR scenes are. Rebuilt 2026-10-23 from one structure per
+What the global illumination and the ray-traced shadows trace (`src/passes/ray_tracing/gi_scene.cpp`, filled by the scene
+contents in `scene_contents.cpp`), laid out as DXR scenes are. Rebuilt 2026-10-23 from one structure per
 captured draw or model part with every triangle expanded; since stage 5 of that rewrite (the same day)
 it is the game's own scene throughout (see "Draw capture (removed)" below).
 
@@ -1782,9 +1784,9 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   replacement as finer levels stream in. Checked in game against the G-buffer's `t0`: 370 of 377 meshes'
   base textures were the very texture the game drew with; 6 were missing from the manager's streaming
   list (the array is walked since), 1 mesh's shader samples another texture at `t0`. On Direct3D 12 each
-  texture has a descriptor in a range after the frame tables (`t0` on in `space2`, 4096), written when it
-  arrives, a new one for a replacement, the old retired once the GPU is past the frame; a texture no model
-  uses is let go. They stay in the common state: the shaders' reads promote them. The copies are made
+  texture has a slot, a descriptor in a range after the frame tables (`t0` on in `space2`, 4096), written when it
+  arrives, a new one for a replacement, the old one free again once the GPU is past the frame; a texture no
+  model uses is let go. They stay in the common state: the shaders' reads promote them. The copies are made
   before the frame's inputs are signalled to Direct3D 12. Before, the slice copies and the terrain's came
   after the signal, so a terrain ring made again could read the heightmap's copy while Direct3D 11 still
   wrote it: in game the shadow probe showed one pixel's sun ray blocked by the terrain, then by nothing,
@@ -1894,7 +1896,7 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   as it may drop a building's shell. The shadow probe lists every model at a character's place
   with all its meshes: each one's group and state, alpha and shadow bytes, whether it is shown and drawn
   (posed by a draw this frame), and the meshes left out.
-- **Model files read once.** A model the renderer has not placed for 600 frames is let go and its file
+- **Model files read once.** A model the game has not placed for 600 frames is let go and its file
   read again when the game places it again. The 600 frames count from the model's arrival: counted from
   frame 0, a model the frame's lists did not place went as it came, and the walk of the model list
   queued every listed model's file, rigid ones too, before its other tests. In one session that read
