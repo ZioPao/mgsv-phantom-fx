@@ -1,7 +1,8 @@
+#include "core.hpp"
+#include "features/upscaling/upscaler.hpp"
 #include "performance.hpp"
 #include "clock.hpp"
 #include "log.hpp"
-#include "upscaler.hpp"
 
 #include <Windows.h>
 #include <atomic>
@@ -41,7 +42,7 @@ struct Sample
 struct Setting
 {
     std::string removed;
-    upscaler::LeftOut leftOut;
+    LeftOut leftOut;
 };
 
 // Frames the GPU may still be working on, and the one being recorded.
@@ -257,10 +258,10 @@ void average(LONGLONG now, const std::optional<Sample>& sample)
     for (std::size_t i = 0; i < costs.passes.size(); ++i) costs.passes[i] += (sample->passes[i] - costs.passes[i]) * weight;
 }
 
-// The steps from what is on now: each leaves out one more effect, the upscaler last, as the others
-// run at its render size. HDR takes a restart, so it is not measured. Returns what the first step
-// leaves out: nothing.
-std::optional<upscaler::LeftOut> startMeasurement(LONGLONG now)
+// The steps from what is on now: each leaves out one more effect, the lighting effects in Effect's order
+// (effects.hpp), the upscaler last, as the others run at its render size. HDR takes a restart, so it is
+// not measured. Returns what the first step leaves out: nothing.
+std::optional<LeftOut> startMeasurement(LONGLONG now)
 {
     auto& m = measurement;
     m.steps.clear();
@@ -268,46 +269,30 @@ std::optional<upscaler::LeftOut> startMeasurement(LONGLONG now)
     m.step = 0;
     m.timingStart = 0;
 
-    const auto settings = upscaler::currentSettings();
-    const bool lighting = upscaler::enhancementsOn();
-    upscaler::LeftOut leftOut;
+    const auto settings = core::currentSettings();
+    const auto plan = core::effectPlan(settings);
+    LeftOut leftOut;
     m.steps.push_back({"", leftOut});
-    const auto leave = [&](bool on, std::string removed, bool upscaler::LeftOut::*effect)
+    const auto leave = [&](bool& flag, std::string removed)
     {
-        if (!on) return;
-
-        leftOut.*effect = true;
+        flag = true;
         m.steps.push_back({std::move(removed), leftOut});
     };
-    leave(lighting && settings.volumetricFog, "Volumetric fog", &upscaler::LeftOut::volumetricFog);
-    // The ray-traced shadows first: with the global illumination on, its scene stays, so the step
-    // gives the shadows' own cost; alone, it takes the scene with it. They keep soft shadows and sun
-    // contact shadows off, so those stay off with them.
-    const bool rayTraced = lighting && settings.rayTracedShadows;
-    if (rayTraced) leftOut.softShadows = leftOut.sunScreenSpaceShadows = true;
-    leave(rayTraced, "Ray-traced shadows", &upscaler::LeftOut::rayTracedShadows);
-    // The lights' own cost with another use of the scene on; alone, the scene's as well.
-    leave(lighting && settings.rayTracedLights, "Ray-traced lights", &upscaler::LeftOut::rayTracedLights);
-
     // The global illumination in parts: its light passes, then the rest (the scene's build, the wait
-    // for Direct3D 12 and its passes in the game's frame). It keeps SSILVB and GTVBAO
-    // off, so they stay off with it.
-    const bool global = lighting && settings.globalIllumination;
-    leave(global, "Global illumination's light passes", &upscaler::LeftOut::globalLight);
-    if (global)
+    // for Direct3D 12 and its passes in the game's frame).
+    for (const auto effect : AllEffects)
     {
-        leftOut.ambientOcclusion = leftOut.indirectLight = true;
-        leave(global, "Global illumination (the rest)", &upscaler::LeftOut::globalIllumination);
+        if (!plan.runs(effect)) continue;
+
+        const bool global = effect == Effect::GlobalIllumination;
+        if (global) leave(leftOut.globalLight, "Global illumination's light passes");
+        leave(leftOut.effects[effect], global ? "Global illumination (the rest)" : std::string(featureOf(effect).name));
     }
 
-    leave(lighting && settings.indirectLight && !settings.globalIllumination, "SSILVB", &upscaler::LeftOut::indirectLight);
-    leave(lighting && settings.ambientOcclusion && !settings.globalIllumination, "GTVBAO", &upscaler::LeftOut::ambientOcclusion);
-    leave(lighting && settings.lightScreenSpaceShadows, "Lamp contact shadows", &upscaler::LeftOut::lightScreenSpaceShadows);
-    leave(lighting && settings.sunScreenSpaceShadows && !rayTraced, "Sun contact shadows", &upscaler::LeftOut::sunScreenSpaceShadows);
-    leave(lighting && settings.softShadows && !rayTraced, "Soft shadows", &upscaler::LeftOut::softShadows);
-    const bool upscaling = settings.mode != upscaler::Mode::Off;
-    leave(upscaling && settings.sharpness > 0, "Sharpening", &upscaler::LeftOut::sharpening);
-    leave(upscaling, std::string(upscaler::label(settings.upscaler)) + " (FXAA instead)", &upscaler::LeftOut::upscaler);
+    const bool upscaling = settings.upscaling.mode != upscaler::Mode::Off;
+    if (upscaling && settings.upscaling.sharpness > 0) leave(leftOut.sharpening, "Sharpening");
+    if (upscaling) leave(leftOut.upscaler, std::string(upscaler::label(settings.upscaling.upscaler)) + " (FXAA instead)");
+
     if (m.steps.size() < 2)
     {
         log("Nothing to measure: no effect is on.");
@@ -337,7 +322,7 @@ void finishMeasurement()
 
 // One present into the measurement: each step settles, then its GPU frames are timed. Returns what
 // to leave out from now on, when that changes.
-std::optional<upscaler::LeftOut> advanceMeasurement(LONGLONG now, const std::optional<Sample>& sample)
+std::optional<LeftOut> advanceMeasurement(LONGLONG now, const std::optional<Sample>& sample)
 {
     auto& m = measurement;
     if (measurementRequested.exchange(false) && !m.running) return startMeasurement(now);
@@ -366,7 +351,7 @@ std::optional<upscaler::LeftOut> advanceMeasurement(LONGLONG now, const std::opt
 
     finishMeasurement();
 
-    return upscaler::LeftOut{};
+    return LeftOut{};
 }
 
 void publish()
@@ -416,7 +401,7 @@ void detach() noexcept
     if (measurement.running)
     {
         measurement.running = false;
-        upscaler::leaveOut({});
+        core::leaveOut({});
     }
 
     std::lock_guard lock(timerMutex);
@@ -550,7 +535,7 @@ void present() noexcept
         const auto sample = closeAndRead();
         average(now, sample);
         // Not under a lock: the effects' settings take theirs.
-        if (const auto leftOut = advanceMeasurement(now, sample)) upscaler::leaveOut(*leftOut);
+        if (const auto leftOut = advanceMeasurement(now, sample)) core::leaveOut(*leftOut);
 
         const bool wanted = overlay || measurement.running || GetTickCount64() - watchedAt.load() < 1000;
         if (!wanted) averaging = false;

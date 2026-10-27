@@ -15,7 +15,7 @@ struct Outcome
 };
 
 // The supported build with the expected engine code; otherwise nothing runs.
-bool supported() noexcept;
+bool isSupported() noexcept;
 // Runs `code` now: only on the game thread outside the game's own Lua calls, such as at the main
 // loop's frame start. With `expression`, `code` is first tried as an expression and its value
 // returned, as an interactive Lua does. Empty before the game's scripts start.

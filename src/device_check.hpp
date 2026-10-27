@@ -11,5 +11,5 @@ namespace phantom_fx
 std::string passDeviceCheck() noexcept;
 // Whether mgsvtpp.exe is the build the add-on knows (PE TimeDateStamp and SizeOfImage); its engine
 // addresses and render pipeline are only known for that one.
-bool supportedBuild() noexcept;
+bool isSupportedGameBuild() noexcept;
 }

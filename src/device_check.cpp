@@ -19,7 +19,7 @@ constexpr unsigned char Original[]{0x40, 0x53, 0x48, 0x81, 0xEC, 0x60, 0x04, 0x0
 // mov al, 1; ret
 constexpr unsigned char Pass[]{0xB0, 0x01, 0xC3};
 
-bool knownBuild(const std::uint8_t* base)
+bool isKnownGameBuild(const std::uint8_t* base)
 {
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
@@ -28,15 +28,15 @@ bool knownBuild(const std::uint8_t* base)
 }
 }
 
-bool supportedBuild() noexcept
+bool isSupportedGameBuild() noexcept
 {
-    return knownBuild(game_code::image());
+    return isKnownGameBuild(game_code::image());
 }
 
 std::string passDeviceCheck() noexcept
 {
     auto* base = game_code::image();
-    if (!knownBuild(base)) return "Unknown game build; the start-up device check is left alone.";
+    if (!isKnownGameBuild(base)) return "Unknown game build; the start-up device check is left alone.";
 
     auto* check = base + CheckRva;
     if (!std::memcmp(check, Pass, sizeof(Pass))) return "The start-up device check already passes.";

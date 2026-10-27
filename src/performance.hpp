@@ -1,6 +1,6 @@
 #pragma once
 
-#include "upscaler_settings.hpp"
+#include "phantom_fx_settings.hpp"
 
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -39,6 +39,7 @@ enum class Pass : std::size_t
     LightPrefilter, LightMarch, LightDenoise, LightUpsample,
     FogPass, SkyTables, FogShadow, FogScattering, FogIntegration, Sky,
     GiInputs, GiProbeLight, GiCombine, GiWait, LocalLights,
+
     // On Direct3D 12
     RayTracedScene, SunShadowRays, SunShadowDenoiser, LightShadowRays, LightShadowFilter, GiRays, GiDenoiser,
     HdrEncode, HdrDecode, HdrGrade,
@@ -128,7 +129,7 @@ void showOverlay(bool show) noexcept;
 void measure() noexcept;
 // The settings window's budget page, whose presets switch `wanted`, and the costs over the game, drawn
 // every frame.
-void drawBudget(upscaler::Settings& wanted);
+void drawBudget(Settings& wanted);
 void drawOverlay();
 // The costs as plain text, for PhantomFX-performance.txt.
 std::string report(const Status& state);

@@ -198,7 +198,7 @@ State read(std::uint8_t* manager)
 
 bool supported() noexcept
 {
-    static const bool expected = supportedBuild() && game_code::matches(Checked);
+    static const bool expected = isSupportedGameBuild() && game_code::matches(Checked);
 
     return expected;
 }

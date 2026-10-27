@@ -26,7 +26,7 @@ constexpr unsigned char NeverStepped[]{0x90, 0xE9};
 
 std::string makeSmooth() noexcept
 {
-    if (!supportedBuild()) return "Unknown game build; the sun moves in the game's steps.";
+    if (!isSupportedGameBuild()) return "Unknown game build; the sun moves in the game's steps.";
 
     auto* const test = game_code::image() + StepTestRva;
     if (std::memcmp(test, StepTestCode, sizeof(StepTestCode))) return "The sun's update has unexpected code; the sun moves in the game's steps.";

@@ -1,15 +1,19 @@
 // Phantom FX's effects as fxui budget lines (menu_budget.hpp).
 #include "menu_budget.hpp"
 
-#include "atmosphere.hpp"
+#include "core.hpp"
 #include "dev_tools.hpp"
-#include "global_illumination.hpp"
-#include "hdr.hpp"
-#include "indirect_light.hpp"
-#include "local_lights.hpp"
-#include "presenter.hpp"
-#include "shadows.hpp"
-#include "upscaler.hpp"
+#include "features/ambient_occlusion/gtvbao.hpp"
+#include "features/frame_generation/presenter.hpp"
+#include "features/global_illumination/light_combine.hpp"
+#include "features/hdr/hdr.hpp"
+#include "features/indirect_light/ssilvb.hpp"
+#include "features/lamp_contact_shadows/lamp_contact_shadows.hpp"
+#include "features/ray_traced_lights/local_lights.hpp"
+#include "features/sun_contact_shadows/sun_contact_shadows.hpp"
+#include "features/upscaling/upscaler.hpp"
+#include "features/volumetric_fog/atmosphere.hpp"
+#include "passes/sun_light_pass.hpp"
 
 #include <algorithm>
 #include <array>
@@ -44,30 +48,76 @@ struct Timed
     std::string_view name;
 };
 
-// An effect's state from its setting, the F1 switch, what replaces it, and its module.
-State stateOf(bool on, bool held, bool replaced, bool failed, std::string_view problem)
+// A lighting effect's budget line, beside what its feature says (features/): its timed passes, and
+// how it is doing while the plan runs it.
+struct EffectLine
 {
-    if (!on) return State::Off;
-    if (held) return State::Held;
-    if (replaced) return State::Replaced;
-    if (failed) return State::Unavailable;
-    if (!problem.empty()) return State::NotRunning;
+    Effect effect;
+    std::initializer_list<Timed> passes;
+    Health (*health)();
+};
 
-    return State::Working;
+// In the budget's order. Not constexpr: MSVC leaves a constexpr table's initializer lists empty at run
+// time.
+const EffectLine EffectLines[]{
+    {.effect = Effect::RayTracedShadows, .passes = {{Pass::SunShadowRays, "Shadow rays"}, {Pass::SunShadowDenoiser, "Denoiser"}},
+        .health = sun_light_pass::rayTracedShadowHealth},
+    {.effect = Effect::SoftShadows, .health = sun_light_pass::softShadowHealth},
+    {.effect = Effect::SunContactShadows, .passes = {{Pass::SunTrace, "Contact shadow trace"}}, .health = sun_contact_shadows::health},
+    {.effect = Effect::RayTracedLights, .passes = {{Pass::LightShadowRays, "Shadow rays"}, {Pass::LightShadowFilter, "Shadow filter"}, {Pass::LocalLights, "Lights with their traced shadows"}},
+        .health = local_lights::health},
+    {.effect = Effect::LampContactShadows, .passes = {{Pass::LampTraces, "Traces"}, {Pass::LampShadows, "Shadow draws"}}, .health = lamp_contact_shadows::health},
+    {.effect = Effect::GlobalIllumination, .passes = {{Pass::GiRays, "Rays and the light cache"}, {Pass::GiDenoiser, "Denoiser and render size"},
+            {Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}},
+        .health = light_combine::health},
+    {.effect = Effect::AmbientOcclusion, .passes = {{Pass::OcclusionPrefilter, "Depth prefilter"}, {Pass::OcclusionMarch, "March"}, {Pass::OcclusionDenoise, "Denoise"},
+            {Pass::OcclusionApply, "Applying to the indirect light"}},
+        .health = gtvbao::health},
+    {.effect = Effect::IndirectLight, .passes = {{Pass::LightPrefilter, "Depth prefilter"}, {Pass::LightMarch, "March (half size)"}, {Pass::LightDenoise, "Denoise"},
+            {Pass::LightUpsample, "Upscaling to the render size"}},
+        .health = ssilvb::health},
+    {.effect = Effect::VolumetricFog, .passes = {{Pass::FogPass, "The game's fog pass, larger"}, {Pass::SkyTables, "Sky tables (physical look)"}, {Pass::FogShadow, "Sun shadow in the fog"},
+            {Pass::FogScattering, "Scattering"}, {Pass::FogIntegration, "Integration"}, {Pass::Sky, "Physical sky"}},
+        .health = atmosphere::health},
+};
+static_assert(std::size(EffectLines) == static_cast<std::size_t>(Effect::Count));
+
+std::string_view lineOf(Effect effect)
+{
+    return featureOf(effect).menuId;
 }
 
-std::string messageFor(State state, std::string_view problem, std::string_view unavailable = {})
+// The line of the effect that replaces `effect`, if any.
+std::string_view replacerLineOf(Effect effect)
 {
-    if (state == State::NotRunning) return std::string(problem);
-    if (state == State::Unavailable) return std::string(unavailable);
-
-    return {};
+    const auto replacer = featureOf(effect).replacedBy;
+    return replacer ? lineOf(*replacer) : std::string_view{};
 }
 
-using Effect = std::pair<std::string_view, State>; // A line's id and state
+// A lighting effect's line state, and its message.
+struct Report
+{
+    State state;
+    std::string message;
+};
+
+// From the plan, then, while it runs, from its health.
+Report reportOf(EffectState planned, Health health)
+{
+    if (planned == EffectState::Off) return {State::Off};
+    if (planned == EffectState::Unsupported) return {State::Unavailable, "This game version is not supported, so it stays off."};
+    if (planned == EffectState::Held) return {State::Held};
+    if (planned == EffectState::Replaced) return {State::Replaced};
+    if (health.kind == Health::Kind::Unavailable) return {State::Unavailable, std::move(health.reason)};
+    if (health.kind == Health::Kind::Waiting) return {State::NotRunning, std::move(health.reason)};
+
+    return {State::Working};
+}
+
+using LineState = std::pair<std::string_view, State>; // A line's id and state
 
 // A pass several effects share counts under the first of them that works, else the first that is on.
-std::string_view owner(std::span<const Effect> effects)
+std::string_view owner(std::span<const LineState> effects)
 {
     for (const auto& [id, state] : effects)
         if (state == State::Working) return id;
@@ -88,39 +138,28 @@ std::span<const fxui::Section> sections()
     return std::span(all).first(DevTools ? all.size() : all.size() - 1);
 }
 
-fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
+fxui::Budget budget(Settings& wanted, const performance::Costs& costs)
 {
-    const bool held = !upscaler::enhancementsOn();
-    const bool shadowsFailed = shadows::failed();
-    const auto rayTracing = global_illumination::problem();
-    const auto lightsProblem = local_lights::problem();
-    const auto occlusionProblem = indirect_light::occlusionProblem();
-    const auto lightProblem = indirect_light::lightProblem();
-    const auto fogProblem = atmosphere::problem();
-
     const auto status = upscaler::status();
-    const State upscaling = wanted.mode == upscaler::Mode::Off ? State::Off
+    const State upscaling = wanted.upscaling.mode == upscaler::Mode::Off ? State::Off
         : !status.supportedBuild || status.failed                ? State::Unavailable
         : status.running                                          ? State::Working
                                                                   : State::NotRunning;
-    const State rayTracedShadows = stateOf(wanted.rayTracedShadows, held, false, shadowsFailed, rayTracing);
-    const State softShadows = stateOf(wanted.softShadows, held, wanted.rayTracedShadows, shadowsFailed, {});
-    const State sunContact = stateOf(wanted.sunScreenSpaceShadows, held, wanted.rayTracedShadows, shadowsFailed, {});
-    const State rayTracedLights = stateOf(wanted.rayTracedLights, held, false, false, lightsProblem);
-    const State lampContact = stateOf(wanted.lightScreenSpaceShadows, held, wanted.rayTracedLights, shadowsFailed, {});
-    const State global = stateOf(wanted.globalIllumination, held, false, false, rayTracing);
-    const State occlusion = stateOf(wanted.ambientOcclusion, held, wanted.globalIllumination, false, occlusionProblem);
-    const State indirect = stateOf(wanted.indirectLight, held, wanted.globalIllumination, false, lightProblem);
-    const State fog = stateOf(wanted.volumetricFog, held, false, false, fogProblem);
+
+    const auto plan = core::effectPlan(wanted);
+    ByEffect<Report> reports;
+    for (const auto& line : EffectLines) reports[line.effect] = reportOf(plan[line.effect], line.health());
+
+    const auto lineState = [&](Effect effect) { return LineState{lineOf(effect), reports[effect].state}; };
 
     State output = State::Working;
     std::string outputMessage;
-    if (wanted.hdr != hdr::active())
+    if (wanted.hdr.on != hdr::active())
     {
         output = State::Restart;
-        outputMessage = wanted.hdr ? "Restart the game to turn HDR on." : "Restart the game to turn HDR off.";
+        outputMessage = wanted.hdr.on ? "Restart the game to turn HDR on." : "Restart the game to turn HDR off.";
     }
-    else if (!wanted.hdr) output = State::Off;
+    else if (!wanted.hdr.on) output = State::Off;
     else if (hdr::output() == hdr::Output::Unavailable)
     {
         output = State::Unavailable;
@@ -135,25 +174,27 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
     const auto timed = [&](Pass pass) { return costs.passes[static_cast<std::size_t>(pass)]; };
 
     // The replacement sun light pass runs for every sun shadow.
-    const Effect sunShadows[]{{"rayTracedShadows", rayTracedShadows}, {"softShadows", softShadows}, {"sunContactShadows", sunContact}};
+    const LineState sunShadows[]{lineState(Effect::RayTracedShadows), lineState(Effect::SoftShadows), lineState(Effect::SunContactShadows)};
     const auto sunLight = owner(sunShadows);
 
     // Each ray-traced effect has its own rays on Direct3D 12. What they share, the scene and handing the
     // frame over to Direct3D 12 and back, splits evenly between those working. Direct3D 11 waits while
     // Direct3D 12 works, so its inputs and wait, less all the Direct3D 12 passes, are the hand-over.
-    const Effect tracers[]{{"globalIllumination", global}, {"rayTracedShadows", rayTracedShadows}, {"rayTracedLights", rayTracedLights}};
+    std::array<LineState, RayTracedEffects.size()> tracers;
+    std::ranges::transform(RayTracedEffects, tracers.begin(), lineState);
+
     float traced{};
     for (const auto pass : {Pass::RayTracedScene, Pass::SunShadowRays, Pass::SunShadowDenoiser, Pass::LightShadowRays, Pass::LightShadowFilter, Pass::GiRays,
              Pass::GiDenoiser})
         traced += timed(pass);
 
     const float handOver = std::max(0.0f, timed(Pass::GiInputs) + timed(Pass::GiWait) - traced);
-    const auto working = std::ranges::count(tracers, State::Working, &Effect::second);
+    const auto working = std::ranges::count(tracers, State::Working, &LineState::second);
     const auto rays = owner(tracers);
     // How much of what the ray tracing shares a line carries: an even share while any of them works,
     // else all of it on the first that is on.
     const auto shareOf = [&](std::string_view id, State state) {
-        if (std::ranges::find(tracers, id, &Effect::first) == std::ranges::end(tracers)) return 0.0f;
+        if (std::ranges::find(tracers, id, &LineState::first) == std::ranges::end(tracers)) return 0.0f;
         if (working) return state == State::Working ? 1.0f / static_cast<float>(working) : 0.0f;
 
         return id == rays ? 1.0f : 0.0f;
@@ -179,40 +220,23 @@ fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs)
         result.lines.push_back(std::move(line));
     };
 
-    add({.id = "upscaler", .name = "Upscaler", .tech = upscaler::label(wanted.upscaler), .section = at(Section::Upscaling), .state = upscaling},
+    const auto upscalerFeature = infoOf<Upscaling>();
+    add({.id = upscalerFeature.menuId, .name = upscalerFeature.name, .tech = upscaler::label(wanted.upscaling.upscaler), .section = at(upscalerFeature.section),
+            .state = upscaling},
         {{Pass::UpscalerInputs, "Motion vectors and inputs"}, {Pass::Upscaler, "DLSS or FSR"}, {Pass::UpscalerOutput, "Sharpening and output"}});
-    add({.id = "rayTracedShadows", .name = "Ray-traced shadows", .section = at(Section::Shadows), .state = rayTracedShadows, .toggle = &wanted.rayTracedShadows,
-            .message = messageFor(rayTracedShadows, rayTracing, "Ray-traced shadows are unavailable (see PhantomFX.log).")},
-        {{Pass::SunShadowRays, "Shadow rays"}, {Pass::SunShadowDenoiser, "Denoiser"}});
-    add({.id = "softShadows", .name = "Soft shadows", .tech = "PCSS", .section = at(Section::Shadows), .state = softShadows, .toggle = &wanted.softShadows,
-            .replacedBy = "rayTracedShadows", .message = messageFor(softShadows, {}, "Soft shadows are unavailable (see PhantomFX.log).")},
-        {});
-    add({.id = "sunContactShadows", .name = "Sun contact shadows", .section = at(Section::Shadows), .state = sunContact, .toggle = &wanted.sunScreenSpaceShadows,
-            .replacedBy = "rayTracedShadows", .message = messageFor(sunContact, {}, "Contact shadows are unavailable (see PhantomFX.log).")},
-        {{Pass::SunTrace, "Contact shadow trace"}});
-    add({.id = "rayTracedLights", .name = "Ray-traced lights", .section = at(Section::Shadows), .state = rayTracedLights, .toggle = &wanted.rayTracedLights,
-            .message = messageFor(rayTracedLights, lightsProblem)},
-        {{Pass::LightShadowRays, "Shadow rays"}, {Pass::LightShadowFilter, "Shadow filter"}, {Pass::LocalLights, "Lights with their traced shadows"}});
-    add({.id = "lampContactShadows", .name = "Lamp contact shadows", .section = at(Section::Shadows), .state = lampContact, .toggle = &wanted.lightScreenSpaceShadows,
-            .replacedBy = "rayTracedLights", .message = messageFor(lampContact, {}, "Contact shadows are unavailable (see PhantomFX.log).")},
-        {{Pass::LampTraces, "Traces"}, {Pass::LampShadows, "Shadow draws"}});
-    add({.id = "globalIllumination", .name = "Global illumination", .tech = "RTGI", .section = at(Section::Lighting), .state = global,
-            .toggle = &wanted.globalIllumination, .message = messageFor(global, rayTracing)},
-        {{Pass::GiRays, "Rays and the light cache"}, {Pass::GiDenoiser, "Denoiser and render size"},
-            {Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}});
-    add({.id = "ambientOcclusion", .name = "Ambient occlusion", .tech = "GTVBAO", .section = at(Section::Lighting), .state = occlusion,
-            .toggle = &wanted.ambientOcclusion, .replacedBy = "globalIllumination", .message = messageFor(occlusion, occlusionProblem)},
-        {{Pass::OcclusionPrefilter, "Depth prefilter"}, {Pass::OcclusionMarch, "March"}, {Pass::OcclusionDenoise, "Denoise"},
-            {Pass::OcclusionApply, "Applying to the indirect light"}});
-    add({.id = "indirectLight", .name = "Indirect lighting", .tech = "SSILVB", .section = at(Section::Lighting), .state = indirect,
-            .toggle = &wanted.indirectLight, .replacedBy = "globalIllumination", .message = messageFor(indirect, lightProblem)},
-        {{Pass::LightPrefilter, "Depth prefilter"}, {Pass::LightMarch, "March (half size)"}, {Pass::LightDenoise, "Denoise"},
-            {Pass::LightUpsample, "Upscaling to the render size"}});
-    add({.id = "volumetricFog", .name = "Volumetric fog", .section = at(Section::Atmosphere), .state = fog, .toggle = &wanted.volumetricFog,
-            .message = messageFor(fog, fogProblem)},
-        {{Pass::FogPass, "The game's fog pass, larger"}, {Pass::SkyTables, "Sky tables (physical look)"}, {Pass::FogShadow, "Sun shadow in the fog"},
-            {Pass::FogScattering, "Scattering"}, {Pass::FogIntegration, "Integration"}, {Pass::Sky, "Physical sky"}});
-    add({.id = "hdr", .name = "HDR output", .tech = "HDR10", .section = at(Section::Display), .state = output, .toggle = &wanted.hdr, .message = outputMessage},
+
+    for (const auto& line : EffectLines)
+    {
+        const auto& feature = featureOf(line.effect);
+        const auto& [state, message] = reports[line.effect];
+        add({.id = feature.menuId, .name = feature.name, .tech = feature.tech ? feature.tech : "", .section = at(feature.section), .state = state,
+                .toggle = &switchOf(wanted, line.effect), .replacedBy = replacerLineOf(line.effect), .message = message},
+            line.passes);
+    }
+
+    const auto hdrFeature = infoOf<Hdr>();
+    add({.id = hdrFeature.menuId, .name = hdrFeature.name, .tech = hdrFeature.tech, .section = at(hdrFeature.section), .state = output,
+            .toggle = &wanted.hdr.on, .message = outputMessage},
         {{Pass::HdrEncode, "Encoding the scene"}, {Pass::HdrDecode, "Decoding copies"}, {Pass::HdrGrade, "Grading"}});
 
     return result;
