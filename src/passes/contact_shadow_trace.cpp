@@ -1,10 +1,10 @@
 #include "passes/contact_shadow_trace.hpp"
 
+#include "constant_capture.hpp"
 #include "frame_latch.hpp"
 #include "game_lights.hpp"
 #include "log.hpp"
 #include "passes/contact_shadow_trace_shaders.hpp"
-#include "passes/ray_tracing/gi_inputs.hpp"
 
 #include <bend_sss/bend_sss_cpu.h>
 #include <wrl/client.h>
@@ -139,7 +139,7 @@ bool failed() noexcept
 void tracesThisFrame(Tracer tracer, bool traces) noexcept
 {
     (tracer == Tracer::Sun ? sunTraces : lampsTrace) = traces;
-    gi_inputs::keepLightPassConstants(sunTraces || lampsTrace);
+    constant_capture::keepLightPasses(sunTraces || lampsTrace);
 }
 
 std::array<float, 4> project(const SceneConstants& scene, const float (&light)[4])

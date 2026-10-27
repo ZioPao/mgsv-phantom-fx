@@ -1,11 +1,11 @@
 #include "features/lamp_contact_shadows/lamp_contact_shadows.hpp"
 
+#include "constant_capture.hpp"
 #include "d3d11_helpers.hpp"
 #include "features/lamp_contact_shadows/lamp_contact_shadows_shaders.hpp"
 #include "game_lights.hpp"
 #include "log.hpp"
 #include "passes/contact_shadow_trace.hpp"
-#include "passes/ray_tracing/gi_inputs.hpp"
 #include "performance.hpp"
 
 #include <wrl/client.h>
@@ -198,8 +198,8 @@ Health health()
 // alpha of both light targets wherever the light can reach.
 bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Falloff falloff, const BoundBlend& gameBlend)
 {
-    const auto scene = gi_inputs::pixelShaderReads<game_constants::SceneConstants>(context);
-    const auto light = gi_inputs::pixelShaderReads<game_constants::LampLightConstants>(context);
+    const auto scene = constant_capture::pixelShaderReads<game_constants::SceneConstants>(context);
+    const auto light = constant_capture::pixelShaderReads<game_constants::LampLightConstants>(context);
     if (!scene || !light)
     {
         logOnce("Shadows: a light without its constants keeps the game's shadows.");
@@ -277,7 +277,7 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
 
 ID3D11BlendState* takeShadowedBlend(ID3D11DeviceContext* context, ID3D11BlendState* gameBlend)
 {
-    const auto light = gi_inputs::pixelShaderReads<game_constants::LampLightConstants>(context);
+    const auto light = constant_capture::pixelShaderReads<game_constants::LampLightConstants>(context);
     if (!light || !takeMarked(context, positionOf(*light))) return nullptr;
 
     std::lock_guard lock(resourceMutex);

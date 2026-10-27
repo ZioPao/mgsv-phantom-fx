@@ -1,11 +1,11 @@
 #include "features/ray_traced_lights/local_lights.hpp"
 
 #include "camera.hpp"
+#include "constant_capture.hpp"
 #include "d3d11_helpers.hpp"
 #include "frame_log.hpp"
 #include "game_lights.hpp"
 #include "log.hpp"
-#include "passes/ray_tracing/gi_inputs.hpp"
 #include "passes/ray_tracing/ray_tracing.hpp"
 #include "passes/ray_tracing/shaders/gi_shared.h"
 #include "performance.hpp"
@@ -385,9 +385,9 @@ std::optional<Light> noteOf(ID3D11DeviceContext* context, const GameLight* game)
 {
     std::array<ID3D11Buffer*, 3> constants{}; // b2 to b4
     context->PSGetConstantBuffers(SceneConstants::Slot, static_cast<UINT>(constants.size()), constants.data());
-    const auto scene = gi_inputs::written<SceneConstants>(constants[0]);
-    const auto light = gi_inputs::written<LampLightConstants>(constants[1]);
-    const auto material = gi_inputs::written<LampMaterialConstants>(constants[2]);
+    const auto scene = constant_capture::written<SceneConstants>(constants[0]);
+    const auto light = constant_capture::written<LampLightConstants>(constants[1]);
+    const auto material = constant_capture::written<LampMaterialConstants>(constants[2]);
     for (auto* buffer : constants)
         if (buffer) buffer->Release();
     if (!scene || !light || !material) return std::nullopt;
@@ -430,10 +430,7 @@ bool isBeam(ID3D11DeviceContext* context, const GameLight& game)
 {
     if (!game.shadowMap || game.shape != Shape::Spot) return false;
 
-    ID3D11Buffer* buffer{};
-    context->PSGetConstantBuffers(LampLightConstants::Slot, 1, &buffer);
-    const auto light = gi_inputs::written<LampLightConstants>(buffer);
-    if (buffer) buffer->Release();
+    const auto light = constant_capture::pixelShaderReads<LampLightConstants>(context);
 
     return light && light->penumbraScale >= BeamEdge;
 }

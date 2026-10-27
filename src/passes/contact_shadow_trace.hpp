@@ -34,7 +34,7 @@ struct Traced
     int dispatches;
 };
 
-// Who traces this frame, so the light passes' constants are kept for them (gi_inputs.hpp).
+// Who traces this frame, so the light passes' constants are kept for them (constant_capture.hpp).
 enum class Tracer : std::uint8_t { Sun, Lamps };
 
 void attach(ID3D11Device* device) noexcept;

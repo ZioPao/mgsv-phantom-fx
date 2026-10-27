@@ -1,12 +1,12 @@
 #include "passes/sun_light_pass.hpp"
 
+#include "constant_capture.hpp"
 #include "d3d11_helpers.hpp"
 #include "features/upscaling/upscaler.hpp"
 #include "features/sun_contact_shadows/sun_contact_shadows.hpp"
 #include "frame_latch.hpp"
 #include "log.hpp"
 #include "passes/contact_shadow_trace.hpp"
-#include "passes/ray_tracing/gi_inputs.hpp"
 #include "passes/ray_tracing/ray_tracing.hpp"
 #include "passes/sun_light_pass_shaders.hpp"
 #include "performance.hpp"
@@ -164,8 +164,8 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
     // Beyond the shadow range there is no shadow map to soften.
     if (!composition.contactShadows && !(composition.softShadows && shadowMapped(sun)) && !rayTraced) return false;
 
-    const auto scene = gi_inputs::pixelShaderReads<game_constants::SceneConstants>(context);
-    const auto light = gi_inputs::pixelShaderReads<game_constants::SunLightConstants>(context);
+    const auto scene = constant_capture::pixelShaderReads<game_constants::SceneConstants>(context);
+    const auto light = constant_capture::pixelShaderReads<game_constants::SunLightConstants>(context);
 
     std::lock_guard lock(resourceMutex);
     if (!ensurePipeline()) return false;

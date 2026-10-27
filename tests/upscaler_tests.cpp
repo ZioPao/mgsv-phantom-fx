@@ -1,4 +1,5 @@
 #include "camera.hpp"
+#include "constant_capture.hpp"
 #include "features/global_illumination/gi_lighting.hpp"
 #include "frame_latch.hpp"
 #include "game_constants.hpp"
@@ -19,6 +20,8 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace
 {
@@ -643,6 +646,111 @@ void outputSaturation()
 
     expect(lastBlocks.size() == 2, "The shaders end in both forms of the checksum's last block.");
 }
+
+Microsoft::WRL::ComPtr<ID3D11Device> warpDevice()
+{
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    expect(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, device.GetAddressOf(), nullptr,
+               nullptr)),
+        "Create a WARP device.");
+
+    return device;
+}
+
+// The constant capture keeps writes by buffer address, so the buffers live until the tests end: a new
+// buffer at a released one's address would read the old one's last write.
+std::vector<Microsoft::WRL::ComPtr<ID3D11Buffer>> captureBuffers;
+
+ID3D11Buffer* constantBuffer(ID3D11Device* device, UINT size)
+{
+    const D3D11_BUFFER_DESC desc{size, D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE};
+    Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
+    expect(SUCCEEDED(device->CreateBuffer(&desc, nullptr, buffer.GetAddressOf())), "Create a constant buffer.");
+    captureBuffers.push_back(buffer);
+
+    return buffer.Get();
+}
+
+// What the game's Map and Unmap of `buffer` show the capture.
+template<class C> void gameWrites(ID3D11Buffer* buffer, C constants)
+{
+    constant_capture::bufferMapped(buffer, &constants);
+    constant_capture::bufferUnmapped(buffer);
+}
+
+// Each of the game's threads records its own command list, whose draws read what that thread wrote.
+void writeIsReadOnItsOwnThreadOnly()
+{
+    const auto device = warpDevice();
+    auto* buffer = constantBuffer(device.Get(), sizeof(game_constants::SceneConstants));
+    constant_capture::keepLightPasses(true);
+    gameWrites(buffer, DumpedMainView);
+    const auto read = constant_capture::written<game_constants::SceneConstants>(buffer);
+    expect(read && std::memcmp(&*read, &DumpedMainView, sizeof(DumpedMainView)) == 0, "A thread reads what it wrote.");
+
+    bool readElsewhere = true;
+    std::thread([&] { readElsewhere = constant_capture::written<game_constants::SceneConstants>(buffer).has_value(); }).join();
+    expect(!readElsewhere, "Another thread reads nothing of it.");
+    constant_capture::keepLightPasses(false);
+}
+
+void lightPassesKeepOnlySceneAndLight()
+{
+    const auto device = warpDevice();
+    auto* scene = constantBuffer(device.Get(), sizeof(game_constants::SceneConstants));
+    auto* light = constantBuffer(device.Get(), sizeof(game_constants::LampLightConstants));
+    auto* object = constantBuffer(device.Get(), sizeof(game_constants::ObjectConstants));
+    constant_capture::keepLightPasses(true);
+    gameWrites(scene, DumpedMainView);
+    gameWrites(light, game_constants::LampLightConstants{.position = {0, 2, 5}});
+    gameWrites(object, game_constants::ObjectConstants{});
+    expect(constant_capture::written<game_constants::SceneConstants>(scene) && constant_capture::written<game_constants::LampLightConstants>(light)
+            && !constant_capture::written<game_constants::ObjectConstants>(object),
+        "For the contact shadows, only the scene and light constants are kept.");
+
+    constant_capture::keepLightPasses(false);
+    auto* later = constantBuffer(device.Get(), sizeof(game_constants::SceneConstants));
+    gameWrites(later, DumpedMainView);
+    expect(!constant_capture::written<game_constants::SceneConstants>(later), "Nothing is kept while nothing reads it.");
+}
+
+// The ray tracing traces from the main camera's scene constants as the upscaler jittered them.
+void mainCameraWriteNotedOnlyWhileAllKept()
+{
+    const auto device = warpDevice();
+    auto* buffer = constantBuffer(device.Get(), sizeof(game_constants::SceneConstants));
+    constant_capture::keepLightPasses(true);
+    gameWrites(buffer, DumpedMainView);
+    expect(!constant_capture::mainCameraWrite(buffer), "The main camera is noted only while all is kept.");
+
+    constant_capture::keepAll(true);
+    auto jittered = DumpedMainView;
+    camera::applyJitter(jittered, camera::jitterNdc({0.25f, -0.375f}, 2560, 1440));
+    gameWrites(buffer, jittered);
+    const auto* noted = constant_capture::mainCameraWrite(buffer);
+    expect(noted && noted->cameraCenterOffset[0] == jittered.cameraCenterOffset[0], "The main camera's write is noted as written, jittered.");
+
+    auto shadow = DumpedMainView;
+    shadow.projection[3][2] = 0;
+    shadow.projection[3][3] = 1;
+    gameWrites(buffer, shadow);
+    expect(!constant_capture::mainCameraWrite(buffer), "Another view's write is not the main camera's.");
+    constant_capture::keepAll(false);
+    constant_capture::keepLightPasses(false);
+}
+
+// The ray-traced lights and the global illumination's sky and sun once read a write of any size, and
+// with it another buffer's values.
+void writeOfAnotherSizeReadsNothing()
+{
+    const auto device = warpDevice();
+    auto* buffer = constantBuffer(device.Get(), sizeof(game_constants::SceneConstants));
+    constant_capture::keepLightPasses(true);
+    gameWrites(buffer, DumpedMainView);
+    expect(!constant_capture::written<game_constants::SunLightConstants>(buffer) && !constant_capture::writtenTo<game_constants::ProbeConstants>(buffer),
+        "A read of another size than the write reads nothing.");
+    constant_capture::keepLightPasses(false);
+}
 }
 
 void globalIlluminationSettingsPersist(const fs::path& root)
@@ -738,6 +846,10 @@ int main()
         hdrSettingsPersist(root);
         motionBlurSettingsPersist(root);
         outputSaturation();
+        writeIsReadOnItsOwnThreadOnly();
+        lightPassesKeepOnlySceneAndLight();
+        mainCameraWriteNotedOnlyWhileAllKept();
+        writeOfAnotherSizeReadsNothing();
         globalIlluminationSettingsPersist(root);
         rangesComeBack();
         skyLightMatchesTheGame();

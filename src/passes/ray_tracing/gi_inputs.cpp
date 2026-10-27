@@ -1,8 +1,8 @@
 // The ray tracing's inputs from the game's draws; gi_inputs.hpp describes them.
 #include "passes/ray_tracing/gi_inputs.hpp"
 
-#include "camera.hpp"
 #include "clock.hpp"
+#include "constant_capture.hpp"
 #include "game_loop.hpp"
 #include "log.hpp"
 #include "passes/ray_tracing/engine_scene.hpp"
@@ -38,13 +38,10 @@ enum class Kind : std::uint8_t
     Terrain,
 };
 
-// The constant buffers whose contents are kept: scene (b2), light (b3) and, for the ray tracing, material
-// (b4), object (b5), bones (b6) and probes (b7). The bones are the largest.
-constexpr UINT LargestConstants = sizeof(BonesConstants) / 4;
 // The skinned meshes noted between kicks at most.
 constexpr std::size_t MaxDrawnBones = 2048;
 
-std::atomic<bool> active{}, lightPassKept{};
+std::atomic<bool> active{};
 
 // Known vertex shaders, by the object the game binds. Holding them keeps their addresses from being reused.
 std::shared_mutex shaderMutex;
@@ -55,27 +52,13 @@ std::vector<ComPtr<IUnknown>> shaderOwners;
 thread_local ID3D11DeviceContext* boundContext{};
 thread_local Kind boundKind{};
 
-// What the thread last wrote to each kept constant buffer, and its size in bytes; for scene constants,
-// whether they are the main camera's, worked out once a write while active.
-struct Written
-{
-    std::array<float, LargestConstants> values{};
-    UINT size{};
-    bool mainCamera{};
-};
-
-thread_local ID3D11Resource* mappedBuffer{};
-thread_local void* mappedData{};
-thread_local UINT mappedSize{};
-thread_local std::unordered_map<ID3D11Resource*, Written> contents;
-
 // The camera by deferred context while recorded, by command list once finished, and that of the lists
 // executed since the last kick.
 std::mutex recordMutex;
 std::unordered_map<std::uint64_t, Camera> pending;
 std::optional<Camera> executed;
 
-// Diagnostics: the hooks' time in performance counter ticks, and the draws, since takeWork.
+// Diagnostics: the draw hook's time in performance counter ticks, and the draws, since takeWork.
 std::atomic<std::int64_t> hookTicks{};
 std::atomic<std::uint64_t> workDraws{};
 
@@ -113,20 +96,6 @@ Kind kindOf(std::string_view name)
 std::mutex bonesMutex;
 std::vector<DrawnBones> drawnBones;
 
-const Written* writtenTo(ID3D11Buffer* buffer)
-{
-    if (!buffer) return nullptr;
-
-    const auto found = contents.find(buffer);
-    return found != contents.end() ? &found->second : nullptr;
-}
-
-// A write as C, whatever its size.
-template<class C> const C& as(const Written& written)
-{
-    return *reinterpret_cast<const C*>(written.values.data());
-}
-
 UINT byteWidth(ID3D11Buffer* buffer)
 {
     D3D11_BUFFER_DESC desc{};
@@ -144,7 +113,7 @@ void noteBones(ID3D11DeviceContext* context, const SceneConstants& scene, const 
     context->VSGetConstantBuffers(BonesConstants::Slot, 1, buffer.GetAddressOf());
     if (!buffer || byteWidth(buffer.Get()) != sizeof(BonesConstants)) return;
 
-    const auto* bones = writtenTo(buffer.Get());
+    const auto* bones = constant_capture::writtenTo<BonesConstants>(buffer.Get());
     if (!bones) return;
 
     DrawnBones drawn{.firstIndex = call.first, .indexCount = call.count};
@@ -157,7 +126,7 @@ void noteBones(ID3D11DeviceContext* context, const SceneConstants& scene, const 
     }
 
     static_assert(sizeof(drawn.bones) == sizeof(BonesConstants::bones));
-    std::memcpy(drawn.bones.data(), as<BonesConstants>(*bones).bones, sizeof(drawn.bones));
+    std::memcpy(drawn.bones.data(), bones->bones, sizeof(drawn.bones));
     std::lock_guard lock(bonesMutex);
     if (drawnBones.size() < MaxDrawnBones) drawnBones.push_back(drawn);
 }
@@ -166,6 +135,7 @@ void noteBones(ID3D11DeviceContext* context, const SceneConstants& scene, const 
 void detach() noexcept
 {
     active = false;
+    constant_capture::keepAll(false);
     {
         std::lock_guard lock(recordMutex);
         pending.clear();
@@ -177,17 +147,13 @@ void detach() noexcept
     shaderOwners.clear();
 }
 
-void keepLightPassConstants(bool keep) noexcept
-{
-    lightPassKept = keep;
-}
-
 void setActive(bool on) noexcept
 {
     if (on == active.load()) return;
 
     std::lock_guard lock(recordMutex);
     active = on;
+    constant_capture::keepAll(on);
     pending.clear();
     executed.reset();
 }
@@ -223,58 +189,6 @@ void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept
     boundKind = kind;
 }
 
-void bufferMapped(ID3D11Resource* buffer, void* data) noexcept
-{
-    const bool tracing = active.load(std::memory_order_relaxed);
-    if ((!tracing && !lightPassKept.load(std::memory_order_relaxed)) || !data) return;
-
-    D3D11_RESOURCE_DIMENSION dimension{};
-    buffer->GetType(&dimension);
-    if (dimension != D3D11_RESOURCE_DIMENSION_BUFFER) return;
-
-    D3D11_BUFFER_DESC desc{};
-    static_cast<ID3D11Buffer*>(buffer)->GetDesc(&desc);
-    const UINT size = desc.ByteWidth;
-    const bool lightPass = size == sizeof(SceneConstants) || size == sizeof(SunLightConstants) || size == sizeof(LampLightConstants);
-    const bool rayTracingOnly = size == sizeof(LampMaterialConstants) || size == sizeof(TerrainMaterialConstants) || size == sizeof(ObjectConstants)
-        || size == sizeof(BonesConstants) || size == sizeof(ProbeConstants);
-    if (!(lightPass || (tracing && rayTracingOnly)) || !(desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER)) return;
-
-    mappedBuffer = buffer;
-    mappedData = data;
-    mappedSize = desc.ByteWidth;
-}
-
-void bufferUnmapped(ID3D11Resource* buffer) noexcept
-{
-    if (!mappedBuffer || buffer != mappedBuffer) return;
-
-    const HookTimer timer;
-    try
-    {
-        auto& written = contents[buffer];
-        std::memcpy(written.values.data(), mappedData, mappedSize);
-        written.size = mappedSize;
-        if (mappedSize == sizeof(SceneConstants))
-            written.mainCamera = active.load(std::memory_order_relaxed) && camera::isMainCamera(as<SceneConstants>(written));
-    }
-    catch (...)
-    {
-    }
-
-    mappedBuffer = nullptr;
-    mappedData = nullptr;
-}
-
-bool copyWritten(ID3D11Buffer* buffer, void* into, std::size_t size, bool exactly) noexcept
-{
-    const auto* found = writtenTo(buffer);
-    if (!found || (exactly ? size != found->size : size > sizeof(found->values))) return false;
-
-    std::memcpy(into, found->values.data(), size);
-    return true;
-}
-
 void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
 {
     if (!active.load(std::memory_order_relaxed) || boundContext != context || boundKind == Kind::None || !call.count) return;
@@ -288,30 +202,32 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
         context->VSGetConstantBuffers(SceneConstants::Slot, 4, rawConstants);
         for (int i = 0; i < 4; ++i) constants[i].Attach(rawConstants[i]);
 
-        const auto* written = writtenTo(constants[0].Get());
-        if (!written || !written->mainCamera) return;
+        const auto* scene = constant_capture::mainCameraWrite(constants[0].Get());
+        if (!scene) return;
 
         // The camera the rays trace from: the list's first main-camera draw's.
-        const auto& scene = as<SceneConstants>(*written);
         {
             std::lock_guard lock(recordMutex);
             auto [noted, first] = pending.try_emplace(reinterpret_cast<std::uint64_t>(context));
             if (first)
             {
-                noted->second.constants = scene;
+                noted->second.constants = *scene;
                 noted->second.gameFrame = game_loop::currentFrame();
             }
         }
 
+        const auto* object = constant_capture::writtenTo<ObjectConstants>(constants[3].Get());
+        if (!object) return;
+
         // The terrain's inputs, with the object and material constants the game wrote for the draw.
-        const auto* material = writtenTo(constants[2].Get());
-        const auto* object = writtenTo(constants[3].Get());
-        if (boundKind == Kind::Terrain && object && material)
-            engine_scene::noteTerrain(context, as<ObjectConstants>(*object), as<TerrainMaterialConstants>(*material));
+        if (boundKind == Kind::Terrain)
+        {
+            const auto* material = constant_capture::writtenTo<TerrainMaterialConstants>(constants[2].Get());
+            if (material) engine_scene::noteTerrain(context, *object, *material);
+        }
 
         // A skinned mesh (useWeightCount set): its bones as drawn, for the scene's characters.
-        if (boundKind == Kind::Model && object && as<ObjectConstants>(*object).useWeightCount[0] != 0)
-            noteBones(context, scene, as<ObjectConstants>(*object), call);
+        if (boundKind == Kind::Model && object->useWeightCount[0] != 0) noteBones(context, *scene, *object, call);
     }
     catch (...)
     {

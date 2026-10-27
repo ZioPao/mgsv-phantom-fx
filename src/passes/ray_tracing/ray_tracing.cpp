@@ -3,6 +3,7 @@
 
 #include "camera.hpp"
 #include "clock.hpp"
+#include "constant_capture.hpp"
 #include "d3d11_helpers.hpp"
 #include "features/global_illumination/gi_lighting.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
@@ -413,6 +414,7 @@ void logStatus()
         + std::to_string(kicksWithObjectVelocity.exchange(0)) + " frames, not in " + std::to_string(kicksWithoutObjectVelocity.exchange(0)));
 
     const auto work = gi_inputs::takeWork();
+    const auto capture = constant_capture::takeWork();
     const double frames = static_cast<double>(std::max<std::uint64_t>(kicksSinceLog.exchange(0), 1));
     const auto milliseconds = [](std::atomic<std::int64_t>& ticks) { return clock::millisecondsOf(ticks.exchange(0)); };
     const auto perFrame = [&](double value) { return std::to_string(value / frames); };
@@ -425,8 +427,10 @@ void logStatus()
     for (const auto& value : lastConverter) steps += " " + std::to_string(value.load());
     steps += "), its heightmap textures " + std::to_string(heightmapChanges.exchange(0)) + " times";
 
-    log("Global illumination's CPU time a frame: hooks " + perFrame(work.hookMilliseconds) + " ms (all threads) over " + perFrame(static_cast<double>(work.draws))
-        + " mesh draws; the kick " + perFrame(kick) + " ms (render thread: " + steps + ").");
+    // The hooks: the draws' and the constant capture's unmaps.
+    log("Global illumination's CPU time a frame: hooks " + perFrame(work.hookMilliseconds + capture.unmapMilliseconds) + " ms (all threads) over "
+        + perFrame(static_cast<double>(work.draws)) + " mesh draws; the kick " + perFrame(kick) + " ms (render thread: " + steps + "); "
+        + std::to_string(capture.refusedReads) + " constant reads refused (a write of another size).");
 }
 
 // Remakes `texture` at this size unless it has it; whether it did.
@@ -776,15 +780,6 @@ void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept
     gi_inputs::vertexShaderBound(context, shader);
 }
 
-void bufferMapped(ID3D11Resource* buffer, void* data) noexcept
-{
-    gi_inputs::bufferMapped(buffer, data);
-}
-
-void bufferUnmapped(ID3D11Resource* buffer) noexcept
-{
-    gi_inputs::bufferUnmapped(buffer);
-}
 
 void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
 {
@@ -823,11 +818,8 @@ void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
         // ambient light is the probe's plus the sky's times the occlusion. Where the game gives no sky
         // (Mother Base: sky and occlusion zero, the probe's light all of it), the probe's light stands in
         // for the sky.
-        ComPtr<ID3D11Buffer> sceneBuffer, probeBuffer;
-        context->PSGetConstantBuffers(SceneConstants::Slot, 1, sceneBuffer.GetAddressOf());
-        context->PSGetConstantBuffers(game_constants::ProbeConstants::Slot, 1, probeBuffer.GetAddressOf());
-        const auto scene = gi_inputs::written<SceneConstants>(sceneBuffer.Get());
-        const auto probes = gi_inputs::written<game_constants::ProbeConstants>(probeBuffer.Get());
+        const auto scene = constant_capture::pixelShaderReads<SceneConstants>(context);
+        const auto probes = constant_capture::pixelShaderReads<game_constants::ProbeConstants>(context);
         if (!scene || !probes) return;
 
         Sky noted;
@@ -880,11 +872,8 @@ void noteSun(ID3D11DeviceContext* context, bool shadowMapped) noexcept
 
     try
     {
-        ComPtr<ID3D11Buffer> sceneBuffer, lightBuffer;
-        context->PSGetConstantBuffers(SceneConstants::Slot, 1, sceneBuffer.GetAddressOf());
-        context->PSGetConstantBuffers(game_constants::SunLightConstants::Slot, 1, lightBuffer.GetAddressOf());
-        const auto scene = gi_inputs::written<SceneConstants>(sceneBuffer.Get());
-        const auto light = gi_inputs::written<game_constants::SunLightConstants>(lightBuffer.Get());
+        const auto scene = constant_capture::pixelShaderReads<SceneConstants>(context);
+        const auto light = constant_capture::pixelShaderReads<game_constants::SunLightConstants>(context);
         if (!scene || !light) return;
 
         Sun noted;

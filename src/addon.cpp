@@ -8,6 +8,7 @@
 // NGX receives ReShade's wrapped context, so other add-ons that follow DLSS evaluations see it like
 // a game's own DLSS.
 #include "character.hpp"
+#include "constant_capture.hpp"
 #include "core.hpp"
 #include "d3d12_helpers.hpp"
 #include "device_check.hpp"
@@ -424,15 +425,15 @@ void onMapBuffer(device*, resource buffer, uint64_t, uint64_t, map_access access
     if (access == map_access::read_only || !data) return;
 
     upscaler::bufferMapped(reinterpret_cast<ID3D11Resource*>(buffer.handle), *data);
-    ray_tracing::bufferMapped(reinterpret_cast<ID3D11Resource*>(buffer.handle), *data);
+    constant_capture::bufferMapped(reinterpret_cast<ID3D11Resource*>(buffer.handle), *data);
 }
 
-// The upscaler adds the jitter to the scene constants first; the screen-space shadows and the global
-// illumination read them as jittered.
+// The upscaler adds the jitter to the scene constants first; the constant capture copies them after it,
+// so the contact shadows and the ray tracing read them as jittered.
 void onUnmapBuffer(device*, resource buffer)
 {
     upscaler::bufferUnmapped(reinterpret_cast<ID3D11Resource*>(buffer.handle));
-    ray_tracing::bufferUnmapped(reinterpret_cast<ID3D11Resource*>(buffer.handle));
+    constant_capture::bufferUnmapped(reinterpret_cast<ID3D11Resource*>(buffer.handle));
 }
 
 // Called before the immediate context executes a command list, and after FinishCommandList with the
