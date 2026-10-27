@@ -1,5 +1,7 @@
 #pragma once
 
+#include "passes/ray_tracing/scene_description.hpp"
+
 #include <d3d11_4.h>
 #include <array>
 #include <cstdint>
@@ -14,6 +16,12 @@
 // two take turns through a shared fence. Everything here runs on the game's render thread.
 namespace phantom_fx::gi_renderer
 {
+using scene_description::CharacterInstance;
+using scene_description::Model;
+using scene_description::ModelInstance;
+using scene_description::ModelPart;
+using scene_description::Transform;
+
 // Textures Direct3D 11 made shareable (D3D11_RESOURCE_MISC_SHARED_NTHANDLE).
 struct Textures
 {
@@ -55,57 +63,6 @@ struct LocalLight
 };
 
 using Matrix = std::array<float, 16>; // Rows applied as dot(row, v), as the engine's
-using Transform = std::array<float, 12>; // Object to world: three rows applied as dot(row, (v, 1))
-using Vertex = std::array<float, 3>;
-
-// A mesh of a model: its index in the model file and its mesh group, whether its texture cuts holes
-// in it (a cut-out mesh), its material's base texture (its colour, and the alpha a cut-out mesh cuts
-// with: the path hash of its Base_Tex_SRGB, 0 without) or, for a mesh with none, its mask
-// (Mask_Tex_LIN, cutting with its alpha), its vertices in object space and, when it has them, their texture
-// coordinates (two halves packed in a uint, a vertex each); its most detailed triangles, three indices
-// each. A skinned model's mesh also has each vertex's four bones (the model's bone numbers, 16 bits
-// each, the first lowest) and their weights (8-bit unorms, the first lowest).
-struct ModelPart
-{
-    std::uint32_t mesh{};
-    std::uint32_t group{};
-    bool alphaTested{};
-    bool leaf{}; // Leaves, which let light through (GI_GEOMETRY_LEAF)
-    bool castsNoShadow{}; // The game draws it in the main view only, never into its shadow maps (GI_GEOMETRY_NO_SHADOW)
-    bool hair{}; // A character's see-through mesh the game never casts with, which lets light through in part (GI_GEOMETRY_HAIR)
-    bool shadowOnly{}; // The game draws it into its shadow maps only: only rays towards lights meet it (GI_GEOMETRY_SHADOW_ONLY)
-    std::uint64_t baseTexture{};
-    bool textureIsMask{};
-    std::vector<Vertex> vertices;
-    std::vector<std::uint32_t> uvs;
-    std::vector<std::uint16_t> indices;
-    std::vector<std::uint64_t> bones;
-    std::vector<std::uint32_t> weights;
-    // Where the game's draw of these triangles starts in the model's index buffer and how many it draws;
-    // and a skinned mesh's palette slots, the model's bone in each (VSBones' g_vsBone, gi_inputs::DrawnBones).
-    std::uint32_t firstIndex{}, indexCount{};
-    std::vector<std::uint16_t> boneGroup;
-    // Diagnostics (the shadow probe): the FMDL mesh's alpha and shadow bytes, and its material's technique.
-    std::uint8_t alphaBits{}, shadowBits{};
-    std::uint64_t technique{};
-};
-
-// Diagnostics (the shadow probe): a mesh of a model file the scene leaves out, with its alpha and shadow bytes.
-struct LeftOutMesh
-{
-    std::uint32_t mesh{};
-    std::uint8_t alphaBits{}, shadowBits{};
-    std::uint64_t technique{};
-};
-
-// A model the game has loaded (engine_scene.hpp): its meshes the scene takes; a skinned model's bones.
-struct Model
-{
-    std::uint64_t hash{}; // The model file's path hash, the same for every copy of the model
-    std::vector<ModelPart> parts;
-    std::uint32_t bones{}; // 0: rigid, placed as a whole (ModelInstance); else posed (CharacterInstance)
-    std::vector<LeftOutMesh> leftOut;
-};
 
 // One of the game's textures for the scene, by its path hash (ModelPart::baseTexture): a shared copy
 // of its levels of detail from the first no larger than the scene keeps (gi_textures.hpp), viewed as
@@ -116,32 +73,6 @@ struct SceneTexture
     ID3D11Texture2D* texture{};
     DXGI_FORMAT viewFormat{};
     std::uint32_t mips{};
-};
-
-// One placement of a model, by its hash, and its mesh groups (ModelPart::group, the first 64) the game
-// hides, a bit each.
-struct ModelInstance
-{
-    std::uint64_t hash{};
-    Transform transform{};
-    std::uint64_t hiddenGroups{};
-};
-
-// One of the game's characters (engine_scene.hpp): a skinned model in the pose the game gives it this
-// frame. `id` stays the same while the game keeps it; `palette` has a 3x4 matrix (three rows of four)
-// for each of the model's bones; `shownGroups` says which of its mesh groups the game draws.
-struct CharacterInstance
-{
-    std::uint64_t id{};
-    std::uint64_t hash{};
-    Transform transform{};
-    std::vector<float> palette;
-    std::vector<bool> shownGroups;
-
-    // Diagnostics (the shadow probe): each mesh group's state byte as read, and which of the model's
-    // meshes (Model::parts) this frame's draws posed (engine_scene::take).
-    std::vector<std::uint8_t> groupStates;
-    std::vector<bool> drawnParts;
 };
 
 // The game's terrain heightmap as its terrain shaders read it (engine_scene::TerrainInputs), shared
@@ -215,11 +146,6 @@ bool started() noexcept;
 // Records and submits the frame: waits for frame.waitValue on the shared fence, signals
 // frame.signalValue when the output is written. Throws on Direct3D 12 errors.
 Result render(const Frame& frame);
-
-// The alpha below which a cut-out mesh lets light through: the game's shadow pass discards below half its
-// per-draw m_param.w (ModelForward_Shadow), measured 1 on cut-out meshes' draws (0 where it tests
-// nothing); its G-buffer below m_param.w times a dither averaging a half.
-constexpr float CutOutThreshold = 0.5f;
 
 // For the overlay: instances, triangles and memory in use.
 std::string status();

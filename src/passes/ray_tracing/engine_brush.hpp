@@ -1,6 +1,6 @@
 #pragma once
 
-#include "passes/ray_tracing/gi_renderer.hpp"
+#include "passes/ray_tracing/scene_description.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -18,7 +18,7 @@ std::string hook(std::uintptr_t base) noexcept;
 
 // The placements in the loaded blocks, a plugin's in a block at a time: its model resource and their
 // transforms. A block is read once, when first seen. On the thread taking the engine scene's snapshot.
-void collect(const std::function<void(std::uintptr_t resource, std::span<const gi_renderer::Transform> transforms)>& place);
+void collect(const std::function<void(std::uintptr_t resource, std::span<const scene_description::Transform> transforms)>& place);
 
 // For the log.
 std::string status();
