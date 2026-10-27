@@ -9,6 +9,7 @@
 #include "features/hdr/hdr.hpp"
 #include "features/indirect_light/ssilvb.hpp"
 #include "features/lamp_contact_shadows/lamp_contact_shadows.hpp"
+#include "features/lamp_soft_shadows/lamp_soft_shadows.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
 #include "features/sun_contact_shadows/sun_contact_shadows.hpp"
 #include "features/upscaling/upscaler.hpp"
@@ -62,10 +63,11 @@ struct EffectLine
 const EffectLine EffectLines[]{
     {.effect = Effect::RayTracedShadows, .passes = {{Pass::SunShadowRays, "Shadow rays"}, {Pass::SunShadowDenoiser, "Denoiser"}},
         .health = sun_light_pass::rayTracedShadowHealth},
-    {.effect = Effect::SoftShadows, .health = sun_light_pass::softShadowHealth},
-    {.effect = Effect::SunContactShadows, .passes = {{Pass::SunTrace, "Contact shadow trace"}}, .health = sun_contact_shadows::health},
     {.effect = Effect::RayTracedLights, .passes = {{Pass::LightShadowRays, "Shadow rays"}, {Pass::LightShadowFilter, "Shadow filter"}, {Pass::LocalLights, "Lights with their traced shadows"}},
         .health = local_lights::health},
+    {.effect = Effect::SoftShadows, .health = sun_light_pass::softShadowHealth},
+    {.effect = Effect::LampSoftShadows, .passes = {{Pass::LampSoftLight, "Light draws, with the soft shadow"}}, .health = lamp_soft_shadows::health},
+    {.effect = Effect::SunContactShadows, .passes = {{Pass::SunTrace, "Contact shadow trace"}}, .health = sun_contact_shadows::health},
     {.effect = Effect::LampContactShadows, .passes = {{Pass::LampTraces, "Traces"}, {Pass::LampShadows, "Shadow draws"}}, .health = lamp_contact_shadows::health},
     {.effect = Effect::GlobalIllumination, .passes = {{Pass::GiRays, "Rays and the light cache"}, {Pass::GiDenoiser, "Denoiser and render size"},
             {Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}},

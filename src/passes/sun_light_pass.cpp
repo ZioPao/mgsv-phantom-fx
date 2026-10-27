@@ -49,7 +49,6 @@ bool reflectsSky(SunShader sun)
     return sun == SunShader::ShadowMap || sun == SunShader::Far;
 }
 
-constexpr UINT SpecularSlot = 1;          // t1 of the light passes, whose z is the material
 constexpr UINT DepthSlot = 2;             // t2 of the light passes
 constexpr UINT RayTracedSlot = 6;         // t6 of the replacement shaders
 constexpr UINT ContactShadowSlot = 7;     // t7 of the replacement shaders
@@ -149,9 +148,8 @@ void writeOptions(ID3D11DeviceContext* context, const Composition& composition, 
 // The sun pass, drawn with the replacement shaders.
 bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, SunShader sun, ID3D11PixelShader* gameShader, const Composition& composition)
 {
-    ComPtr<ID3D11ShaderResourceView> depth, specular;
+    ComPtr<ID3D11ShaderResourceView> depth;
     context->PSGetShaderResources(DepthSlot, 1, depth.GetAddressOf());
-    context->PSGetShaderResources(SpecularSlot, 1, specular.GetAddressOf());
 
     // The ray-traced shadow at the depth's size, once Direct3D 12 has traced one; until then the
     // game's shadows stay. The rays trace the main view only, not a smaller camera's (a mirror's).
@@ -179,7 +177,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
             return false;
         }
 
-        contactShadow = sun_contact_shadows::trace(context, depth.Get(), specular.Get(), *constants);
+        contactShadow = sun_contact_shadows::trace(context, depth.Get(), *constants);
         if (!contactShadow) return false;
 
         // The diagnostics view lights everything as beyond the shadow range, with the trace's shadow.

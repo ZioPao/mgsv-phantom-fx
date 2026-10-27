@@ -121,6 +121,8 @@ what draws it, when that is the feature's own.
 | `soft_shadows/` | Settings only: a mode of the sun light pass's shaders (`passes/sun_light_pass.*`) |
 | `sun_contact_shadows/` | `sun_contact_shadows.*`: the sun's screen-space shadow, traced once per depth a command list records |
 | `lamp_contact_shadows/` | `lamp_contact_shadows.*`: every point and spot light's screen-space shadow, drawn into the light targets' alpha between its two draws. `lamp_contact_shadows_shaders.hpp`: that draw |
+| `lamp_soft_shadows/` | `lamp_soft_shadows.*`: the replacement shaders a point or spot light with a shadow map lights with, and their options. `lamp_soft_shadows_shaders.hpp`: the game's `SSLighting2_Point` and `SSLighting2_Spot` rebuilt, with the light's shadow map filtered by contact-hardening soft shadows |
+| `contact_shadow_shape/` | Settings only: the contrast, reach, thickness and fade of the contact shadow trace (`passes/contact_shadow_trace.*`), which the sun's and the lamps' share |
 | `ray_traced_shadows/` | `gi_shadow.*`: the sun's shadow rays and the FidelityFX Shadow Denoiser on Direct3D 12. `gi_shadow.hlsl`, `gi_shadow_filter.hlsl`: the rays, the denoiser's temporal pass and filters |
 | `ray_traced_lights/` | `local_lights.*`: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights"). `light_shadow_rays.*`, `light_shadows.hlsl`: the lights' shadow rays and filter on Direct3D 12 |
 | `global_illumination/` | `gi_light.*`, `gi_light.hlsl`: the light on Direct3D 12, its rays, their hits' light, the hash grid cache, the denoiser's inputs and the render size (see "Global illumination"). `gi_denoiser.*`: NVIDIA NRD's RELAX denoiser without NRI. `gi_lighting.*`: the game's sky and sun in the light's terms. `light_combine.*`: the traced light in place of the game's probe light at the resolve |
@@ -137,6 +139,7 @@ what draws it, when that is the feature's own.
 | File | Purpose |
 | --- | --- |
 | `src/passes/sun_light_pass.*` | The game's sun light pass drawn with replacement shaders, with soft shadows, the sun's contact shadows and the ray-traced shadow composed in. `sun_light_pass_shaders.hpp`: the game's sun light shaders rebuilt with them |
+| `src/passes/local_light_pass.*` | The game's point and spot light draws, with the lamps' contact shadows and soft shadows composed in: the light shaders by checksum, the marking and lighting draws |
 | `src/passes/contact_shadow_trace.*` | Bend Studio's screen-space shadow trace, for the sun's and the lamps' contact shadows; the light passes' constants. `contact_shadow_trace_shaders.hpp`: Bend's trace ported to FXC |
 | `third_party/bend_sss/bend_sss_cpu.h` | Bend Studio's dispatch layout, unchanged (Apache License 2.0) |
 | `src/passes/indirect_light_pass.*` | The game's sky light, upscale and resolve: pass recognition, the G-buffer notes, the resolve's white occlusion and diffuse light, the diagnostics views, the ray-traced scene's notes. `indirect_light_pass_shaders.hpp`: the diagnostics views |
@@ -159,7 +162,7 @@ what draws it, when that is the feature's own.
 | `src/render_scale.cpp`, `src/render_scale.hpp` | Hook on the renderer's per-frame step: the engine renders at the requested size |
 | `src/ui_redirect.cpp`, `src/ui_redirect.hpp` | The draw call every module sees; the grading, the 2D pass and `GammaControl` on output-size targets while the engine renders below them |
 | `src/camera.cpp`, `src/camera.hpp` | Scene constants: main-view recognition, jitter, reprojection, camera cuts |
-| `src/game_lights.hpp` | The game's point and spot light shaders and their constants, for lamp contact shadows and the ray-traced lights: the checksums, a light's range, its sphere on screen |
+| `src/game_lights.hpp` | The game's point and spot light shaders and their constants, for the local light pass and the ray-traced lights: the checksums, a light's range, its sphere on screen |
 | `src/device_check.cpp`, `src/device_check.hpp` | Lets the game start under ReShade (see below); the build check |
 | `src/game_code.hpp` | The game's image, checks of its code, hooks (MinHook) and code patches |
 | `src/game_memory.hpp` | Guarded reads of the game's objects |
@@ -1500,7 +1503,7 @@ License 2.0): contact shadows traced through the depth buffer, which the shadow 
 to give. The game has no shadow mask to multiply (see "Sun light and shadows"), so the sun pass
 draws with replacement shaders. With soft shadows off too, the game's own shaders draw; the add-on
 then only checks a flag on each full-screen draw. **Lamp contact shadows** trace the same way for
-every point and spot light (`drawLocalLight` in `src/features/lamp_contact_shadows/lamp_contact_shadows.cpp`), one trace per light, so they
+every point and spot light (`drawMarking` in `src/features/lamp_contact_shadows/lamp_contact_shadows.cpp`, from the local light pass), one trace per light, so they
 are a toggle of their own: the sun's is one trace a frame, the lamps' grows with the lights on
 screen.
 
@@ -1525,13 +1528,14 @@ screen.
   jitter; `gi_inputs.cpp` keeps them, as for the ray tracing) and looked up by the buffers the draw
   binds. Depth is reversed (near 1, far 0, the border colour). Bend's starting values: 60 samples,
   surface thickness 0.5%, bilinear threshold 2%, contrast 4, early-out on.
-- **Foliage casts no shadow.** The trace reads the material from the pass's specular target
-  (`t1`, `z` x 255; foliage is 43, as in "GTVBAO") and skips foliage samples as Bend skips edge
-  pixels. Taken as solid surfaces 0.5% deep, a clump's blades shaded each other: in a sunlit
-  scene at 11:27, the trace darkened bushes and grass clumps by 7 to 24% and bare ground by
-  nothing. The sun's shadow map already holds the blades (cascade 0 has 3 mm texels), and
-  foliage still receives the trace from everything else. Without a specular target the trace
-  reads 0 and treats nothing as foliage.
+- **Foliage casts like everything else.** The trace reads its casters from the depth buffer alone,
+  as Bend's does, so grass, bushes and tree leaves both cast and receive. Its own measured effect
+  is the reason it is worth having: a clump's blades shade each other, which the sun's shadow map
+  resolves only in cascade 0 (3 mm texels) and the rest of the range does not. An earlier build
+  skipped the foliage material (43 in the specular target's `z`, as in "GTVBAO") to keep clumps out
+  of it; the skip is gone so the term matches the screen-space shadows in `renodx-mgsv`. If a
+  clump darkens too far, **Contact shadow thickness** and **Contact shadow contrast** set how deep a
+  sample casts and how hard the transition is.
 - **Draw.** The game's compute bindings in the slots the trace uses are saved and restored around
   it; the replacement pixel shader, `t7` and `b6` are bound for the game's draw, made by the
   add-on, and the game's shader, `t7` and `b6` restored. The options apply from the frame after
@@ -1555,12 +1559,60 @@ every frame (one dispatch with the sun off screen), the lit image looked as befo
 shadows showed under Snake's boots, in grass and around rocks. With the trace alone, characters
 close to the camera keep only the shadow near their feet.
 
+- **Contrast and reach.** Two settings shape both traces, under **Contact shadows** with their
+  switches: **Contact shadow contrast** (0.5 to 4, 1 by default) scales the trace's distance-to-shadow
+  window, so higher is darker and harder and lower is a soft grey wash, 1 being the trace itself;
+  and **Contact shadow reach** (8 to 120 pixels of the render size, 80 by default) is how far along the ray the march runs. The reach costs one depth read group when the
+  shader's `SAMPLE_COUNT` went from 60 to 120, and the march stops at the setting, so a shorter reach
+  is cheap; the last eight samples of it fade out as Bend's last eight do. It is in pixels, so at 4K
+  the same reach covers half the world distance it does at 1080p.
+- **Thickness.** Bend's 0.5% window was a constant. It is a setting now (`SurfaceThickness`, 0.2% to
+  2.5% of the depth between a sample and the far plane): how deep a surface may sit behind the
+  receiver and still count as a contact. RenoDX exposes the same dial per light type.
+- **Distance fade.** Bend's shader has no fade, so a contact shadow at 100 m was as sharp as one
+  underfoot. The trace now fades its result with view depth (B and A from `cPSScene` c21 give the view
+  Z from the depth it already reads), full strength out to 60% of the setting and nothing past it.
+  RenoDX fades for the same reason: past that range the shadow map has the detail and the trace only
+  has guesses.
+
 Not handled:
 
-- The trace reaches 60 pixels at the render size: near characters fill much of the screen, so only
-  the start of their shadow is found, and at 4K it reaches half as far in the world as at 1080p.
-  The shadow map gives the rest.
+- The trace reaches 120 pixels at most: near characters fill much of the screen, so only
+  the start of their shadow is found. The shadow map gives the rest.
 - Forward and transparent objects, drawn after the sun, neither cast nor receive the trace.
+
+## Lamp soft shadows
+
+With **Lamp soft shadows (PCSS)** on, a point light whose shader is `SSLighting2_Point` draws with the
+add-on's replacement (`src/features/lamp_soft_shadows/lamp_soft_shadows_shaders.hpp`) instead of the game's, and its own shadow map is
+filtered with contact-hardening soft shadows: sharp where the object meets the light, wider the
+further the shadow falls, as a real bulb's is.
+
+- **Why the shader and not the blend.** The add-on's other local-light work (the screen-space shadow,
+  the ray-traced lights) only *scales* the game's light through the targets' alpha. A soft shadow
+  cannot be added that way: the game's four comparisons have already decided the pixel is in shadow,
+  and scaling a zero leaves zero. The filter has to replace the comparison, so it replaces the shader.
+- **The body is the decompiled one** (renodx-mgsv's `SSLighting2_Point` port, itself from 3Dmigoto),
+  kept in its register form: rewriting 500 lines of register code into named variables risks a
+  transcription error that no test here would catch, and FXC folds the redundant moves away.
+- **Dual-paraboloid atlas.** The point light's shadow map is two hemispheres side by side; a texel
+  covers a different world size at a hemisphere's centre than at its rim, so the penumbra uses a
+  compromise scale, `3 x distance / hemisphereRes`, as renodx-mgsv does. The search radius is
+  `g_lampSearchTexels`, the penumbra's growth `g_lampHardening`, its widest `g_lampSoftness` (10 cm),
+  and how dark its core gets `g_lampDarkness`.
+- **Point and spot.** Two shaders are rebuilt: `SSLighting2_Point`, whose dual-paraboloid atlas needs
+  the compromise scale above, and `SSLighting2_Spot`, whose map is a plain projection, so its penumbra
+  follows `m_shadowProjection` the way the sun's cascades do. Both are the quartic, specular,
+  shadow-mapped variants; the others (no specular, no shadow map) keep the game's shader, and a light
+  the game draws *without* a shadow map -- most of its point lights -- has no shadow to soften at all.
+- **Identified by checksum.** The local light pass (`src/passes/local_light_pass.cpp`) knows every
+  point and spot light shader by its checksum (`game_lights.hpp`), and the soft shadows replace the
+  two kinds above at the lighting draw (`SSLighting2_Point`, `afbc12167037e4e0d653da184c7e3e82`;
+  `SSLighting2_Spot`, `ac0947110cb0f17f4ffe930a6a11617d`). With the lamps' contact shadows on as well, that draw also takes
+  their blend. The log says "the game draws a ... with the soft shadows" once for each shader that
+  draws.
+
+Not handled yet: the same lights without specular, and the masked spots, which have their own shaders.
 
 ## Global illumination
 

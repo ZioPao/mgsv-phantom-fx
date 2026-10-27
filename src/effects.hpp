@@ -21,6 +21,7 @@ enum class Effect : std::uint8_t
     IndirectLight,
     AmbientOcclusion,
     LampContactShadows,
+    LampSoftShadows,
     SunContactShadows,
     SoftShadows,
     Count

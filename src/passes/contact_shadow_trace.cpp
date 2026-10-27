@@ -1,5 +1,6 @@
 #include "passes/contact_shadow_trace.hpp"
 
+#include "frame_latch.hpp"
 #include "log.hpp"
 #include "passes/contact_shadow_trace_shaders.hpp"
 #include "passes/ray_tracing/gi_inputs.hpp"
@@ -28,16 +29,21 @@ struct Parameters
     float lightCoordinate[4];
     std::int32_t waveOffset[2];
     float inverseDepthSize[2];
-    float surfaceThickness, bilinearThreshold, shadowContrast, padding;
+    float surfaceThickness, bilinearThreshold, shadowContrast, reach;
     float depthBounds[2];
     std::int32_t boundsMin[2], boundsMax[2];
-    float padding2[2];
+    float projection[2]; // B, A: view Z from the reversed depth
+    float fade[2];       // Metres: start and end of the distance fade
+    float padding[2];
 };
 static_assert(sizeof(Parameters) % 16 == 0);
 
-// Bend's recommended starting values, which suit Fox Engine's reversed depth as they are.
-constexpr float SurfaceThickness = 0.005f, BilinearThreshold = 0.02f, ShadowContrast = 4;
+// Bend's recommended starting value, which suits Fox Engine's reversed depth as it is.
+constexpr float BilinearThreshold = 0.02f;
+// The contact shadows are at full strength out to this share of the fade distance.
+constexpr float FadeStart = 0.6f;
 
+FrameLatch<ContactShadowShape> latch;
 std::atomic<bool> wantedRunning{}, pipelineFailed{}, sunTraces{}, lampsTrace{};
 
 // ---- Direct3D, guarded by resourceMutex ----
@@ -111,11 +117,17 @@ void detach() noexcept
 void configure(const Configuration& configuration) noexcept
 {
     const bool running = configuration.effects.runs(Effect::SunContactShadows) || configuration.effects.runs(Effect::LampContactShadows);
+    latch.set(configuration.settings.contactShadowShape);
     wantedRunning = running;
     if (!running) return;
 
     std::lock_guard lock(resourceMutex);
     ensurePipeline();
+}
+
+void present() noexcept
+{
+    latch.present();
 }
 
 bool failed() noexcept
@@ -191,10 +203,11 @@ std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 
     return bounds;
 }
 
-std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* specular,
-    std::array<float, 4> lightProjection, const std::optional<TraceBounds>& bounds, ShadowTarget& target)
+std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, const float* scene, std::array<float, 4> lightProjection,
+    const std::optional<TraceBounds>& bounds, ShadowTarget& target)
 {
     auto size = depthSize(depth);
+    const auto shape = latch.frame();
     std::lock_guard lock(resourceMutex);
     if (!ensurePipeline()) return std::nullopt;
 
@@ -205,7 +218,7 @@ std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceVi
     int boundsMin[2]{covered.min[0], covered.min[1]}, boundsMax[2]{covered.max[0], covered.max[1]};
     const auto dispatches = Bend::BuildDispatchList(lightProjection.data(), size.data(), boundsMin, boundsMax, false, WaveSize);
 
-    const SavedComputeState saved(context, {.buffers = 1, .views = 2, .accesses = 1, .samplers = 1});
+    const SavedComputeState saved(context, {.buffers = 1, .views = 1, .accesses = 1, .samplers = 1});
 
     if (!bounds)
     {
@@ -214,8 +227,7 @@ std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceVi
     }
 
     context->CSSetShader(traceShader.Get(), nullptr, 0);
-    ID3D11ShaderResourceView* inputs[]{depth, specular};
-    context->CSSetShaderResources(0, static_cast<UINT>(std::size(inputs)), inputs);
+    context->CSSetShaderResources(0, 1, &depth);
     context->CSSetUnorderedAccessViews(0, 1, target.access.GetAddressOf(), nullptr);
     context->CSSetSamplers(0, 1, borderSampler.GetAddressOf());
     context->CSSetConstantBuffers(0, 1, parameterBuffer.GetAddressOf());
@@ -228,9 +240,15 @@ std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceVi
         parameters.waveOffset[1] = dispatch.WaveOffset_Shader[1];
         parameters.inverseDepthSize[0] = 1.0f / static_cast<float>(size[0]);
         parameters.inverseDepthSize[1] = 1.0f / static_cast<float>(size[1]);
-        parameters.surfaceThickness = SurfaceThickness;
+        parameters.surfaceThickness = shape.thickness;
         parameters.bilinearThreshold = BilinearThreshold;
-        parameters.shadowContrast = ShadowContrast;
+        parameters.shadowContrast = shape.contrast;
+        parameters.reach = shape.reachPixels;
+        // The light passes reconstruct the view depth as z = B / (depth - A).
+        parameters.projection[0] = scene[ProjectionParam + 2];
+        parameters.projection[1] = scene[ProjectionParam + 3];
+        parameters.fade[0] = shape.fadeMetres * FadeStart;
+        parameters.fade[1] = shape.fadeMetres;
         parameters.depthBounds[0] = covered.depthMin;
         parameters.depthBounds[1] = covered.depthMax;
         std::memcpy(parameters.boundsMin, covered.min, sizeof(parameters.boundsMin));

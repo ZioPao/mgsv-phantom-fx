@@ -191,6 +191,8 @@ private:
         endItem();
         if (info.section != section) return;
 
+        if (info.heading) fxui::subheading(info.heading);
+
         status = nextFeatureStatus ? nextFeatureStatus() : ItemStatus{};
         const auto state = status.state ? status.state : on ? std::optional(*on ? State::Working : State::Off) : std::nullopt;
         item.emplace(fxui::ItemSpec{.id = info.menuId, .name = info.name, .tech = info.tech, .tag = info.tag, .tip = info.tip, .summary = info.summary,
@@ -198,12 +200,19 @@ private:
         effect = info.effect;
     }
 
-    // Other features' settings shown in this item come last.
+    // Other features' settings shown in this item come last, each once a page: in the first of its
+    // items that is open.
     void endItem()
     {
         if (open() && effect)
             for (auto& [value, info] : shared.sliders)
-                if (info.visible && std::ranges::find(info.shownIn, *effect) != info.shownIn.end()) drawSlider(*value, info);
+            {
+                const bool shownHere = info.visible && std::ranges::find(info.shownIn, *effect) != info.shownIn.end();
+                if (!shownHere || std::ranges::find(sharedShown, value) != sharedShown.end()) continue;
+
+                drawSlider(*value, info);
+                sharedShown.push_back(value);
+            }
 
         item.reset();
         effect.reset();
@@ -240,6 +249,7 @@ private:
     ItemStatus status;
     std::optional<fxui::Item> item;
     std::optional<Effect> effect;
+    std::vector<const float*> sharedShown;
 };
 
 // The section's features, in the menu's order.

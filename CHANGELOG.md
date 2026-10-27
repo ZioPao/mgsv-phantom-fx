@@ -1,5 +1,23 @@
 # Phantom FX changelog
 
+## Unreleased
+
+- Add **Contact shadow contrast**, **reach**, **thickness** and **fade** settings, under the shadows:
+  how dark and how hard the trace is (0.5 to 4, 1 by default), how far along the screen it marches
+  (8 to 120 pixels, 80 by default), how deep a surface counts as a contact (0.2% to 2.5% of its depth
+  to the far plane, 0.5% by default) and how far away it still shows (50 to 700 m, 500 by default,
+  full strength to 60% of that). All apply to the sun's and the lamps'.
+- Contact shadows now fade out with distance: before, one at 100 m was as sharp and as strong as the
+  one underfoot, and now the trace thins out and leaves the shadow map to it.
+- Reorganise the **Shadows** page: the ray-traced lights sit beside the ray-traced shadows, and the
+  contact shadows have a heading of their own under the soft shadows, with their two sliders.
+- Add **Lamp soft shadows (PCSS)**: point and spot lights with a shadow map filter it with
+  contact-hardening soft shadows instead of the game's four evenly sharp comparisons, so a lamp's
+  shadow is sharp where it meets a surface and widens with distance. Off by default; rebuilt copies
+  of `SSLighting2_Point` and `SSLighting2_Spot`.
+- Foliage (grass, bushes, tree leaves) casts screen-space contact shadows: the trace no longer
+  skips the foliage material, so clumps shade themselves as they do in `renodx-mgsv`.
+
 ## 1.8.0
 
 This release focuses on fixing and improving the visuals of the prologue's hospital.

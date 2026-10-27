@@ -254,4 +254,19 @@ private:
     UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     UINT rectCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
 };
+
+// The blend a context has bound, to draw with its factor and mask and to put back after.
+struct BoundBlend
+{
+    Microsoft::WRL::ComPtr<ID3D11BlendState> state;
+    float factor[4]{};
+    UINT sampleMask{};
+};
+
+inline BoundBlend boundBlend(ID3D11DeviceContext* context)
+{
+    BoundBlend blend;
+    context->OMGetBlendState(blend.state.GetAddressOf(), blend.factor, &blend.sampleMask);
+    return blend;
+}
 }

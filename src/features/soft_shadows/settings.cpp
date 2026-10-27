@@ -8,7 +8,7 @@ void describe(SoftShadows& shadows, SettingVisitor& visit)
         {.menuId = "softShadows",
             .iniKey = "soft_shadows",
             .section = Section::Shadows,
-            .name = "Soft shadows",
+            .name = "Sun soft shadows",
             .tech = "PCSS",
             .tip = "Contact-hardening soft shadows from the sun's shadow map: sharp where an object meets the ground, softer the further the "
                    "shadow falls from it, as the sun's disc gives. Off keeps the game's evenly sharp shadow edges.",

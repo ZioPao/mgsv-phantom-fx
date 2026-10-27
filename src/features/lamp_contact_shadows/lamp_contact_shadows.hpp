@@ -1,32 +1,38 @@
 #pragma once
 
+#include "d3d11_helpers.hpp"
+#include "game_lights.hpp"
 #include "phantom_fx_settings.hpp"
 #include "ui_redirect.hpp"
 
 #include <d3d11.h>
-#include <cstddef>
 
-// The lamps' contact shadows (docs/DEVELOPMENT.md, "Screen-space shadows"). A point or spot light draws
-// its volume twice, to mark the stencil and then to light. Before the first, the add-on traces Bend
-// Studio's screen-space shadow towards the light within its reach (contact_shadow_trace.hpp) and draws
-// it into the light targets' unused alpha; the second's light is then scaled by it. One trace per
-// light, so it costs far more where many lights are on screen.
+// The lamps' contact shadows (docs/DEVELOPMENT.md, "Screen-space shadows"), drawn by the local light
+// pass (local_light_pass.hpp). A point or spot light draws its volume twice, to mark the stencil and
+// then to light. At the first, the add-on traces Bend Studio's screen-space shadow towards the light
+// within its reach (contact_shadow_trace.hpp) and draws it into the light targets' unused alpha; the
+// second's light is then scaled by it. One trace per light, so it costs far more where many lights
+// are on screen.
 namespace phantom_fx::lamp_contact_shadows
 {
 void attach(ID3D11Device* device) noexcept;
 // Releases everything; only when no Direct3D work can run (device teardown, unload).
 void detach() noexcept;
-// Applies from the frame recorded after the next present.
+// Compiles the shaders while the effect runs, before its first frame.
 void configure(const Configuration& configuration) noexcept;
 // For the budget: unavailable when its shaders or the trace did not compile, so the lights keep the
 // game's shadows (see PhantomFX.log).
 Health health();
 
 // ---- Recording, on the game's render and worker threads ----
-void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
-// Before a draw: a point or spot light's draws, while the effect runs, are drawn here instead; returns
-// true when the game's draw must be skipped.
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
+// A light's stencil-marking draw, with the game's blend: the game's draw, then the light's shadow into
+// the light targets' alpha. Returns true when it drew the game's draw; false leaves the draw, and the
+// light's shadows, to the game.
+bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_lights::Falloff falloff, const BoundBlend& gameBlend);
+// For a light's lighting draw: `gameBlend` with the light scaled by the shadow its marking draw left
+// on `context`, which this uses up. Null when it left none, or the blend is not the game's additive
+// one: the light then keeps the game's shadows.
+ID3D11BlendState* takeShadowedBlend(ID3D11DeviceContext* context, ID3D11BlendState* gameBlend);
 // FinishCommandList on `context`.
 void contextFinished(ID3D11DeviceContext* context) noexcept;
 void present() noexcept;

@@ -71,13 +71,14 @@ void settingsPersist(const fs::path& root)
     const Settings chosen{.upscaling = {.upscaler = Upscaler::Fsr, .mode = Mode::Off, .dlssPreset = Preset::J, .sharpness = 0.5f},
         .frameGeneration = {.mode = FrameGenerationMode::X3}, .sun = {.diameterDegrees = 1.25f}, .rayTracedShadows = {.on = true, .withGameShadows = true}, .softShadows = {.on = true},
         .sunContactShadows = {.on = true}, .rayTracedLights = {.on = true, .shadowRaysPerPixel = 8, .flashlightBrightness = 3.5f},
-        .lampContactShadows = {.on = true}, .globalIllumination = {.raysPerLightPixel = 4}, .ambientOcclusion = {.on = true, .radiusMetres = 2, .strength = 1.5f},
+        .lampContactShadows = {.on = true}, .lampSoftShadows = {.on = true},
+        .contactShadowShape = {.contrast = 2, .reachPixels = 40, .thickness = 0.01f, .fadeMetres = 300}, .globalIllumination = {.raysPerLightPixel = 4}, .ambientOcclusion = {.on = true, .radiusMetres = 2, .strength = 1.5f},
         .indirectLight = {.on = true, .radiusMetres = 3, .strength = 0.5f}, .volumetricFog = {.on = true, .look = AtmosphereLook::Physical, .haze = 0.5f},
         .frameRate = {.unlocked = true}};
     saveSettings(path, chosen);
     expect(loadSettings(path) == chosen,
         "Restart restores the upscaler, mode, preset, sharpening, frame rate unlock, frame generation, soft, screen-space and ray-traced "
-        "shadows, GTVBAO, SSILVB, the global illumination's rays and the volumetric fog.");
+        "shadows, the contact shadows' shape, GTVBAO, SSILVB, the global illumination's rays and the volumetric fog.");
     write(path, "frame_generation=dynamic\n");
     expect(loadSettings(path).frameGeneration.mode == FrameGenerationMode::Dynamic, "Dynamic frame generation is read back.");
     write(path, "frame_generation=fsr\n");
@@ -169,7 +170,7 @@ void effectPlan()
 {
     Settings all;
     all.rayTracedShadows.on = all.softShadows.on = all.sunContactShadows.on = true;
-    all.rayTracedLights.on = all.lampContactShadows.on = true;
+    all.rayTracedLights.on = all.lampContactShadows.on = all.lampSoftShadows.on = true;
     all.globalIllumination.on = all.ambientOcclusion.on = all.indirectLight.on = true;
     all.volumetricFog.on = true;
 
@@ -178,12 +179,15 @@ void effectPlan()
             && plan.runs(Effect::VolumetricFog),
         "The effects nothing replaces run.");
 
-    for (const auto effect : {Effect::SoftShadows, Effect::SunContactShadows, Effect::LampContactShadows, Effect::AmbientOcclusion, Effect::IndirectLight})
+    for (const auto effect : {Effect::SoftShadows, Effect::SunContactShadows, Effect::LampContactShadows, Effect::LampSoftShadows, Effect::AmbientOcclusion,
+             Effect::IndirectLight})
         expect(plan[effect] == EffectState::Replaced, "The ray-traced effects replace the soft and contact shadows, GTVBAO and SSILVB.");
 
     Settings withoutTracedLights = all;
     withoutTracedLights.rayTracedLights.on = false;
-    expect(planEffects(withoutTracedLights, {}).runs(Effect::LampContactShadows), "Only the ray-traced lights replace the lamp contact shadows.");
+    const auto withoutTracedLightsPlan = planEffects(withoutTracedLights, {});
+    expect(withoutTracedLightsPlan.runs(Effect::LampContactShadows) && withoutTracedLightsPlan.runs(Effect::LampSoftShadows),
+        "Only the ray-traced lights replace the lamps' contact and soft shadows.");
 
     LeftOut tracedShadowsLeftOut;
     tracedShadowsLeftOut.effects[Effect::RayTracedShadows] = true;

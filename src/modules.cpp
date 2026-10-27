@@ -5,6 +5,7 @@
 #include "features/global_illumination/light_combine.hpp"
 #include "features/indirect_light/ssilvb.hpp"
 #include "features/lamp_contact_shadows/lamp_contact_shadows.hpp"
+#include "features/lamp_soft_shadows/lamp_soft_shadows.hpp"
 #include "features/motion_blur/motion_blur.hpp"
 #include "features/photo_mode/focus.hpp"
 #include "features/photo_mode/photo_mode.hpp"
@@ -13,6 +14,7 @@
 #include "features/volumetric_fog/atmosphere.hpp"
 #include "passes/contact_shadow_trace.hpp"
 #include "passes/indirect_light_pass.hpp"
+#include "passes/local_light_pass.hpp"
 #include "passes/ray_tracing/ray_tracing.hpp"
 #include "passes/sun_light_pass.hpp"
 #include "passes/visibility_bitmask.hpp"
@@ -39,9 +41,12 @@ template<void (*Attach)(ID3D11Device*) noexcept> void withDevice(ID3D11Device* d
 constexpr Module Modules[]{
     {.attach = withDevice<sun_light_pass::attach>, .configure = sun_light_pass::configure, .present = sun_light_pass::present, .detach = sun_light_pass::detach},
     {.present = sun_contact_shadows::present, .detach = sun_contact_shadows::detach},
+    {.configure = local_light_pass::configure, .present = local_light_pass::present, .detach = local_light_pass::detach},
     {.attach = withDevice<lamp_contact_shadows::attach>, .configure = lamp_contact_shadows::configure, .present = lamp_contact_shadows::present,
         .detach = lamp_contact_shadows::detach},
-    {.attach = withDevice<contact_shadow_trace::attach>, .configure = contact_shadow_trace::configure, .detach = contact_shadow_trace::detach},
+    {.attach = withDevice<lamp_soft_shadows::attach>, .configure = lamp_soft_shadows::configure, .detach = lamp_soft_shadows::detach},
+    {.attach = withDevice<contact_shadow_trace::attach>, .configure = contact_shadow_trace::configure, .present = contact_shadow_trace::present,
+        .detach = contact_shadow_trace::detach},
 
     {.attach = withDevice<indirect_light_pass::attach>, .configure = indirect_light_pass::configure, .present = indirect_light_pass::present,
         .detach = indirect_light_pass::detach},

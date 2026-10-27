@@ -20,6 +20,7 @@ struct FeatureInfo
     const char* menuId; // Its item's and its budget line's
     std::string_view iniKey; // Its switch's
     Section section;
+    const char* heading{}; // Above its item, for the items that follow
     const char* name;
     const char* tech{};
     const char* tag{};

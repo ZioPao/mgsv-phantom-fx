@@ -11,8 +11,9 @@
 #include <string>
 
 // Bend Studio's screen-space shadow, traced through the depth buffer towards a light
-// (docs/DEVELOPMENT.md, "Screen-space shadows"). The sun's contact shadows trace it once a frame
-// (sun_contact_shadows.hpp), the lamps' once per light (lamp_contact_shadows.hpp).
+// (docs/DEVELOPMENT.md, "Screen-space shadows"), in the shape the contact shadow settings give it. The
+// sun's contact shadows trace it once a frame (sun_contact_shadows.hpp), the lamps' once per light
+// (lamp_contact_shadows.hpp).
 namespace phantom_fx::contact_shadow_trace
 {
 // What a trace covers: pixels from `min` to `max` (exclusive) whose depth lies between the depth
@@ -46,8 +47,10 @@ enum class Tracer : std::uint8_t { Sun, Lamps };
 void attach(ID3D11Device* device) noexcept;
 // Releases everything; only when no Direct3D work can run (device teardown, unload).
 void detach() noexcept;
-// Compiles the trace while the sun's or the lamps' contact shadows run, before their first frame.
+// Compiles the trace while the sun's or the lamps' contact shadows run, before their first frame. The
+// shape applies from the frame recorded after the next present.
 void configure(const Configuration& configuration) noexcept;
+void present() noexcept;
 // The trace did not compile (see PhantomFX.log).
 bool failed() noexcept;
 void tracesThisFrame(Tracer tracer, bool traces) noexcept;
@@ -65,11 +68,11 @@ std::array<int, 2> depthSize(ID3D11ShaderResourceView* view);
 // sphere is behind the camera or off the screen.
 std::optional<TraceBounds> boundsOf(const float* scene, const std::array<float, 3>& center, float range, std::array<int, 2> size);
 // Traces the screen-space shadow towards `lightProjection` from `depth` into `target` on `context`,
-// with the game's compute state saved around it; `specular` (may be null) tells foliage, which casts
-// none. With `bounds`, it writes only within them, and the shadow draw takes the rest as lit;
-// without, it covers the whole screen and the sky stays lit. None when the trace is unavailable.
-std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* specular,
-    std::array<float, 4> lightProjection, const std::optional<TraceBounds>& bounds, ShadowTarget& target);
+// with the game's compute state saved around it; `scene` is the light pass's cPSScene, for the
+// distance fade. With `bounds`, it writes only within them, and the shadow draw takes the rest as
+// lit; without, it covers the whole screen and the sky stays lit. None when the trace is unavailable.
+std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, const float* scene, std::array<float, 4> lightProjection,
+    const std::optional<TraceBounds>& bounds, ShadowTarget& target);
 // The last trace's constants, which the lamps' shadow draw reads its bounds from.
 ID3D11Buffer* parameters() noexcept;
 // For the log.

@@ -6,20 +6,16 @@
 #include "log.hpp"
 #include "passes/contact_shadow_trace.hpp"
 #include "performance.hpp"
-#include "shader_bytecode.hpp"
 
 #include <wrl/client.h>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <mutex>
-#include <optional>
-#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
-#include <vector>
 
 namespace phantom_fx::lamp_contact_shadows
 {
@@ -28,19 +24,13 @@ namespace
 using Microsoft::WRL::ComPtr;
 using namespace game_lights;
 
-constexpr UINT SpecularSlot = 1; // t1 of the light passes, whose z is the material
 constexpr UINT DepthSlot = 2;    // t2 of the light passes
 constexpr UINT ShadowSlot = 7;   // t7 of the light shadow shader
 constexpr UINT BoundsSlot = 6;   // b6 of the light shadow shader: the trace's constants
 // A light this close to the camera plane is moved off it, so its place on screen stays finite.
 constexpr float MinLightDepth = 0.01f;
 
-std::atomic<bool> wantedRunning{}, active{}, pipelineFailed{};
-
-// Identified local light shaders, looked up on every indexed draw.
-std::shared_mutex lightShaderMutex;
-std::unordered_map<IUnknown*, Falloff> lightShaders;
-std::vector<ComPtr<IUnknown>> lightShaderOwners;
+std::atomic<bool> wantedRunning{}, pipelineFailed{};
 
 // The light whose shadow a context's last stencil-marking draw put in the light targets' alpha, by
 // its position, for the lighting draw that follows.
@@ -101,14 +91,11 @@ bool ensurePipeline()
     }
 }
 
-// A local light shader's falloff; none for any other shader.
-std::optional<Falloff> falloffOf(IUnknown* shader)
+// The light's position in view space, from its cPSLight.
+std::array<float, 3> positionOf(const contact_shadow_trace::PassConstants& constants)
 {
-    std::shared_lock lock(lightShaderMutex);
-    const auto found = shader ? lightShaders.find(shader) : lightShaders.end();
-    if (found == lightShaders.end()) return std::nullopt;
-
-    return found->second;
+    const float* light = constants.light.data();
+    return {light[LightPosition], light[LightPosition + 1], light[LightPosition + 2]};
 }
 
 void noteMarked(ID3D11DeviceContext* context, const std::array<float, 3>& position)
@@ -132,7 +119,7 @@ bool takeMarked(ID3D11DeviceContext* context, const std::array<float, 3>& positi
 
 // The game's additive light blend (ONE, ONE) with its light scaled by the target's alpha, which it
 // keeps; null for any other blend. Call with resourceMutex held.
-ID3D11BlendState* shadowedBlend(ID3D11BlendState* game)
+ID3D11BlendState* scaledByAlpha(ID3D11BlendState* game)
 {
     if (!game) return nullptr;
 
@@ -162,56 +149,68 @@ ID3D11BlendState* shadowedBlend(ID3D11BlendState* game)
 
     return shadowed.Get();
 }
+}
 
-// A point or spot light's draws. At the one that marks the stencil (colour writes off), the light's
-// shadow is traced within the light's reach, and the light's volume drawn once more, both faces and
-// without depth test, to put the shadow in the alpha of both light targets wherever the light can
-// reach. The lighting draw that follows then scales its light by that alpha.
-bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Falloff falloff)
+void attach(ID3D11Device* gameDevice) noexcept
 {
-    ComPtr<ID3D11BlendState> gameBlend;
-    float blendFactor[4]{};
-    UINT sampleMask{};
-    context->OMGetBlendState(gameBlend.GetAddressOf(), blendFactor, &sampleMask);
-    if (!gameBlend) return false;
+    std::lock_guard lock(resourceMutex);
+    device = gameDevice;
+    if (wantedRunning) ensurePipeline();
+}
 
-    D3D11_BLEND_DESC blend{};
-    gameBlend->GetDesc(&blend);
-    const bool marking = blend.RenderTarget[0].RenderTargetWriteMask == 0;
+void detach() noexcept
+{
+    {
+        std::lock_guard lock(resourceMutex);
+        lightShadowShader.Reset();
+        alphaOnly.Reset();
+        noDepth.Reset();
+        bothFaces.Reset();
+        shadowedBlends.clear();
+        lightShadow = {};
+        device.Reset();
+        pipelineFailed = false;
+    }
+
+    std::lock_guard lock(markedMutex);
+    marked.clear();
+}
+
+void configure(const Configuration& configuration) noexcept
+{
+    const bool running = configuration.effects.runs(Effect::LampContactShadows);
+    wantedRunning = running;
+    if (!running) return;
+
+    std::lock_guard lock(resourceMutex);
+    ensurePipeline();
+}
+
+Health health()
+{
+    if (pipelineFailed || contact_shadow_trace::failed()) return Health::unavailable("Contact shadows are unavailable (see PhantomFX.log).");
+
+    return {};
+}
+
+// At the marking draw (colour writes off), the light's shadow is traced within the light's reach, and
+// the light's volume drawn once more, both faces and without depth test, to put the shadow in the
+// alpha of both light targets wherever the light can reach.
+bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Falloff falloff, const BoundBlend& gameBlend)
+{
     const auto constants = contact_shadow_trace::passConstants(context);
     if (!constants)
     {
-        std::lock_guard lock(resourceMutex);
         logOnce("Shadows: a light without its constants keeps the game's shadows.");
         return false;
     }
 
     const float* scene = constants->scene.data();
     const float* light = constants->light.data();
+    const auto position = positionOf(*constants);
 
-    const std::array position{light[LightPosition], light[LightPosition + 1], light[LightPosition + 2]};
-    if (!marking)
-    {
-        if (!takeMarked(context, position)) return false;
-
-        std::lock_guard lock(resourceMutex);
-        auto* shadowed = shadowedBlend(gameBlend.Get());
-        if (!shadowed)
-        {
-            logOnce("Shadows: a light with another blend than (one, one) keeps the game's shadows.");
-            return false;
-        }
-
-        context->OMSetBlendState(shadowed, blendFactor, sampleMask);
-        context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
-        context->OMSetBlendState(gameBlend.Get(), blendFactor, sampleMask);
-
-        return true;
-    }
-
-    ComPtr<ID3D11ShaderResourceView> depth, specular;
+    ComPtr<ID3D11ShaderResourceView> depth;
     context->PSGetShaderResources(DepthSlot, 1, depth.GetAddressOf());
-    context->PSGetShaderResources(SpecularSlot, 1, specular.GetAddressOf());
     std::lock_guard lock(resourceMutex);
     if (!ensurePipeline()) return false;
 
@@ -229,7 +228,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     float point[4]{position[0], position[1], position[2], 1};
     if (std::abs(point[2]) < MinLightDepth) point[2] = std::copysign(MinLightDepth, point[2]);
     performance::Timed timed(context, performance::Pass::LampTraces);
-    const auto dispatched = contact_shadow_trace::trace(context, depth.Get(), specular.Get(), contact_shadow_trace::project(scene, point), bounds, lightShadow);
+    const auto dispatched = contact_shadow_trace::trace(context, depth.Get(), scene, contact_shadow_trace::project(scene, point), bounds, lightShadow);
     timed.end();
     if (!dispatched || dispatched->dispatches == 0) return false;
 
@@ -261,7 +260,7 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     context->PSSetShader(lightShadowShader.Get(), nullptr, 0);
     context->PSSetShaderResources(ShadowSlot, 1, lightShadow.view.GetAddressOf());
     context->PSSetConstantBuffers(BoundsSlot, 1, &traceConstants);
-    context->OMSetBlendState(alphaOnly.Get(), blendFactor, sampleMask);
+    context->OMSetBlendState(alphaOnly.Get(), gameBlend.factor, gameBlend.sampleMask);
     context->OMSetDepthStencilState(noDepth.Get(), 0);
     context->RSSetState(bothFaces.Get());
     context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
@@ -269,105 +268,24 @@ bool drawLocalLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
     context->PSSetShader(gameShader.Get(), nullptr, 0);
     context->PSSetShaderResources(ShadowSlot, 1, gameView.GetAddressOf());
     context->PSSetConstantBuffers(BoundsSlot, 1, gameOptions.GetAddressOf());
-    context->OMSetBlendState(gameBlend.Get(), blendFactor, sampleMask);
+    context->OMSetBlendState(gameBlend.state.Get(), gameBlend.factor, gameBlend.sampleMask);
     context->OMSetDepthStencilState(gameDepth.Get(), stencilReference);
     context->RSSetState(gameRasterizer.Get());
     noteMarked(context, position);
 
     return true;
 }
-}
 
-void attach(ID3D11Device* gameDevice) noexcept
+ID3D11BlendState* takeShadowedBlend(ID3D11DeviceContext* context, ID3D11BlendState* gameBlend)
 {
-    std::lock_guard lock(resourceMutex);
-    device = gameDevice;
-    if (wantedRunning) ensurePipeline();
-}
-
-void detach() noexcept
-{
-    {
-        std::lock_guard lock(resourceMutex);
-        lightShadowShader.Reset();
-        alphaOnly.Reset();
-        noDepth.Reset();
-        bothFaces.Reset();
-        shadowedBlends.clear();
-        lightShadow = {};
-        device.Reset();
-        pipelineFailed = false;
-    }
-
-    {
-        std::lock_guard lock(markedMutex);
-        marked.clear();
-    }
-
-    std::unique_lock lock(lightShaderMutex);
-    lightShaders.clear();
-    lightShaderOwners.clear();
-}
-
-void configure(const Configuration& configuration) noexcept
-{
-    const bool running = configuration.effects.runs(Effect::LampContactShadows);
-    wantedRunning = running;
-    if (!running) return;
+    const auto constants = contact_shadow_trace::passConstants(context);
+    if (!constants || !takeMarked(context, positionOf(*constants))) return nullptr;
 
     std::lock_guard lock(resourceMutex);
-    ensurePipeline();
-}
+    auto* shadowed = scaledByAlpha(gameBlend);
+    if (!shadowed) logOnce("Shadows: a light with another blend than (one, one) keeps the game's shadows.");
 
-Health health()
-{
-    if (pipelineFailed || contact_shadow_trace::failed()) return Health::unavailable("Contact shadows are unavailable (see PhantomFX.log).");
-
-    return {};
-}
-
-void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
-{
-    const auto checksum = dxbcHashOf(code, size);
-    if (!checksum || !shader) return;
-
-    const auto* light = findGameLight(toHex(*checksum));
-    if (!light) return;
-
-    try
-    {
-        std::unique_lock lock(lightShaderMutex);
-        lightShaders.emplace(shader, light->falloff);
-        lightShaderOwners.emplace_back(shader);
-    }
-    catch (...)
-    {
-    }
-}
-
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
-{
-    if (!active.load(std::memory_order_relaxed) || !call.indexed || call.instances != 1) return false;
-
-    try
-    {
-        ComPtr<ID3D11PixelShader> gameShader;
-        context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
-        const auto falloff = falloffOf(gameShader.Get());
-        if (!falloff) return false;
-
-        return drawLocalLight(context, call, *falloff);
-    }
-    catch (const std::exception& error)
-    {
-        std::lock_guard lock(resourceMutex);
-        logOnce(std::string("Shadows: a light pass kept the game's shadows: ") + error.what());
-    }
-    catch (...)
-    {
-    }
-
-    return false;
+    return shadowed;
 }
 
 void contextFinished(ID3D11DeviceContext* context) noexcept
@@ -378,12 +296,7 @@ void contextFinished(ID3D11DeviceContext* context) noexcept
 
 void present() noexcept
 {
-    {
-        std::lock_guard lock(markedMutex);
-        marked.clear();
-    }
-
-    active = wantedRunning && !pipelineFailed;
-    contact_shadow_trace::tracesThisFrame(contact_shadow_trace::Tracer::Lamps, active);
+    std::lock_guard lock(markedMutex);
+    marked.clear();
 }
 }
