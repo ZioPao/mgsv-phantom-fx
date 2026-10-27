@@ -469,7 +469,7 @@ gi_scene::Geometry materialOf(const State& s, const ModelPart& part)
 {
     gi_scene::Geometry geometry;
     geometry.flags = (part.alphaTested ? GI_GEOMETRY_CUT_OUT : 0u) | (part.uvs.empty() ? 0u : GI_GEOMETRY_UV) | (part.leaf ? GI_GEOMETRY_LEAF : 0u)
-        | (part.castsNoShadow ? GI_GEOMETRY_NO_SHADOW : 0u) | (part.hair ? GI_GEOMETRY_HAIR : 0u);
+        | (part.castsNoShadow ? GI_GEOMETRY_NO_SHADOW : 0u) | (part.hair ? GI_GEOMETRY_HAIR : 0u) | (part.shadowOnly ? GI_GEOMETRY_SHADOW_ONLY : 0u);
     const auto texture = part.uvs.empty() ? s.textures.end() : s.textures.find(part.baseTexture);
     if (texture == s.textures.end() || !texture->second.shared.resource) return geometry;
 

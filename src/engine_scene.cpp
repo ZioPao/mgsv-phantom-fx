@@ -121,6 +121,12 @@ constexpr std::uint64_t ParseBytesPerTake = 8ull << 20;
 // stays out: the main view's own meshes are in the scene, and its stand-in, an offset, simpler copy of
 // them the camera never sees, blocked light where nothing was drawn (a building's 25-triangle stand-in
 // kept 80 to 100% of a room's main lamp, an unshadowed spot, off its wall; the lamp probe, 2026-10-26).
+// But where the main view shows cut-out meshes the scene leaves out, a solid stand-in is all the rays
+// have of them: it is kept, for the rays towards lights alone (GI_GEOMETRY_SHADOW_ONLY). A scaffold's
+// white tarps (alpha 32, shadow 1, drawn in the main view only) cast in the game through a 72-triangle
+// stand-in (shadow 2, drawn into all four sun cascades), a 33 cm slab around each sheet; without it they
+// cast nothing in the rays (Mother Base, 2026-10-27). Met by every ray, rays leaving a sheet would meet
+// the slab's inside 16 cm away, as a wall's met a building's shell and went black (see ModelFade).
 // A cut-out one stays in, for the cut-out meshes the main view shows and the scene leaves out (a pylon's
 // lattice casts through its stand-in, alpha 128, shadow 66).
 // A character (a skinned model) is taken as the main view shows it instead: its stand-ins left out
@@ -434,6 +440,16 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
     const auto meshGroups = meshGroupsOf(file, *layout);
     if (!meshGroups) return nullptr;
 
+    // Whether the main view shows cut-out meshes the scene leaves out: the solid stand-ins are then kept
+    // (see ShadowMapsOnly).
+    bool mainViewCutOutsLeftOut{};
+    for (std::uint32_t mesh = 0; mesh < b[Meshes].count && !vegetation; ++mesh)
+    {
+        std::uint8_t alpha{}, shadow{};
+        if (file.at(b[Meshes].offset + 48ull * mesh, alpha) && file.at(b[Meshes].offset + 48ull * mesh + 1, shadow))
+            mainViewCutOutsLeftOut |= (shadow & CastsNoShadow) && (alpha & (CutOutAlpha | DecalAlpha));
+    }
+
     for (std::uint32_t mesh = 0; mesh < b[Meshes].count; ++mesh)
     {
         const auto meshAt = b[Meshes].offset + 48ull * mesh;
@@ -450,7 +466,8 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
         const bool mainViewTaken = !(alpha & (CutOutAlpha | DecalAlpha));
         const bool mainViewGlass = mainViewOnly && (alpha & GlassAlpha);
         const bool solidStandIn = (shadow & ShadowMapsOnly) && !(alpha & (CutOutAlpha | DecalAlpha));
-        const bool leftOut = mainViewGlass || solidStandIn
+        const bool standInKept = solidStandIn && !character && mainViewCutOutsLeftOut;
+        const bool leftOut = mainViewGlass || (solidStandIn && !standInKept)
             || (character ? (shadow & ShadowMapsOnly) != 0 : (mainViewOnly && !mainViewTaken) || (alpha & TranslucentAlpha));
         if (leftOut)
         {
@@ -508,6 +525,7 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
         // A character's main-view meshes cast in the rays (its hair, see above); a rigid model's do not, as in the game.
         part.castsNoShadow = mainViewOnly && !character;
         part.hair = character && part.alphaTested && (mainViewOnly || (alpha & TranslucentAlpha));
+        part.shadowOnly = standInKept;
         part.alphaBits = alpha;
         part.shadowBits = shadow;
         part.technique = techniqueOf(file, *layout, materialInstance);

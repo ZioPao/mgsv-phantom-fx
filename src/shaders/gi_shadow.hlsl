@@ -71,7 +71,8 @@ ShadowSurface ShadowSurfaceAt(float3 position, float3 gbufferNormal)
     float tolerance = 0.03f + 0.02f * surfaceDistance;
     SceneHit hit = TraceClosest(g_Frame.eye.xyz, direction, max(surfaceDistance - tolerance, 0.0f), surfaceDistance + tolerance, GI_MASK_SCENE, true,
         false, float2(0.0f, g_Frame.rayCone.x));
-    if (!hit.hit || abs(hit.distance - surfaceDistance) > tolerance) return surface;
+    // A stand-in the camera never sees is not the surface (a tarp's slab, 16 cm before its sheet).
+    if (!hit.hit || abs(hit.distance - surfaceDistance) > tolerance || IsShadowOnly(hit.instance, hit.geometry)) return surface;
 
     SceneTriangle t = LoadTriangle(hit.instance, hit.geometry, hit.primitive);
     float3 normal = cross(t.v1 - t.v0, t.v2 - t.v0);
