@@ -41,7 +41,7 @@ template<void (*Attach)(ID3D11Device*) noexcept> void withDevice(ID3D11Device* d
 constexpr Module Modules[]{
     {.attach = withDevice<sun_light_pass::attach>, .configure = sun_light_pass::configure, .present = sun_light_pass::present, .detach = sun_light_pass::detach},
     {.present = sun_contact_shadows::present, .detach = sun_contact_shadows::detach},
-    {.configure = local_light_pass::configure, .present = local_light_pass::present, .detach = local_light_pass::detach},
+    {.configure = local_light_pass::configure, .present = local_light_pass::present},
     {.attach = withDevice<lamp_contact_shadows::attach>, .configure = lamp_contact_shadows::configure, .present = lamp_contact_shadows::present,
         .detach = lamp_contact_shadows::detach},
     {.attach = withDevice<lamp_soft_shadows::attach>, .configure = lamp_soft_shadows::configure, .detach = lamp_soft_shadows::detach},

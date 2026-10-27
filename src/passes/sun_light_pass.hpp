@@ -1,10 +1,10 @@
 #pragma once
 
+#include "game_shaders.hpp"
 #include "phantom_fx_settings.hpp"
 #include "ui_redirect.hpp"
 
 #include <d3d11.h>
-#include <cstddef>
 
 // The game's sun light pass (docs/DEVELOPMENT.md, "Sun light and shadows"): the engine lights the sun
 // in one full-screen pass whose shaders sample the shadow map themselves. While a sun shadow effect
@@ -33,10 +33,9 @@ Health softShadowHealth();
 Health rayTracedShadowHealth();
 
 // ---- Recording, on the game's render and worker threads ----
-void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
 // Before a draw: the sun pass, while a sun shadow effect runs, is drawn here instead; returns true
 // when the game's draw must be skipped.
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
 // Each present. The game records a whole frame between presents, so all of a frame's sun passes draw
 // with the same effects.
 void present() noexcept;

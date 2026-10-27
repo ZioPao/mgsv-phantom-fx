@@ -5,12 +5,12 @@
 #include "d3d11_helpers.hpp"
 #include "frame_log.hpp"
 #include "game_lights.hpp"
+#include "game_shaders.hpp"
 #include "log.hpp"
 #include "passes/ray_tracing/ray_tracing.hpp"
 #include "passes/ray_tracing/shaders/gi_shared.h"
 #include "performance.hpp"
 #include "resource_dump.hpp"
-#include "shader_bytecode.hpp"
 
 #include <Windows.h>
 #include <wrl/client.h>
@@ -23,7 +23,6 @@
 #include <limits>
 #include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -34,6 +33,7 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 using namespace game_lights;
+using game_shaders::GamePass, game_shaders::GameShader, game_shaders::GameShaders;
 using game_constants::LampLightConstants, game_constants::LampMaterialConstants, game_constants::SceneConstants;
 
 // Diagnostics: which lights are drawn over all their reach, shadowed by the rays alone, rather than
@@ -232,12 +232,14 @@ std::atomic<bool> enabled{}, active{};
 std::atomic<float> flashlightBrightness{1};
 std::atomic<BeyondVolumes> beyondVolumes{};
 
-// The game's light shaders by the object it draws with, looked up on every indexed draw, and the twins
-// that draw them again. Holding them keeps their addresses from being reused.
-std::shared_mutex shaderMutex;
-std::unordered_map<IUnknown*, const GameLight*> gameShaders;
-std::vector<ComPtr<IUnknown>> shaderOwners;
-std::array<ComPtr<ID3D11PixelShader>, static_cast<std::size_t>(Twin::Count)> twins;
+// The game's shaders that draw the lights of each kind again: their twins (game_lights::isTwin).
+constexpr auto TwinRows = [] {
+    std::array<const GameShader*, static_cast<std::size_t>(Twin::Count)> rows{};
+    for (const auto& row : GameShaders)
+        if (row.light && isTwin(*row.light)) rows[static_cast<std::size_t>(row.light->twin)] = &row;
+
+    return rows;
+}();
 
 std::mutex notesMutex;
 std::unordered_map<std::uint64_t, Notes> byContext; // While recorded
@@ -368,16 +370,23 @@ bool ensurePipeline()
     }
 }
 
-// The game's light a shader draws, when its twin is there to draw it again.
-const GameLight* gameLightOf(IUnknown* shader)
+// The twin that draws the lights of `kind` again, once the game has made it.
+ID3D11PixelShader* twinOf(Twin kind)
 {
-    if (!shader) return nullptr;
+    return game_shaders::firstCreated(*TwinRows[static_cast<std::size_t>(kind)]);
+}
 
-    std::shared_lock lock(shaderMutex);
-    const auto found = gameShaders.find(shader);
-    if (found == gameShaders.end() || !twins[static_cast<std::size_t>(found->second->twin)]) return nullptr;
+bool hasAnyTwin()
+{
+    return std::ranges::any_of(TwinRows, [](const GameShader* row) { return game_shaders::firstCreated(*row) != nullptr; });
+}
 
-    return found->second;
+// The game's light a shader draws, when its twin is there to draw it again.
+const GameLight* gameLightOf(const GameShader* shader)
+{
+    if (!shader || shader->pass != GamePass::LocalLight || !twinOf(shader->light->twin)) return nullptr;
+
+    return &*shader->light;
 }
 
 // What the light's lighting draw binds, or nothing when its constants are unknown.
@@ -704,7 +713,7 @@ void drawAgain(const Light& light)
     std::array<ID3D11SamplerState*, SamplerCount> samplers{};
     for (UINT i = 0; i < SamplerCount; ++i) samplers[i] = light.samplers[i].Get();
     ID3D11Buffer* lightConstants[]{sceneBuffer.Get(), lightBuffer.Get(), materialBuffer.Get()}; // b2 to b4
-    immediate->PSSetShader(twins[static_cast<std::size_t>(light.game->twin)].Get(), nullptr, 0);
+    immediate->PSSetShader(twinOf(light.game->twin), nullptr, 0);
     immediate->PSSetShaderResources(0, ResourceSlots, resources.data());
     immediate->PSSetSamplers(FirstSampler, SamplerCount, samplers.data());
     immediate->PSSetConstantBuffers(SceneConstants::Slot, 3, lightConstants);
@@ -786,6 +795,14 @@ void readVolumeBounds()
     lights.clear();
 }
 
+// The checksum of the game's shader for `game`, which names the light in the frame record.
+const char* checksumOf(const GameLight* game)
+{
+    const auto row = std::ranges::find_if(GameShaders, [&](const GameShader& shader) { return shader.light && &*shader.light == game; });
+
+    return row != std::end(GameShaders) ? row->checksum : "unknown";
+}
+
 // Developer: while F10 records a frame, what the lights are drawn from and into, in the frame's dump
 // folder: the light targets ("when" before or after), and before, the rays' share, the depth and each
 // light in world space.
@@ -814,7 +831,7 @@ void saveForRecord(const std::filesystem::path& folder, int batch, const char* w
     {
         const auto at = game_constants::toWorld(light.scene, light.light.position, 1);
         const auto way = game_constants::toWorld(light.scene, light.light.axis, 0);
-        list << light.game->checksum << (light.traced ? " traced" : " untraced") << (light.volume.view ? " volume " : " no volume ")
+        list << checksumOf(light.game) << (light.traced ? " traced" : " untraced") << (light.volume.view ? " volume " : " no volume ")
              << light.volume.count << " at " << at[0] << ' ' << at[1] << ' ' << at[2] << " way " << way[0] << ' ' << way[1] << ' ' << way[2]
              << " colour " << light.light.color[0] << ' ' << light.light.color[1] << ' ' << light.light.color[2] << " range "
              << rangeOf(light.light, *light.game) << " shadow map from " << shadowMapStart(light);
@@ -959,11 +976,6 @@ void detach() noexcept
         std::lock_guard lock(boundsMutex);
         volumeBounds.clear();
     }
-
-    std::unique_lock lock(shaderMutex);
-    gameShaders.clear();
-    shaderOwners.clear();
-    for (auto& twin : twins) twin.Reset();
 }
 
 void configure(const Configuration& configuration) noexcept
@@ -988,46 +1000,18 @@ Health health()
         if (pipelineFailed) return Health::unavailable("Ray-traced lights are unavailable (see PhantomFX.log).");
     }
 
-    {
-        std::shared_lock lock(shaderMutex);
-        if (std::none_of(twins.begin(), twins.end(), [](const auto& twin) { return twin != nullptr; }))
-            return Health::waiting("The game has not loaded its light shaders yet.");
-    }
+    if (!hasAnyTwin()) return Health::waiting("The game has not loaded its light shaders yet.");
 
     return ray_tracing::health();
 }
 
-void pixelShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
-{
-    const auto checksum = dxbcHashOf(code, size);
-    if (!checksum || !shader) return;
-
-    const auto text = toHex(*checksum);
-    const auto* game = findGameLight(text);
-    if (!game) return;
-
-    try
-    {
-        std::unique_lock lock(shaderMutex);
-        gameShaders[shader] = game;
-        shaderOwners.emplace_back(shader);
-        auto& twin = twins[static_cast<std::size_t>(game->twin)];
-        if (isTwin(*game) && !twin) check(shader->QueryInterface(IID_PPV_ARGS(&twin)), "Taking one of the game's light shaders");
-    }
-    catch (...)
-    {
-    }
-}
-
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
     if (!active.load(std::memory_order_relaxed) || !call.indexed || call.instances != 1) return false;
 
     try
     {
-        ComPtr<ID3D11PixelShader> gameShader;
-        context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
-        const auto* game = gameLightOf(gameShader.Get());
+        const auto* game = gameLightOf(shader.row());
         if (!game || isBeam(context, *game)) return false;
 
         // A smaller camera's light, as the intro mirror's: the rays trace the main view only.
@@ -1055,7 +1039,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
         // The lighting draw keeps its stencil work, without its light: no pixel shader.
         context->PSSetShader(nullptr, nullptr, 0);
         context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
-        context->PSSetShader(gameShader.Get(), nullptr, 0);
+        context->PSSetShader(shader.object(), nullptr, 0);
 
         std::lock_guard lock(notesMutex);
         byContext[reinterpret_cast<std::uint64_t>(context)].lights.push_back(std::move(*noted));
@@ -1221,11 +1205,7 @@ void present() noexcept
         on = on && fullScreenShader && !pipelineFailed;
     }
 
-    {
-        std::shared_lock lock(shaderMutex);
-        on = on && std::any_of(twins.begin(), twins.end(), [](const auto& twin) { return twin != nullptr; });
-    }
-
+    on = on && hasAnyTwin();
     enabled = on;
     active = on && sawDrawPoint;
     if constexpr (DiagnosticLog) logLights();

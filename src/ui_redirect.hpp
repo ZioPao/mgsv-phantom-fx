@@ -83,10 +83,9 @@ void detach() noexcept;
 // The swap chain's size.
 void setOutputSize(unsigned width, unsigned height) noexcept;
 
-// The 2D pass is recognised by its vertex shaders, the Draw2D*_vs.hlsl ones by the source paths the
-// game's shaders keep, bound on the context that records it.
-void vertexShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
-void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept;
+// The 2D pass is recognised by its vertex shaders (game_shaders::VertexShader::Draw2D), bound on the
+// context that records it.
+void vertexShaderBound(ID3D11DeviceContext* context, bool isDraw2D) noexcept;
 // FinishCommandList clears the context's state.
 void contextFinished(ID3D11DeviceContext* context) noexcept;
 bool drawing2D(ID3D11DeviceContext* context) noexcept;

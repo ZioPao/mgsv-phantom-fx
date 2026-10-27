@@ -10,7 +10,6 @@
 #include "passes/ray_tracing/ray_tracing.hpp"
 #include "passes/sun_light_pass_shaders.hpp"
 #include "performance.hpp"
-#include "shader_bytecode.hpp"
 
 #include <wrl/client.h>
 #include <array>
@@ -26,29 +25,7 @@ namespace phantom_fx::sun_light_pass
 namespace
 {
 using Microsoft::WRL::ComPtr;
-
-// The game's sun light pixel shaders: inside the shadow range, with the shadow map, and beyond it.
-// In rain the game draws a pair without the sky reflection, as its rain filter reflects the sky
-// instead.
-enum class SunShader : std::uint8_t { ShadowMap, Far, RainShadowMap, RainFar, Count, None = Count };
-constexpr const char* SunChecksums[]{
-    "56ed4db892a7940f038146eeb0df0d30", // SunLight_DL_CS_ES
-    "92726e8d231c8ed85f0db90400ef2258", // SunLight_DL_ES
-    "7e5c2fc99c9d84ddd32df4e789e7082a", // SunLight_DL_CS
-    "853f56a63e5bc66e6ee301c85ebfeaa8", // SunLight_DL
-};
-constexpr const char* SunNames[]{"shadow map", "far", "shadow map, rain", "far, rain"};
-static_assert(std::size(SunChecksums) == static_cast<std::size_t>(SunShader::Count) && std::size(SunNames) == std::size(SunChecksums));
-
-bool shadowMapped(SunShader sun)
-{
-    return sun == SunShader::ShadowMap || sun == SunShader::RainShadowMap;
-}
-
-bool reflectsSky(SunShader sun)
-{
-    return sun == SunShader::ShadowMap || sun == SunShader::Far;
-}
+using game_shaders::GamePass, game_shaders::GameShader;
 
 constexpr UINT DepthSlot = 2;             // t2 of the light passes
 constexpr UINT RayTracedSlot = 6;         // t6 of the replacement shaders
@@ -80,18 +57,18 @@ std::atomic<bool> active{}, pipelineFailed{};
 std::atomic<std::uint32_t> frame{};
 std::atomic<bool> turnPattern{};
 
-// Identified sun shaders, read lock-free on every full-screen draw. The game can create a shader more
-// than once; holding the copies keeps their addresses from being reused.
-constexpr std::size_t CopiesPerShader = 4;
-std::mutex shaderMutex;
-std::array<std::array<std::atomic<IUnknown*>, CopiesPerShader>, std::size(SunChecksums)> sunShaders{};
-std::array<std::array<ComPtr<IUnknown>, CopiesPerShader>, std::size(SunChecksums)> shaderOwners;
-
 // ---- Direct3D, guarded by resourceMutex ----
 std::mutex resourceMutex;
 ComPtr<ID3D11Device> device;
-std::array<ComPtr<ID3D11PixelShader>, std::size(SunChecksums)> replacements;
+// The game's sun shaders rebuilt: with and without the shadow map, each with and without the sky's
+// reflection (game_shaders::GameShader).
+std::array<ComPtr<ID3D11PixelShader>, 4> replacements;
 ComPtr<ID3D11Buffer> optionsBuffer;
+
+std::size_t replacementOf(bool isShadowMapped, bool reflectsSky)
+{
+    return (isShadowMapped ? 2 : 0) + (reflectsSky ? 1 : 0);
+}
 
 // Compiles the shaders once; call with resourceMutex held. Returns false when they are unavailable.
 bool ensurePipeline()
@@ -101,12 +78,12 @@ bool ensurePipeline()
 
     try
     {
-        for (std::size_t index = 0; index < replacements.size(); ++index)
-        {
-            const auto sun = static_cast<SunShader>(index);
-            const D3D_SHADER_MACRO defines[]{{"SHADOW_MAP", shadowMapped(sun) ? "1" : "0"}, {"SKY_REFLECTION", reflectsSky(sun) ? "1" : "0"}, {}};
-            replacements[index] = pixelShader(device.Get(), shaders::SunLight, "sun-light", defines);
-        }
+        for (const bool isShadowMapped : {true, false})
+            for (const bool reflectsSky : {true, false})
+            {
+                const D3D_SHADER_MACRO defines[]{{"SHADOW_MAP", isShadowMapped ? "1" : "0"}, {"SKY_REFLECTION", reflectsSky ? "1" : "0"}, {}};
+                replacements[replacementOf(isShadowMapped, reflectsSky)] = pixelShader(device.Get(), shaders::SunLight, "sun-light", defines);
+            }
 
         // Last, so it marks a complete pipeline.
         optionsBuffer = makeConstantBuffer(device.Get(), sizeof(ShaderOptions), "Creating the sun shadow options");
@@ -124,17 +101,6 @@ bool ensurePipeline()
     }
 }
 
-SunShader sunOf(IUnknown* shader)
-{
-    if (!shader) return SunShader::None;
-
-    for (std::size_t sun = 0; sun < sunShaders.size(); ++sun)
-        for (const auto& copy : sunShaders[sun])
-            if (copy.load(std::memory_order_relaxed) == shader) return static_cast<SunShader>(sun);
-
-    return SunShader::None;
-}
-
 // Writes the replacement shaders' options on `context`; call with resourceMutex held. With the
 // ray-traced shadow, the shadow map's part is always soft.
 void writeOptions(ID3D11DeviceContext* context, const Composition& composition, bool rayTraced)
@@ -147,7 +113,8 @@ void writeOptions(ID3D11DeviceContext* context, const Composition& composition, 
 }
 
 // The sun pass, drawn with the replacement shaders.
-bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, SunShader sun, ID3D11PixelShader* gameShader, const Composition& composition)
+bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, const GameShader& sun, ID3D11PixelShader* gameShader,
+    const Composition& composition)
 {
     ComPtr<ID3D11ShaderResourceView> depth;
     context->PSGetShaderResources(DepthSlot, 1, depth.GetAddressOf());
@@ -162,7 +129,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
     }
 
     // Beyond the shadow range there is no shadow map to soften.
-    if (!composition.contactShadows && !(composition.softShadows && shadowMapped(sun)) && !rayTraced) return false;
+    if (!composition.contactShadows && !(composition.softShadows && sun.isShadowMapped) && !rayTraced) return false;
 
     const auto scene = constant_capture::pixelShaderReads<game_constants::SceneConstants>(context);
     const auto light = constant_capture::pixelShaderReads<game_constants::SunLightConstants>(context);
@@ -170,6 +137,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
     std::lock_guard lock(resourceMutex);
     if (!ensurePipeline()) return false;
 
+    bool isShadowMapped = sun.isShadowMapped;
     ID3D11ShaderResourceView* contactShadow{};
     if (composition.contactShadows)
     {
@@ -183,11 +151,11 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
         if (!contactShadow) return false;
 
         // The diagnostics view lights everything as beyond the shadow range, with the trace's shadow.
-        if (composition.onlyContactShadows) sun = reflectsSky(sun) ? SunShader::Far : SunShader::RainFar;
+        if (composition.onlyContactShadows) isShadowMapped = false;
     }
 
     // The rays' shadow alone, unless the shadow map's joins it: everything lit as beyond the shadow range.
-    if (rayTraced && !composition.rayTraced.withGameShadows) sun = reflectsSky(sun) ? SunShader::Far : SunShader::RainFar;
+    if (rayTraced && !composition.rayTraced.withGameShadows) isShadowMapped = false;
 
     writeOptions(context, composition, rayTraced != nullptr);
     ComPtr<ID3D11ShaderResourceView> gameView, gameRayTracedView;
@@ -195,7 +163,7 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Su
     context->PSGetShaderResources(ContactShadowSlot, 1, gameView.GetAddressOf());
     context->PSGetShaderResources(RayTracedSlot, 1, gameRayTracedView.GetAddressOf());
     context->PSGetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
-    context->PSSetShader(replacements[static_cast<std::size_t>(sun)].Get(), nullptr, 0);
+    context->PSSetShader(replacements[replacementOf(isShadowMapped, sun.reflectsSky)].Get(), nullptr, 0);
     context->PSSetShaderResources(ContactShadowSlot, 1, &contactShadow);
     context->PSSetShaderResources(RayTracedSlot, 1, &rayTraced);
     context->PSSetConstantBuffers(OptionsSlot, 1, optionsBuffer.GetAddressOf());
@@ -224,21 +192,11 @@ void attach(ID3D11Device* gameDevice) noexcept
 
 void detach() noexcept
 {
-    {
-        std::lock_guard lock(resourceMutex);
-        for (auto& replacement : replacements) replacement.Reset();
-        optionsBuffer.Reset();
-        device.Reset();
-        pipelineFailed = false;
-    }
-
-    std::lock_guard shaderLock(shaderMutex);
-    for (std::size_t sun = 0; sun < sunShaders.size(); ++sun)
-        for (std::size_t i = 0; i < CopiesPerShader; ++i)
-        {
-            sunShaders[sun][i] = nullptr;
-            shaderOwners[sun][i].Reset();
-        }
+    std::lock_guard lock(resourceMutex);
+    for (auto& replacement : replacements) replacement.Reset();
+    optionsBuffer.Reset();
+    device.Reset();
+    pipelineFailed = false;
 }
 
 void configure(const Configuration& configuration) noexcept
@@ -279,43 +237,18 @@ Health rayTracedShadowHealth()
     return ray_tracing::health();
 }
 
-void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
-{
-    const auto checksum = dxbcHashOf(code, size);
-    if (!checksum || !shader) return;
-
-    const auto text = toHex(*checksum);
-    for (std::size_t sun = 0; sun < std::size(SunChecksums); ++sun)
-    {
-        if (text != SunChecksums[sun]) continue;
-
-        std::lock_guard lock(shaderMutex);
-        for (std::size_t i = 0; i < CopiesPerShader; ++i)
-        {
-            if (sunShaders[sun][i].load()) continue;
-
-            shaderOwners[sun][i] = shader;
-            sunShaders[sun][i] = shader;
-            log(std::string("Identified the sun light pass (") + SunNames[sun] + ").");
-            return;
-        }
-    }
-}
-
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
     if (!active.load(std::memory_order_relaxed) || call.indexed || call.instances != 1 || call.count != 3) return false;
 
     try
     {
-        ComPtr<ID3D11PixelShader> gameShader;
-        context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
-        const auto sun = sunOf(gameShader.Get());
-        if (sun == SunShader::None) return false;
+        const auto* sun = shader.row();
+        if (!sun || sun->pass != GamePass::Sun) return false;
 
         const auto composition = latch.frame();
 
-        return drawSun(context, call, sun, gameShader.Get(), composition);
+        return drawSun(context, call, *sun, shader.object(), composition);
     }
     catch (const std::exception& error)
     {

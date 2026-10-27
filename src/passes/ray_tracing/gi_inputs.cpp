@@ -6,7 +6,6 @@
 #include "game_loop.hpp"
 #include "log.hpp"
 #include "passes/ray_tracing/engine_scene.hpp"
-#include "shader_bytecode.hpp"
 
 #include <Windows.h>
 #include <wrl/client.h>
@@ -16,8 +15,6 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
-#include <shared_mutex>
-#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -28,29 +25,16 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 using namespace game_constants;
-
-// What a vertex shader draws, from its source name: the game's models (their G-buffer and shadow
-// passes), its terrain, or neither.
-enum class Kind : std::uint8_t
-{
-    None,
-    Model,
-    Terrain,
-};
+using game_shaders::VertexShader;
 
 // The skinned meshes noted between kicks at most.
 constexpr std::size_t MaxDrawnBones = 2048;
 
 std::atomic<bool> active{};
 
-// Known vertex shaders, by the object the game binds. Holding them keeps their addresses from being reused.
-std::shared_mutex shaderMutex;
-std::unordered_map<IUnknown*, Kind> shaders;
-std::vector<ComPtr<IUnknown>> shaderOwners;
-
-// The shader the thread's context bound last, and what it draws.
+// What the vertex shader the thread's context bound last draws.
 thread_local ID3D11DeviceContext* boundContext{};
-thread_local Kind boundKind{};
+thread_local VertexShader boundKind{};
 
 // The camera by deferred context while recorded, by command list once finished, and that of the lists
 // executed since the last kick.
@@ -83,14 +67,6 @@ struct HookTimer
         }
     }
 };
-
-Kind kindOf(std::string_view name)
-{
-    if (name.starts_with("NewTerrain_Depth") || name.starts_with("NewTerrain_Shadow")) return Kind::Terrain;
-    if (name.starts_with("fox3ddf_") || name.starts_with("tpp3ddf_") || name.starts_with("ModelForward_Shadow")) return Kind::Model;
-
-    return Kind::None;
-}
 
 // The draws' skinned meshes since the last kick (takeDrawnBones).
 std::mutex bonesMutex;
@@ -141,10 +117,6 @@ void detach() noexcept
         pending.clear();
         executed.reset();
     }
-
-    std::unique_lock lock(shaderMutex);
-    shaders.clear();
-    shaderOwners.clear();
 }
 
 void setActive(bool on) noexcept
@@ -158,40 +130,16 @@ void setActive(bool on) noexcept
     executed.reset();
 }
 
-void vertexShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
+void vertexShaderBound(ID3D11DeviceContext* context, VertexShader kind) noexcept
 {
-    if (!code || !shader) return;
-
-    const auto kind = kindOf(sourceName(std::string_view(static_cast<const char*>(code), size), "_vs.hlsl"));
-    if (kind == Kind::None) return;
-
-    try
-    {
-        std::unique_lock lock(shaderMutex);
-        shaders[shader] = kind;
-        shaderOwners.emplace_back(shader);
-    }
-    catch (...)
-    {
-    }
-}
-
-void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept
-{
-    Kind kind{};
-    if (shader)
-    {
-        std::shared_lock lock(shaderMutex);
-        if (const auto found = shaders.find(shader); found != shaders.end()) kind = found->second;
-    }
-
     boundContext = context;
     boundKind = kind;
 }
 
 void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
 {
-    if (!active.load(std::memory_order_relaxed) || boundContext != context || boundKind == Kind::None || !call.count) return;
+    const bool isModelOrTerrain = boundKind == VertexShader::Model || boundKind == VertexShader::Terrain;
+    if (!active.load(std::memory_order_relaxed) || boundContext != context || !isModelOrTerrain || !call.count) return;
 
     const HookTimer timer;
     if constexpr (DiagnosticLog) ++workDraws;
@@ -220,14 +168,14 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
         if (!object) return;
 
         // The terrain's inputs, with the object and material constants the game wrote for the draw.
-        if (boundKind == Kind::Terrain)
+        if (boundKind == VertexShader::Terrain)
         {
             const auto* material = constant_capture::writtenTo<TerrainMaterialConstants>(constants[2].Get());
             if (material) engine_scene::noteTerrain(context, *object, *material);
         }
 
         // A skinned mesh (useWeightCount set): its bones as drawn, for the scene's characters.
-        if (boundKind == Kind::Model && object->useWeightCount[0] != 0) noteBones(context, *scene, *object, call);
+        if (boundKind == VertexShader::Model && object->useWeightCount[0] != 0) noteBones(context, *scene, *object, call);
     }
     catch (...)
     {

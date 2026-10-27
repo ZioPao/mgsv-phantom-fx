@@ -1,10 +1,10 @@
 #pragma once
 
 #include "features/frame_generation/frame_generation.hpp"
+#include "game_shaders.hpp"
 #include "phantom_fx_settings.hpp"
 #include "ui_redirect.hpp"
 
-#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -43,17 +43,16 @@ void detach() noexcept;
 void setOutputSize(unsigned width, unsigned height) noexcept;
 
 // ---- Recording, on the game's render and worker threads ----
-void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
 // Notes the FXAA and camera velocity passes as they are recorded. Returns true when the draw was
 // made on the UI target instead (the 2D pass and GammaControl while upscaling), or must not be made
 // (FXAA, as DLSS runs before the grading), so the game's own draw must be skipped; the render
 // target clear likewise.
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
 // Before the add-on's other draw hooks: notes the game's grading, which DLSS runs before. While
 // upscaling, true for its full-size draws (the lens flare layer's composite and the grading), which
 // are then bound to the output size (ui_redirect.hpp) and must be made in that state, whoever makes
 // them; afterPostDraw then puts the game's bindings back.
-bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
+bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
 void afterPostDraw(ID3D11DeviceContext* context) noexcept;
 bool clearTarget(ID3D11DeviceContext* context, ID3D11RenderTargetView* view, const float color[4]) noexcept;
 void depthStencilCleared(ID3D11DeviceContext* context, ID3D11DepthStencilView* view, UINT flags, float depth, UINT8 stencil) noexcept;

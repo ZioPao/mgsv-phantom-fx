@@ -1,12 +1,12 @@
 #pragma once
 
 #include "game_constants.hpp"
+#include "game_shaders.hpp"
 #include "passes/ray_tracing/gi_renderer.hpp"
 #include "phantom_fx_settings.hpp"
 #include "ui_redirect.hpp"
 
 #include <d3d11.h>
-#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -28,9 +28,8 @@ void configure(const Configuration& configuration) noexcept;
 Health health();
 
 // ---- Recording, on the game's render and worker threads ----
-void pixelShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
 // Before an indexed draw. Returns true when it made a light's draw itself, so the game's is skipped.
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
 // indirect_light calls this at a pass that comes after the game's lights and before anything reads them:
 // the sun pass, indoors the sky's specular pass in its place, or the resolve, as some scenes draw no sun
 // pass at all. Each list that has one draws the lights recorded before it again.

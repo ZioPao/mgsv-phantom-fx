@@ -2,6 +2,7 @@
 
 #include "d3d11_helpers.hpp"
 #include "features/hdr/hdr_shaders.hpp"
+#include "game_shaders.hpp"
 #include "log.hpp"
 #include "performance.hpp"
 #include "shader_bytecode.hpp"
@@ -27,6 +28,7 @@ namespace phantom_fx::hdr
 namespace
 {
 using Microsoft::WRL::ComPtr;
+using game_shaders::GamePass;
 
 constexpr DXGI_FORMAT GameSceneFormat = DXGI_FORMAT_B8G8R8A8_TYPELESS, SceneFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr DXGI_FORMAT BackBufferFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
@@ -35,34 +37,6 @@ constexpr DXGI_FORMAT BackBufferFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
 // (renderer +0x1E8 and +0x1F4): at start-up in 0x2BA1B0, and in every rebuild in 0x24B2A0. These are
 // the return addresses of those calls (docs/DEVELOPMENT.md, "HDR").
 constexpr std::uintptr_t SceneTargetCalls[]{0x2BA676, 0x2BA6DF, 0x24B2C1, 0x24B2D9};
-
-// The game's passes HDR works with, by their unpatched checksum.
-enum class Role : std::uint8_t
-{
-    Resolve,      // The deferred resolves, whose TppTonemap curve the grading uses
-    Grade,        // Tonemap: bloom and the colour LUT
-    Reduce,       // CopyReductionX4: the scene's quarter-size copy that bloom and flares start from
-    Copy,         // CopyRenderBuffer, a plain copy; from the scene into the depth of field's copy
-    DofComposite, // DOF_ScatterCompositeFinal: the depth of field over that copy
-};
-
-struct GameShader
-{
-    Role role;
-    const char* name;
-    const char* checksum; // docs/DEVELOPMENT.md, "Shaders"
-};
-
-constexpr GameShader Shaders[]{
-    {Role::Resolve, "DR_VolFog_TppTonemap", "00a609370c2e8b47a645263f91f6d3e8"},
-    {Role::Resolve, "DR_VolFog_TppTonemap_MD", "79c001e295254d8a749e41d1d7e49de7"},
-    {Role::Resolve, "DR_TonemapRainFilter", "9a4abc815afc5f121572d695f07af5af"},
-    {Role::Resolve, "DR_TonemapRainFilter_NoIR", "47f52852eaccaa83c25745ce790a212c"},
-    {Role::Grade, "Tonemap", "422ba739df267d9f92d4d62b0d2b4e09"},
-    {Role::Reduce, "CopyReductionX4", "e5b80b0a4d737e50533f9a058ffdca42"},
-    {Role::Copy, "CopyRenderBuffer", "9f93a957f1e21656e0d86bf112b71d6d"},
-    {Role::DofComposite, "DOF_ScatterCompositeFinal", "d1462a415f8e79dba14db617c576407d"},
-};
 
 // The resolves' cPSMaterial, the curve in the add-on's shaders, the output shader's constants, and
 // the depth of field composite's copy of the scene.
@@ -135,10 +109,6 @@ ComPtr<ID3D11UnorderedAccessView> curveAccess;
 std::unordered_map<ID3D11Resource*, Upgraded> targets;
 // The game's sRGB views of the upgraded targets, with their target.
 std::unordered_map<ID3D11View*, ID3D11Resource*> srgbViews;
-// Identified game shaders, by the object the game draws with. Holding them keeps their addresses
-// from being reused.
-std::unordered_map<IUnknown*, Role> roles;
-std::vector<ComPtr<IUnknown>> shaderOwners;
 // The game's pixel shaders made from patched bytecode, by the game's checksum and by the patched
 // code; kept for the session.
 std::map<DxbcHash, Patched> patchedShaders;
@@ -186,15 +156,6 @@ bool madeForScene()
             if (reinterpret_cast<std::uintptr_t>(frames[i]) == base + call) return true;
 
     return false;
-}
-
-std::optional<Role> roleOf(IUnknown* shader)
-{
-    if (!shader) return std::nullopt;
-
-    std::shared_lock lock(mutex);
-    const auto found = roles.find(shader);
-    return found == roles.end() ? std::nullopt : std::optional(found->second);
 }
 
 float linearToSrgb(float value)
@@ -413,8 +374,6 @@ void detach() noexcept
     std::unique_lock lock(mutex);
     targets.clear();
     srgbViews.clear();
-    roles.clear();
-    shaderOwners.clear();
     patchedByCode.clear();
     patchedShaders.clear();
     dofCopy = {};
@@ -648,46 +607,20 @@ std::pair<const void*, std::size_t> originalOf(const void* code, std::size_t siz
     return {found->second->original.data(), found->second->original.size()};
 }
 
-void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
-{
-    if (!enabled || !shader) return;
-
-    const auto checksum = dxbcHashOf(code, size);
-    if (!checksum) return;
-
-    const auto text = toHex(*checksum);
-    for (const auto& known : Shaders)
-    {
-        if (text != known.checksum) continue;
-
-        try
-        {
-            std::unique_lock lock(mutex);
-            roles[shader] = known.role;
-            shaderOwners.emplace_back(shader);
-        }
-        catch (...)
-        {
-            return;
-        }
-
-        log(std::string("HDR: identified ") + known.name + ".");
-        return;
-    }
-}
-
-bool beforeDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
+bool beforeDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
     if (!enabled.load(std::memory_order_relaxed) || call.indexed || call.count != 3 || call.instances != 1) return false;
 
     try
     {
-        ComPtr<ID3D11PixelShader> shader;
-        context->PSGetShader(shader.GetAddressOf(), nullptr, nullptr);
-        const auto role = roleOf(shader.Get());
-        if (role == Role::Resolve) captureCurve(context);
-        else if (role == Role::Copy) copyForDof(context);
-        else if (role == Role::DofComposite) composeDofOverFloat(context);
+        // The resolves with TppTonemap give its curve; CopyRenderBuffer copies the scene into the depth of
+        // field's copy, and DOF_ScatterCompositeFinal draws the depth of field over it.
+        if (const auto* row = shader.row())
+        {
+            if (row->pass == GamePass::Resolve && row->hasTppTonemap) captureCurve(context);
+            else if (row->pass == GamePass::Copy) copyForDof(context);
+            else if (row->pass == GamePass::DofComposite) composeDofOverFloat(context);
+        }
 
         ComPtr<ID3D11RenderTargetView> target;
         context->OMGetRenderTargets(1, target.GetAddressOf(), nullptr);
@@ -762,18 +695,18 @@ void encode(ID3D11DeviceContext* context) noexcept
     }
 }
 
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
     if (!enabled.load(std::memory_order_relaxed) || call.indexed || call.count != 3 || call.instances != 1) return false;
 
     try
     {
-        ComPtr<ID3D11PixelShader> shader;
-        context->PSGetShader(shader.GetAddressOf(), nullptr, nullptr);
-        const auto role = roleOf(shader.Get());
+        const auto* row = shader.row();
+        if (!row) return false;
+
         ID3D11PixelShader* replacement{};
-        if (role == Role::Grade) replacement = gradeShader.Get();
-        else if (role == Role::Reduce)
+        if (row->pass == GamePass::Grade) replacement = gradeShader.Get();
+        else if (row->pass == GamePass::Reduce)
         {
             // Only the reduction of the scene itself; the game runs it again on its own result.
             ComPtr<ID3D11ShaderResourceView> source;
@@ -791,7 +724,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
         performance::Timed timed(context, performance::Pass::HdrGrade);
         context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
         timed.end();
-        context->PSSetShader(shader.Get(), nullptr, 0);
+        context->PSSetShader(shader.object(), nullptr, 0);
         context->PSSetShaderResources(CurveSlot, 1, slot.GetAddressOf());
 
         return true;

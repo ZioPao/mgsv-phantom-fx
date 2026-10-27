@@ -17,7 +17,6 @@
 #include "passes/ray_tracing/gi_textures.hpp"
 #include "passes/ray_tracing/shaders/gi_shared.h"
 #include "performance.hpp"
-#include "shader_bytecode.hpp"
 
 #include <Windows.h>
 #include <d3d11_4.h>
@@ -30,12 +29,10 @@
 #include <format>
 #include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 
 namespace phantom_fx::ray_tracing
@@ -67,12 +64,8 @@ struct Options
     bool light = true;
 };
 
-// SH_SphereMap, which lights the probe atlas with the sky's light (docs/DEVELOPMENT.md, "Global
-// illumination", "Light").
-constexpr char SkyProbeChecksum[] = "4a3faf87b9ec54a401060a5b736eae5a";
-// MotionBlurCameraVelocity, which reads the game's velocity for its moving meshes at t3, right after
-// the G-buffer (docs/DEVELOPMENT.md, "Velocity").
-constexpr char CameraVelocityChecksum[] = "5d0241dd9804f41c780cd36669c71198";
+// MotionBlurCameraVelocity reads the game's velocity for its moving meshes here, right after the
+// G-buffer (docs/DEVELOPMENT.md, "Velocity").
 constexpr UINT ObjectVelocitySlot = 3;
 
 // Packs what the kernels read from the G-buffer: the depth, the normals in world space (0 where
@@ -161,10 +154,6 @@ FrameLatch<Options> latch;
 // The scene runs (for the light, the shadows or the point and spot lights), the light runs, the sun's
 // shadows run, the point and spot lights' shadows run.
 std::atomic<bool> enabled{}, lighting{}, shadowing{}, localShadowing{}, failed{};
-
-std::shared_mutex shaderMutex;
-std::unordered_set<IUnknown*> skyProbeShaders, cameraVelocityShaders;
-std::vector<ComPtr<IUnknown>> shaderOwners;
 
 std::mutex notesMutex;
 std::unordered_map<std::uint64_t, Notes> notes; // By deferred context, then by command list
@@ -699,11 +688,6 @@ void detach() noexcept
         std::lock_guard lock(notesMutex);
         notes.clear();
     }
-
-    std::unique_lock lock(shaderMutex);
-    skyProbeShaders.clear();
-    cameraVelocityShaders.clear();
-    shaderOwners.clear();
 }
 
 void configure(const Configuration& configuration) noexcept
@@ -751,37 +735,12 @@ std::string status()
     return text;
 }
 
-void pixelShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
+void vertexShaderBound(ID3D11DeviceContext* context, game_shaders::VertexShader kind) noexcept
 {
-    const auto checksum = dxbcHashOf(code, size);
-    if (!checksum || !shader) return;
-
-    const auto name = toHex(*checksum);
-    if (name != SkyProbeChecksum && name != CameraVelocityChecksum) return;
-
-    try
-    {
-        std::unique_lock lock(shaderMutex);
-        (name == SkyProbeChecksum ? skyProbeShaders : cameraVelocityShaders).insert(shader);
-        shaderOwners.emplace_back(shader);
-    }
-    catch (...)
-    {
-    }
+    gi_inputs::vertexShaderBound(context, kind);
 }
 
-void vertexShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
-{
-    gi_inputs::vertexShaderCreated(code, size, shader);
-}
-
-void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept
-{
-    gi_inputs::vertexShaderBound(context, shader);
-}
-
-
-void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
+void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
     if (!enabled.load(std::memory_order_relaxed)) return;
     if (call.indexed)
@@ -794,16 +753,10 @@ void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
 
     try
     {
-        ComPtr<ID3D11PixelShader> shader;
-        context->PSGetShader(shader.GetAddressOf(), nullptr, nullptr);
-        bool skyProbe{}, cameraVelocity{};
-        {
-            std::shared_lock lock(shaderMutex);
-            skyProbe = skyProbeShaders.contains(shader.Get());
-            cameraVelocity = cameraVelocityShaders.contains(shader.Get());
-        }
+        const auto* row = shader.row();
+        if (!row) return;
 
-        if (cameraVelocity)
+        if (row->pass == game_shaders::GamePass::CameraVelocity)
         {
             ComPtr<ID3D11ShaderResourceView> velocity;
             context->PSGetShaderResources(ObjectVelocitySlot, 1, velocity.GetAddressOf());
@@ -812,7 +765,7 @@ void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
             return;
         }
 
-        if (!skyProbe) return;
+        if (row->pass != game_shaders::GamePass::SkyProbe) return;
 
         // PsWork (SH_SphereMap_ps): the probe's light and the sky's; the scene's exposure. The game's
         // ambient light is the probe's plus the sky's times the occlusion. Where the game gives no sky

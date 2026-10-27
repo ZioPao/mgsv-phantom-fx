@@ -8,17 +8,13 @@
 #include "log.hpp"
 #include "passes/contact_shadow_trace.hpp"
 #include "performance.hpp"
-#include "shader_bytecode.hpp"
 
 #include <wrl/client.h>
+#include <array>
 #include <atomic>
-#include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
-#include <vector>
 
 namespace phantom_fx::local_light_pass
 {
@@ -26,6 +22,7 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 using namespace game_lights;
+using game_shaders::GamePass, game_shaders::GameShader, game_shaders::GameShaders;
 
 // The lamp shadow effects the pass adds, by the effect plan.
 struct Composition
@@ -38,27 +35,8 @@ struct Composition
 FrameLatch<Composition> latch;
 std::atomic<bool> active{};
 
-// An identified light shader, and whether the log has named its first lighting draw.
-struct LightShader
-{
-    const GameLight* light;
-    std::atomic<bool> named{};
-};
-
-// Identified light shaders, looked up on every indexed draw. Holding them keeps their addresses from
-// being reused.
-std::shared_mutex lightShaderMutex;
-std::unordered_map<IUnknown*, LightShader> lightShaders;
-std::vector<ComPtr<IUnknown>> lightShaderOwners;
-
-// Null for any other shader.
-LightShader* lightShaderOf(IUnknown* shader)
-{
-    std::shared_lock lock(lightShaderMutex);
-    const auto found = shader ? lightShaders.find(shader) : lightShaders.end();
-
-    return found == lightShaders.end() ? nullptr : &found->second;
-}
+// Whether the log has named a light shader's first lighting draw, by its row.
+std::array<std::atomic<bool>, std::size(GameShaders)> named{};
 
 // A light shader's kind, as the log names it.
 std::string kindOf(const GameLight& light)
@@ -70,7 +48,7 @@ std::string kindOf(const GameLight& light)
 
 // A light's draws: the marking draw (colour writes off) takes the contact shadow; the lighting draw
 // the contact shadow's blend and the soft shadows' shader.
-bool drawLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, ID3D11PixelShader* gameShader, LightShader& shader,
+bool drawLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, const GameShader& shader, ID3D11PixelShader* gameShader,
     const Composition& composition)
 {
     const auto gameBlend = boundBlend(context);
@@ -83,7 +61,8 @@ bool drawLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, 
 
     const auto replacement = composition.softShadows ? lamp_soft_shadows::replacementFor(*shader.light) : std::nullopt;
 
-    if (!shader.named.exchange(true)) log("Shadows: the game draws a " + kindOf(*shader.light) + (replacement ? ", with the soft shadows." : "."));
+    if (!named[static_cast<std::size_t>(&shader - std::begin(GameShaders))].exchange(true))
+        log("Shadows: the game draws a " + kindOf(*shader.light) + (replacement ? ", with the soft shadows." : "."));
 
     auto* shadowed = composition.contactShadows ? lamp_contact_shadows::takeShadowedBlend(context, gameBlend.state.Get()) : nullptr;
     if (!replacement && !shadowed) return false;
@@ -116,49 +95,21 @@ bool drawLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, 
 }
 }
 
-void detach() noexcept
-{
-    std::unique_lock lock(lightShaderMutex);
-    lightShaders.clear();
-    lightShaderOwners.clear();
-}
-
 void configure(const Configuration& configuration) noexcept
 {
     latch.set({.contactShadows = configuration.effects.runs(Effect::LampContactShadows), .softShadows = configuration.effects.runs(Effect::LampSoftShadows)});
 }
 
-void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
-{
-    const auto checksum = dxbcHashOf(code, size);
-    if (!checksum || !shader) return;
-
-    const auto* light = findGameLight(toHex(*checksum));
-    if (!light) return;
-
-    try
-    {
-        std::unique_lock lock(lightShaderMutex);
-        lightShaders.try_emplace(shader, light);
-        lightShaderOwners.emplace_back(shader);
-    }
-    catch (...)
-    {
-    }
-}
-
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
     if (!active.load(std::memory_order_relaxed) || !call.indexed || call.instances != 1) return false;
 
     try
     {
-        ComPtr<ID3D11PixelShader> gameShader;
-        context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
-        auto* shader = lightShaderOf(gameShader.Get());
-        if (!shader) return false;
+        const auto* light = shader.row();
+        if (!light || light->pass != GamePass::LocalLight) return false;
 
-        return drawLight(context, call, gameShader.Get(), *shader, latch.frame());
+        return drawLight(context, call, *light, shader.object(), latch.frame());
     }
     catch (const std::exception& error)
     {

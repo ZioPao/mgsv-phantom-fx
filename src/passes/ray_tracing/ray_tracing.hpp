@@ -1,5 +1,6 @@
 #pragma once
 
+#include "game_shaders.hpp"
 #include "phantom_fx_settings.hpp"
 #include "ui_redirect.hpp"
 
@@ -38,11 +39,9 @@ Health health();
 std::string status();
 
 // ---- Recording, on the game's render and worker threads ----
-void pixelShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
-void vertexShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
-void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept;
+void vertexShaderBound(ID3D11DeviceContext* context, game_shaders::VertexShader kind) noexcept;
 // Before a draw; never takes it. Notes the sky's probe constants, the camera and the terrain's inputs.
-void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
+void draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
 
 // The indirect light pass (indirect_light_pass.hpp) calls these from the game's passes it handles.
 // The sky light pass: the G-buffer normals it binds.

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "game_shaders.hpp"
 #include "phantom_fx_settings.hpp"
 #include "ui_redirect.hpp"
 
@@ -77,16 +78,15 @@ const std::vector<std::uint8_t>* patchedShader(const void* code, std::size_t siz
 std::pair<const void*, std::size_t> originalOf(const void* code, std::size_t size) noexcept;
 
 // ---- Recording, on the game's render and worker threads ----
-void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
 // Before a draw, whoever draws it. Keeps a resolve's tonemap curve, copies the scene for the depth
 // of field and gives its composite that copy. True when the draw writes through an sRGB view of an
 // upgraded target, which encode() must follow.
-bool beforeDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
+bool beforeDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
 // Encodes what the draw just made wrote to the render target bound.
 void encode(ID3D11DeviceContext* context) noexcept;
 // The grading pass and the reduction for bloom are drawn here; returns true when the game's draw must
 // be skipped.
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
 // A clear through an sRGB view of an upgraded target, made here with the colour encoded. Returns
 // true when the game's clear must be skipped.
 bool clearTarget(ID3D11DeviceContext* context, ID3D11RenderTargetView* view, const float color[4]) noexcept;
