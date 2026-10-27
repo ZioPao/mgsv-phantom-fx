@@ -531,7 +531,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     engine_scene::Snapshot engineScene;
     engine_scene::take(engineScene, gi_inputs::takeDrawnBones(*sceneCamera));
     for (const auto& model : engineScene.newModels)
-        for (const auto& part : model->parts) gi_textures::want(part.baseTexture, part.alphaTested);
+        for (const auto& part : model->parts) gi_textures::want(part.baseTexture, scene_description::isCutOut(part.role));
     endStep(ModelsStep);
     gi_textures::update(device.Get(), immediate.Get(), frame.newTextures);
     endStep(TexturesStep);

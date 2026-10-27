@@ -5,6 +5,7 @@
 #include "game_memory.hpp"
 #include "game_loop.hpp"
 #include "passes/ray_tracing/engine_brush.hpp"
+#include "passes/ray_tracing/scene_description.hpp"
 
 #include <Windows.h>
 #include <MinHook.h>
@@ -25,6 +26,9 @@ namespace
 {
 using game_memory::read;
 using game_memory::readRaw;
+using scene_description::MaxBones;
+using scene_description::ModelFile;
+using scene_description::Source;
 
 // The model visibility tests, called from the job threads with the visibility manager in rcx, once a
 // view (main camera, shadow cascades) a frame; docs/DEVELOPMENT.md, "Scene objects".
@@ -91,7 +95,6 @@ constexpr std::uint32_t MaxTypes = 256, MaxListedModels = 1 << 16;
 // 2026-10-26).
 constexpr std::size_t ModelBoneCount = 0xF8, ModelSkin = 0x188, SkinPalette = 0x78, ModelGroupCount = 0x1E8, ModelGroupStates = 0x178;
 constexpr std::uint8_t HiddenGroupBits = 0x33;
-constexpr std::uint32_t MaxBones = 1024;
 constexpr std::uint32_t MaxChunks = 64, MaxManagers = 8;
 constexpr std::uint64_t MaxGroupInstances = 4096, MaxFileBytes = 64ull << 20;
 // A model file that does not read as one (still streaming in, or not an FMDL) is looked at again for
@@ -99,49 +102,6 @@ constexpr std::uint64_t MaxGroupInstances = 4096, MaxFileBytes = 64ull << 20;
 constexpr std::uint32_t UnreadableRetries = 600;
 // New model files read a take at most; the rest wait for the next takes.
 constexpr std::uint64_t ParseBytesPerTake = 8ull << 20;
-
-// The scene takes the meshes the game draws, in its main view or its shadow maps, as its draws showed
-// them mesh by mesh (docs/DEVELOPMENT.md, "Scene objects"), by an FMDL mesh's alpha (first byte) and
-// shadow (second byte) bits. Shadow bit 0: drawn in the main view only. A room's inner walls, floor and
-// ceiling have it, its building casting the shadows with an outer shell: until 2026-10-25 the scene left
-// them out, and shadow rays left a room's walls from the shell 7 cm behind them, past the backs of the
-// shelves on them (the shadow probe). Only the opaque ones are taken: cut-out ones and decals stay out,
-// as the game keeps them out of its shadows (crossed cards 44 cm above a road, which the game showed
-// nothing of there, cast a moon shadow, 2026-10-25). Alpha bit 6: translucent, never drawn into the
-// shadow maps and left out (sky domes kilometres wide around the camera, alpha 80: they blocked the sky
-// for the global illumination). Alpha bit 7: decals, which the game casts or not by the material's
-// technique: some do (a pylon's lattice with shadow bit 1, a trench's grating and a tree's
-// twigs with shadow 64), others never (fox3DDF_Blin_NC). Until the game's own per-mesh pass mask is
-// read, every decal is taken as a cut-out caster (the user's call, 2026-10-23: see what breaks). Alpha
-// bit 5 (32): cut out, the shadow pass testing its alpha (m_param.w 1, measured per draw), as it does
-// a shadow-only decal's; alpha 16 (glass) is drawn into the shadow maps without the test (m_param.w 0):
-// solid. Glass the game draws in the main view only stays out, for any model: taken, a helicopter's
-// windows (alpha 16, shadow 5) kept the sun out of its cabin (the shadow probe, 2026-10-25).
-// Shadow bit 1: drawn into the shadow maps only, a stand-in for what the main view shows. A solid one
-// stays out: the main view's own meshes are in the scene, and its stand-in, an offset, simpler copy of
-// them the camera never sees, blocked light where nothing was drawn (a building's 25-triangle stand-in
-// kept 80 to 100% of a room's main lamp, an unshadowed spot, off its wall; the lamp probe, 2026-10-26).
-// But where the main view shows cut-out meshes the scene leaves out, a solid stand-in is all the rays
-// have of them: it is kept, for the rays towards lights alone (GI_GEOMETRY_SHADOW_ONLY). A scaffold's
-// white tarps (alpha 32, shadow 1, drawn in the main view only) cast in the game through a 72-triangle
-// stand-in (shadow 2, drawn into all four sun cascades), a 33 cm slab around each sheet; without it they
-// cast nothing in the rays (Mother Base, 2026-10-27). Met by every ray, rays leaving a sheet would meet
-// the slab's inside 16 cm away, as a wall's met a building's shell and went black (see ModelFade).
-// A cut-out one stays in, for the cut-out meshes the main view shows and the scene leaves out (a pylon's
-// lattice casts through its stand-in, alpha 128, shadow 66).
-// A character (a skinned model) is taken as the main view shows it instead: its stand-ins left out
-// (2026-10-24: one of 40 triangles on a woman's outfit lay on her skin and blocked her chest's sun
-// rays at once), its meshes the shadow maps leave out taken (her hair: the rays saw her bald, low-poly
-// head's outline across it), see-through ones (alpha bit 6) cut out by their alpha. Its see-through meshes
-// the game never casts with, its hair, let light through in part (GI_GEOMETRY_HAIR).
-constexpr std::uint8_t CastsNoShadow = 0x01, ShadowMapsOnly = 0x02;
-constexpr std::uint8_t GlassAlpha = 0x10, CutOutAlpha = 0x20, TranslucentAlpha = 0x40, DecalAlpha = 0x80;
-// The StrCode64s of a material's texture parameters "Base_Tex_SRGB" (the colour, and a cut-out mesh's
-// alpha) and "Mask_Tex_LIN" (a shadow-only mesh's mask, its only texture, often the visible mesh's
-// colour: the shadow pass cuts by its alpha, as ModelForward_Shadow's pixel shader samples t0.w):
-// Fox Engine's string hash, CityHash64 1.0.3 of the name and its terminating zero with seeds
-// 0x9AE16A3B2F90404F and (first character << 16) + length, 48 bits kept.
-constexpr std::uint64_t BaseTextureParameter = 0x41EA7BE81B61, MaskTextureParameter = 0x3ED9B75CD480;
 
 using VisibilityTest = void (*)(std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t,
     std::uintptr_t, std::uintptr_t, std::uintptr_t);
@@ -154,15 +114,16 @@ std::mutex snapshotMutex;
 std::atomic<std::uint64_t> lastSnapshotFrame{};
 // The visibility managers the tests ran with (noteManager), a slot each.
 std::array<std::atomic<std::uintptr_t>, MaxManagers> seenManagers{};
-// Models by path hash: rigid or skinned (its file queued or read), or left out; and the snapshots each
-// unreadable file has been tried in.
-enum class FileKind : std::uint8_t
+// Models by path hash: rigid or skinned (its file queued or read), or unreadable (given up), with the
+// source that asked for it first, whose roles its meshes take; and the snapshots each unreadable file
+// has been tried in.
+struct KnownModel
 {
-    LeftOut,
-    Rigid,
-    Skinned
+    ModelFile file{};
+    Source source{};
+    bool isShared{}; // Diagnostics: counted in sharedFiles
 };
-std::unordered_map<std::uint64_t, FileKind> knownModels;
+std::unordered_map<std::uint64_t, KnownModel> knownModels;
 std::unordered_map<std::uint64_t, std::uint32_t> unreadableTries;
 std::vector<std::uint8_t> recordBuffer(RecordSize * RecordsPerChunk);
 std::vector<float> matrixBuffer;
@@ -171,17 +132,17 @@ struct PendingFile
 {
     std::uint64_t hash{};
     std::vector<std::uint8_t> bytes;
-    bool vegetation{}; // See parseModel
+    Source source{};
 };
 
 // What the snapshots publish for the render thread.
 std::mutex publishMutex;
-std::vector<gi_renderer::ModelInstance> latestInstances;
-std::vector<gi_renderer::CharacterInstance> latestCharacters;
+std::vector<scene_description::ModelInstance> latestInstances;
+std::vector<scene_description::CharacterInstance> latestCharacters;
 bool latestFresh{};
 
 // The skinned models parsed, for their meshes' index ranges and bone groups (take); render thread.
-std::unordered_map<std::uint64_t, std::shared_ptr<const gi_renderer::Model>> skinnedModels;
+std::unordered_map<std::uint64_t, std::shared_ptr<const scene_description::Model>> skinnedModels;
 
 // Diagnostics: where the bones came from.
 std::atomic<std::uint64_t> posesCompared{}, posesChanged{}, drawsNoted{}, drawsPlaced{}, meshesPosed{};
@@ -193,6 +154,9 @@ std::atomic<std::uint64_t> terrainFrame{};
 
 // Diagnostics.
 std::atomic<std::uint64_t> snapshots{}, filesRead{}, skinnedFiles{}, unreadableFiles{}, modelsParsed{}, parseFailures{}, shadowlessMeshes{};
+// Files the object brush and another source both asked for: read once, their meshes have the roles of the
+// source that asked first.
+std::atomic<std::uint64_t> sharedFiles{};
 std::atomic<std::uint32_t> lastInstances{}, lastOwners{}, lastOtherOwners{}, lastLeftOut{}, lastHidden{}, lastFadedOut{}, lastHidingGroups{}, lastCharacters{},
     lastListedModels{};
 // The model list was found in the last snapshot: the characters come from it.
@@ -220,12 +184,12 @@ bool isA(std::uintptr_t object, std::uintptr_t vtableRva) noexcept
 // A stored world matrix (4x4, column-major, translation in the last column) as the scene's rows. The
 // bottom row is (0 0 0 1) give or take rounding: a weapon held in a hand, its matrix made from the
 // hand's bone, had 0.99999988 for the 1.
-std::optional<gi_renderer::Transform> transformOf(const float* m) noexcept
+std::optional<scene_description::Transform> transformOf(const float* m) noexcept
 {
     constexpr float Rounding = 1e-3f;
     if (std::abs(m[3]) > Rounding || std::abs(m[7]) > Rounding || std::abs(m[11]) > Rounding || std::abs(m[15] - 1) > Rounding) return std::nullopt;
 
-    gi_renderer::Transform rows{};
+    scene_description::Transform rows{};
     for (int row = 0; row < 3; ++row)
         for (int column = 0; column < 4; ++column)
         {
@@ -238,367 +202,54 @@ std::optional<gi_renderer::Transform> transformOf(const float* m) noexcept
     return rows;
 }
 
-// Little-endian fields of a model file, bounds-checked.
-struct FileReader
-{
-    std::span<const std::uint8_t> bytes;
-
-    template<class T> bool at(std::uint64_t offset, T& out) const noexcept
-    {
-        if (offset > bytes.size() || bytes.size() - offset < sizeof(T)) return false;
-
-        std::memcpy(&out, bytes.data() + offset, sizeof(T));
-        return true;
-    }
-};
-
-// Section 0's blocks (FMDL 2.0x, as the community's FmdlTool reads them): where each starts and how
-// many entries it has.
-struct Block
-{
-    std::uint64_t offset{};
-    std::uint32_t count{};
-};
-
-struct FileLayout
-{
-    std::array<Block, 32> blocks{};
-    std::uint64_t bufferData{}; // Section 1's vertex and index data
-    bool hasBones{};
-};
-
-std::optional<FileLayout> layoutOf(const FileReader& file) noexcept
-{
-    std::uint32_t magic{}, count0{}, count1{}, offset0{}, offset1{};
-    std::uint64_t sectionInfo{};
-    if (!file.at(0, magic) || magic != 0x4C444D46 || !file.at(8, sectionInfo) || !file.at(32, count0) || !file.at(36, count1) || !file.at(40, offset0)
-        || !file.at(48, offset1) || count0 > 64 || count1 > 64)
-        return std::nullopt;
-
-    FileLayout layout;
-    for (std::uint32_t i = 0; i < count0; ++i)
-    {
-        std::uint16_t type{}, count{};
-        std::uint32_t offset{};
-        if (!file.at(sectionInfo + 8 * i, type) || !file.at(sectionInfo + 8 * i + 2, count) || !file.at(sectionInfo + 8 * i + 4, offset)) return std::nullopt;
-
-        if (type == 0) layout.hasBones = true;
-        if (type < layout.blocks.size()) layout.blocks[type] = {std::uint64_t{offset0} + offset, count};
-    }
-
-    for (std::uint32_t i = 0; i < count1; ++i)
-    {
-        std::uint32_t type{}, offset{};
-        const auto at = sectionInfo + 8ull * count0 + 12ull * i;
-        if (!file.at(at, type) || !file.at(at + 4, offset)) return std::nullopt;
-
-        if (type == 2) layout.bufferData = std::uint64_t{offset1} + offset;
-    }
-
-    if (!layout.bufferData) return std::nullopt;
-
-    return layout;
-}
-
-// A vertex stream of a mesh: where its first vertex's element starts, the stride, and the element's type.
-struct Stream
-{
-    std::uint64_t at{};
-    std::uint32_t stride{};
-    std::uint8_t dataType{};
-};
-
-// Each mesh's group (block 2, 32 bytes: the group at +4, the count of its meshes at +6, the first at +8).
-std::optional<std::vector<std::uint32_t>> meshGroupsOf(const FileReader& file, const FileLayout& layout)
-{
-    constexpr int GroupMeshes = 2, Meshes = 3;
-    const auto& b = layout.blocks;
-    std::vector<std::uint32_t> groups(b[Meshes].count);
-    for (std::uint32_t i = 0; i < b[GroupMeshes].count; ++i)
-    {
-        const auto at = b[GroupMeshes].offset + 32ull * i;
-        std::uint16_t group{}, count{}, first{};
-        if (!file.at(at + 4, group) || !file.at(at + 6, count) || !file.at(at + 8, first)) return std::nullopt;
-
-        for (std::uint32_t mesh = first; mesh < std::uint32_t{first} + count && mesh < groups.size(); ++mesh) groups[mesh] = group;
-    }
-
-    return groups;
-}
-
-// The path hash of a mesh's texture for a parameter: its material instance's (block 4: texture count at
-// +6, first texture parameter at +8) texture parameter of that name (block 7: the name's StrCode64
-// index into block 22, the texture's into block 6), whose texture (block 6: its path's index into
-// block 21) has that path hash. 0 when the mesh has none.
-std::uint64_t textureOf(const FileReader& file, const FileLayout& layout, std::uint16_t materialInstance, std::uint64_t parameter)
-{
-    const auto& b = layout.blocks;
-    constexpr int MaterialInstances = 4, Textures = 6, Parameters = 7, PathCodes = 21, StrCodes = 22;
-    std::uint8_t count{};
-    std::uint16_t first{};
-    if (materialInstance >= b[MaterialInstances].count || !file.at(b[MaterialInstances].offset + 16ull * materialInstance + 6, count)
-        || !file.at(b[MaterialInstances].offset + 16ull * materialInstance + 8, first))
-        return 0;
-
-    for (std::uint32_t i = first; i < std::uint32_t{first} + count && i < b[Parameters].count; ++i)
-    {
-        std::uint16_t name{}, texture{}, path{};
-        std::uint64_t nameHash{}, pathHash{};
-        if (!file.at(b[Parameters].offset + 4ull * i, name) || !file.at(b[Parameters].offset + 4ull * i + 2, texture) || name >= b[StrCodes].count
-            || !file.at(b[StrCodes].offset + 8ull * name, nameHash) || nameHash != parameter)
-            continue;
-
-        if (texture < b[Textures].count && file.at(b[Textures].offset + 4ull * texture + 2, path) && path < b[PathCodes].count
-            && file.at(b[PathCodes].offset + 8ull * path, pathHash))
-            return pathHash;
-    }
-
-    return 0;
-}
-
-// Diagnostics: the StrCode64 of a mesh's material's technique (as fox3DDF_Blin_NC): its material
-// instance's material (block 4: material at +4), whose type (block 8: name at +0, type at +2) indexes
-// block 22. 0 when the file does not say.
-std::uint64_t techniqueOf(const FileReader& file, const FileLayout& layout, std::uint16_t materialInstance)
-{
-    const auto& b = layout.blocks;
-    constexpr int MaterialInstances = 4, Materials = 8, StrCodes = 22;
-    std::uint16_t material{}, type{};
-    std::uint64_t technique{};
-    if (materialInstance >= b[MaterialInstances].count || !file.at(b[MaterialInstances].offset + 16ull * materialInstance + 4, material)
-        || material >= b[Materials].count || !file.at(b[Materials].offset + 4ull * material + 2, type) || type >= b[StrCodes].count
-        || !file.at(b[StrCodes].offset + 8ull * type, technique))
-        return 0;
-
-    return technique;
-}
-
-// A skinned mesh's vertices' bones and weights (ModelPart::bones, weights): its four bone numbers a
-// vertex index its bone group (block 5, 68 bytes: the count at +2, then 32 of the model's bone numbers;
-// the mesh's group at +6), as the game's palette for the mesh is the model's through the group.
-// Without numbers a vertex follows the group's first bone; without weights, its first number alone.
-bool readSkin(const FileReader& file, const Block& boneGroups, std::uint64_t meshAt, std::uint32_t bones, std::optional<Stream> numbers,
-    std::optional<Stream> weights, gi_renderer::ModelPart& part)
-{
-    std::uint16_t group{}, count{};
-    if (!file.at(meshAt + 6, group) || group >= boneGroups.count || !file.at(boneGroups.offset + 68ull * group + 2, count)) return false;
-
-    std::array<std::uint16_t, 32> members{};
-    for (std::uint32_t i = 0; i < std::min<std::uint32_t>(count, 32); ++i)
-        if (!file.at(boneGroups.offset + 68ull * group + 4 + 2ull * i, members[i])) return false;
-
-    part.boneGroup.assign(members.begin(), members.begin() + std::min<std::uint32_t>(count, 32));
-
-    const auto vertexCount = part.vertices.size();
-    part.bones.resize(vertexCount);
-    part.weights.resize(vertexCount);
-    for (std::size_t v = 0; v < vertexCount; ++v)
-    {
-        std::array<std::uint8_t, 4> local{};
-        std::uint32_t weight = 0xFF;
-        if ((numbers && !file.at(numbers->at + v * numbers->stride, local)) || (weights && !file.at(weights->at + v * weights->stride, weight))) return false;
-
-        std::uint64_t packed{};
-        for (int k = 0; k < 4; ++k)
-        {
-            const std::uint64_t bone = local[k] < std::min<std::uint32_t>(count, 32) && members[local[k]] < bones ? members[local[k]] : 0;
-            packed |= bone << (16 * k);
-        }
-
-        part.bones[v] = packed;
-        part.weights[v] = weight;
-    }
-
-    return true;
-}
-
-// A model's meshes that the game draws, a character's that it draws in the main view (see
-// CastsNoShadow): each one's vertices with their texture coordinates, its mesh group, and the
-// indices of its most detailed triangles, as the game keeps them; a skinned model's vertices also with
-// their bones (readSkin). The object brush's bushes and grass (`vegetation`) cast no shadow in the game
-// (alpha 0xA0, a cut-out decal; shadow bit 0): their meshes are taken as cut out all the same, for the
-// rays' shadows, and as leaves, which let light through; the brush's props are opaque.
-std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::span<const std::uint8_t> bytes, bool vegetation)
-{
-    const FileReader file{bytes};
-    const auto layout = layoutOf(file);
-    if (!layout) return nullptr;
-
-    const auto& b = layout->blocks;
-    constexpr int Bones = 0, Meshes = 3, BoneGroups = 5, Assignments = 9, MeshFormats = 10, VertexFormats = 11, BufferOffsets = 14, FaceInfos = 17;
-    // Vertex format usages and data types.
-    constexpr std::uint8_t Position = 0, BoneWeights = 1, BoneNumbers = 7, Uv0 = 8, ThreeFloats = 1, TwoHalves = 7, FourUnorms = 8, FourBytes = 9;
-    if (!b[BufferOffsets].count) return nullptr;
-
-    std::uint32_t facesOffset{};
-    const auto faceBuffer = std::min<std::uint32_t>(b[BufferOffsets].count - 1, 2);
-    if (!file.at(b[BufferOffsets].offset + 16ull * faceBuffer + 8, facesOffset)) return nullptr;
-
-    auto model = std::make_shared<gi_renderer::Model>();
-    model->hash = hash;
-    model->bones = layout->hasBones ? std::min(b[Bones].count, MaxBones) : 0;
-    const auto meshGroups = meshGroupsOf(file, *layout);
-    if (!meshGroups) return nullptr;
-
-    // Whether the main view shows cut-out meshes the scene leaves out: the solid stand-ins are then kept
-    // (see ShadowMapsOnly).
-    bool mainViewCutOutsLeftOut{};
-    for (std::uint32_t mesh = 0; mesh < b[Meshes].count && !vegetation; ++mesh)
-    {
-        std::uint8_t alpha{}, shadow{};
-        if (file.at(b[Meshes].offset + 48ull * mesh, alpha) && file.at(b[Meshes].offset + 48ull * mesh + 1, shadow))
-            mainViewCutOutsLeftOut |= (shadow & CastsNoShadow) && (alpha & (CutOutAlpha | DecalAlpha));
-    }
-
-    for (std::uint32_t mesh = 0; mesh < b[Meshes].count; ++mesh)
-    {
-        const auto meshAt = b[Meshes].offset + 48ull * mesh;
-        std::uint8_t alpha{}, shadow{};
-        std::uint16_t materialInstance{}, vertexCount{};
-        std::uint32_t firstFace{};
-        std::uint64_t firstFaceInfo{};
-        if (!file.at(meshAt, alpha) || !file.at(meshAt + 1, shadow) || !file.at(meshAt + 4, materialInstance) || !file.at(meshAt + 10, vertexCount)
-            || !file.at(meshAt + 16, firstFace) || !file.at(meshAt + 24, firstFaceInfo))
-            return nullptr;
-
-        const bool character = model->bones != 0;
-        const bool mainViewOnly = (shadow & CastsNoShadow) && !vegetation;
-        const bool mainViewTaken = !(alpha & (CutOutAlpha | DecalAlpha));
-        const bool mainViewGlass = mainViewOnly && (alpha & GlassAlpha);
-        const bool solidStandIn = (shadow & ShadowMapsOnly) && !(alpha & (CutOutAlpha | DecalAlpha));
-        const bool standInKept = solidStandIn && !character && mainViewCutOutsLeftOut;
-        const bool leftOut = mainViewGlass || (solidStandIn && !standInKept)
-            || (character ? (shadow & ShadowMapsOnly) != 0 : (mainViewOnly && !mainViewTaken) || (alpha & TranslucentAlpha));
-        if (leftOut)
-        {
-            ++shadowlessMeshes;
-            model->leftOut.push_back({mesh, alpha, shadow, techniqueOf(file, *layout, materialInstance)});
-            continue;
-        }
-
-        // The mesh's streams: its mesh formats in order, each followed by as many of its vertex
-        // formats as it says.
-        const auto assignmentAt = b[Assignments].offset + 8ull * mesh;
-        std::uint8_t meshFormatCount{};
-        std::uint16_t firstMeshFormat{}, firstVertexFormat{};
-        if (mesh >= b[Assignments].count || !file.at(assignmentAt, meshFormatCount) || !file.at(assignmentAt + 4, firstMeshFormat)
-            || !file.at(assignmentAt + 6, firstVertexFormat))
-            return nullptr;
-
-        std::optional<Stream> positions, uvs, weights, numbers;
-        std::uint32_t vertexFormat = firstVertexFormat;
-        for (std::uint32_t i = firstMeshFormat; i < std::uint32_t{firstMeshFormat} + meshFormatCount && i < b[MeshFormats].count; ++i)
-        {
-            const auto at = b[MeshFormats].offset + 8ull * i;
-            std::uint8_t bufferOffset{}, formats{}, stride{};
-            std::uint32_t offset{}, buffer{};
-            if (!file.at(at, bufferOffset) || !file.at(at + 1, formats) || !file.at(at + 2, stride) || !file.at(at + 4, offset)) return nullptr;
-            if (bufferOffset >= b[BufferOffsets].count || !file.at(b[BufferOffsets].offset + 16ull * bufferOffset + 8, buffer)) return nullptr;
-
-            for (std::uint32_t k = 0; k < formats && vertexFormat < b[VertexFormats].count; ++k, ++vertexFormat)
-            {
-                const auto formatAt = b[VertexFormats].offset + 4ull * vertexFormat;
-                std::uint8_t usage{}, dataType{};
-                std::uint16_t element{};
-                if (!file.at(formatAt, usage) || !file.at(formatAt + 1, dataType) || !file.at(formatAt + 2, element)) return nullptr;
-
-                const Stream stream{layout->bufferData + buffer + offset + element, stride, dataType};
-                if (usage == Position && !positions) positions = stream;
-                if (usage == Uv0 && !uvs) uvs = stream;
-                if (usage == BoneWeights && !weights) weights = stream;
-                if (usage == BoneNumbers && !numbers) numbers = stream;
-            }
-        }
-
-        if (!positions || positions->dataType != ThreeFloats || firstFaceInfo >= b[FaceInfos].count) return nullptr;
-
-        std::uint32_t lodFirst{}, lodCount{};
-        if (!file.at(b[FaceInfos].offset + 8 * firstFaceInfo, lodFirst) || !file.at(b[FaceInfos].offset + 8 * firstFaceInfo + 4, lodCount)) return nullptr;
-
-        // A mesh without two-half texture coordinates has neither alpha nor albedo of its own: a cut-out
-        // one is left to the shadow map, any one takes its mean albedo from the screen.
-        auto& part = model->parts.emplace_back();
-        part.mesh = mesh;
-        part.group = (*meshGroups)[mesh];
-        part.alphaTested = (alpha & (CutOutAlpha | DecalAlpha)) != 0 || (character && (alpha & TranslucentAlpha));
-        part.leaf = vegetation && part.alphaTested;
-        // A character's main-view meshes cast in the rays (its hair, see above); a rigid model's do not, as in the game.
-        part.castsNoShadow = mainViewOnly && !character;
-        part.hair = character && part.alphaTested && (mainViewOnly || (alpha & TranslucentAlpha));
-        part.shadowOnly = standInKept;
-        part.alphaBits = alpha;
-        part.shadowBits = shadow;
-        part.technique = techniqueOf(file, *layout, materialInstance);
-        part.baseTexture = textureOf(file, *layout, materialInstance, BaseTextureParameter);
-        if (!part.baseTexture)
-        {
-            part.baseTexture = textureOf(file, *layout, materialInstance, MaskTextureParameter);
-            part.textureIsMask = part.baseTexture != 0;
-        }
-
-        const bool textured = uvs && uvs->dataType == TwoHalves;
-        part.vertices.resize(vertexCount);
-        if (textured) part.uvs.resize(vertexCount);
-        for (std::uint32_t v = 0; v < vertexCount; ++v)
-            if (!file.at(positions->at + std::uint64_t{v} * positions->stride, part.vertices[v])
-                || (textured && !file.at(uvs->at + std::uint64_t{v} * uvs->stride, part.uvs[v])))
-                return nullptr;
-
-        const auto indices = layout->bufferData + facesOffset + 2ull * (std::uint64_t{firstFace} + lodFirst);
-        part.firstIndex = firstFace + lodFirst;
-        part.indexCount = lodCount;
-        part.indices.resize(lodCount / 3 * 3);
-        for (std::uint32_t i = 0; i < part.indices.size(); ++i)
-            if (!file.at(indices + 2ull * i, part.indices[i]) || part.indices[i] >= vertexCount) return nullptr;
-
-        if (model->bones && !readSkin(file, b[BoneGroups], meshAt, model->bones, numbers && numbers->dataType == FourBytes ? numbers : std::nullopt,
-                                weights && weights->dataType == FourUnorms ? weights : std::nullopt, part))
-            return nullptr;
-
-        if (part.indices.empty()) model->parts.pop_back();
-    }
-
-    return model;
-}
-
-// A model resource's path hash when its model is of the kind `wanted`; its file is queued the first
-// time it is seen (`vegetation`: see parseModel). On the job thread taking the snapshot.
-std::optional<std::uint64_t> modelResource(std::uintptr_t resource, FileKind wanted, bool vegetation = false)
+// A model resource's path hash when its model file is of the kind `wanted`; its file is queued the first
+// time it is seen, from `source` (scene_description::describeModel). On the job thread taking the snapshot.
+std::optional<std::uint64_t> modelResource(std::uintptr_t resource, ModelFile wanted, Source source)
 {
     if (!isA(resource, ResourceVtable)) return std::nullopt;
 
     const auto hash = read<std::uint64_t>(resource + ResourceHash);
     if (!hash) return std::nullopt;
-    if (const auto found = knownModels.find(*hash); found != knownModels.end()) return found->second == wanted ? hash : std::nullopt;
+
+    if (const auto found = knownModels.find(*hash); found != knownModels.end())
+    {
+        auto& known = found->second;
+        if (!known.isShared && (known.source == Source::ObjectBrush) != (source == Source::ObjectBrush))
+        {
+            known.isShared = true;
+            ++sharedFiles;
+        }
+
+        return known.file == wanted ? hash : std::nullopt;
+    }
 
     // A file not loaded yet is looked at again next frame.
     const auto fileAt = read<std::uintptr_t>(resource + ResourceFile);
     const auto size = read<std::uint32_t>(resource + ResourceFileSize);
     if (!fileAt || !*fileAt || !size || *size < 0x40) return std::nullopt;
 
-    PendingFile file{*hash, {}, vegetation};
+    PendingFile file{*hash, {}, source};
     if (*size <= MaxFileBytes)
     {
         file.bytes.resize(*size);
         if (!readRaw(file.bytes.data(), *fileAt, file.bytes.size())) return std::nullopt;
     }
 
-    const auto layout = file.bytes.empty() ? std::nullopt : layoutOf(FileReader{file.bytes});
-    if (!layout)
+    const auto kind = scene_description::fileKindOf(file.bytes);
+    if (kind == ModelFile::Unreadable)
     {
         // Possibly still streaming in: given up only after many snapshots.
         if (++unreadableTries[*hash] < UnreadableRetries) return std::nullopt;
 
         unreadableTries.erase(*hash);
-        knownModels[*hash] = FileKind::LeftOut;
+        knownModels[*hash] = {kind, source};
         ++unreadableFiles;
         return std::nullopt;
     }
 
     unreadableTries.erase(*hash);
-    const auto kind = layout->hasBones ? FileKind::Skinned : FileKind::Rigid;
-    knownModels[*hash] = kind;
-    ++(kind == FileKind::Skinned ? skinnedFiles : filesRead);
+    knownModels[*hash] = {kind, source};
+    ++(kind == ModelFile::Skinned ? skinnedFiles : filesRead);
     {
         std::lock_guard lock(publishMutex);
         pendingFiles.push_back(std::move(file));
@@ -636,12 +287,12 @@ std::optional<std::uint64_t> rigidModel(std::uintptr_t model)
     if (!isA(model, ModelVtable)) return std::nullopt;
 
     const auto resource = read<std::uintptr_t>(model + ModelResource);
-    return resource ? modelResource(*resource, FileKind::Rigid) : std::nullopt;
+    return resource ? modelResource(*resource, ModelFile::Rigid, Source::VisibilityManager) : std::nullopt;
 }
 
 // The game's characters: every skinned model on the object registry's model list the game shows,
 // in its pose this frame (docs/DEVELOPMENT.md, "Every model", "Characters"); false without the list.
-bool collectCharacters(std::vector<gi_renderer::CharacterInstance>& characters, std::uint32_t& listed)
+bool collectCharacters(std::vector<scene_description::CharacterInstance>& characters, std::uint32_t& listed)
 {
     const auto registry = read<std::uintptr_t>(base + RegistryGlobal);
     const auto type = read<std::uint32_t>(base + ModelTypeGlobal);
@@ -674,10 +325,10 @@ bool collectCharacters(std::vector<gi_renderer::CharacterInstance>& characters, 
 
         const auto transform = transformOf(matrix);
         const auto resource = transform ? read<std::uintptr_t>(model + ModelResource) : std::nullopt;
-        const auto hash = resource ? modelResource(*resource, FileKind::Skinned) : std::nullopt;
+        const auto hash = resource ? modelResource(*resource, ModelFile::Skinned, Source::ModelList) : std::nullopt;
         if (!hash) continue;
 
-        gi_renderer::CharacterInstance character{model, *hash, *transform, std::vector<float>(std::size_t{*bones} * 12), {}};
+        scene_description::CharacterInstance character{model, *hash, *transform, std::vector<float>(std::size_t{*bones} * 12), {}};
         std::vector<std::uint8_t> groupStates(*groups);
         if (!readRaw(character.palette.data(), *palette, character.palette.size() * sizeof(float))
             || (*groups && (!*states || !readRaw(groupStates.data(), *states, groupStates.size()))))
@@ -733,7 +384,7 @@ void snapshot()
     std::sort(owners.begin(), owners.end());
     owners.erase(std::unique(owners.begin(), owners.end()), owners.end());
 
-    std::vector<gi_renderer::ModelInstance> instances;
+    std::vector<scene_description::ModelInstance> instances;
     std::uint32_t others{}, leftOut{}, hidden{}, fadedOutModels{}, hidingGroups{};
     const auto place = [&](std::uint64_t hash, const float* matrix, std::uint64_t hiddenGroups) {
         const auto transform = transformOf(matrix);
@@ -795,12 +446,12 @@ void snapshot()
     }
 
     // The object brush's vegetation, a plugin's placements in a block at a time.
-    engine_brush::collect([&](std::uintptr_t resource, std::span<const gi_renderer::Transform> transforms) {
-        if (const auto hash = modelResource(resource, FileKind::Rigid, true))
+    engine_brush::collect([&](std::uintptr_t resource, std::span<const scene_description::Transform> transforms) {
+        if (const auto hash = modelResource(resource, ModelFile::Rigid, Source::ObjectBrush))
             for (const auto& transform : transforms) instances.push_back({*hash, transform, 0});
     });
 
-    std::vector<gi_renderer::CharacterInstance> characters;
+    std::vector<scene_description::CharacterInstance> characters;
     std::uint32_t listed{};
     modelListFound = collectCharacters(characters, listed);
 
@@ -993,7 +644,7 @@ void take(Snapshot& snapshot, const std::vector<gi_inputs::DrawnBones>& drawn)
 
     for (const auto& file : files)
     {
-        auto parsed = parseModel(file.hash, file.bytes, file.vegetation);
+        auto parsed = scene_description::describeModel(file.hash, file.bytes, file.source);
         if (!parsed)
         {
             ++parseFailures;
@@ -1001,6 +652,7 @@ void take(Snapshot& snapshot, const std::vector<gi_inputs::DrawnBones>& drawn)
         }
 
         ++modelsParsed;
+        shadowlessMeshes += parsed->dropped.size();
         if (parsed->bones) skinnedModels[parsed->hash] = parsed;
         snapshot.newModels.push_back(std::move(parsed));
     }
@@ -1132,7 +784,8 @@ std::string status()
         + std::to_string(snapshots.load()) + " snapshots; model files: " + std::to_string(filesRead.load()) + " rigid, "
         + std::to_string(skinnedFiles.load()) + " skinned, " + std::to_string(unreadableFiles.load()) + " unreadable, "
         + std::to_string(modelsParsed.load()) + " parsed, "
-        + std::to_string(parseFailures.load()) + " failed; " + std::to_string(shadowlessMeshes.load())
+        + std::to_string(parseFailures.load()) + " failed, " + std::to_string(sharedFiles.load())
+        + " asked for by the object brush and another source (roles from the first); " + std::to_string(shadowlessMeshes.load())
         + " meshes left out (no shadow or see-through, or a character's shadow stand-in); " + engine_brush::status();
 }
 }

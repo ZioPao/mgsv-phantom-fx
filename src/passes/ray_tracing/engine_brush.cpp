@@ -83,7 +83,7 @@ struct Plugin
 struct Group
 {
     std::uintptr_t resource{};
-    std::vector<gi_renderer::Transform> transforms;
+    std::vector<scene_description::Transform> transforms;
 };
 std::unordered_map<std::uintptr_t, std::vector<Group>> readBlocks;
 
@@ -131,7 +131,7 @@ float halfToFloat(std::uint16_t h)
 }
 
 // A placement's transform: the rotation's rows times the scale, the position last.
-gi_renderer::Transform transformOf(float x, float y, float z, const float q[4], float scale)
+scene_description::Transform transformOf(float x, float y, float z, const float q[4], float scale)
 {
     const float xx = q[0] * q[0], yy = q[1] * q[1], zz = q[2] * q[2];
     const float xy = q[0] * q[1], xz = q[0] * q[2], yz = q[1] * q[2], wx = q[3] * q[0], wy = q[3] * q[1], wz = q[3] * q[2];
@@ -249,7 +249,7 @@ std::string hook(std::uintptr_t base) noexcept
     return " The object brush's constructors are hooked: the scene takes its vegetation.";
 }
 
-void collect(const std::function<void(std::uintptr_t resource, std::span<const gi_renderer::Transform> transforms)>& place)
+void collect(const std::function<void(std::uintptr_t resource, std::span<const scene_description::Transform> transforms)>& place)
 {
     std::vector<std::uintptr_t> liveBrushes, liveBlocks;
     {

@@ -71,6 +71,8 @@ using gi_scene::BlasId;
 using gi_scene::FramesInFlight;
 using gi_scene::MaxGeometries;
 using gi_scene::MaxInstances;
+using scene_description::isCutOut;
+using scene_description::MeshRole;
 
 static_assert(MaxInstances <= (1u << GI_HIT_INSTANCE_BITS));
 
@@ -464,25 +466,14 @@ void waitFor(State& s, std::uint64_t value)
     if (WaitForSingleObject(s.event, FenceTimeout) != WAIT_OBJECT_0) throw std::runtime_error("The global illumination's GPU work did not finish within 10 seconds.");
 }
 
-// A model mesh's row of the geometry table, with its base texture once the game's is copied: its
-// colour for the hits' albedo, and a cut-out mesh's alpha for the shadow rays' test.
+// A model mesh's row of the geometry table, with its base texture once the game's is copied
+// (scene_description::materialOf).
 gi_scene::Geometry materialOf(const State& s, const ModelPart& part)
 {
-    gi_scene::Geometry geometry;
-    geometry.flags = (part.alphaTested ? GI_GEOMETRY_CUT_OUT : 0u) | (part.uvs.empty() ? 0u : GI_GEOMETRY_UV) | (part.leaf ? GI_GEOMETRY_LEAF : 0u)
-        | (part.castsNoShadow ? GI_GEOMETRY_NO_SHADOW : 0u) | (part.hair ? GI_GEOMETRY_HAIR : 0u) | (part.shadowOnly ? GI_GEOMETRY_SHADOW_ONLY : 0u);
-    const auto texture = part.uvs.empty() ? s.textures.end() : s.textures.find(part.baseTexture);
-    if (texture == s.textures.end() || !texture->second.shared.resource) return geometry;
-
-    geometry.texture = texture->second.index + 1;
-    if (part.textureIsMask) geometry.flags |= GI_GEOMETRY_MASK;
-    if (part.alphaTested)
-    {
-        geometry.flags |= GI_GEOMETRY_ALPHA_TEXTURE;
-        geometry.alphaThreshold = CutOutThreshold;
-    }
-
-    return geometry;
+    const auto texture = s.textures.find(part.baseTexture);
+    const bool isCopied = texture != s.textures.end() && texture->second.shared.resource;
+    const auto material = scene_description::materialOf(part, isCopied ? std::optional(texture->second.index) : std::nullopt);
+    return {.flags = material.flags, .texture = material.texture, .alphaThreshold = material.alphaThreshold};
 }
 
 // A mesh's bytes in the pool, in this order and each from a 16-byte boundary: its vertices (16 bytes:
@@ -1245,8 +1236,8 @@ std::string characterMesh(const ModelPart& part, const CharacterInstance& charac
     const bool drawn = partIndex < character.drawnParts.size() && character.drawnParts[partIndex];
     const auto groupState = part.group < character.groupStates.size() ? std::format("{:#04x}", character.groupStates[part.group]) : std::string("unread");
     return std::format("file mesh {} (group {} state {}, alpha {:#04x} shadow {:#04x}, technique {:x}, {}, {} triangles, {}, {})", part.mesh, part.group,
-        groupState, part.alphaBits, part.shadowBits, part.technique, part.hair ? "hair" : part.alphaTested ? "cut-out" : "opaque", part.indices.size() / 3,
-        shown ? "shown" : "hidden", drawn ? "drawn" : "not drawn");
+        groupState, part.alphaBits, part.shadowBits, part.technique, part.role == MeshRole::Hair ? "hair" : isCutOut(part.role) ? "cut-out" : "opaque",
+        part.indices.size() / 3, shown ? "shown" : "hidden", drawn ? "drawn" : "not drawn");
 }
 
 // Diagnostics: the character `id`'s shown mesh `shownIndex` (a geometry of its structure) as its model file has it.
@@ -1290,7 +1281,7 @@ std::string charactersAt(const State& s, const std::array<float, 3>& position)
             text += (i ? "; " : " ") + characterMesh(parts[i], character, shown, i);
         }
 
-        for (const auto& mesh : model->second.geometry->leftOut)
+        for (const auto& mesh : model->second.geometry->dropped)
             text += std::format("; file mesh {} left out (alpha {:#04x} shadow {:#04x})", mesh.mesh, mesh.alphaBits, mesh.shadowBits);
     }
 
@@ -1339,8 +1330,8 @@ std::string describeHit(const State& s, std::span<const InstancedModel> instance
             {
                 const auto& part = found->second.geometry->parts[partIndex];
                 what += std::format(", mesh {} ({}, {} triangles, alpha {:#04x} shadow {:#04x}, technique {:x})", part.mesh,
-                    part.hair ? "hair" : part.leaf ? "leaves" : part.alphaTested ? "cut-out" : "opaque", part.indices.size() / 3, part.alphaBits,
-                    part.shadowBits, part.technique);
+                    part.role == MeshRole::Hair ? "hair" : part.role == MeshRole::Leaf ? "leaves" : isCutOut(part.role) ? "cut-out" : "opaque",
+                    part.indices.size() / 3, part.alphaBits, part.shadowBits, part.technique);
             }
         }
     }
@@ -1487,12 +1478,12 @@ std::pair<std::string, std::string> describeProbe(const State& s, std::span<cons
         {
             const auto texture = s.textures.find(part.baseTexture);
             const bool textured = !part.uvs.empty() && texture != s.textures.end() && texture->second.shared.resource;
-            text += std::format(" mesh {} {} (alpha {:#04x} shadow {:#04x}), {} {} triangles", part.mesh, part.alphaTested ? "cut-out" : "opaque",
+            text += std::format(" mesh {} {} (alpha {:#04x} shadow {:#04x}), {} {} triangles", part.mesh, isCutOut(part.role) ? "cut-out" : "opaque",
                 part.alphaBits, part.shadowBits, !part.baseTexture ? "no base texture" : textured ? "its texture copied" : "its texture not copied yet",
                 part.indices.size() / 3);
         }
 
-        for (const auto& mesh : record.geometry->leftOut)
+        for (const auto& mesh : record.geometry->dropped)
             text += std::format(" mesh {} left out (alpha {:#04x} shadow {:#04x})", mesh.mesh, mesh.alphaBits, mesh.shadowBits);
     }
 
@@ -1680,8 +1671,8 @@ void dumpModels(const State& s, const std::filesystem::path& folder)
         file << '\n';
         for (const auto& part : record.geometry->parts)
             file << std::format("  mesh {} group {} first {} count {} technique {:x} alpha {:#04x} shadow {:#04x}{}\n", part.mesh, part.group, part.firstIndex,
-                part.indexCount, part.technique, part.alphaBits, part.shadowBits, part.alphaTested ? " cut-out" : "");
-        for (const auto& mesh : record.geometry->leftOut)
+                part.indexCount, part.technique, part.alphaBits, part.shadowBits, isCutOut(part.role) ? " cut-out" : "");
+        for (const auto& mesh : record.geometry->dropped)
             file << std::format("  mesh {} left out, technique {:x} alpha {:#04x} shadow {:#04x}\n", mesh.mesh, mesh.technique, mesh.alphaBits, mesh.shadowBits);
     }
 }

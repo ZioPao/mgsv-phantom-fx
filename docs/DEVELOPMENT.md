@@ -54,11 +54,14 @@ documentation and licenses are in `PhantomFX/`.
 ctest --test-dir build/release
 ```
 
-This runs `tests/upscaler_tests.cpp`, which needs neither the game nor a GPU: settings (defaults,
-round trip, clamping, invalid files and values), the mode maths (render scales, texture LOD bias)
-and the camera maths (main-view recognition, jitter direction and units, reprojection, camera cuts,
-jitter phases and the Halton sequence, the camera frame generation gets). Everything else is checked
-in the game.
+This runs two tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
+(defaults, round trip, clamping, invalid files and values), the mode maths (render scales, texture LOD
+bias) and the camera maths (main-view recognition, jitter direction and units, reprojection, camera
+cuts, jitter phases and the Halton sequence, the camera frame generation gets).
+`tests/scene_description_tests.cpp`: what the ray-traced scene takes of a model file, from small FMDL
+files it writes: the mesh roles of each case measured in the game (a tarp's stand-in, a pylon's
+lattice, glass, sky domes, inner walls, decals, hair, bushes), what each role gives its rays, a
+cut-out mesh's texture, unreadable files and skins. Everything else is checked in the game.
 
 ## Package a release
 
@@ -147,7 +150,8 @@ what draws it, when that is the feature's own.
 | `src/passes/ray_tracing/ray_tracing.*` | The ray-traced scene's frame on Direct3D 11: the kick, the waits, the shared textures the global illumination and the ray-traced shadows hand back |
 | `src/passes/ray_tracing/gi_renderer.*` | The Direct3D 12 side: the device, the scene's frame, each feature's passes recorded in turn |
 | `src/passes/ray_tracing/gi_scene.*` | The ray-traced scene on Direct3D 12: the geometry pool, bottom-level structures (a geometry per mesh, compacted), the geometry table, the frame's instances and top level (see "Ray-traced scene") |
-| `src/passes/ray_tracing/engine_scene.*` | The game's loaded models from its visibility managers, its characters from its model list, their FMDL meshes and base textures, its texture manager, the terrain's heightmap inputs (see "Scene objects") |
+| `src/passes/ray_tracing/engine_scene.*` | The game's loaded models from its visibility managers and object brush, its characters from its model list, their model files read once, its texture manager, the terrain's heightmap inputs (see "Scene objects") |
+| `src/passes/ray_tracing/scene_description.*` | What the ray-traced scene takes of a model file: its FMDL meshes, each with its mesh role from its alpha and shadow bytes and its model source, their base textures and skins; the flags, texture and alpha threshold a role gives its row of the geometry table (see "Ray-traced scene", "Mesh roles") |
 | `src/passes/ray_tracing/engine_brush.*` | The game's object brush: its loaded blocks' vegetation and props, read from their placement records (see "Scene objects") |
 | `src/passes/ray_tracing/gi_inputs.*` | What the ray tracing takes from the game's draws: the constants it writes (also the contact shadows' light pass constants), the main camera of the frame drawn, the terrain's inputs |
 | `src/passes/ray_tracing/gi_textures.*` | Shared copies of the game's textures the ray-traced scene's meshes use, from its texture manager (see "Ray-traced scene") |
@@ -1892,6 +1896,21 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   with the brush (Afghanistan, 25 blocks) the captured meshes fell from 1,800 to 167 and the geometry pool
   from 91% to 16%. Placements come grouped by model, so the renderer looks a
   model up once a run.
+- **Mesh roles** (2026-10-27). `scene_description.cpp` gives each mesh of a model file its role from
+  its alpha and shadow bytes, whether the file has bones and its model source, by the rules above
+  ("Characters", "Vegetation"): solid, cut-out, leaf, hair, main view only, shadow only, or dropped. The
+  role alone sets its row's flags. `tests/scene_description_tests.cpp` keeps the cases measured in the
+  game as rows. Checked against the code before it for every alpha and shadow byte, rigid and skinned
+  and from each source, every mesh had the same flags but two kinds. A rigid model's solid stand-in the
+  main view draws too (shadow bits 0 and 1), beside main-view cut-outs, was kept as both main view only
+  and shadow only, which no ray stops on (`StopsRay`): it is dropped. The 15 F10 `models.txt` dumps of
+  2026-10-26 and 27 had none (one mesh with shadow 0x03, in a model without main-view cut-outs, was
+  dropped already). And a skinned file the object brush asked for first gave its see-through meshes
+  both leaf and hair: they are hair now. The brush never places a skinned file, so only a character of
+  the same file could show it.
+  A model file is read once, by its path hash, with the roles of the source that asked for it first;
+  the object brush's differ from the others'. The log counts the files the brush and another source
+  both asked for ("asked for by the object brush and another source"), to see whether it happens.
 - **Leaves let light through** (2026-10-24). The brush's cut-out meshes are leaves (`GI_GEOMETRY_LEAF`;
   its props stay opaque): a thin surface that reflects and lets through light diffusely, as pbrt's
   `DiffuseTransmissionMaterial`. Where the global illumination's rays hit one (`HitDirectLight`), it adds
