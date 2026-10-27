@@ -60,6 +60,14 @@ constexpr std::size_t ModelMatrix = 0x40, ModelResource = 0x118, ResourceHash = 
 // Levels keep hidden copies of rocks and cliffs, in the visibility manager too.
 constexpr std::size_t ModelHiddenPasses = 0x1A4;
 constexpr std::uint32_t HiddenFromEveryPass = 0xFFFFFFFF;
+// A model's fade, 0 (gone) to 1 (as drawn); the constructor (0x1C77B0) sets 1. Watched 2026-10-27 in
+// Mother Base: models faded in from near 0 to 1 in about two seconds, and some near the camera dipped to
+// 0.83 and back. Held at 0 there: of 257 shown rigid models only a building's outer shell (model
+// 84a2063b554c5d57, mesh 0, main view only), which no draw of a frame held, and one whose meshes the
+// scene leaves out anyway; and 23 hidden ones. Taken, the shell lay 13 cm off a wall the game drew, and
+// the wall's global illumination rays met its inside: the wall went black up close, where they no
+// longer skip it as a copy of the wall.
+constexpr std::size_t ModelFade = 0x1B8;
 // A model's layer flags, which a few draw-list builders test against a pass's (0x25BE00). Bit 0x20 marks
 // the silhouette of a soldier the player marked (a copy of its skeleton with glass-flagged meshes, its
 // root bone's matrix not a pose): the game draws it in the main view only, through walls (measured
@@ -113,6 +121,12 @@ constexpr std::uint64_t ParseBytesPerTake = 8ull << 20;
 // stays out: the main view's own meshes are in the scene, and its stand-in, an offset, simpler copy of
 // them the camera never sees, blocked light where nothing was drawn (a building's 25-triangle stand-in
 // kept 80 to 100% of a room's main lamp, an unshadowed spot, off its wall; the lamp probe, 2026-10-26).
+// But where the main view shows cut-out meshes the scene leaves out, a solid stand-in is all the rays
+// have of them: it is kept, for the rays towards lights alone (GI_GEOMETRY_SHADOW_ONLY). A scaffold's
+// white tarps (alpha 32, shadow 1, drawn in the main view only) cast in the game through a 72-triangle
+// stand-in (shadow 2, drawn into all four sun cascades), a 33 cm slab around each sheet; without it they
+// cast nothing in the rays (Mother Base, 2026-10-27). Met by every ray, rays leaving a sheet would meet
+// the slab's inside 16 cm away, as a wall's met a building's shell and went black (see ModelFade).
 // A cut-out one stays in, for the cut-out meshes the main view shows and the scene leaves out (a pylon's
 // lattice casts through its stand-in, alpha 128, shadow 66).
 // A character (a skinned model) is taken as the main view shows it instead: its stand-ins left out
@@ -179,7 +193,8 @@ std::atomic<std::uint64_t> terrainFrame{};
 
 // Diagnostics.
 std::atomic<std::uint64_t> snapshots{}, filesRead{}, skinnedFiles{}, unreadableFiles{}, modelsParsed{}, parseFailures{}, shadowlessMeshes{};
-std::atomic<std::uint32_t> lastInstances{}, lastOwners{}, lastOtherOwners{}, lastLeftOut{}, lastHidden{}, lastHidingGroups{}, lastCharacters{}, lastListedModels{};
+std::atomic<std::uint32_t> lastInstances{}, lastOwners{}, lastOtherOwners{}, lastLeftOut{}, lastHidden{}, lastFadedOut{}, lastHidingGroups{}, lastCharacters{},
+    lastListedModels{};
 // The model list was found in the last snapshot: the characters come from it.
 std::atomic<bool> modelListFound{};
 
@@ -425,6 +440,16 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
     const auto meshGroups = meshGroupsOf(file, *layout);
     if (!meshGroups) return nullptr;
 
+    // Whether the main view shows cut-out meshes the scene leaves out: the solid stand-ins are then kept
+    // (see ShadowMapsOnly).
+    bool mainViewCutOutsLeftOut{};
+    for (std::uint32_t mesh = 0; mesh < b[Meshes].count && !vegetation; ++mesh)
+    {
+        std::uint8_t alpha{}, shadow{};
+        if (file.at(b[Meshes].offset + 48ull * mesh, alpha) && file.at(b[Meshes].offset + 48ull * mesh + 1, shadow))
+            mainViewCutOutsLeftOut |= (shadow & CastsNoShadow) && (alpha & (CutOutAlpha | DecalAlpha));
+    }
+
     for (std::uint32_t mesh = 0; mesh < b[Meshes].count; ++mesh)
     {
         const auto meshAt = b[Meshes].offset + 48ull * mesh;
@@ -441,7 +466,8 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
         const bool mainViewTaken = !(alpha & (CutOutAlpha | DecalAlpha));
         const bool mainViewGlass = mainViewOnly && (alpha & GlassAlpha);
         const bool solidStandIn = (shadow & ShadowMapsOnly) && !(alpha & (CutOutAlpha | DecalAlpha));
-        const bool leftOut = mainViewGlass || solidStandIn
+        const bool standInKept = solidStandIn && !character && mainViewCutOutsLeftOut;
+        const bool leftOut = mainViewGlass || (solidStandIn && !standInKept)
             || (character ? (shadow & ShadowMapsOnly) != 0 : (mainViewOnly && !mainViewTaken) || (alpha & TranslucentAlpha));
         if (leftOut)
         {
@@ -499,6 +525,7 @@ std::shared_ptr<const gi_renderer::Model> parseModel(std::uint64_t hash, std::sp
         // A character's main-view meshes cast in the rays (its hair, see above); a rigid model's do not, as in the game.
         part.castsNoShadow = mainViewOnly && !character;
         part.hair = character && part.alphaTested && (mainViewOnly || (alpha & TranslucentAlpha));
+        part.shadowOnly = standInKept;
         part.alphaBits = alpha;
         part.shadowBits = shadow;
         part.technique = techniqueOf(file, *layout, materialInstance);
@@ -597,6 +624,11 @@ std::uint64_t hiddenGroupsOf(std::uintptr_t model)
         if (bytes[g] & HiddenGroupBits) hidden |= 1ull << g;
 
     return hidden;
+}
+
+bool fadedOut(std::uintptr_t model)
+{
+    return read<float>(model + ModelFade) == 0.0f;
 }
 
 std::optional<std::uint64_t> rigidModel(std::uintptr_t model)
@@ -702,7 +734,7 @@ void snapshot()
     owners.erase(std::unique(owners.begin(), owners.end()), owners.end());
 
     std::vector<gi_renderer::ModelInstance> instances;
-    std::uint32_t others{}, leftOut{}, hidden{}, hidingGroups{};
+    std::uint32_t others{}, leftOut{}, hidden{}, fadedOutModels{}, hidingGroups{};
     const auto place = [&](std::uint64_t hash, const float* matrix, std::uint64_t hiddenGroups) {
         const auto transform = transformOf(matrix);
         if (!transform)
@@ -747,6 +779,12 @@ void snapshot()
                 continue;
             }
 
+            if (fadedOut(owner))
+            {
+                ++fadedOutModels;
+                continue;
+            }
+
             float matrix[16]{};
             const auto hash = rigidModel(owner);
             if (hash && readRaw(matrix, owner + ModelMatrix, sizeof(matrix))) place(*hash, matrix, hiddenGroupsOf(owner));
@@ -772,6 +810,7 @@ void snapshot()
     lastOtherOwners = others;
     lastLeftOut = leftOut;
     lastHidden = hidden;
+    lastFadedOut = fadedOutModels;
     lastHidingGroups = hidingGroups;
     lastCharacters = static_cast<std::uint32_t>(characters.size());
     lastListedModels = listed;
@@ -1086,7 +1125,8 @@ std::string status()
 
     return "the game's scene: " + std::to_string(lastInstances.load()) + " instances from " + std::to_string(lastOwners.load()) + " owners ("
         + std::to_string(lastOtherOwners.load()) + " of other kinds, " + std::to_string(lastLeftOut.load()) + " left out, "
-        + std::to_string(lastHidden.load()) + " models the game hides, " + std::to_string(lastHidingGroups.load())
+        + std::to_string(lastHidden.load()) + " models the game hides, " + std::to_string(lastFadedOut.load()) + " faded out, "
+        + std::to_string(lastHidingGroups.load())
         + " placed with mesh groups hidden), " + std::to_string(lastCharacters.load()) + " characters of "
         + std::to_string(lastListedModels.load()) + " models listed" + (modelListFound.load() ? "" : " (no model list)") + ", "
         + std::to_string(snapshots.load()) + " snapshots; model files: " + std::to_string(filesRead.load()) + " rigid, "

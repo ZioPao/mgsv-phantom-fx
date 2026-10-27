@@ -880,7 +880,19 @@ level at Camp Omega's cliffs. No names in the exe: the class names here are desc
   the builder matches. Found 2026-10-23 in Afghanistan: 294 of 882 single models hidden, among them
   copies of cliff rocks a few metres from the drawn ones (in the ray-traced scene, rock filling the
   hollows the game shows open). Frame records with the draws' constants: no hidden model was drawn,
-  every shown one in view was. The scene leaves hidden models out.
+  every shown one in view was. The scene leaves hidden models out. `+0x1B8` the model's fade, 0 (gone)
+  to 1 (as drawn); the constructor (`0x1C77B0`) sets 1 (`+0x1BC` 0.9, `+0x1C0` 1). Watched 2026-10-27
+  in Mother Base, read four times a second: a model faded in from 0.03 to 1 in steps of about 0.14,
+  several times, and three near the camera dipped to 0.83, held, and came back to 1. Held at 0: of 257
+  shown rigid models only two, a building's outer shell (model `84a2063b554c5d57`, mesh 0, main view
+  only, 1,318 triangles) and one whose meshes the scene leaves out anyway, and 23 hidden ones; none of
+  240 instance groups' models. The shell stayed at 0 while the player walked 45 m away and back. What
+  writes the fade is not found; the draw-list builder does not read it. The shell lay 13 cm off a wall
+  the game drew, and an F10 frame there held no draw of it; in the scene, the wall's global
+  illumination rays met its inside (63 of the shadow probe's 64 within 1 m) and the wall went black up
+  close, where the copy tolerance (gi_common.hlsli) no longer skipped it. The scene leaves models faded
+  to 0 out. Open: whether a model faded to 0 still casts in the game's shadow maps (the shell casts
+  nothing: main view only).
 - **The model file** is the whole FMDL (version 2.04), kept in memory: section 0 (meshes, vertex
   formats, buffer offsets, LOD face ranges, boxes) and section 1 (the vertex and index data). The
   layout matches the community's FmdlTool: meshes (block 3, 48 bytes: vertex count, first face vertex,
@@ -1737,6 +1749,18 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   off its wall 0.9 m from it (the lamp probe), and the scene view went red over the room: the camera's
   rays met stand-ins short of what the game drew. Cut-out stand-ins stay in, for the main-view cut-out
   meshes left out (the pylon's lattice).
+  Since 2026-10-27 a solid stand-in is kept again where its model's main view shows cut-out meshes the
+  scene leaves out (shadow bit 0 with alpha bit 5 or 7), as the only thing the rays have of them, and
+  only for rays towards lights (`GI_GEOMETRY_SHADOW_ONLY`, `StopsRay`): every other ray passes it, and
+  the eye's ray does not take it for a pixel's own surface. Mother Base's scaffolds' white tarps cast no
+  ray-traced shadow: their sheets (model `84a07d3c8f5c1982`, meshes 3 to 8, alpha 32, shadow 1) were
+  drawn in the main view only, their 72-triangle stand-in (mesh 12, shadow 2) into all four sun
+  cascades, and neither was in the scene (an F10 frame, matched by the meshes' index ranges). The
+  stand-in is a 33 cm slab around each sheet, its faces 16.3 cm off it: met by every ray, a sheet's
+  global illumination rays would meet its inside, as a wall's met the faded-out shell (see "Model",
+  `+0x1B8`). Of 110 shown rigid model files there, 4 had solid stand-ins and 3 of them, all scaffolds,
+  main-view cut-outs; the hospital building has none (its left-out meshes are glass), so its stand-in
+  stays out.
   Open: a tarp on a fence (model `84a1bc5b4702c16b`) is a
   main-view cut-out (mesh 2) cast in the game by a flat 4-triangle stand-in (mesh 3, shadow bit 1) up
   to 25 cm off it, so its shadow rays start on the stand-in or meet it, in patches that change with the
