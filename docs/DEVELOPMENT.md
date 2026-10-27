@@ -1908,6 +1908,9 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   dropped already). And a skinned file the object brush asked for first gave its see-through meshes
   both leaf and hair: they are hair now. The brush never places a skinned file, so only a character of
   the same file could show it.
+  A model file is read once, by its path hash, with the roles of the source that asked for it first;
+  the object brush's differ from the others'. The log counts the files the brush and another source
+  both asked for ("asked for by the object brush and another source"), to see whether it happens.
 - **Leaves let light through** (2026-10-24). The brush's cut-out meshes are leaves (`GI_GEOMETRY_LEAF`;
   its props stay opaque): a thin surface that reflects and lets through light diffusely, as pbrt's
   `DiffuseTransmissionMaterial`. Where the global illumination's rays hit one (`HitDirectLight`), it adds

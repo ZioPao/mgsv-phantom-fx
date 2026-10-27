@@ -114,9 +114,16 @@ std::mutex snapshotMutex;
 std::atomic<std::uint64_t> lastSnapshotFrame{};
 // The visibility managers the tests ran with (noteManager), a slot each.
 std::array<std::atomic<std::uintptr_t>, MaxManagers> seenManagers{};
-// Models by path hash: rigid or skinned (its file queued or read), or unreadable (given up); and the
-// snapshots each unreadable file has been tried in.
-std::unordered_map<std::uint64_t, ModelFile> knownModels;
+// Models by path hash: rigid or skinned (its file queued or read), or unreadable (given up), with the
+// source that asked for it first, whose roles its meshes take; and the snapshots each unreadable file
+// has been tried in.
+struct KnownModel
+{
+    ModelFile file{};
+    Source source{};
+    bool isShared{}; // Diagnostics: counted in sharedFiles
+};
+std::unordered_map<std::uint64_t, KnownModel> knownModels;
 std::unordered_map<std::uint64_t, std::uint32_t> unreadableTries;
 std::vector<std::uint8_t> recordBuffer(RecordSize * RecordsPerChunk);
 std::vector<float> matrixBuffer;
@@ -147,6 +154,9 @@ std::atomic<std::uint64_t> terrainFrame{};
 
 // Diagnostics.
 std::atomic<std::uint64_t> snapshots{}, filesRead{}, skinnedFiles{}, unreadableFiles{}, modelsParsed{}, parseFailures{}, shadowlessMeshes{};
+// Files the object brush and another source both asked for: read once, their meshes have the roles of the
+// source that asked first.
+std::atomic<std::uint64_t> sharedFiles{};
 std::atomic<std::uint32_t> lastInstances{}, lastOwners{}, lastOtherOwners{}, lastLeftOut{}, lastHidden{}, lastFadedOut{}, lastHidingGroups{}, lastCharacters{},
     lastListedModels{};
 // The model list was found in the last snapshot: the characters come from it.
@@ -200,7 +210,18 @@ std::optional<std::uint64_t> modelResource(std::uintptr_t resource, ModelFile wa
 
     const auto hash = read<std::uint64_t>(resource + ResourceHash);
     if (!hash) return std::nullopt;
-    if (const auto found = knownModels.find(*hash); found != knownModels.end()) return found->second == wanted ? hash : std::nullopt;
+
+    if (const auto found = knownModels.find(*hash); found != knownModels.end())
+    {
+        auto& known = found->second;
+        if (!known.isShared && (known.source == Source::ObjectBrush) != (source == Source::ObjectBrush))
+        {
+            known.isShared = true;
+            ++sharedFiles;
+        }
+
+        return known.file == wanted ? hash : std::nullopt;
+    }
 
     // A file not loaded yet is looked at again next frame.
     const auto fileAt = read<std::uintptr_t>(resource + ResourceFile);
@@ -221,13 +242,13 @@ std::optional<std::uint64_t> modelResource(std::uintptr_t resource, ModelFile wa
         if (++unreadableTries[*hash] < UnreadableRetries) return std::nullopt;
 
         unreadableTries.erase(*hash);
-        knownModels[*hash] = kind;
+        knownModels[*hash] = {kind, source};
         ++unreadableFiles;
         return std::nullopt;
     }
 
     unreadableTries.erase(*hash);
-    knownModels[*hash] = kind;
+    knownModels[*hash] = {kind, source};
     ++(kind == ModelFile::Skinned ? skinnedFiles : filesRead);
     {
         std::lock_guard lock(publishMutex);
@@ -763,7 +784,8 @@ std::string status()
         + std::to_string(snapshots.load()) + " snapshots; model files: " + std::to_string(filesRead.load()) + " rigid, "
         + std::to_string(skinnedFiles.load()) + " skinned, " + std::to_string(unreadableFiles.load()) + " unreadable, "
         + std::to_string(modelsParsed.load()) + " parsed, "
-        + std::to_string(parseFailures.load()) + " failed; " + std::to_string(shadowlessMeshes.load())
+        + std::to_string(parseFailures.load()) + " failed, " + std::to_string(sharedFiles.load())
+        + " asked for by the object brush and another source (roles from the first); " + std::to_string(shadowlessMeshes.load())
         + " meshes left out (no shadow or see-through, or a character's shadow stand-in); " + engine_brush::status();
 }
 }
