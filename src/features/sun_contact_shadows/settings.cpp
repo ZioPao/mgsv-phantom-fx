@@ -8,6 +8,7 @@ void describe(SunContactShadows& shadows, SettingVisitor& visit)
         {.menuId = "sunContactShadows",
             .iniKey = "sun_screen_space_shadows",
             .section = Section::Shadows,
+            .heading = "Contact shadows",
             .name = "Sun contact shadows",
             .tip = "Bend Studio's screen-space shadows for the sun: short shadows traced through the depth buffer. They add the contact shadows "
                    "the sun's shadow map misses (feet, rocks, folds of clothing). Cheap: one trace a frame.",

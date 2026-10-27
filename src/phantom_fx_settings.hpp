@@ -2,12 +2,14 @@
 
 #include "effects.hpp"
 #include "features/ambient_occlusion/settings.hpp"
+#include "features/contact_shadow_shape/settings.hpp"
 #include "features/frame_generation/settings.hpp"
 #include "features/frame_rate/settings.hpp"
 #include "features/global_illumination/settings.hpp"
 #include "features/hdr/settings.hpp"
 #include "features/indirect_light/settings.hpp"
 #include "features/lamp_contact_shadows/settings.hpp"
+#include "features/lamp_soft_shadows/settings.hpp"
 #include "features/motion_blur/settings.hpp"
 #include "features/photo_mode/settings.hpp"
 #include "features/ray_traced_lights/settings.hpp"
@@ -37,6 +39,8 @@ struct Settings
     SunContactShadows sunContactShadows;
     RayTracedLights rayTracedLights;
     LampContactShadows lampContactShadows;
+    LampSoftShadows lampSoftShadows;
+    ContactShadowShape contactShadowShape;
     GlobalIllumination globalIllumination;
     AmbientOcclusion ambientOcclusion;
     IndirectLight indirectLight;
@@ -56,10 +60,12 @@ template<class Visit> void forEachFeature(Settings& settings, Visit&& visit)
     visit(settings.frameGeneration);
     visit(settings.sun);
     visit(settings.rayTracedShadows);
-    visit(settings.softShadows);
-    visit(settings.sunContactShadows);
     visit(settings.rayTracedLights);
+    visit(settings.softShadows);
+    visit(settings.lampSoftShadows);
+    visit(settings.sunContactShadows);
     visit(settings.lampContactShadows);
+    visit(settings.contactShadowShape);
     visit(settings.globalIllumination);
     visit(settings.ambientOcclusion);
     visit(settings.indirectLight);

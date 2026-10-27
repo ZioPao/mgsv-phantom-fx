@@ -30,6 +30,7 @@
 #include "menu.hpp"
 #include "modules.hpp"
 #include "passes/indirect_light_pass.hpp"
+#include "passes/local_light_pass.hpp"
 #include "passes/ray_tracing/engine_scene.hpp"
 #include "passes/ray_tracing/ray_tracing.hpp"
 #include "passes/sun_light_pass.hpp"
@@ -182,7 +183,7 @@ void onInitPipeline(device* device, pipeline_layout, uint32_t count, const pipel
             auto* created = reinterpret_cast<IUnknown*>(pipeline.handle);
             upscaler::shaderCreated(code, size, created);
             sun_light_pass::shaderCreated(code, size, created);
-            lamp_contact_shadows::shaderCreated(code, size, created);
+            local_light_pass::shaderCreated(code, size, created);
             indirect_light_pass::shaderCreated(code, size, created);
             ray_tracing::pixelShaderCreated(code, size, created);
             local_lights::pixelShaderCreated(code, size, created);
@@ -227,7 +228,7 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
     // The fog notes the sun pass and fills its texture before the resolve, whoever draws them. GTVBAO
     // notes the sun pass's G-buffer before the sun shadows may draw that pass themselves.
     const bool drawn = atmosphere::draw(context, call) || indirect_light_pass::draw(context, call) || sun_light_pass::draw(context, call)
-        || lamp_contact_shadows::draw(context, call) || hdr::draw(context, call) || upscaler::draw(context, call);
+        || hdr::draw(context, call) || upscaler::draw(context, call);
     if (!encode) return drawn;
 
     if (!drawn) context->DrawInstanced(vertices, instances, first, firstInstance);
@@ -241,8 +242,8 @@ bool onDrawIndexed(command_list* list, uint32_t indices, uint32_t instances, uin
     const ui_redirect::DrawCall call{indices, instances, first, firstInstance, offset, true};
     // The global illumination notes the camera and the terrain's inputs from the draws; it never takes one.
     ray_tracing::draw(native(list), call);
-    // The point and spot lights' draws before the lamps' contact shadows, which leave a light the rays shadow alone.
-    return hiddenUi(list) || local_lights::draw(native(list), call) || lamp_contact_shadows::draw(native(list), call)
+    // The ray-traced lights' draws before the local light pass's, which leaves a light the rays shadow alone.
+    return hiddenUi(list) || local_lights::draw(native(list), call) || local_light_pass::draw(native(list), call)
         || upscaler::draw(native(list), call);
 }
 

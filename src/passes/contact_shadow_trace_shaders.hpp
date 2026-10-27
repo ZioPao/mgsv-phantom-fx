@@ -7,12 +7,12 @@ namespace phantom_fx::contact_shadow_trace::shaders
 // Bend Studio's screen-space shadows: bend_sss_gpu.h from "Inside Bend: Screen Space Shadows",
 // Copyright 2023 Sony Interactive Entertainment, Apache License 2.0 (Bend-Studio-SSS-LICENSE.txt).
 // Changed for FXC and Direct3D 11: the configuration macros are set here; the forward declaration
-// and a (void) cast that FXC rejects are removed; the output is unorm; the early-out votes
-// through groupshared memory, as shader model 5 has no wave intrinsics; and foliage casts no
-// shadow. Split into literals, as MSVC limits each to 16 KB.
+// and a (void) cast that FXC rejects are removed; the output is unorm; and the early-out votes
+// through groupshared memory, as shader model 5 has no wave intrinsics. Split into literals, as
+// MSVC limits each to 16 KB.
 inline constexpr char BendShadow[] = R"(
 #define WAVE_SIZE 64
-#define SAMPLE_COUNT 60
+#define SAMPLE_COUNT 120
 #define HARD_SHADOW_SAMPLES 4
 #define FADE_OUT_SAMPLES 8
 #define USE_HALF_PIXEL_OFFSET 1
@@ -35,6 +35,12 @@ struct DispatchParameters
 
     float ShadowContrast;               // A contrast boost is applied to the transition in/out of shadow.
                                         // Recommended starting value: 2 or 4. Values >= 1 are valid.
+
+    float Reach;                        // How many samples along the ray to march, one a pixel of the render
+                                        // size. Bend's shader always takes SAMPLE_COUNT; this is how much of it.
+
+    float2 Projection;                  // B, A: view Z from the reversed depth
+    float2 Fade;                        // Metres: the contact shadow fades out between these
 
     bool IgnoreEdgePixels;              // If an edge is detected, the edge pixel will not contribute to the shadow.
                                         // If a very flat surface is being lit and rendered at an grazing angles, the edge detect may incorrectly detect multiple 'edge' pixels along that flat surface.
@@ -70,6 +76,9 @@ struct DispatchParameters
         SurfaceThickness            = 0.005;
         BilinearThreshold           = 0.02;
         ShadowContrast              = 4;
+        Reach                       = SAMPLE_COUNT;
+        Projection                  = float2(1, 0);
+        Fade                        = float2(0, 0);
         IgnoreEdgePixels            = false;
         UsePrecisionOffset          = false;
         BilinearSamplingOffsetMode  = false;
@@ -94,7 +103,6 @@ struct DispatchParameters
                                         // The 'USE_HALF_PIXEL_OFFSET' macro might need to be defined if sampling at exact pixel coordinates isn't precise (e.g., if odd patterns appear in the shadow).
 
     Texture2D<float> DepthTexture;      // Depth Buffer Texture (rasterized non-linear depth)
-    Texture2D<float4> SpecularTexture;  // Changed: the G-buffer's specular target, whose z is the material
     RWTexture2D<unorm float> OutputTexture; // Output screen-space shadow buffer (typically single-channel, 8bit)
 
     SamplerState PointBorderSampler;    // A point sampler, with Wrap Mode set to Clamp-To-Border-Color (D3D12_TEXTURE_ADDRESS_MODE_BORDER), and Border Color set to "FarDepthValue" (typically zero), or some other far-depth value out of DepthBounds.
@@ -168,9 +176,6 @@ static void ComputeWavefrontExtents(DispatchParameters inParameters, int3 inGrou
 )" R"(
 // Number of bilinear sample reads performed per-thread
 #define READ_COUNT (SAMPLE_COUNT / WAVE_SIZE + 2)
-
-// Changed: Fox Engine's material for grass, bushes and tree leaves, in 255ths.
-static const float FoliageMaterial = 43;
 
 // Common shared data
 groupshared float DepthData[READ_COUNT * WAVE_SIZE];
@@ -267,11 +272,6 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
             shadowing_depth[i] = use_point_filter ? edge_depth : shadow_depth;
         }
 
-        // Changed: foliage casts no shadow. Taken as solid, the blades of a clump shade each other far
-        // more than thin, translucent blades do, and the sun's shadow map already holds them.
-        if (round(inParameters.SpecularTexture.Load(int3(floor(pixel_xy), 0)).z * 255) == FoliageMaterial)
-            shadowing_depth[i] = edge_skip;
-
         // Store for later
         sample_distance[i] = pixel_distance + (WAVE_SIZE * i) * direction;
 
@@ -356,25 +356,47 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
     }
 
     // Brute force go!
-    // The main shadow samples, averaged in to a set of 4 shadow values
-    [unroll] for (i = HARD_SHADOW_SAMPLES; i < SAMPLE_COUNT - FADE_OUT_SAMPLES; i++)
+    // The main shadow samples, averaged in to a set of 4 shadow values, out to the reach. Bend's shader
+    // always runs SAMPLE_COUNT of them; the add-on's reach stops the march early, so a shorter reach is
+    // cheaper as well as tighter, and the last FADE_OUT_SAMPLES of the reach fade out in case a light
+    // stands within it. Four samples a pass, one per accumulator, so the loop never indexes the vector
+    // by a runtime value: that would force FXC to unroll it to the full sample count whatever the reach.
+    const int reach = clamp((int)inParameters.Reach, HARD_SHADOW_SAMPLES, SAMPLE_COUNT);
+    const int fadeFrom = max(reach - FADE_OUT_SAMPLES, HARD_SHADOW_SAMPLES);
+    i = HARD_SHADOW_SAMPLES;
+    [loop] for (; i + 3 < reach; i += 4)
     {
-        float depth_delta = abs(start_depth - DepthData[sample_index + i] * depth_scale);
+        float4 sample_depth;
+        sample_depth.x = DepthData[sample_index + i + 0] * depth_scale;
+        sample_depth.y = DepthData[sample_index + i + 1] * depth_scale;
+        sample_depth.z = DepthData[sample_index + i + 2] * depth_scale;
+        sample_depth.w = DepthData[sample_index + i + 3] * depth_scale;
+        const float4 depth_delta = abs(start_depth - sample_depth);
 
-        // Do the same as the hard_shadow code above, but this will accumulate to 4 separate values.
+        // Add the fade value to the samples of the reach's last stretch.
+        float4 fade_out;
+        fade_out.x = (i + 0) < fadeFrom ? 0 : (float)(i + 1 - fadeFrom) / (float)(FADE_OUT_SAMPLES + 1) * 0.75;
+        fade_out.y = (i + 1) < fadeFrom ? 0 : (float)(i + 2 - fadeFrom) / (float)(FADE_OUT_SAMPLES + 1) * 0.75;
+        fade_out.z = (i + 2) < fadeFrom ? 0 : (float)(i + 3 - fadeFrom) / (float)(FADE_OUT_SAMPLES + 1) * 0.75;
+        fade_out.w = (i + 3) < fadeFrom ? 0 : (float)(i + 4 - fadeFrom) / (float)(FADE_OUT_SAMPLES + 1) * 0.75;
+
         // By using 4 values, the average shadow can be taken, which can help soften single-pixel shadows.
-        shadow_value[i & 3] = min(shadow_value[i & 3], depth_delta);
+        shadow_value = min(shadow_value, depth_delta + fade_out);
+
     }
 
-    // Final fade out samples
-    [unroll] for (i = SAMPLE_COUNT - FADE_OUT_SAMPLES; i < SAMPLE_COUNT; i++)
+    // The fewer than four samples left of the reach. Four samples a pass start at 4, so each lands in the
+    // accumulator its index would have had in Bend's unrolled loop.
+    for (; i < reach; ++i)
     {
-        float depth_delta = abs(start_depth - DepthData[sample_index + i] * depth_scale);
+        const float depth_delta = abs(start_depth - DepthData[sample_index + i] * depth_scale);
+        const float fade_out = i < fadeFrom ? 0 : (float)(i + 1 - fadeFrom) / (float)(FADE_OUT_SAMPLES + 1) * 0.75;
 
-        // Add the fade value to these samples
-        const float fade_out = (float)(i + 1 - (SAMPLE_COUNT - FADE_OUT_SAMPLES)) / (float)(FADE_OUT_SAMPLES + 1) * 0.75;
+        if ((i & 3) == 0) shadow_value.x = min(shadow_value.x, depth_delta + fade_out);
+        else if ((i & 3) == 1) shadow_value.y = min(shadow_value.y, depth_delta + fade_out);
+        else if ((i & 3) == 2) shadow_value.z = min(shadow_value.z, depth_delta + fade_out);
+        else shadow_value.w = min(shadow_value.w, depth_delta + fade_out);
 
-        shadow_value[i & 3] = min(shadow_value[i & 3], depth_delta + fade_out);
     }
 
     // Apply the contrast value.
@@ -390,6 +412,16 @@ void WriteScreenSpaceShadow(DispatchParameters inParameters, int3 inGroupID, int
 
     // If the first samples are always producing a hard shadow, then compute this value separately.
     result = min(hard_shadow, result);
+
+    // Distance fade. Past this range the shadow map is the right tool and the trace has too little of the
+    // caster on screen to be trusted, so the contact shadow thins out instead of staying as sharp at 60 m
+    // as it is underfoot. RenoDX fades the same way; Bend's shader has no fade at all.
+    {
+        const float viewZ = inParameters.Projection.x / max(sampling_depth[0] - inParameters.Projection.y, 1e-6);
+        const float fade = saturate((inParameters.Fade.y - viewZ) / max(inParameters.Fade.y - inParameters.Fade.x, 1e-3));
+        result = lerp(1.0, result, fade);
+    }
+
 
     //write the result
     {
@@ -414,13 +446,14 @@ cbuffer Parameters : register(b0)
     float SurfaceThickness;
     float BilinearThreshold;
     float ShadowContrast;
-    float Padding;
+    float Reach;     // In samples
     float2 DepthBounds;     // Pixels at or beyond these depths are skipped
     int2 BoundsMin;         // The pixels BuildDispatchList covers, for the light shadow shader
     int2 BoundsMax;
+    float2 Projection;      // B, A: view Z from the reversed depth
+    float2 Fade;            // Metres: start and end of the distance fade
 };
 Texture2D<float> Depth : register(t0);
-Texture2D<float4> Specular : register(t1);
 RWTexture2D<unorm float> Shadow : register(u0);
 SamplerState PointBorder : register(s0); // Border colour 0, the far plane
 
@@ -432,6 +465,9 @@ void main(int3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
     parameters.SurfaceThickness = SurfaceThickness;
     parameters.BilinearThreshold = BilinearThreshold;
     parameters.ShadowContrast = ShadowContrast;
+    parameters.Reach = Reach;
+    parameters.Projection = Projection;
+    parameters.Fade = Fade;
     // Skips the sky, which is at the far plane, and for a local light what it cannot reach.
     parameters.UseEarlyOut = true;
     parameters.DepthBounds = DepthBounds;
@@ -442,7 +478,6 @@ void main(int3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
     parameters.NearDepthValue = 1;
     parameters.InvDepthTextureSize = InvDepthTextureSize;
     parameters.DepthTexture = Depth;
-    parameters.SpecularTexture = Specular;
     parameters.OutputTexture = Shadow;
     parameters.PointBorderSampler = PointBorder;
     WriteScreenSpaceShadow(parameters, groupId, groupThreadId.x);

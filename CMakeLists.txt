@@ -189,7 +189,8 @@ add_custom_target(gi_kernels DEPENDS ${GI_SHADER_HEADERS})
 
 # Each feature's settings and their description (src/features/).
 set(PHANTOM_FX_FEATURES src/features/upscaling/settings.cpp src/features/frame_generation/settings.cpp src/features/sun/settings.cpp src/features/ray_traced_shadows/settings.cpp src/features/soft_shadows/settings.cpp src/features/sun_contact_shadows/settings.cpp
-    src/features/ray_traced_lights/settings.cpp src/features/lamp_contact_shadows/settings.cpp src/features/global_illumination/settings.cpp src/features/ambient_occlusion/settings.cpp
+    src/features/ray_traced_lights/settings.cpp src/features/lamp_contact_shadows/settings.cpp src/features/lamp_soft_shadows/settings.cpp
+    src/features/contact_shadow_shape/settings.cpp src/features/global_illumination/settings.cpp src/features/ambient_occlusion/settings.cpp
     src/features/indirect_light/settings.cpp src/features/volumetric_fog/settings.cpp src/features/photo_mode/settings.cpp src/features/hdr/settings.cpp src/features/frame_rate/settings.cpp
     src/features/motion_blur/settings.cpp)
 
@@ -197,7 +198,7 @@ set(PHANTOM_FX_FEATURES src/features/upscaling/settings.cpp src/features/frame_g
 add_library(phantom_fx SHARED src/addon.cpp src/core.cpp src/modules.cpp src/features/upscaling/upscaler.cpp src/menu.cpp src/menu_budget.cpp src/fxui/fxui.cpp src/phantom_fx_settings.cpp ${PHANTOM_FX_FEATURES} src/camera.cpp
     src/device_check.cpp src/features/motion_blur/motion_blur.cpp src/features/upscaling/fxaa.cpp src/features/frame_rate/frame_rate.cpp src/render_scale.cpp src/ui_redirect.cpp src/frame_log.cpp src/resource_dump.cpp
     src/log.cpp src/shader_bytecode.cpp src/features/frame_generation/presenter.cpp src/features/frame_generation/frame_generation.cpp src/game_loop.cpp src/passes/contact_shadow_trace.cpp src/passes/sun_light_pass.cpp src/features/sun_contact_shadows/sun_contact_shadows.cpp
-    src/features/lamp_contact_shadows/lamp_contact_shadows.cpp
+    src/passes/local_light_pass.cpp src/features/lamp_contact_shadows/lamp_contact_shadows.cpp src/features/lamp_soft_shadows/lamp_soft_shadows.cpp
     src/passes/indirect_light_pass.cpp src/passes/visibility_bitmask.cpp src/features/ambient_occlusion/gtvbao.cpp
     src/features/indirect_light/ssilvb.cpp src/features/global_illumination/light_combine.cpp src/features/photo_mode/photo_mode.cpp src/features/photo_mode/focus.cpp src/features/hdr/hdr.cpp src/weather.cpp src/character.cpp src/game_lua.cpp src/travel.cpp src/features/volumetric_fog/atmosphere.cpp src/sun_movement.cpp
     src/fidelityfx.cpp src/features/upscaling/fsr_upscaler.cpp src/features/frame_generation/fsr_frame_generation.cpp src/performance.cpp src/performance_menu.cpp

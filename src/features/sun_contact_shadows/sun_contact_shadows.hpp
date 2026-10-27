@@ -17,8 +17,7 @@ Health health();
 // ---- Recording, on the game's render and worker threads ----
 // The sun's shadow traced from `depth`, once per depth that a context records: both parts of the sun
 // pass read the same shadow. Null when the trace is unavailable.
-ID3D11ShaderResourceView* trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* specular,
-    const contact_shadow_trace::PassConstants& constants);
+ID3D11ShaderResourceView* trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, const contact_shadow_trace::PassConstants& constants);
 // FinishCommandList on `context`: its next sun pass traces again.
 void contextFinished(ID3D11DeviceContext* context) noexcept;
 void present() noexcept;
