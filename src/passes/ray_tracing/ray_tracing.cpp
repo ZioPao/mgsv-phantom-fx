@@ -3,6 +3,7 @@
 
 #include "camera.hpp"
 #include "clock.hpp"
+#include "command_list_notes.hpp"
 #include "constant_capture.hpp"
 #include "d3d11_helpers.hpp"
 #include "features/global_illumination/gi_lighting.hpp"
@@ -32,7 +33,6 @@
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <utility>
 
 namespace phantom_fx::ray_tracing
@@ -145,6 +145,19 @@ struct Notes
     std::optional<Sun> sun;
     // The game's shadow map range from the sun pass inside it: cPSLight c8.x, c8.y, c6.x, and 1.
     std::optional<std::array<float, 4>> shadowRange;
+
+    void merge(Notes later)
+    {
+        kick |= later.kick;
+        wait |= later.wait;
+        if (later.depth) depth = std::move(later.depth);
+        if (later.normals) normals = std::move(later.normals);
+        if (later.albedo) albedo = std::move(later.albedo);
+        if (later.velocity) velocity = std::move(later.velocity);
+        if (later.sky) sky = later.sky;
+        if (later.sun) sun = later.sun;
+        if (later.shadowRange) shadowRange = later.shadowRange;
+    }
 };
 
 // A shared texture with the views Direct3D 11 uses.
@@ -155,8 +168,7 @@ FrameLatch<Options> latch;
 // shadows run, the point and spot lights' shadows run.
 std::atomic<bool> enabled{}, lighting{}, shadowing{}, localShadowing{}, failed{};
 
-std::mutex notesMutex;
-std::unordered_map<std::uint64_t, Notes> notes; // By deferred context, then by command list
+CommandListNotes<Notes> notes;
 
 // ---- The immediate context's side, guarded by executionMutex ----
 std::mutex executionMutex;
@@ -198,6 +210,10 @@ std::atomic<std::uint32_t> converterChanges{}, heightmapChanges{};
 std::array<std::atomic<float>, 8> lastConverter{};
 // Diagnostics: the kicks whose shadow denoiser had the game's velocity for its moving meshes, and not.
 std::atomic<std::uint64_t> kicksWithObjectVelocity{}, kicksWithoutObjectVelocity{};
+// Diagnostics: the kicks whose camera's viewport is smaller than the depth they pack, as a smaller view's
+// is (the rays would trace from the intro's mirror); the contexts' or lists' notes and the cameras
+// (gi_inputs) never handed over.
+std::atomic<std::uint64_t> kicksFromSmallerView{}, expiredNotes{}, expiredCameras{};
 
 // The light the resolve reads and the shadow the sun pass reads, made at the render size on
 // whichever thread asks first. Taken after executionMutex when both are.
@@ -213,9 +229,9 @@ SharedTexture makeShared(ID3D11Device* creator, UINT width, UINT height, DXGI_FO
     return makeComputeTexture(creator, width, height, format, what, SharedWithD3D12);
 }
 
-Notes& notesOf(ID3D11DeviceContext* context)
+std::uint64_t keyOf(ID3D11DeviceContext* context)
 {
-    return notes[reinterpret_cast<std::uint64_t>(context)];
+    return reinterpret_cast<std::uint64_t>(context);
 }
 
 // Call with executionMutex held.
@@ -400,7 +416,9 @@ void logStatus()
     lastStatus = now;
     log("Global illumination: " + engine_scene::poseTiming() + ".");
     log("Global illumination: " + status() + "; the denoisers had the game's velocity for moving meshes in "
-        + std::to_string(kicksWithObjectVelocity.exchange(0)) + " frames, not in " + std::to_string(kicksWithoutObjectVelocity.exchange(0)));
+        + std::to_string(kicksWithObjectVelocity.exchange(0)) + " frames, not in " + std::to_string(kicksWithoutObjectVelocity.exchange(0)) + "; "
+        + std::to_string(kicksFromSmallerView.exchange(0)) + " kicks from a camera smaller than their depth; " + std::to_string(expiredNotes.exchange(0))
+        + " contexts' or lists' notes and " + std::to_string(expiredCameras.exchange(0)) + " cameras expired");
 
     const auto work = gi_inputs::takeWork();
     const auto capture = constant_capture::takeWork();
@@ -458,11 +476,17 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     timed.next(performance::Pass::GiInputs);
     if (const auto taken = gi_inputs::takeCamera())
     {
-        previousCamera = sceneCamera ? sceneCamera : taken->constants;
-        sceneCamera = taken->constants;
+        previousCamera = sceneCamera ? sceneCamera : taken;
+        sceneCamera = taken;
     }
 
     if (!sceneCamera || !depth || !normals) return;
+
+    if constexpr (DiagnosticLog)
+    {
+        const auto [width, height] = sizeOf(depth);
+        if (sceneCamera->width < static_cast<float>(width) || sceneCamera->height < static_cast<float>(height)) ++kicksFromSmallerView;
+    }
 
     pack(depth, *sceneCamera);
     ID3D11Texture2D* light{};
@@ -684,10 +708,7 @@ void detach() noexcept
         lightDevice.Reset();
     }
 
-    {
-        std::lock_guard lock(notesMutex);
-        notes.clear();
-    }
+    notes.clear();
 }
 
 void configure(const Configuration& configuration) noexcept
@@ -760,8 +781,7 @@ void note(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
         {
             ComPtr<ID3D11ShaderResourceView> velocity;
             context->PSGetShaderResources(ObjectVelocitySlot, 1, velocity.GetAddressOf());
-            std::lock_guard lock(notesMutex);
-            notesOf(context).velocity = std::move(velocity);
+            notes.note(keyOf(context), [&](Notes& contextNotes) { contextNotes.velocity = std::move(velocity); });
             return;
         }
 
@@ -781,8 +801,7 @@ void note(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
         const auto& light = noted.fromProbe ? probes->paramSH : probes->paramSHSky;
         for (int color = 0; color < 3; ++color) std::memcpy(noted.matrices[color].data(), light[color], sizeof(light[color]));
         noted.exposure = scene->exposure;
-        std::lock_guard lock(notesMutex);
-        notesOf(context).sky = noted;
+        notes.note(keyOf(context), [&](Notes& contextNotes) { contextNotes.sky = noted; });
     }
     catch (...)
     {
@@ -795,8 +814,7 @@ void noteNormals(ID3D11DeviceContext* context, ID3D11ShaderResourceView* view) n
 
     try
     {
-        std::lock_guard lock(notesMutex);
-        notesOf(context).normals = view;
+        notes.note(keyOf(context), [&](Notes& contextNotes) { contextNotes.normals = view; });
     }
     catch (...)
     {
@@ -809,10 +827,10 @@ void noteUpscale(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth) 
 
     try
     {
-        std::lock_guard lock(notesMutex);
-        auto& noted = notesOf(context);
-        noted.kick = true;
-        noted.depth = depth;
+        notes.note(keyOf(context), [&](Notes& contextNotes) {
+            contextNotes.kick = true;
+            contextNotes.depth = depth;
+        });
     }
     catch (...)
     {
@@ -838,13 +856,13 @@ void noteSun(ID3D11DeviceContext* context, bool shadowMapped) noexcept
 
         noted.color = {light->color[0], light->color[1], light->color[2]};
         noted.exposure = scene->exposure;
-        std::lock_guard lock(notesMutex);
-        auto& contextNotes = notesOf(context);
-        contextNotes.sun = noted;
-        // The range as SunShadow reads it (sun_light_pass_shaders.hpp).
-        if (shadowMapped) contextNotes.shadowRange = std::array<float, 4>{light->shadowRangeCentre, light->shadowRangeStart, light->shadowRangeFade, 1};
-        // The sun pass reads the shadows, and the point and spot lights are drawn before its list: it waits for them.
-        if (shadowing.load(std::memory_order_relaxed) || localShadowing.load(std::memory_order_relaxed)) contextNotes.wait = true;
+        notes.note(keyOf(context), [&](Notes& contextNotes) {
+            contextNotes.sun = noted;
+            // The range as SunShadow reads it (sun_light_pass_shaders.hpp).
+            if (shadowMapped) contextNotes.shadowRange = std::array<float, 4>{light->shadowRangeCentre, light->shadowRangeStart, light->shadowRangeFade, 1};
+            // The sun pass reads the shadows, and the point and spot lights are drawn before its list: it waits for them.
+            if (shadowing.load(std::memory_order_relaxed) || localShadowing.load(std::memory_order_relaxed)) contextNotes.wait = true;
+        });
     }
     catch (...)
     {
@@ -857,8 +875,7 @@ void noteSkySpecular(ID3D11DeviceContext* context) noexcept
 
     try
     {
-        std::lock_guard lock(notesMutex);
-        notesOf(context).wait = true;
+        notes.note(keyOf(context), [](Notes& contextNotes) { contextNotes.wait = true; });
     }
     catch (...)
     {
@@ -871,10 +888,10 @@ void noteResolve(ID3D11DeviceContext* context, ID3D11ShaderResourceView* view) n
 
     try
     {
-        std::lock_guard lock(notesMutex);
-        auto& noted = notesOf(context);
-        noted.wait = true;
-        noted.albedo = view;
+        notes.note(keyOf(context), [&](Notes& contextNotes) {
+            contextNotes.wait = true;
+            contextNotes.albedo = view;
+        });
     }
     catch (...)
     {
@@ -963,54 +980,23 @@ bool lightRuns() noexcept
     return lighting.load(std::memory_order_relaxed) && !failed && sinceKick() < 1000;
 }
 
-void recorded(std::uint64_t list, std::uint64_t context) noexcept
+void recorded(std::uint64_t into, std::uint64_t from) noexcept
 {
-    gi_inputs::recorded(list, context);
-    try
-    {
-        std::lock_guard lock(notesMutex);
-        const auto found = notes.find(context);
-        if (found == notes.end()) return;
-
-        auto from = std::move(found->second);
-        notes.erase(found);
-        auto& into = notes[list];
-        into.kick |= from.kick;
-        into.wait |= from.wait;
-        if (from.depth) into.depth = std::move(from.depth);
-        if (from.normals) into.normals = std::move(from.normals);
-        if (from.albedo) into.albedo = std::move(from.albedo);
-        if (from.velocity) into.velocity = std::move(from.velocity);
-        if (from.sky) into.sky = from.sky;
-        if (from.sun) into.sun = from.sun;
-        if (from.shadowRange) into.shadowRange = from.shadowRange;
-    }
-    catch (...)
-    {
-    }
+    gi_inputs::recorded(into, from);
+    notes.recorded(into, from);
 }
 
-void forget(std::uint64_t list) noexcept
+void forget(std::uint64_t contextOrList) noexcept
 {
-    gi_inputs::forget(list);
-    std::lock_guard lock(notesMutex);
-    notes.erase(list);
+    gi_inputs::forget(contextOrList);
+    notes.forget(contextOrList);
 }
 
 void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
 {
     if (!enabled.load(std::memory_order_relaxed)) return;
 
-    Notes noted;
-    {
-        std::lock_guard lock(notesMutex);
-        const auto found = notes.find(list);
-        if (found != notes.end())
-        {
-            noted = std::move(found->second);
-            notes.erase(found);
-        }
-    }
+    auto noted = notes.take(list).value_or(Notes{});
 
     std::lock_guard lock(executionMutex);
     if (!immediate || failed || context != nativeImmediate) return;
@@ -1063,6 +1049,9 @@ void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
 
 void present() noexcept
 {
+    expiredNotes += notes.present();
+    expiredCameras += gi_inputs::present();
+
     {
         std::lock_guard lock(executionMutex);
         objectVelocityDrawn = false;

@@ -38,6 +38,9 @@ only feeds them (`DiagnosticLog` in `src/log.hpp`, tested with `if constexpr`):
 - the ray-traced lights' "Lights in ten seconds";
 - the physical sky's parameters, copied back from the GPU every ten seconds;
 - the upscaler's frame counts every 1800 presents;
+- each module's expired notes (see "Command lists" under "What the add-on changes"), in its status
+  line, and the global illumination's kicks from a camera smaller than the depth it packs (see
+  "Smaller views");
 - the shadow probe's findings, while its debug view shows;
 - Developer, **Log global illumination often**.
 
@@ -56,7 +59,7 @@ documentation and licenses are in `PhantomFX/`.
 ctest --test-dir build/release
 ```
 
-This runs four tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
+This runs five tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
 (defaults, round trip, clamping, invalid files and values), the mode maths (render scales, texture LOD
 bias) and the camera maths (main-view recognition, jitter direction and units, reprojection, camera
 cuts, jitter phases and the Halton sequence, the camera frame generation gets). The main view and a sun
@@ -74,8 +77,12 @@ newer list, the instance cap's order and the terrain rings' remaking. `tests/gam
 the game's shaders on a WARP device, each created from a DXBC header carrying a row's checksum: a sun
 shader known by its checksum and drawn with it, unknown and missing shaders, every copy of one shader
 known, code that is not DXBC, the first of a row's shaders kept (the ray-traced lights' twins),
-everything let go at device teardown, and vertex shaders by their source name. Everything else is
-checked in the game.
+everything let go at device teardown, and vertex shaders by their source name.
+`tests/command_list_notes_tests.cpp`: how a module's notes go from a deferred context to its command list
+and are handed over: once, a context starting empty after its finish or at a gone one's address, a list
+run inside a deferred context joining its notes in the order they run, a forgotten list, notes expiring
+at the fourth present, the next frame recorded during a present, and the lists waiting at the kick.
+Everything else is checked in the game.
 
 ## Package a release
 
@@ -202,6 +209,7 @@ what draws it, when that is the feature's own.
 | `src/log.cpp`, `src/log.hpp` | `PhantomFX.log` beside the add-on, one per game session |
 | `src/clock.hpp` | `QueryPerformanceCounter` ticks and the milliseconds between them |
 | `src/frame_latch.hpp` | A module's settings as configure sets them and as the frame being recorded uses them, latched at present |
+| `src/command_list_notes.hpp` | A module's notes by deferred context, then by command list, until the immediate context runs it; their merge in the order they run, and their expiry (see "What the add-on changes", "Command lists") |
 | `src/hresult.hpp` | `check`: a failed Direct3D or Windows call as an exception naming the step |
 | `src/d3d11_helpers.hpp` | Direct3D 11 helpers for the effects: shader compiles, dynamic constant buffers, compute textures, texture sizes |
 | `src/d3d12_helpers.hpp` | Direct3D 12 helpers for the ray tracing, FSR and the presenter: barriers, the device on Direct3D 11's GPU behind ReShade's proxy, shared textures and fences opened in Direct3D 12 |
@@ -1114,10 +1122,22 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
 - **Command lists.** The game records a whole frame on its worker threads, finishes about 44
   command lists, and only then executes them on the immediate context in one burst, followed by
   Present (measured over 200 frames: never a finish after the first execute of a frame). What a
-  deferred context records that matters (the grading, the FXAA pass, the velocity texture) is
-  kept by context, moved to the command list at `FinishCommandList` (ReShade's
-  `execute_secondary_command_list` with the new list and the deferred context) and taken at its
-  `ExecuteCommandList`. That event fires before the real call.
+  module notes as a deferred context records (the upscaler's grading, FXAA pass and velocity
+  texture, the ray tracing's inputs and camera, the point and spot lights, the timed passes) is kept
+  by context in the module's `CommandListNotes` (`src/command_list_notes.hpp`), moved to the command
+  list at `FinishCommandList` (ReShade's `execute_secondary_command_list` with the new list and the
+  deferred context) and handed over once, as the immediate context is about to run the list (the
+  same event, which fires before the real call).
+  - Notes merge in the order the immediate context runs them; each module's `merge` says what later
+    means for each note: flags add up, the latest texture, sky or sun wins, the point and spot
+    lights and the timed passes append, the first camera stays.
+  - A list a deferred context runs inside it (the same event with the context and the list) joins
+    the context's notes after what it noted so far. The game is not known to do it: the log says so
+    once if it does.
+  - Notes that waited through three presents without being handed over expire at the fourth: a
+    context never finished, a list never run. The diagnostic log counts them, in the upscaler's
+    status line, the global illumination's (with its cameras), "Lights in ten seconds" and a
+    "Costs:" line when there are any; normal play should have none.
 - **Where DLSS runs.** Post processing starts its own command list: in all 126 F10 records (SDR and
   HDR, DLAA and upscaling, render sizes 1280x720 to 3840x2160) the list before it ends with a draw
   into the scene (particles, forward geometry), and it opens with exposure (a `CopyRenderBuffer` from
@@ -1756,6 +1776,9 @@ history was the other camera's. A pass whose viewport does not cover its render 
 lights drawn by the game, unshadowed; no ray-traced sun shadow in its sun pass; and its resolve the
 game's probe light with white in place of the occlusion, as the game's SSAO is skipped while the global
 illumination runs (both cameras' SSAO passes fill their half-size target, so they cannot be told apart).
+The rays still trace from the camera of the first main-camera draw in the last list run before the
+kick (`gi_inputs`), not the frame's largest as the upscaler's main view: the diagnostic log counts the
+kicks whose camera's viewport is smaller than the depth they pack, which a smaller view's camera would be.
 
 ## Ray-traced scene
 

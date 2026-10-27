@@ -274,6 +274,12 @@ if(BUILD_TESTING)
     target_compile_definitions(game_shaders_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(game_shaders_tests PRIVATE /W4 /WX /permissive- /utf-8)
     add_test(NAME game_shaders COMMAND game_shaders_tests)
+
+    add_executable(command_list_notes_tests tests/command_list_notes_tests.cpp)
+    target_include_directories(command_list_notes_tests PRIVATE src)
+    target_compile_features(command_list_notes_tests PRIVATE cxx_std_20)
+    target_compile_options(command_list_notes_tests PRIVATE /W4 /WX /permissive- /utf-8)
+    add_test(NAME command_list_notes COMMAND command_list_notes_tests)
 endif()
 
 # Package only runtime files and documentation, not dependency development files.

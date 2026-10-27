@@ -81,9 +81,10 @@ bool active() noexcept;
 // for it. Until then they stay.
 bool lightRuns() noexcept;
 
-// FinishCommandList and command list lifetime.
-void recorded(std::uint64_t list, std::uint64_t context) noexcept;
-void forget(std::uint64_t list) noexcept;
+// What `from` recorded now belongs to `into`: FinishCommandList, or a command list executed in a
+// deferred context.
+void recorded(std::uint64_t into, std::uint64_t from) noexcept;
+void forget(std::uint64_t contextOrList) noexcept;
 
 // ---- Immediate context ----
 // Before the immediate context executes `list`: the kick, or the wait for the light.

@@ -65,7 +65,7 @@ void bufferUnmapped(ID3D11Resource* buffer) noexcept;
 // What `from` recorded now belongs to `into`: FinishCommandList, or a command list executed in a
 // deferred context.
 void recorded(std::uint64_t into, std::uint64_t from) noexcept;
-void forget(std::uint64_t list) noexcept;
+void forget(std::uint64_t contextOrList) noexcept;
 
 // ---- Immediate context ----
 // Before the immediate context executes `list`.

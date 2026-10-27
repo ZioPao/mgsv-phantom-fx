@@ -106,9 +106,10 @@ private:
     std::optional<TimedRun> run;
 };
 
-// FinishCommandList: what `context` recorded now belongs to `list`.
-void recorded(std::uint64_t list, std::uint64_t context) noexcept;
-void forget(std::uint64_t list) noexcept;
+// What `from` recorded now belongs to `into`: FinishCommandList, or a command list executed in a
+// deferred context.
+void recorded(std::uint64_t into, std::uint64_t from) noexcept;
+void forget(std::uint64_t contextOrList) noexcept;
 
 // ---- The ray tracing's Direct3D 12 queue (gi_renderer.cpp) ----
 // A frame's passes there, once the GPU is past them; they count for the frame being timed now.

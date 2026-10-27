@@ -34,9 +34,10 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
 // the sun pass, indoors the sky's specular pass in its place, or the resolve, as some scenes draw no sun
 // pass at all. Each list that has one draws the lights recorded before it again.
 void noteDrawPoint(ID3D11DeviceContext* context) noexcept;
-// FinishCommandList and command list lifetime.
-void recorded(std::uint64_t list, std::uint64_t context) noexcept;
-void forget(std::uint64_t list) noexcept;
+// What `from` recorded now belongs to `into`: FinishCommandList, or a command list executed in a
+// deferred context.
+void recorded(std::uint64_t into, std::uint64_t from) noexcept;
+void forget(std::uint64_t contextOrList) noexcept;
 
 // ---- Immediate context ----
 // At the kick: the lights recorded for the frame `camera` draws and not traced yet, world space, the

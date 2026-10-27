@@ -72,6 +72,16 @@ ID3D11DeviceContext* native(command_list* list)
     return reinterpret_cast<ID3D11DeviceContext*>(list->get_native());
 }
 
+// Whether `list` is a device context rather than a command list.
+bool isContext(command_list* list)
+{
+    ID3D11DeviceContext* context{};
+    if (FAILED(reinterpret_cast<IUnknown*>(list->get_native())->QueryInterface(IID_PPV_ARGS(&context)))) return false;
+
+    context->Release();
+    return true;
+}
+
 // The settings, log and frame records live beside the add-on, as ReShade keeps its own.
 std::filesystem::path dataDirectory()
 {
@@ -436,8 +446,9 @@ void onUnmapBuffer(device*, resource buffer)
     constant_capture::bufferUnmapped(reinterpret_cast<ID3D11Resource*>(buffer.handle));
 }
 
-// Called before the immediate context executes a command list, and after FinishCommandList with the
-// new command list and the deferred context it came from.
+// Called before the immediate context executes a command list, after FinishCommandList with the new
+// command list and the deferred context it came from, and before a deferred context executes a command
+// list inside it.
 void onExecuteSecondary(command_list* list, command_list* secondary)
 {
     if (list == immediateList)
@@ -450,6 +461,9 @@ void onExecuteSecondary(command_list* list, command_list* secondary)
         local_lights::executing(native(list), secondary->get_native());
         return;
     }
+
+    // The game is not known to do it: the list's notes join the context's (command_list_notes.hpp).
+    if (isContext(list)) logOnce("A deferred context runs a command list inside it; the list's notes join the context's.");
 
     performance::recorded(list->get_native(), secondary->get_native());
     upscaler::recorded(list->get_native(), secondary->get_native());
