@@ -798,12 +798,13 @@ struct PostDraw
 };
 thread_local PostDraw postDraw;
 
-// The full-screen triangle and the bilinear stretch, made once for the immediate context and the
-// recording threads. The composite draws with the triangle too: its pixel shader reads only SV_Position.
+// The full-screen triangle, the bilinear stretch and the motion blur's start, made once for the
+// immediate context and the recording threads. The composite draws with the triangle too: its pixel
+// shader reads only SV_Position.
 struct StretchShaders
 {
     ComPtr<ID3D11VertexShader> vertex;
-    ComPtr<ID3D11PixelShader> pixel;
+    ComPtr<ID3D11PixelShader> pixel, blurSource;
     ComPtr<ID3D11SamplerState> sampler;
 };
 std::mutex stretchShaderMutex;
@@ -819,6 +820,7 @@ std::shared_ptr<const StretchShaders> ensureStretch()
     check(device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, made->vertex.GetAddressOf()),
         "Creating the stretch vertex shader");
     made->pixel = pixelShader(device.Get(), shaders::Stretch, "stretch");
+    made->blurSource = pixelShader(device.Get(), shaders::BlurSource, "blur-source");
     D3D11_SAMPLER_DESC sampler{};
     sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -827,6 +829,84 @@ std::shared_ptr<const StretchShaders> ensureStretch()
     stretchShaders = std::move(made);
 
     return stretchShaders;
+}
+
+// The bindings a stretch changes on a recording context, the game's put back when this goes out of
+// scope.
+class SavedStretchState
+{
+public:
+    explicit SavedStretchState(ID3D11DeviceContext* context) : context(context)
+    {
+        context->IAGetInputLayout(layout.GetAddressOf());
+        context->IAGetPrimitiveTopology(&topology);
+        context->VSGetShader(vertex.GetAddressOf(), nullptr, nullptr);
+        context->PSGetShader(pixel.GetAddressOf(), nullptr, nullptr);
+        context->PSGetShaderResources(0, InputCount, inputs);
+        context->PSGetSamplers(0, 1, sampler.GetAddressOf());
+        context->RSGetState(rasterizer.GetAddressOf());
+        context->OMGetBlendState(blend.GetAddressOf(), blendFactor, &sampleMask);
+        context->OMGetRenderTargets(TargetCount, targets, depth.GetAddressOf());
+    }
+
+    ~SavedStretchState()
+    {
+        context->IASetInputLayout(layout.Get());
+        context->IASetPrimitiveTopology(topology);
+        context->VSSetShader(vertex.Get(), nullptr, 0);
+        context->PSSetShader(pixel.Get(), nullptr, 0);
+        context->PSSetShaderResources(0, InputCount, inputs);
+        context->PSSetSamplers(0, 1, sampler.GetAddressOf());
+        context->RSSetState(rasterizer.Get());
+        context->OMSetBlendState(blend.Get(), blendFactor, sampleMask);
+        context->OMSetRenderTargets(TargetCount, targets, depth.Get());
+
+        for (auto* input : inputs)
+            if (input) input->Release();
+
+        for (auto* target : targets)
+            if (target) target->Release();
+    }
+
+    SavedStretchState(const SavedStretchState&) = delete;
+    SavedStretchState& operator=(const SavedStretchState&) = delete;
+
+private:
+    static constexpr UINT InputCount = 2, TargetCount = D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT;
+
+    ID3D11DeviceContext* context;
+
+    ComPtr<ID3D11InputLayout> layout;
+    D3D11_PRIMITIVE_TOPOLOGY topology{};
+    ComPtr<ID3D11VertexShader> vertex;
+    ComPtr<ID3D11PixelShader> pixel;
+    ID3D11ShaderResourceView* inputs[InputCount]{};
+    ComPtr<ID3D11SamplerState> sampler;
+    ComPtr<ID3D11RasterizerState> rasterizer;
+    ComPtr<ID3D11BlendState> blend;
+    float blendFactor[4]{};
+    UINT sampleMask{};
+    ID3D11RenderTargetView* targets[TargetCount]{};
+    ComPtr<ID3D11DepthStencilView> depth;
+};
+
+// Binds the stretch's triangle, `pixel` and the bilinear sampler, with `inputs` from t0 and `target`
+// whole; then draws.
+void drawStretch(ID3D11DeviceContext* context, const StretchShaders& stretch, ID3D11PixelShader* pixel,
+    std::initializer_list<ID3D11ShaderResourceView*> inputs, ID3D11RenderTargetView* target)
+{
+    const auto size = textureDesc(target);
+    const WholeTargetViewport viewport(context, size.Width, size.Height);
+    context->IASetInputLayout(nullptr);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetShader(stretch.vertex.Get(), nullptr, 0);
+    context->PSSetShader(pixel, nullptr, 0);
+    context->PSSetShaderResources(0, static_cast<UINT>(inputs.size()), inputs.begin());
+    context->PSSetSamplers(0, 1, stretch.sampler.GetAddressOf());
+    context->RSSetState(nullptr);
+    context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+    context->OMSetRenderTargets(1, &target, nullptr);
+    context->Draw(3, 0);
 }
 
 // The graded image at the output size, stretched into the render-size scene target on `context`. The
@@ -838,52 +918,76 @@ void drawGradedScene(ID3D11DeviceContext* context, ID3D11RenderTargetView* scene
     const auto stretch = ensureStretch();
     if (!output.view || !stretch) return;
 
-    ComPtr<ID3D11InputLayout> layout;
-    D3D11_PRIMITIVE_TOPOLOGY topology{};
-    ComPtr<ID3D11VertexShader> vertex;
-    ComPtr<ID3D11PixelShader> pixel;
-    ComPtr<ID3D11ShaderResourceView> input;
-    ComPtr<ID3D11SamplerState> sampler;
-    ComPtr<ID3D11RasterizerState> rasterizer;
-    ComPtr<ID3D11BlendState> blend;
-    float blendFactor[4]{};
-    UINT sampleMask{};
-    ID3D11RenderTargetView* bound[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
-    ComPtr<ID3D11DepthStencilView> depth;
-    context->IAGetInputLayout(layout.GetAddressOf());
-    context->IAGetPrimitiveTopology(&topology);
-    context->VSGetShader(vertex.GetAddressOf(), nullptr, nullptr);
-    context->PSGetShader(pixel.GetAddressOf(), nullptr, nullptr);
-    context->PSGetShaderResources(0, 1, input.GetAddressOf());
-    context->PSGetSamplers(0, 1, sampler.GetAddressOf());
-    context->RSGetState(rasterizer.GetAddressOf());
-    context->OMGetBlendState(blend.GetAddressOf(), blendFactor, &sampleMask);
-    context->OMGetRenderTargets(static_cast<UINT>(std::size(bound)), bound, depth.GetAddressOf());
-    std::array<ComPtr<ID3D11RenderTargetView>, std::size(bound)> targets;
-    for (std::size_t i = 0; i < std::size(bound); ++i) targets[i].Attach(bound[i]);
+    const SavedStretchState saved(context);
+    drawStretch(context, *stretch, stretch->pixel.Get(), {output.view.Get()}, scene);
+}
 
-    const auto size = textureDesc(scene);
-    const WholeTargetViewport viewport(context, size.Width, size.Height);
-    context->IASetInputLayout(nullptr);
-    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    context->VSSetShader(stretch->vertex.Get(), nullptr, 0);
-    context->PSSetShader(stretch->pixel.Get(), nullptr, 0);
-    context->PSSetShaderResources(0, 1, output.view.GetAddressOf());
-    context->PSSetSamplers(0, 1, stretch->sampler.GetAddressOf());
-    context->RSSetState(nullptr);
-    context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
-    context->OMSetRenderTargets(1, &scene, nullptr);
-    context->Draw(3, 0);
+// The game's motion blur on one recording thread: the frame, the game's half-size target its last
+// gather pass wrote, by address only, and the surface at half the output size that holds that pass's
+// result.
+struct BlurChain
+{
+    std::uint64_t frame{};
+    const ID3D11Resource* gameTarget{};
+    ui_redirect::Surface surface{};
+};
+thread_local BlurChain blurChain;
 
-    context->IASetInputLayout(layout.Get());
-    context->IASetPrimitiveTopology(topology);
-    context->VSSetShader(vertex.Get(), nullptr, 0);
-    context->PSSetShader(pixel.Get(), nullptr, 0);
-    context->PSSetShaderResources(0, 1, input.GetAddressOf());
-    context->PSSetSamplers(0, 1, sampler.GetAddressOf());
-    context->RSSetState(rasterizer.Get());
-    context->OMSetBlendState(blend.Get(), blendFactor, sampleMask);
-    context->OMSetRenderTargets(static_cast<UINT>(std::size(bound)), bound, depth.Get());
+std::uint64_t currentRecordingFrame()
+{
+    std::lock_guard lock(recordMutex);
+    return recordingFrame();
+}
+
+// Whether `source` is the result of this frame's last gather pass on this thread. Without the frame, a
+// frame that missed its composite would leave the next frame's first pass taken for its second.
+bool isBlurResult(ID3D11ShaderResourceView* source)
+{
+    return blurChain.gameTarget && blurChain.frame == currentRecordingFrame() && resourceOf(source).Get() == blurChain.gameTarget;
+}
+
+// While upscaling, the game's motion blur gathers at half the output size from DLSS's image, as it
+// does at half the render size without upscaling. At half the render size it gathered from the
+// jittered scene before DLSS, and its composite stretched that over the output: pixelated. Its first
+// pass reads the add-on's halved output instead of the game's halved scene, the second the first's
+// result, and the composite the second's (beforePostDraw). The game's constants stay: they place the
+// samples in texture coordinates, so the blur reaches as far on screen.
+bool gatherBlurAtOutputSize(ID3D11DeviceContext* context)
+{
+    if (!ui_redirect::isUpscaling()) return false;
+
+    ComPtr<ID3D11ShaderResourceView> source;
+    ComPtr<ID3D11RenderTargetView> target;
+    context->PSGetShaderResources(0, 1, source.GetAddressOf());
+    context->OMGetRenderTargets(1, target.GetAddressOf(), nullptr);
+    if (!source || !target) return false;
+
+    using enum ui_redirect::Surface;
+    const bool isFirstPass = !isBlurResult(source.Get());
+    if (isFirstPass)
+    {
+        const auto scene = ui_redirect::output();
+        const auto blur = ui_redirect::surfaceViews(Blur);
+        const auto stretch = ensureStretch();
+        if (!scene.view || !blur.target || !stretch) return false;
+
+        const SavedStretchState saved(context);
+        drawStretch(context, *stretch, stretch->blurSource.Get(), {scene.view.Get(), source.Get()}, blur.target.Get());
+    }
+
+    const auto input = isFirstPass ? Blur : blurChain.surface;
+    const auto output = input == Blur ? BlurTwin : Blur;
+    postDraw.redirected.emplace(context, output, Inputs{{0, input}});
+    if (!*postDraw.redirected)
+    {
+        postDraw.clear();
+        return false;
+    }
+
+    blurChain = {currentRecordingFrame(), resourceOf(target.Get()).Get(), output};
+    recordUiTargetUse(context);
+
+    return true;
 }
 
 // ---- Per frame, on the immediate context ----
@@ -1457,6 +1561,7 @@ bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         // CopyRenderBuffer is a plain copy the game makes anywhere; the layer's composite shares its
         // list with the LUT build.
         if (pass == GamePass::LutBuild || pass == GamePass::Grade || pass == GamePass::Fxaa) recordGrading(context);
+        if (pass == GamePass::MotionBlur) return gatherBlurAtOutputSize(context);
         if (pass != GamePass::Copy && pass != GamePass::Grade) return false;
 
         ComPtr<ID3D11RenderTargetView> target;
@@ -1467,13 +1572,16 @@ bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         auto& redirected = postDraw.redirected;
         if (pass == GamePass::Copy)
         {
-            // The two copies into a render-size target in every recorded frame: the depth of field's
-            // copy of the scene, before DLSS, and the half-size layer (lens flares) drawn over it after.
+            // The copies into a render-size target in every recorded frame: the depth of field's copy
+            // of the scene, before DLSS, then over it the half-size layer (lens flares) and, with motion
+            // blur on, the blur's half-size result, which the add-on's surface holds instead.
             ComPtr<ID3D11ShaderResourceView> source;
             context->PSGetShaderResources(0, 1, source.GetAddressOf());
             if (ui_redirect::renderSized(source.Get())) return false;
 
-            redirected.emplace(context, Scene, Inputs{});
+            if (isBlurResult(source.Get())) redirected.emplace(context, Scene, Inputs{{0, blurChain.surface}});
+            else redirected.emplace(context, Scene, Inputs{});
+            blurChain = {};
         }
         else
         {

@@ -17,6 +17,9 @@
   of `SSLighting2_Point` and `SSLighting2_Spot`.
 - Foliage (grass, bushes, tree leaves) casts screen-space contact shadows: the trace no longer
   skips the foliage material, so clumps shade themselves as they do in `renodx-mgsv`.
+- Fix the game's motion blur looking pixelated while upscaling. It blurred a small copy of the image
+  from before DLSS (a third of the screen's width at Quality) and stretched it over the screen. It
+  now blurs DLSS's image at half the screen's size, as it does without upscaling.
 
 ## 1.8.0
 

@@ -6,6 +6,7 @@
 #include "log.hpp"
 #include "render_scale.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -38,12 +39,13 @@ struct Texture
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<ID3D11RenderTargetView> target;
     ComPtr<ID3D11ShaderResourceView> view;
+    unsigned width{}, height{};
 };
 
 struct Targets
 {
     unsigned width{}, height{};
-    Texture surfaces[2]; // Scene, Copy
+    Texture surfaces[4]; // Scene, Copy, Blur, BlurTwin
     ComPtr<ID3D11ShaderResourceView> srgbView;
     // The 2D pass masks with stencil; it does not test depth.
     ComPtr<ID3D11DepthStencilView> depth;
@@ -100,6 +102,19 @@ bool sceneTarget(const D3D11_TEXTURE2D_DESC& texture)
     return texture.Format == hdr::sceneFormat() && renderSized(texture);
 }
 
+bool makeSurface(Texture& surface, const D3D11_TEXTURE2D_DESC& desc, DXGI_FORMAT viewFormat)
+{
+    const D3D11_RENDER_TARGET_VIEW_DESC targetDesc{viewFormat, D3D11_RTV_DIMENSION_TEXTURE2D};
+    D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{viewFormat, D3D11_SRV_DIMENSION_TEXTURE2D};
+    viewDesc.Texture2D.MipLevels = 1;
+    surface.width = desc.Width;
+    surface.height = desc.Height;
+
+    return SUCCEEDED(device->CreateTexture2D(&desc, nullptr, surface.texture.GetAddressOf()))
+        && SUCCEEDED(device->CreateRenderTargetView(surface.texture.Get(), &targetDesc, surface.target.GetAddressOf()))
+        && SUCCEEDED(device->CreateShaderResourceView(surface.texture.Get(), &viewDesc, surface.view.GetAddressOf()));
+}
+
 std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
 {
     auto created = std::make_shared<Targets>();
@@ -115,14 +130,18 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    D3D11_RENDER_TARGET_VIEW_DESC targetDesc{drawFormat(), D3D11_RTV_DIMENSION_TEXTURE2D};
-    D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{drawFormat(), D3D11_SRV_DIMENSION_TEXTURE2D};
-    viewDesc.Texture2D.MipLevels = 1;
-    for (auto& surface : created->surfaces)
-        if (FAILED(device->CreateTexture2D(&desc, nullptr, surface.texture.GetAddressOf()))
-            || FAILED(device->CreateRenderTargetView(surface.texture.Get(), &targetDesc, surface.target.GetAddressOf()))
-            || FAILED(device->CreateShaderResourceView(surface.texture.Get(), &viewDesc, surface.view.GetAddressOf())))
-            return nullptr;
+
+    // The motion blur's pair as the game makes its own: half the size of the scene it blends over, and
+    // 8-bit, so moving HDR highlights clip as they do without upscaling.
+    auto blurDesc = desc;
+    blurDesc.Width = std::max(width / 2, 1u);
+    blurDesc.Height = std::max(height / 2, 1u);
+    blurDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+
+    auto& [outputScene, outputCopy, blur, blurTwin] = created->surfaces;
+    if (!makeSurface(outputScene, desc, drawFormat()) || !makeSurface(outputCopy, desc, drawFormat()) || !makeSurface(blur, blurDesc, blurDesc.Format)
+        || !makeSurface(blurTwin, blurDesc, blurDesc.Format))
+        return nullptr;
 
     const float system[16]{0, 0, 0, 0, static_cast<float>(width), static_cast<float>(height), 0, 0, static_cast<float>(width),
         static_cast<float>(height), 1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height)};
@@ -141,11 +160,12 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
         || FAILED(device->CreateBuffer(&viewportDesc, &viewportData, created->viewportSize.GetAddressOf())))
         return nullptr;
 
-    viewDesc.Format = gammaFormat();
+    D3D11_SHADER_RESOURCE_VIEW_DESC srgbDesc{gammaFormat(), D3D11_SRV_DIMENSION_TEXTURE2D};
+    srgbDesc.Texture2D.MipLevels = 1;
     desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
     desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
     ComPtr<ID3D11Texture2D> depth;
-    if (FAILED(device->CreateShaderResourceView((*created)[Surface::Scene].texture.Get(), &viewDesc, created->srgbView.GetAddressOf()))
+    if (FAILED(device->CreateShaderResourceView(outputScene.texture.Get(), &srgbDesc, created->srgbView.GetAddressOf()))
         || FAILED(device->CreateTexture2D(&desc, nullptr, depth.GetAddressOf()))
         || FAILED(device->CreateDepthStencilView(depth.Get(), nullptr, created->depth.GetAddressOf())))
         return nullptr;
@@ -458,7 +478,8 @@ OutputSizeDraw::OutputSizeDraw(ID3D11DeviceContext* drawing, Surface target, std
             ++inputCount;
         }
 
-        const double scaleX = static_cast<double>(output->width) / gameTarget.Width, scaleY = static_cast<double>(output->height) / gameTarget.Height;
+        const auto& surface = (*output)[target];
+        const double scaleX = static_cast<double>(surface.width) / gameTarget.Width, scaleY = static_cast<double>(surface.height) / gameTarget.Height;
         D3D11_VIEWPORT scaledViewports[std::size(viewports)]{};
         D3D11_RECT scaledRects[std::size(rects)]{};
         scale(viewports, scaledViewports, viewportCount, scaleX, scaleY);
@@ -466,7 +487,8 @@ OutputSizeDraw::OutputSizeDraw(ID3D11DeviceContext* drawing, Surface target, std
         if (target == Surface::Scene) rememberScene(targets[0].Get());
 
         context = drawing;
-        if (copySystem(drawing, *output, system.Get())) drawing->PSSetConstantBuffers(0, 1, output->postSystemConstants.GetAddressOf());
+        const bool isBlur = target == Surface::Blur || target == Surface::BlurTwin;
+        if (!isBlur && copySystem(drawing, *output, system.Get())) drawing->PSSetConstantBuffers(0, 1, output->postSystemConstants.GetAddressOf());
         for (const auto& input : inputs) drawing->PSSetShaderResources(input.slot, 1, (*output)[input.surface].view.GetAddressOf());
         drawing->OMSetRenderTargetsAndUnorderedAccessViews(1, (*output)[target].target.GetAddressOf(), nullptr, 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
             nullptr, nullptr);
@@ -495,6 +517,21 @@ OutputSizeDraw::~OutputSizeDraw()
 void copySurface(ID3D11DeviceContext* context, Surface to, Surface from) noexcept
 {
     if (const auto output = currentTargets()) context->CopyResource((*output)[to].texture.Get(), (*output)[from].texture.Get());
+}
+
+SurfaceViews surfaceViews(Surface surface) noexcept
+{
+    const auto output = currentTargets();
+    if (!output) return {};
+
+    const auto& texture = (*output)[surface];
+
+    return {texture.target, texture.view, texture.width, texture.height};
+}
+
+bool isUpscaling() noexcept
+{
+    return belowOutput(render_scale::current());
 }
 
 bool renderSized(ID3D11View* view) noexcept
