@@ -91,6 +91,13 @@ bool ensurePipeline()
     }
 }
 
+// The light's position in view space, from its cPSLight.
+std::array<float, 3> positionOf(const contact_shadow_trace::PassConstants& constants)
+{
+    const float* light = constants.light.data();
+    return {light[LightPosition], light[LightPosition + 1], light[LightPosition + 2]};
+}
+
 void noteMarked(ID3D11DeviceContext* context, const std::array<float, 3>& position)
 {
     std::lock_guard lock(markedMutex);
@@ -189,7 +196,7 @@ Health health()
 // At the marking draw (colour writes off), the light's shadow is traced within the light's reach, and
 // the light's volume drawn once more, both faces and without depth test, to put the shadow in the
 // alpha of both light targets wherever the light can reach.
-bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Falloff falloff)
+bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Falloff falloff, const BoundBlend& gameBlend)
 {
     const auto constants = contact_shadow_trace::passConstants(context);
     if (!constants)
@@ -200,7 +207,7 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
 
     const float* scene = constants->scene.data();
     const float* light = constants->light.data();
-    const std::array position{light[LightPosition], light[LightPosition + 1], light[LightPosition + 2]};
+    const auto position = positionOf(*constants);
 
     ComPtr<ID3D11ShaderResourceView> depth;
     context->PSGetShaderResources(DepthSlot, 1, depth.GetAddressOf());
@@ -238,16 +245,12 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     ComPtr<ID3D11PixelShader> gameShader;
     ComPtr<ID3D11ShaderResourceView> gameView;
     ComPtr<ID3D11Buffer> gameOptions;
-    ComPtr<ID3D11BlendState> gameBlend;
-    float blendFactor[4]{};
-    UINT sampleMask{};
     ComPtr<ID3D11DepthStencilState> gameDepth;
     UINT stencilReference{};
     ComPtr<ID3D11RasterizerState> gameRasterizer;
     context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
     context->PSGetShaderResources(ShadowSlot, 1, gameView.GetAddressOf());
     context->PSGetConstantBuffers(BoundsSlot, 1, gameOptions.GetAddressOf());
-    context->OMGetBlendState(gameBlend.GetAddressOf(), blendFactor, &sampleMask);
     context->OMGetDepthStencilState(gameDepth.GetAddressOf(), &stencilReference);
     context->RSGetState(gameRasterizer.GetAddressOf());
 
@@ -257,7 +260,7 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     context->PSSetShader(lightShadowShader.Get(), nullptr, 0);
     context->PSSetShaderResources(ShadowSlot, 1, lightShadow.view.GetAddressOf());
     context->PSSetConstantBuffers(BoundsSlot, 1, &traceConstants);
-    context->OMSetBlendState(alphaOnly.Get(), blendFactor, sampleMask);
+    context->OMSetBlendState(alphaOnly.Get(), gameBlend.factor, gameBlend.sampleMask);
     context->OMSetDepthStencilState(noDepth.Get(), 0);
     context->RSSetState(bothFaces.Get());
     context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
@@ -265,7 +268,7 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     context->PSSetShader(gameShader.Get(), nullptr, 0);
     context->PSSetShaderResources(ShadowSlot, 1, gameView.GetAddressOf());
     context->PSSetConstantBuffers(BoundsSlot, 1, gameOptions.GetAddressOf());
-    context->OMSetBlendState(gameBlend.Get(), blendFactor, sampleMask);
+    context->OMSetBlendState(gameBlend.state.Get(), gameBlend.factor, gameBlend.sampleMask);
     context->OMSetDepthStencilState(gameDepth.Get(), stencilReference);
     context->RSSetState(gameRasterizer.Get());
     noteMarked(context, position);
@@ -273,13 +276,10 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     return true;
 }
 
-ID3D11BlendState* shadowedBlend(ID3D11DeviceContext* context, ID3D11BlendState* gameBlend)
+ID3D11BlendState* takeShadowedBlend(ID3D11DeviceContext* context, ID3D11BlendState* gameBlend)
 {
     const auto constants = contact_shadow_trace::passConstants(context);
-    if (!constants) return nullptr;
-
-    const float* light = constants->light.data();
-    if (!takeMarked(context, {light[LightPosition], light[LightPosition + 1], light[LightPosition + 2]})) return nullptr;
+    if (!constants || !takeMarked(context, positionOf(*constants))) return nullptr;
 
     std::lock_guard lock(resourceMutex);
     auto* shadowed = scaledByAlpha(gameBlend);

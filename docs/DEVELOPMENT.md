@@ -1607,8 +1607,8 @@ further the shadow falls, as a real bulb's is.
   the game draws *without* a shadow map -- most of its point lights -- has no shadow to soften at all.
 - **Identified by checksum.** The local light pass (`src/passes/local_light_pass.cpp`) knows every
   point and spot light shader by its checksum (`game_lights.hpp`), and the soft shadows replace the
-  two with theirs (`afbc12167037e4e0d653da184c7e3e82` for the point, `ac0947110cb0f17f4ffe930a6a11617d`
-  for the spot) at the lighting draw. With the lamps' contact shadows on as well, that draw also takes
+  two kinds above at the lighting draw (`SSLighting2_Point`, `afbc12167037e4e0d653da184c7e3e82`;
+  `SSLighting2_Spot`, `ac0947110cb0f17f4ffe930a6a11617d`). With the lamps' contact shadows on as well, that draw also takes
   their blend. The log says "the game draws a ... with the soft shadows" once for each shader that
   draws.
 

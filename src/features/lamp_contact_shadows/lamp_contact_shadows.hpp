@@ -1,5 +1,6 @@
 #pragma once
 
+#include "d3d11_helpers.hpp"
 #include "game_lights.hpp"
 #include "phantom_fx_settings.hpp"
 #include "ui_redirect.hpp"
@@ -24,14 +25,14 @@ void configure(const Configuration& configuration) noexcept;
 Health health();
 
 // ---- Recording, on the game's render and worker threads ----
-// A light's stencil-marking draw: the game's, then the light's shadow into the light targets' alpha.
-// Returns true when it drew the game's draw; false leaves the draw, and the light's shadows, to the
-// game.
-bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_lights::Falloff falloff);
+// A light's stencil-marking draw, with the game's blend: the game's draw, then the light's shadow into
+// the light targets' alpha. Returns true when it drew the game's draw; false leaves the draw, and the
+// light's shadows, to the game.
+bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_lights::Falloff falloff, const BoundBlend& gameBlend);
 // For a light's lighting draw: `gameBlend` with the light scaled by the shadow its marking draw left
 // on `context`, which this uses up. Null when it left none, or the blend is not the game's additive
 // one: the light then keeps the game's shadows.
-ID3D11BlendState* shadowedBlend(ID3D11DeviceContext* context, ID3D11BlendState* gameBlend);
+ID3D11BlendState* takeShadowedBlend(ID3D11DeviceContext* context, ID3D11BlendState* gameBlend);
 // FinishCommandList on `context`.
 void contextFinished(ID3D11DeviceContext* context) noexcept;
 void present() noexcept;

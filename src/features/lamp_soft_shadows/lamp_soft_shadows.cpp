@@ -12,7 +12,6 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 
 namespace phantom_fx::lamp_soft_shadows
 {
@@ -20,18 +19,18 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 
-// The game's light shaders the soft shadows replace (game_lights.hpp): the point light with a
-// dual-paraboloid shadow map and the spot light's plain projection, both quartic, with specular and
-// a shadow map.
+// The kinds of the game's lights the soft shadows replace the shader of (game_lights.hpp), with
+// specular and a shadow map: the quartic point light, whose shadow map is a dual paraboloid, and the
+// quartic spot light, whose map is a plain projection. The masked spots have shaders of their own.
 struct ReplacedLight
 {
-    std::string_view checksum;
+    game_lights::Twin kind;
     const char* name;
     const char* source;
 };
 constexpr ReplacedLight ReplacedLights[]{
-    {"afbc12167037e4e0d653da184c7e3e82", "SSLighting2_Point", shaders::PointLight},
-    {"ac0947110cb0f17f4ffe930a6a11617d", "SSLighting2_Spot", shaders::SpotLight},
+    {game_lights::Twin::Point2, "SSLighting2_Point", shaders::PointLight},
+    {game_lights::Twin::Spot2, "SSLighting2_Spot", shaders::SpotLight},
 };
 
 // cLampShadows (b6) of the replacements.
@@ -117,8 +116,8 @@ Health health()
 
 std::optional<Replacement> replacementFor(const game_lights::GameLight& light)
 {
-    const auto replaced = std::ranges::find(ReplacedLights, std::string_view(light.checksum), &ReplacedLight::checksum);
-    if (replaced == std::end(ReplacedLights)) return std::nullopt;
+    const auto replaced = std::ranges::find(ReplacedLights, light.twin, &ReplacedLight::kind);
+    if (!light.specular || !light.shadowMap || replaced == std::end(ReplacedLights)) return std::nullopt;
 
     std::lock_guard lock(resourceMutex);
     if (!ensurePipeline()) return std::nullopt;

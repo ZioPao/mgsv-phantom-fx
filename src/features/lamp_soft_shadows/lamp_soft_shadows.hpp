@@ -21,9 +21,11 @@ void configure(const Configuration& configuration) noexcept;
 // For the budget: unavailable when its shaders did not compile (see PhantomFX.log).
 Health health();
 
-// What a lighting draw binds in place of the game's shader: the replacement, and its options for b6.
+// What a lighting draw binds in place of the game's shader: the replacement, and its options.
 struct Replacement
 {
+    static constexpr UINT OptionsSlot = 6; // b6 of the replacement shaders
+
     ID3D11PixelShader* shader;
     ID3D11Buffer* options;
 };

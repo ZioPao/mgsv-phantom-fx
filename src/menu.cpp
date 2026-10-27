@@ -193,7 +193,7 @@ private:
 
         if (info.heading) fxui::subheading(info.heading);
 
-        status =nextFeatureStatus ? nextFeatureStatus() : ItemStatus{};
+        status = nextFeatureStatus ? nextFeatureStatus() : ItemStatus{};
         const auto state = status.state ? status.state : on ? std::optional(*on ? State::Working : State::Off) : std::nullopt;
         item.emplace(fxui::ItemSpec{.id = info.menuId, .name = info.name, .tech = info.tech, .tag = info.tag, .tip = info.tip, .summary = info.summary,
             .keywords = info.keywords, .toggle = on, .state = state, .message = status.message});

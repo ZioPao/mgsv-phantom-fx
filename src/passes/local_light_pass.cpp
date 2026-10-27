@@ -1,5 +1,6 @@
 #include "passes/local_light_pass.hpp"
 
+#include "d3d11_helpers.hpp"
 #include "features/lamp_contact_shadows/lamp_contact_shadows.hpp"
 #include "features/lamp_soft_shadows/lamp_soft_shadows.hpp"
 #include "frame_latch.hpp"
@@ -25,8 +26,6 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 using namespace game_lights;
-
-constexpr UINT OptionsSlot = 6; // b6 of the soft shadows' replacement shaders
 
 // The lamp shadow effects the pass adds, by the effect plan.
 struct Composition
@@ -62,7 +61,7 @@ LightShader* lightShaderOf(IUnknown* shader)
 }
 
 // A light shader's kind, as the log names it.
-std::string describe(const GameLight& light)
+std::string kindOf(const GameLight& light)
 {
     return std::string(light.shape == Shape::Point ? "point light" : light.flashlight ? "flashlight" : "spot light")
         + (light.falloff == Falloff::Quartic ? ", quartic falloff" : ", sixteenth falloff") + (light.specular ? ", specular" : ", no specular")
@@ -74,25 +73,25 @@ std::string describe(const GameLight& light)
 bool drawLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, ID3D11PixelShader* gameShader, LightShader& shader,
     const Composition& composition)
 {
-    ComPtr<ID3D11BlendState> gameBlend;
-    float blendFactor[4]{};
-    UINT sampleMask{};
-    context->OMGetBlendState(gameBlend.GetAddressOf(), blendFactor, &sampleMask);
-    if (!gameBlend) return false;
+    const auto gameBlend = boundBlend(context);
+    if (!gameBlend.state) return false;
 
     D3D11_BLEND_DESC blend{};
-    gameBlend->GetDesc(&blend);
+    gameBlend.state->GetDesc(&blend);
     if (blend.RenderTarget[0].RenderTargetWriteMask == 0)
-        return composition.contactShadows && lamp_contact_shadows::drawMarking(context, call, shader.light->falloff);
+        return composition.contactShadows && lamp_contact_shadows::drawMarking(context, call, shader.light->falloff, gameBlend);
 
     const auto replacement = composition.softShadows ? lamp_soft_shadows::replacementFor(*shader.light) : std::nullopt;
-    if (!shader.named.exchange(true)) log("Shadows: the game draws a " + describe(*shader.light) + (replacement ? ", with the soft shadows." : "."));
 
-    auto* shadowed = composition.contactShadows ? lamp_contact_shadows::shadowedBlend(context, gameBlend.Get()) : nullptr;
+    if (!shader.named.exchange(true)) log("Shadows: the game draws a " + kindOf(*shader.light) + (replacement ? ", with the soft shadows." : "."));
+
+    auto* shadowed = composition.contactShadows ? lamp_contact_shadows::takeShadowedBlend(context, gameBlend.state.Get()) : nullptr;
     if (!replacement && !shadowed) return false;
 
+    if (shadowed) context->OMSetBlendState(shadowed, gameBlend.factor, gameBlend.sampleMask);
+
+    constexpr UINT OptionsSlot = lamp_soft_shadows::Replacement::OptionsSlot;
     ComPtr<ID3D11Buffer> gameOptions;
-    if (shadowed) context->OMSetBlendState(shadowed, blendFactor, sampleMask);
     if (replacement)
     {
         context->PSGetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
@@ -104,7 +103,8 @@ bool drawLight(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, 
     context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
     timed.end();
 
-    if (shadowed) context->OMSetBlendState(gameBlend.Get(), blendFactor, sampleMask);
+    if (shadowed) context->OMSetBlendState(gameBlend.state.Get(), gameBlend.factor, gameBlend.sampleMask);
+
     if (replacement)
     {
         context->PSSetShader(gameShader, nullptr, 0);
