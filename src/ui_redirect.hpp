@@ -36,7 +36,7 @@ enum class Surface : std::uint8_t
 {
     Scene,    // The output target, in place of the scene target
     Copy,     // In place of the scene target's copy that the grading reads
-    Blur,     // Half the output size, 8-bit: in place of the motion blur's two half-size targets
+    Blur,     // Half the output size: in place of the motion blur's two half-size targets
     BlurTwin,
 };
 

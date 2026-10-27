@@ -131,16 +131,15 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
 
-    // The motion blur's pair as the game makes its own: half the size of the scene it blends over, and
-    // 8-bit, so moving HDR highlights clip as they do without upscaling.
+    // The motion blur's pair at half the size of the scene it blends over, as the game makes its own,
+    // but in the scene's format: the game's are 8-bit, which clips HDR highlights while the camera moves.
     auto blurDesc = desc;
     blurDesc.Width = std::max(width / 2, 1u);
     blurDesc.Height = std::max(height / 2, 1u);
-    blurDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
 
     auto& [outputScene, outputCopy, blur, blurTwin] = created->surfaces;
-    if (!makeSurface(outputScene, desc, drawFormat()) || !makeSurface(outputCopy, desc, drawFormat()) || !makeSurface(blur, blurDesc, blurDesc.Format)
-        || !makeSurface(blurTwin, blurDesc, blurDesc.Format))
+    if (!makeSurface(outputScene, desc, drawFormat()) || !makeSurface(outputCopy, desc, drawFormat()) || !makeSurface(blur, blurDesc, drawFormat())
+        || !makeSurface(blurTwin, blurDesc, drawFormat()))
         return nullptr;
 
     const float system[16]{0, 0, 0, 0, static_cast<float>(width), static_cast<float>(height), 0, 0, static_cast<float>(width),

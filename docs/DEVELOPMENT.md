@@ -1236,7 +1236,8 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
   - The motion blur gathers at half the output size from DLSS's image, as it does at half the render
     size without upscaling (frame 141835, 1920x1080 to 3840x2160, before this: it gathered at 960x540
     from the jittered scene before DLSS, and its composite stretched that four times over the
-    output, pixelated). Two more 8-bit targets at half the output size stand in for the game's two.
+    output, pixelated). Two more targets at half the output size stand in for the game's two, in the
+    scene's format: the game's are 8-bit, which clipped HDR highlights while the camera moved.
     Before the first `MotionBlurMcGuire` pass, the output target is halved bilinearly into the
     first, with the alpha of the game's own halved scene (the output target has the composite's
     alpha, which the blur would take for its own). Each pass then reads the add-on's target in place
@@ -1516,8 +1517,9 @@ Not handled:
 - Particles or glass that blend with alpha above 1 would darken their background, as the 2D pass did;
   none were seen.
 - The reflections' own targets are 8-bit, so reflected highlights stop at the game's white.
-- Motion blur blurs through an 8-bit copy, so moving highlights stop at white; while upscaling the
-  add-on's own targets for it are 8-bit too, to look the same.
+- Without upscaling, motion blur blurs through the game's 8-bit copy, so moving highlights stop at
+  white. While upscaling it blurs through the add-on's targets, float with HDR, so moving highlights
+  keep their brightness.
 - The HUD has the scene's paper white; it is not separate.
 
 ## Soft shadows

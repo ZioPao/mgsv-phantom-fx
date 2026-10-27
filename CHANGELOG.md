@@ -19,7 +19,8 @@
   skips the foliage material, so clumps shade themselves as they do in `renodx-mgsv`.
 - Fix the game's motion blur looking pixelated while upscaling. It blurred a small copy of the image
   from before DLSS (a third of the screen's width at Quality) and stretched it over the screen. It
-  now blurs DLSS's image at half the screen's size, as it does without upscaling.
+  now blurs DLSS's image at half the screen's size, as it does without upscaling, and with HDR it
+  keeps the highlights bright while the camera moves instead of clipping them at white.
 
 ## 1.8.0
 
