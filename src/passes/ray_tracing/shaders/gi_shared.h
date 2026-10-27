@@ -34,6 +34,7 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 #define GI_GEOMETRY_NO_SHADOW     32u // The game never casts with it (a rigid model's main-view-only mesh): rays towards lights pass it (StopsShadowRay)
 #define GI_GEOMETRY_HAIR          64u // A character's see-through mesh the game never casts with (its hair): rays towards lights pass it in part (PassHair)
 #define GI_GEOMETRY_SHADOW_ONLY   128u // The game draws it into its shadow maps only (a tarp's stand-in): only rays towards lights meet it (StopsRay)
+#define GI_GEOMETRY_SUN_ONLY      256u // With GI_GEOMETRY_SHADOW_ONLY (a building's stand-in): of the rays towards lights, only the sun's meet it (StopsShadowRay)
 
 // The game's textures the scene holds at most (g_SceneTextures, gi_textures.hpp).
 #define GI_MAX_TEXTURES 4096u
@@ -146,7 +147,7 @@ struct GIFrameConstants
     float4 shadowRange;  // The game's shadow map range (cPSLight): x: centre depth (c8.x); y: start distance (c8.y); z: fade rate (c6.x); w: 1 once known
     float4 shadowParams; // x: tangent of the sun's angular radius (SunSample); y: how much sun an alpha-tested mesh blocks; z: ray length; w: 1 on a fresh start
     uint4 objectMotion;  // x: 1 when g_ObjectVelocity (gi_common.hlsli) holds this frame's velocity of the game's moving meshes
-    uint4 shadowDiagnostics; // x: 1 for every surface casting from both sides (ShadowFaces); y: 1 for the debug view of where the shadow rays leave (ShadowStartColor)
+    uint4 shadowDiagnostics; // x: 1 for every surface casting from both sides (ShadowRayTowards); y: 1 for the debug view of where the shadow rays leave (ShadowStartColor)
     uint4 lightDiagnostics;  // z: 1 for the denoiser's history into g_LightDebug (CompositeLight)
     // The game's terrain (TerrainGrid in gi_scene.hlsl): a world point is (u, height, v) x scale +
     // offset, u and v its virtual heightmap coordinates; the page table's converter (the terrain

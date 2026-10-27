@@ -68,7 +68,7 @@ void TraceLocalLightShadows(uint2 did : SV_DispatchThreadID)
                     float blocker = FLT_MAX, transmittance = 1.0f;
                     bool blocked = false;
                     if (rayLength > 0.0f)
-                        blocked = SurfaceRayBlocked(origin, facing, tolerance, direction, rayLength, cone, true, 0.0f, ShadowFaces(), random, blocker, transmittance);
+                        blocked = SurfaceRayBlocked(origin, facing, tolerance, direction, rayLength, cone, true, 0.0f, ShadowRayTowards(RayTowardsLamp), random, blocker, transmittance);
 
                     float through = blocked ? 0.0f : transmittance;
                     visible += through;
@@ -181,7 +181,7 @@ void ProbeLocalLights()
             float blocker = FLT_MAX, transmittance = 1.0f;
             bool blocked = false;
             if (rayLength > 0.0f)
-                blocked = SurfaceRayBlocked(origin, facing, tolerance, toLight, rayLength, cone, true, 0.0f, ShadowFaces(), random, blocker, transmittance);
+                blocked = SurfaceRayBlocked(origin, facing, tolerance, toLight, rayLength, cone, true, 0.0f, ShadowRayTowards(RayTowardsLamp), random, blocker, transmittance);
 
             float through = blocked ? 0.0f : transmittance;
             probe.share.z += amount;

@@ -220,11 +220,15 @@ void tarpSheetsCastThroughStandIn()
         "A tarp's stand-in is kept for rays towards lights alone, as its sheets are dropped.");
 }
 
-// The prologue hospital's building (2026-10-26): its stand-in kept 80 to 100% of a room's lamp off a wall.
-// What its main view shows that the scene drops is glass, not cut-outs.
-void solidStandInDroppedBesideGlass()
+// Serak Power Plant (2026-10-27): a room's walls and a cave's rock overhang the main view alone shows let
+// the sun in, where the game cast it with their stand-ins, drawn into every sun cascade. The prologue
+// hospital's building (2026-10-26): its stand-in kept 80 to 100% of a room's lamp off a wall.
+void solidStandInsCastTheSunAlone()
 {
-    expect(rigid({{0, 2}, {16, 5}}) == Roles{Dropped, Dropped}, "A solid stand-in is dropped where no cut-out mesh is.");
+    expect(rigid({{0, 0}, {0, 1}, {0, 2}}) == Roles{MeshRole::Solid, MeshRole::MainViewOnly, MeshRole::SunShadowOnly},
+        "A building's stand-in casts the sun for the walls the main view alone shows.");
+    expect(rigid({{0, 1}, {0, 2}}) == Roles{MeshRole::MainViewOnly, MeshRole::SunShadowOnly}, "A rock's stand-in casts the sun.");
+    expect(rigid({{0, 2}, {16, 5}}) == Roles{MeshRole::SunShadowOnly, Dropped}, "Beside glass, a stand-in casts the sun alone, not a lamp.");
 }
 
 void pylonLattice()
@@ -269,6 +273,7 @@ void shadowByteThreeDropped()
 {
     expect(rigid({{32, 1}, {0, 3}, {0, 2}}) == Roles{Dropped, Dropped, MeshRole::ShadowOnly},
         "A stand-in the main view shows too is dropped beside main-view cut-outs.");
+    expect(rigid({{0, 3}}) == Roles{Dropped}, "A stand-in the main view shows too is dropped.");
 }
 
 // A woman's hair (2026-10-24): without it the rays saw her bald head's outline across it.
@@ -315,7 +320,10 @@ void materialPerRole()
     expect(flagsOf(*building, 0) == 0, "A solid mesh stops every ray.");
     expect(flagsOf(*building, 1) == GI_GEOMETRY_CUT_OUT, "A cut-out mesh is tested by its alpha.");
     expect(flagsOf(*building, 2) == GI_GEOMETRY_NO_SHADOW, "Rays towards lights pass a main-view-only mesh.");
-    expect(flagsOf(*building, 4) == GI_GEOMETRY_SHADOW_ONLY, "Only rays towards lights meet a shadow-only mesh.");
+    expect(flagsOf(*building, 4) == GI_GEOMETRY_SHADOW_ONLY, "Only rays towards lights meet a tarp's stand-in.");
+
+    const auto rock = modelOf({{0, 1}, {0, 2}}, Source::VisibilityManager);
+    expect(flagsOf(*rock, 1) == (GI_GEOMETRY_SHADOW_ONLY | GI_GEOMETRY_SUN_ONLY), "Only the sun's rays meet a rock's stand-in.");
 
     const auto bush = modelOf({{160, 64}}, Source::ObjectBrush);
     expect(flagsOf(*bush, 0) == (GI_GEOMETRY_CUT_OUT | GI_GEOMETRY_LEAF), "Leaves are cut out and let light through.");
@@ -381,7 +389,7 @@ int main()
     try
     {
         tarpSheetsCastThroughStandIn();
-        solidStandInDroppedBesideGlass();
+        solidStandInsCastTheSunAlone();
         pylonLattice();
         mainViewGlassDropped();
         skyDomeDropped();

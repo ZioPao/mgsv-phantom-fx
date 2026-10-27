@@ -1894,6 +1894,16 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   `+0x1B8`). Of 110 shown rigid model files there, 4 had solid stand-ins and 3 of them, all scaffolds,
   main-view cut-outs; the hospital building has none (its left-out meshes are glass), so its stand-in
   stays out.
+  Since 2026-10-27 every other rigid solid stand-in is kept too, for the sun's rays alone
+  (`GI_GEOMETRY_SUN_ONLY`, `StopsShadowRay`). At Serak Power Plant a room's walls (model
+  `84a3e8003e2406b0`, meshes 2, 4 and 11, shadow bit 0) and a cave's rock overhang (model
+  `84a2b02d4835dd8b`, mesh 0) are drawn in the main view only, and their stand-ins (meshes 3, 5 and 12;
+  mesh 1) into the sun's shadow maps: mesh 12's 180 indices from 1122 were drawn four times into the
+  8192x8192 atlas, once a cascade (an F10 frame, matched by index range). With both out of the rays, the
+  sun lit the room's lockers and the cave's walls where the game kept them dark. A lamp's rays still
+  pass these stand-ins, as the hospital's kept a room's lamp off its wall. Should the sun-only rule
+  mislead too, the exact rule is the game's per-draw pass masks: which shadow maps each mesh is drawn
+  into.
   Open: a tarp on a fence (model `84a1bc5b4702c16b`) is a
   main-view cut-out (mesh 2) cast in the game by a flat 4-triangle stand-in (mesh 3, shadow bit 1) up
   to 25 cm off it, so its shadow rays start on the stand-in or meet it, in patches that change with the

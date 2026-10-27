@@ -36,7 +36,8 @@ enum class MeshRole : std::uint8_t
     Leaf,         // The object brush's bushes and grass: cut out, and thin, they let light through
     Hair,         // A character's see-through mesh the game never casts with: cut out, and rays towards lights pass it in part
     MainViewOnly, // A rigid model's solid mesh the game never draws into its shadow maps: rays towards lights pass it
-    ShadowOnly    // A rigid model's stand-in the game draws into its shadow maps only: only rays towards lights meet it
+    ShadowOnly,   // A rigid model's stand-in for main-view cut-outs the scene drops (a tarp's): only rays towards lights meet it
+    SunShadowOnly // Any other rigid model's solid stand-in: of the rays towards lights, only the sun's meet it
 };
 
 enum class ModelFile : std::uint8_t
