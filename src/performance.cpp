@@ -2,6 +2,7 @@
 #include "features/upscaling/upscaler.hpp"
 #include "performance.hpp"
 #include "clock.hpp"
+#include "command_list_notes.hpp"
 #include "log.hpp"
 
 #include <Windows.h>
@@ -11,7 +12,6 @@
 #include <fstream>
 #include <iterator>
 #include <mutex>
-#include <unordered_map>
 #include <utility>
 
 namespace phantom_fx::performance
@@ -45,6 +45,17 @@ struct Setting
     LeftOut leftOut;
 };
 
+// The runs a deferred context recorded since its last FinishCommandList, then those of its command list.
+struct RecordedRuns
+{
+    std::vector<TimedRun> runs;
+
+    void merge(RecordedRuns later)
+    {
+        runs.insert(runs.end(), std::make_move_iterator(later.runs.begin()), std::make_move_iterator(later.runs.end()));
+    }
+};
+
 // Frames the GPU may still be working on, and the one being recorded.
 constexpr std::size_t FrameCount = 5;
 constexpr float AverageMilliseconds = 500;
@@ -58,9 +69,10 @@ std::array<Frame, FrameCount> frames;
 std::size_t current{};
 bool open{}; // frames[current] takes the runs of the command lists executed now
 std::vector<TimedRun> spare;
-// The runs a deferred context recorded since its last FinishCommandList, and those of finished
-// command lists, by native pointer.
-std::unordered_map<std::uint64_t, std::vector<TimedRun>> recordedRuns;
+
+CommandListNotes<RecordedRuns> recordedRuns;
+// Diagnostics: contexts' or lists' runs never handed over (CommandListNotes::present) since the last log.
+std::uint64_t expiredRuns{}, expiredLoggedAt{};
 
 // Read on every recording thread.
 std::atomic<bool> timing{};
@@ -131,10 +143,18 @@ std::optional<TimedRun> acquire(Pass pass)
 // waits for its command list.
 void finish(ID3D11DeviceContext* context, TimedRun run)
 {
-    std::lock_guard lock(timerMutex);
-    if (context != immediate.Get()) recordedRuns[reinterpret_cast<std::uint64_t>(context)].push_back(std::move(run));
-    else if (open) frames[current].runs.push_back(std::move(run));
-    else spare.push_back(std::move(run));
+    {
+        std::lock_guard lock(timerMutex);
+        if (context == immediate.Get())
+        {
+            if (open) frames[current].runs.push_back(std::move(run));
+            else spare.push_back(std::move(run));
+
+            return;
+        }
+    }
+
+    recordedRuns.note(reinterpret_cast<std::uint64_t>(context), [&](RecordedRuns& contextRuns) { contextRuns.runs.push_back(std::move(run)); });
 }
 
 // Call with timerMutex held.
@@ -398,6 +418,7 @@ void attach(ID3D11Device* gameDevice, ID3D11DeviceContext* gameImmediate, const 
 void detach() noexcept
 {
     timing = false;
+    recordedRuns.clear();
     if (measurement.running)
     {
         measurement.running = false;
@@ -409,7 +430,6 @@ void detach() noexcept
     current = 0;
     open = false;
     spare.clear();
-    recordedRuns.clear();
     immediate.Reset();
     device.Reset();
     averaging = false;
@@ -451,34 +471,22 @@ void Timed::end() noexcept
     run.reset();
 }
 
-void recorded(std::uint64_t list, std::uint64_t context) noexcept
+void recorded(std::uint64_t into, std::uint64_t from) noexcept
 {
-    try
-    {
-        std::lock_guard lock(timerMutex);
-        const auto found = recordedRuns.find(context);
-        if (found == recordedRuns.end()) return;
-
-        auto runs = std::move(found->second);
-        recordedRuns.erase(found);
-        auto& target = recordedRuns[list];
-        target.insert(target.end(), std::make_move_iterator(runs.begin()), std::make_move_iterator(runs.end()));
-    }
-    catch (...)
-    {
-    }
+    recordedRuns.recorded(into, from);
 }
 
-void forget(std::uint64_t list) noexcept
+void forget(std::uint64_t contextOrList) noexcept
 {
+    // A list gone before it ran gives its queries back.
+    auto listRuns = recordedRuns.take(contextOrList);
+    recordedRuns.forget(contextOrList);
+    if (!listRuns) return;
+
     try
     {
         std::lock_guard lock(timerMutex);
-        const auto found = recordedRuns.find(list);
-        if (found == recordedRuns.end()) return;
-
-        giveBack(found->second);
-        recordedRuns.erase(found);
+        giveBack(listRuns->runs);
     }
     catch (...)
     {
@@ -506,6 +514,8 @@ void executing(std::uint64_t list) noexcept
 {
     try
     {
+        auto listRuns = recordedRuns.take(list);
+
         std::lock_guard lock(timerMutex);
         if (open && !frames[current].started)
         {
@@ -513,14 +523,11 @@ void executing(std::uint64_t list) noexcept
             frames[current].started = true;
         }
 
-        const auto found = recordedRuns.find(list);
-        if (found == recordedRuns.end()) return;
+        if (!listRuns) return;
 
         auto& runs = frames[current].runs;
-        if (open) runs.insert(runs.end(), std::make_move_iterator(found->second.begin()), std::make_move_iterator(found->second.end()));
-        else giveBack(found->second);
-
-        recordedRuns.erase(found);
+        if (open) runs.insert(runs.end(), std::make_move_iterator(listRuns->runs.begin()), std::make_move_iterator(listRuns->runs.end()));
+        else giveBack(listRuns->runs);
     }
     catch (...)
     {
@@ -529,6 +536,18 @@ void executing(std::uint64_t list) noexcept
 
 void present() noexcept
 {
+    expiredRuns += recordedRuns.present();
+    if constexpr (DiagnosticLog)
+    {
+        const auto now = GetTickCount64();
+        if (expiredRuns && now - expiredLoggedAt >= 10'000)
+        {
+            log("Costs: " + std::to_string(expiredRuns) + " contexts' or lists' timed runs expired.");
+            expiredRuns = 0;
+            expiredLoggedAt = now;
+        }
+    }
+
     try
     {
         const auto now = clock::ticksNow();

@@ -2,6 +2,7 @@
 
 #include "camera.hpp"
 #include "clock.hpp"
+#include "command_list_notes.hpp"
 #include "d3d11_helpers.hpp"
 #include "features/hdr/hdr.hpp"
 #include "features/motion_blur/motion_blur.hpp"
@@ -33,7 +34,6 @@
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <utility>
 
 namespace phantom_fx::upscaler
@@ -86,6 +86,15 @@ struct Recorded
     bool drawsOnUiTarget{};
     // Draws GammaControl into this hudless texture.
     std::shared_ptr<const Hudless> hudless;
+
+    void merge(Recorded later)
+    {
+        grading = grading || later.grading;
+        fxaa = fxaa || later.fxaa;
+        if (later.velocity) velocity = std::move(later.velocity);
+        drawsOnUiTarget = drawsOnUiTarget || later.drawsOnUiTarget;
+        if (later.hudless) hudless = std::move(later.hudless);
+    }
 };
 
 // The game records a whole frame, then executes it (docs/DEVELOPMENT.md, "Command lists"). A frame
@@ -188,8 +197,9 @@ std::shared_mutex samplerMutex;
 std::map<std::pair<ID3D11SamplerState*, float>, BiasedSampler> biasedSamplers;
 
 // ---- Recording ----
+CommandListNotes<Recorded> recordedLists;
+
 std::mutex recordMutex;
-std::unordered_map<std::uint64_t, Recorded> recordedLists;
 // The latest FXAA pass recorded. The whole frame is recorded before it executes, so the frame's own
 // is known when its grading starts.
 std::optional<FxaaPass> recordedFxaa;
@@ -255,6 +265,8 @@ struct Presented
 std::atomic<bool> failed{};
 std::string failure, lastFallback;
 std::uint64_t presents{}, lastEvaluatedPresent{}, evaluations{}, fallbacks{}, resets{}, cameraCuts{};
+// Contexts' and lists' notes never handed over (CommandListNotes::present), for the diagnostic log.
+std::uint64_t expiredNotes{};
 Configured currentConfiguration()
 {
     std::lock_guard lock(configuredMutex);
@@ -309,31 +321,35 @@ void recordFxaa(ID3D11DeviceContext* context)
 {
     FxaaPass pass;
     context->OMGetRenderTargets(1, pass.sceneTarget.GetAddressOf(), pass.depth.GetAddressOf());
-    std::lock_guard lock(recordMutex);
-    pass.frame = recordingFrame();
-    recordedFxaa = std::move(pass);
-    recordedLists[keyOf(context)].fxaa = true;
+    {
+        std::lock_guard lock(recordMutex);
+        pass.frame = recordingFrame();
+        recordedFxaa = std::move(pass);
+    }
+
+    recordedLists.note(keyOf(context), [](Recorded& notes) { notes.fxaa = true; });
 }
 
 void recordGrading(ID3D11DeviceContext* context)
 {
-    std::lock_guard lock(recordMutex);
-    recordedLists[keyOf(context)].grading = true;
+    recordedLists.note(keyOf(context), [](Recorded& notes) { notes.grading = true; });
 }
 
 void recordVelocity(ID3D11DeviceContext* context)
 {
     ObjectVelocity found;
     context->PSGetShaderResources(3, 1, found.view.GetAddressOf());
-    std::lock_guard lock(recordMutex);
-    found.frame = recordingFrame();
-    recordedLists[keyOf(context)].velocity = std::move(found);
+    {
+        std::lock_guard lock(recordMutex);
+        found.frame = recordingFrame();
+    }
+
+    recordedLists.note(keyOf(context), [&](Recorded& notes) { notes.velocity = std::move(found); });
 }
 
 void recordUiTargetUse(ID3D11DeviceContext* context)
 {
-    std::lock_guard lock(recordMutex);
-    recordedLists[keyOf(context)].drawsOnUiTarget = true;
+    recordedLists.note(keyOf(context), [](Recorded& notes) { notes.drawsOnUiTarget = true; });
 }
 
 // The first main-view upload after the immediate context executed anything starts a frame.
@@ -415,8 +431,7 @@ void drawHudless(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     context->OMSetRenderTargets(1, backBuffer.GetAddressOf(), depth.Get());
     context->PSSetShaderResources(0, 1, scene.GetAddressOf());
 
-    std::lock_guard lock(recordMutex);
-    recordedLists[keyOf(context)].hudless = std::move(target);
+    recordedLists.note(keyOf(context), [&](Recorded& notes) { notes.hudless = std::move(target); });
 }
 
 // ---- Resources ----
@@ -1340,9 +1355,9 @@ void detach() noexcept
     ngxDevice.Reset();
     immediate.Reset();
     device.Reset();
+    recordedLists.clear();
     {
         std::lock_guard recordLock(recordMutex);
-        recordedLists.clear();
         recordedFxaa.reset();
     }
 
@@ -1581,30 +1596,12 @@ void bufferUnmapped(ID3D11Resource* buffer) noexcept
 
 void recorded(std::uint64_t into, std::uint64_t from) noexcept
 {
-    try
-    {
-        std::lock_guard lock(recordMutex);
-        const auto found = recordedLists.find(from);
-        if (found == recordedLists.end()) return;
-
-        auto entry = std::move(found->second);
-        recordedLists.erase(found);
-        auto& target = recordedLists[into];
-        target.grading = target.grading || entry.grading;
-        target.fxaa = target.fxaa || entry.fxaa;
-        if (entry.velocity) target.velocity = std::move(entry.velocity);
-        if (entry.hudless) target.hudless = std::move(entry.hudless);
-        target.drawsOnUiTarget = target.drawsOnUiTarget || entry.drawsOnUiTarget;
-    }
-    catch (...)
-    {
-    }
+    recordedLists.recorded(into, from);
 }
 
-void forget(std::uint64_t list) noexcept
+void forget(std::uint64_t contextOrList) noexcept
 {
-    std::lock_guard lock(recordMutex);
-    recordedLists.erase(list);
+    recordedLists.forget(contextOrList);
 }
 
 void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
@@ -1617,25 +1614,23 @@ void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
         if (context != immediate.Get()) return;
 
         if (pendingHudless && pendingHudless->copyNext) copyHudless();
-        Recorded entry;
+
         {
             std::lock_guard recordLock(recordMutex);
             executedSinceFrameStart = true;
-            const auto found = recordedLists.find(list);
-            if (found == recordedLists.end()) return;
-
-            entry = std::move(found->second);
-            recordedLists.erase(found);
         }
 
-        if (entry.velocity) velocity = std::move(entry.velocity);
-        // The hudless colour was copied before this list, so its GammaControl draws this frame's.
-        if (entry.hudless && entry.hudless == presented.hudless) presented.hudlessDrawn = true;
-        if (entry.grading) upscaleBeforeGrading();
-        // The grading is done once the FXAA pass's list has run; the UI draws in a later one.
-        if (entry.fxaa && pendingHudless) pendingHudless->copyNext = true;
+        auto entry = recordedLists.take(list);
+        if (!entry) return;
 
-        if (entry.drawsOnUiTarget) fillUiTarget();
+        if (entry->velocity) velocity = std::move(entry->velocity);
+        // The hudless colour was copied before this list, so its GammaControl draws this frame's.
+        if (entry->hudless && entry->hudless == presented.hudless) presented.hudlessDrawn = true;
+        if (entry->grading) upscaleBeforeGrading();
+        // The grading is done once the FXAA pass's list has run; the UI draws in a later one.
+        if (entry->fxaa && pendingHudless) pendingHudless->copyNext = true;
+
+        if (entry->drawsOnUiTarget) fillUiTarget();
     }
     catch (const std::exception& error)
     {
@@ -1653,6 +1648,7 @@ void present() noexcept
     ++presents;
     uiTargetFilled = false;
     presented = {};
+    expiredNotes += recordedLists.present();
 
     try
     {
@@ -1670,7 +1666,7 @@ void present() noexcept
         if (replacing && presents % 1800 == 0)
             log("Status: " + std::to_string(evaluations) + " upscaled frames, " + std::to_string(fallbacks) + " without, "
                 + std::to_string(resets) + " history resets (" + std::to_string(cameraCuts) + " at camera cuts); last fallback: "
-                + (lastFallback.empty() ? "none" : lastFallback) + ".");
+                + (lastFallback.empty() ? "none" : lastFallback) + "; " + std::to_string(expiredNotes) + " contexts' or lists' notes expired.");
     }
 }
 

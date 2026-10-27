@@ -1,6 +1,7 @@
 #include "features/ray_traced_lights/local_lights.hpp"
 
 #include "camera.hpp"
+#include "command_list_notes.hpp"
 #include "constant_capture.hpp"
 #include "d3d11_helpers.hpp"
 #include "frame_log.hpp"
@@ -218,7 +219,12 @@ struct Notes
 {
     std::vector<Light> lights;
     bool drawPoint{};
-    std::uint32_t presents{}; // Since it was recorded: notes no list ran go after a few
+
+    void merge(Notes later)
+    {
+        lights.insert(lights.end(), std::make_move_iterator(later.lights.begin()), std::make_move_iterator(later.lights.end()));
+        drawPoint = drawPoint || later.drawPoint;
+    }
 };
 
 // What the effect plan asked for (configure).
@@ -241,9 +247,7 @@ constexpr auto TwinRows = [] {
     return rows;
 }();
 
-std::mutex notesMutex;
-std::unordered_map<std::uint64_t, Notes> byContext; // While recorded
-std::unordered_map<std::uint64_t, Notes> byList;    // Once finished
+CommandListNotes<Notes> notes;
 
 // The volumes' buffers of lights drawn again, for lights recorded after.
 std::mutex volumeMutex;
@@ -281,6 +285,8 @@ std::unordered_map<std::uint64_t, Bounds> volumeBounds;
 // the kick, or the shadow not traced), those of them drawn without their volume, left to the next frame's
 // camera or over the mask's bits at the kick, and lost (a frame ended without a draw point after them).
 std::atomic<std::uint64_t> drawnShadowed{}, drawnUnshadowed{}, drawnWithoutVolume{}, otherFrame{}, overLimit{}, lost{};
+// Diagnostics: contexts' or lists' notes never handed over (CommandListNotes::present).
+std::atomic<std::uint64_t> expiredNotes{};
 
 // The shaders, states and buffers, once; call with resourceMutex held. False when unavailable.
 bool ensurePipeline()
@@ -909,13 +915,14 @@ void logLights()
     const auto shadowedCount = drawnShadowed.exchange(0), unshadowedCount = drawnUnshadowed.exchange(0);
     const auto withoutVolumeCount = drawnWithoutVolume.exchange(0);
     const auto otherCount = otherFrame.exchange(0), overCount = overLimit.exchange(0), lostCount = lost.exchange(0);
-    if (shadowedCount + unshadowedCount + otherCount + overCount + lostCount == 0) return;
+    const auto expiredCount = expiredNotes.exchange(0);
+    if (shadowedCount + unshadowedCount + otherCount + overCount + lostCount + expiredCount == 0) return;
 
     log("Lights in ten seconds: " + std::to_string(shadowedCount) + " drawn with their ray-traced shadow, " + std::to_string(unshadowedCount)
         + " without (recorded after the kick, or not traced), " + std::to_string(withoutVolumeCount)
         + " of all drawn without the game's volume; at the kicks " + std::to_string(otherCount) + " left for another frame's camera, "
         + std::to_string(overCount) + " over the " + std::to_string(GI_MAX_LOCAL_LIGHTS) + " the rays take; " + std::to_string(lostCount)
-        + " lost (no draw point after them).");
+        + " lost (no draw point after them); " + std::to_string(expiredCount) + " contexts' or lists' notes expired.");
 }
 }
 
@@ -961,11 +968,7 @@ void detach() noexcept
         pipelineFailed = false;
     }
 
-    {
-        std::lock_guard lock(notesMutex);
-        byContext.clear();
-        byList.clear();
-    }
+    notes.clear();
 
     {
         std::lock_guard lock(volumeMutex);
@@ -1041,8 +1044,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
         context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
         context->PSSetShader(shader.object(), nullptr, 0);
 
-        std::lock_guard lock(notesMutex);
-        byContext[reinterpret_cast<std::uint64_t>(context)].lights.push_back(std::move(*noted));
+        notes.note(reinterpret_cast<std::uint64_t>(context), [&](Notes& contextNotes) { contextNotes.lights.push_back(std::move(*noted)); });
         return true;
     }
     catch (...)
@@ -1057,34 +1059,21 @@ void noteDrawPoint(ID3D11DeviceContext* context) noexcept
 
     try
     {
-        std::lock_guard lock(notesMutex);
-        byContext[reinterpret_cast<std::uint64_t>(context)].drawPoint = true;
+        notes.note(reinterpret_cast<std::uint64_t>(context), [](Notes& contextNotes) { contextNotes.drawPoint = true; });
     }
     catch (...)
     {
     }
 }
 
-void recorded(std::uint64_t list, std::uint64_t context) noexcept
+void recorded(std::uint64_t into, std::uint64_t from) noexcept
 {
-    try
-    {
-        std::lock_guard lock(notesMutex);
-        const auto found = byContext.find(context);
-        if (found == byContext.end()) return;
-
-        byList[list] = std::move(found->second);
-        byContext.erase(found);
-    }
-    catch (...)
-    {
-    }
+    notes.recorded(into, from);
 }
 
-void forget(std::uint64_t list) noexcept
+void forget(std::uint64_t contextOrList) noexcept
 {
-    std::lock_guard lock(notesMutex);
-    byList.erase(list);
+    notes.forget(contextOrList);
 }
 
 std::vector<gi_renderer::LocalLight> takeForTrace(const SceneConstants& camera) noexcept
@@ -1094,8 +1083,6 @@ std::vector<gi_renderer::LocalLight> takeForTrace(const SceneConstants& camera) 
 
     try
     {
-        std::lock_guard lock(notesMutex);
-
         // The frame's lights by the pixels they can reach, most first, then the nearest: past what the rays can
         // take the smallest go without, the same ones frame after frame. Lights that reach none are never drawn again.
         struct Reaching
@@ -1104,38 +1091,41 @@ std::vector<gi_renderer::LocalLight> takeForTrace(const SceneConstants& camera) 
             float distance;
             Light* light;
         };
-        std::vector<Reaching> reaching;
-        for (auto& [list, noted] : byList)
-            for (auto& light : noted.lights)
-            {
-                if (light.traced) continue;
-                if (!sameFrame(light, camera))
+
+        notes.withWaiting([&](auto&& waiting) {
+            std::vector<Reaching> reaching;
+            for (auto& noted : waiting)
+                for (auto& light : noted.lights)
                 {
-                    ++otherFrame;
-                    continue;
+                    if (light.traced) continue;
+                    if (!sameFrame(light, camera))
+                    {
+                        ++otherFrame;
+                        continue;
+                    }
+
+                    const auto reach = reachOf(light);
+                    if (!reach) continue;
+
+                    const float* position = light.light.position;
+                    reaching.push_back({(reach->right - reach->left) * (reach->bottom - reach->top),
+                        std::sqrt(position[0] * position[0] + position[1] * position[1] + position[2] * position[2]), &light});
                 }
 
-                const auto reach = reachOf(light);
-                if (!reach) continue;
-
-                const float* position = light.light.position;
-                reaching.push_back({(reach->right - reach->left) * (reach->bottom - reach->top),
-                    std::sqrt(position[0] * position[0] + position[1] * position[1] + position[2] * position[2]), &light});
+            std::sort(reaching.begin(), reaching.end(),
+                [](const Reaching& a, const Reaching& b) { return a.pixels != b.pixels ? a.pixels > b.pixels : a.distance < b.distance; });
+            if (reaching.size() > GI_MAX_LOCAL_LIGHTS)
+            {
+                overLimit += reaching.size() - GI_MAX_LOCAL_LIGHTS;
+                reaching.resize(GI_MAX_LOCAL_LIGHTS);
             }
 
-        std::sort(reaching.begin(), reaching.end(),
-            [](const Reaching& a, const Reaching& b) { return a.pixels != b.pixels ? a.pixels > b.pixels : a.distance < b.distance; });
-        if (reaching.size() > GI_MAX_LOCAL_LIGHTS)
-        {
-            overLimit += reaching.size() - GI_MAX_LOCAL_LIGHTS;
-            reaching.resize(GI_MAX_LOCAL_LIGHTS);
-        }
-
-        for (const auto& each : reaching)
-        {
-            each.light->traced = true;
-            lights.push_back(forRays(*each.light));
-        }
+            for (const auto& each : reaching)
+            {
+                each.light->traced = true;
+                lights.push_back(forRays(*each.light));
+            }
+        });
     }
     catch (...)
     {
@@ -1149,22 +1139,15 @@ void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
 {
     if (!enabled.load(std::memory_order_relaxed)) return;
 
-    Notes noted;
-    {
-        std::lock_guard lock(notesMutex);
-        const auto found = byList.find(list);
-        if (found == byList.end()) return;
-
-        noted = std::move(found->second);
-        byList.erase(found);
-    }
+    auto noted = notes.take(list);
+    if (!noted) return;
 
     std::lock_guard lock(resourceMutex);
     if (context != immediate) return;
 
     try
     {
-        for (auto& light : noted.lights) frameLights.push_back(std::move(light));
+        for (auto& light : noted->lights) frameLights.push_back(std::move(light));
     }
     catch (...)
     {
@@ -1174,7 +1157,7 @@ void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
     // drawn before it. Never at once in a later list: that list has not run yet, so neither have the copies
     // of its lights' volumes, nor has the immediate context waited for the rays a later kick traced. A
     // second camera, as the intro's mirror, draws its lights after the first camera's draw point.
-    if (!noted.drawPoint) return;
+    if (!noted->drawPoint) return;
 
     drawPointRan = true;
     drawFrameLights();
@@ -1192,12 +1175,8 @@ void present() noexcept
         if (immediate) readVolumeBounds();
     }
 
-    {
-        // Notes of lists that never ran go, as do a context's left unfinished.
-        std::lock_guard lock(notesMutex);
-        for (auto* notes : {&byContext, &byList})
-            std::erase_if(*notes, [](auto& entry) { return ++entry.second.presents > 3; });
-    }
+    // Notes of lists that never ran go, as do a context's left unfinished.
+    expiredNotes += notes.present();
 
     bool on = wantedRunning;
     {

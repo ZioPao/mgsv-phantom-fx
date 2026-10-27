@@ -2,8 +2,8 @@
 #include "passes/ray_tracing/gi_inputs.hpp"
 
 #include "clock.hpp"
+#include "command_list_notes.hpp"
 #include "constant_capture.hpp"
-#include "game_loop.hpp"
 #include "log.hpp"
 #include "passes/ray_tracing/engine_scene.hpp"
 
@@ -15,7 +15,6 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -36,11 +35,22 @@ std::atomic<bool> active{};
 thread_local ID3D11DeviceContext* boundContext{};
 thread_local VertexShader boundKind{};
 
+// The camera the rays trace from: a list's first main-camera draw's.
+struct Notes
+{
+    std::optional<SceneConstants> camera;
+
+    void merge(Notes later)
+    {
+        if (!camera) camera = later.camera;
+    }
+};
+
 // The camera by deferred context while recorded, by command list once finished, and that of the lists
 // executed since the last kick.
-std::mutex recordMutex;
-std::unordered_map<std::uint64_t, Camera> pending;
-std::optional<Camera> executed;
+CommandListNotes<Notes> pending;
+std::mutex executedMutex;
+std::optional<SceneConstants> executed;
 
 // Diagnostics: the draw hook's time in performance counter ticks, and the draws, since takeWork.
 std::atomic<std::int64_t> hookTicks{};
@@ -112,9 +122,9 @@ void detach() noexcept
 {
     active = false;
     constant_capture::keepAll(false);
+    pending.clear();
     {
-        std::lock_guard lock(recordMutex);
-        pending.clear();
+        std::lock_guard lock(executedMutex);
         executed.reset();
     }
 }
@@ -123,7 +133,7 @@ void setActive(bool on) noexcept
 {
     if (on == active.load()) return;
 
-    std::lock_guard lock(recordMutex);
+    std::lock_guard lock(executedMutex);
     active = on;
     constant_capture::keepAll(on);
     pending.clear();
@@ -153,16 +163,9 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
         const auto* scene = constant_capture::mainCameraWrite(constants[0].Get());
         if (!scene) return;
 
-        // The camera the rays trace from: the list's first main-camera draw's.
-        {
-            std::lock_guard lock(recordMutex);
-            auto [noted, first] = pending.try_emplace(reinterpret_cast<std::uint64_t>(context));
-            if (first)
-            {
-                noted->second.constants = *scene;
-                noted->second.gameFrame = game_loop::currentFrame();
-            }
-        }
+        pending.note(reinterpret_cast<std::uint64_t>(context), [&](Notes& notes) {
+            if (!notes.camera) notes.camera = *scene;
+        });
 
         const auto* object = constant_capture::writtenTo<ObjectConstants>(constants[3].Get());
         if (!object) return;
@@ -182,37 +185,28 @@ void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     }
 }
 
-void recorded(std::uint64_t list, std::uint64_t context) noexcept
+void recorded(std::uint64_t into, std::uint64_t from) noexcept
 {
-    try
-    {
-        std::lock_guard lock(recordMutex);
-        const auto found = pending.find(context);
-        if (found == pending.end()) return;
-
-        const auto noted = found->second;
-        pending.erase(found);
-        pending[list] = noted;
-    }
-    catch (...)
-    {
-    }
+    pending.recorded(into, from);
 }
 
-void forget(std::uint64_t list) noexcept
+void forget(std::uint64_t contextOrList) noexcept
 {
-    std::lock_guard lock(recordMutex);
-    pending.erase(list);
+    pending.forget(contextOrList);
 }
 
 void executing(std::uint64_t list) noexcept
 {
-    std::lock_guard lock(recordMutex);
-    const auto found = pending.find(list);
-    if (found == pending.end()) return;
+    const auto noted = pending.take(list);
+    if (!noted || !noted->camera) return;
 
-    executed = found->second;
-    pending.erase(found);
+    std::lock_guard lock(executedMutex);
+    executed = noted->camera;
+}
+
+std::size_t present() noexcept
+{
+    return pending.present();
 }
 
 std::vector<DrawnBones> takeDrawnBones(const SceneConstants& camera) noexcept
@@ -237,9 +231,9 @@ std::vector<DrawnBones> takeDrawnBones(const SceneConstants& camera) noexcept
     return taken;
 }
 
-std::optional<Camera> takeCamera() noexcept
+std::optional<SceneConstants> takeCamera() noexcept
 {
-    std::lock_guard lock(recordMutex);
+    std::lock_guard lock(executedMutex);
     return std::exchange(executed, std::nullopt);
 }
 
