@@ -182,7 +182,11 @@ void SceneContents::updateTextures(const GameScene& frame)
         if (found == textures.end()) continue;
 
         const auto slot = memory.openTexture(made);
-        if (!slot) continue;
+        if (!slot)
+        {
+            ++texturesRefused;
+            continue;
+        }
 
         auto& record = found->second;
         if (record.slot) memory.closeTexture(*record.slot);
@@ -391,7 +395,10 @@ void SceneContents::updateModels(const GameScene& frame, Update& update)
             geometries.push_back(record.parts[i]);
         }
 
+        // One without room for its structure is not made again: its placements stay untraced until it is
+        // let go.
         variant.blas = memory.createBlas(Use::Static, geometries);
+        if (!variant.blas && !geometries.empty()) ++variantsWithoutRoom;
     }
 }
 
@@ -549,12 +556,19 @@ void SceneContents::addInstances(const GameScene& frame, Update& update)
 {
     modelInstanceCount = 0;
     modelTriangles = 0;
+    unreceivedPlacements = modelsPastCap = charactersPastCap = ringsPastCap = 0;
     auto found = models.end();
     std::uint64_t lastHash{};
     for (const auto& placement : placements)
     {
         if (placement.hash != lastHash) found = models.find(lastHash = placement.hash);
-        if (found == models.end() || !found->second.blas) continue;
+        if (found == models.end())
+        {
+            ++unreceivedPlacements;
+            continue;
+        }
+
+        if (!found->second.blas) continue;
 
         // A placement that hides mesh groups takes its variant's structure: it is not traced while that is
         // not built, nor ever when the variant has none (no room for it, or every mesh hidden).
@@ -564,8 +578,13 @@ void SceneContents::addInstances(const GameScene& frame, Update& update)
         const auto blas = isTrimmed ? variant->blas : record.blas;
         if (!blas) continue;
 
+        // Not traced: its structure is not built yet, or the frame is past the instance cap.
         const auto instance = memory.addInstance(*blas, placement.transform.data(), GI_INSTANCE_MODEL);
-        if (!instance) continue;
+        if (!instance)
+        {
+            if (memory.ready(*blas)) ++modelsPastCap;
+            continue;
+        }
 
         if (frame.shouldListInstances)
             update.instanced.push_back(
@@ -588,7 +607,11 @@ void SceneContents::addInstances(const GameScene& frame, Update& update)
         if (!character.isTraced) continue;
 
         const auto instance = memory.addInstance(character.blas, character.transform.data(), GI_INSTANCE_MODEL | GI_INSTANCE_CHARACTER);
-        if (!instance) continue;
+        if (!instance)
+        {
+            if (memory.ready(character.blas)) ++charactersPastCap;
+            continue;
+        }
 
         if (frame.shouldListInstances)
             update.instanced.push_back({*instance, character.hash, {character.transform[3], character.transform[7], character.transform[11]}, id});
@@ -605,21 +628,29 @@ void SceneContents::addInstances(const GameScene& frame, Update& update)
     update.triangles += characterTriangles;
     terrainRings = 0;
     for (std::uint32_t r = 0; r < GI_TERRAIN_RINGS && frame.terrainEye; ++r)
-        if (memory.addInstance(terrain[r].blas, nullptr, GI_INSTANCE_TERRAIN))
+    {
+        if (!memory.addInstance(terrain[r].blas, nullptr, GI_INSTANCE_TERRAIN))
         {
-            update.triangles += TerrainRingVertices / 3;
-            ++terrainRings;
+            if (memory.ready(terrain[r].blas)) ++ringsPastCap;
+            continue;
         }
+
+        update.triangles += TerrainRingVertices / 3;
+        ++terrainRings;
+    }
 }
 
 std::string SceneContents::status() const
 {
     return "the game's models: " + std::to_string(modelInstanceCount) + " instances (" + std::to_string(modelTriangles / 1000) + "k triangles) of "
         + std::to_string(models.size()) + " models, " + std::to_string(modelsWaiting) + " waiting for room"
-        + (modelsTooLarge ? ", " + std::to_string(modelsTooLarge) + " too large" : "") + ", " + std::to_string(texturesHeld)
-        + " of the game's textures held; characters: " + std::to_string(charactersTraced) + " traced (" + std::to_string(characterVertices / 1000)
-        + "k vertices posed, " + std::to_string(characterTriangles / 1000) + "k triangles), " + std::to_string(charactersWaiting)
-        + " waiting; terrain rings " + std::to_string(terrainRings) + " of " + std::to_string(GI_TERRAIN_RINGS);
+        + (modelsTooLarge ? ", " + std::to_string(modelsTooLarge) + " too large" : "") + ", " + std::to_string(unreceivedPlacements)
+        + " placements of models not received, " + std::to_string(variantsWithoutRoom) + " variants made without room for their structure, "
+        + std::to_string(texturesHeld) + " of the game's textures held (" + std::to_string(texturesRefused) + " copies refused for want of a slot); characters: "
+        + std::to_string(charactersTraced) + " traced (" + std::to_string(characterVertices / 1000) + "k vertices posed, "
+        + std::to_string(characterTriangles / 1000) + "k triangles), " + std::to_string(charactersWaiting) + " waiting; terrain rings "
+        + std::to_string(terrainRings) + " of " + std::to_string(GI_TERRAIN_RINGS) + "; past the instance cap: " + std::to_string(modelsPastCap)
+        + " models, " + std::to_string(charactersPastCap) + " characters, " + std::to_string(ringsPastCap) + " terrain rings";
 }
 
 // The character `id`'s shown mesh `shownIndex` (a geometry of its structure) as its model file has it.

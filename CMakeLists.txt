@@ -259,6 +259,13 @@ if(BUILD_TESTING)
     target_compile_features(scene_description_tests PRIVATE cxx_std_20)
     target_compile_options(scene_description_tests PRIVATE /W4 /WX /permissive- /utf-8)
     add_test(NAME scene_description COMMAND scene_description_tests)
+
+    add_executable(scene_contents_tests tests/scene_contents_tests.cpp src/passes/ray_tracing/scene_contents.cpp src/passes/ray_tracing/scene_description.cpp)
+    target_include_directories(scene_contents_tests PRIVATE src)
+    target_compile_features(scene_contents_tests PRIVATE cxx_std_20)
+    target_compile_definitions(scene_contents_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(scene_contents_tests PRIVATE /W4 /WX /permissive- /utf-8)
+    add_test(NAME scene_contents COMMAND scene_contents_tests)
 endif()
 
 # Package only runtime files and documentation, not dependency development files.

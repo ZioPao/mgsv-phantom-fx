@@ -209,5 +209,10 @@ private:
     // posed vertices and triangles.
     std::uint32_t charactersTraced{}, charactersWaiting{};
     std::uint64_t characterVertices{}, characterTriangles{};
+    // Diagnostics: the frame's placements of models the scene was never given (not read yet, or their file
+    // failed), and its instances past the instance cap by kind; since the start, the variants made without
+    // room for their structure (never traced) and the texture copies refused for want of a free slot.
+    std::uint32_t unreceivedPlacements{}, modelsPastCap{}, charactersPastCap{}, ringsPastCap{};
+    std::uint32_t variantsWithoutRoom{}, texturesRefused{};
 };
 }

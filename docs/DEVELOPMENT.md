@@ -56,7 +56,7 @@ documentation and licenses are in `PhantomFX/`.
 ctest --test-dir build/release
 ```
 
-This runs two tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
+This runs three tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
 (defaults, round trip, clamping, invalid files and values), the mode maths (render scales, texture LOD
 bias) and the camera maths (main-view recognition, jitter direction and units, reprojection, camera
 cuts, jitter phases and the Halton sequence, the camera frame generation gets). The main view and a sun
@@ -66,7 +66,12 @@ reads only its own writes and only at their size, and each effect keeps only wha
 `tests/scene_description_tests.cpp`: what the ray-traced scene takes of a model file, from small FMDL
 files it writes: the mesh roles of each case measured in the game (a tarp's stand-in, a pylon's
 lattice, glass, sky domes, inner walls, decals, hair, bushes), what each role gives its rays, a
-cut-out mesh's texture, unreadable files and skins. Everything else is checked in the game.
+cut-out mesh's texture, unreadable files and skins. `tests/scene_contents_tests.cpp`: the scene
+contents over a fake scene memory with room limits: when models, variants, characters and textures are
+let go, waiting for room, a variant without room (never traced, as today), texture copies arriving and
+replacing one another, characters built, refitted and made again, the palette budget, frames without a
+newer list, the instance cap's order and the terrain rings' remaking. Everything else is checked in the
+game.
 
 ## Package a release
 
