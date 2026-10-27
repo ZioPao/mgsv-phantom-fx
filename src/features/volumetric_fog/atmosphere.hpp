@@ -36,7 +36,11 @@ void textureCreated(ID3D11Resource* texture) noexcept;
 void resourceDestroyed(ID3D11Resource* resource) noexcept;
 
 // ---- Recording, on the game's render and worker threads ----
-// Before a draw. Returns true when the add-on made the draw itself, so the game's draw must be skipped.
+// Before a draw, whoever draws it: the sun pass inside the shadow range, whose shadow map the fill reads,
+// and before the resolve the fill of the fog texture.
+void note(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
+// The fog pass, and with the physical look the sky. Returns true when the add-on made the draw itself,
+// so the game's draw must be skipped.
 bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
 // Each present. The game records a whole frame between presents. While the physical look runs, the
 // diagnostic log gets the sky's parameters every ten seconds.

@@ -43,15 +43,15 @@ void detach() noexcept;
 void setOutputSize(unsigned width, unsigned height) noexcept;
 
 // ---- Recording, on the game's render and worker threads ----
-// Notes the FXAA and camera velocity passes as they are recorded. Returns true when the draw was
-// made on the UI target instead (the 2D pass and GammaControl while upscaling), or must not be made
-// (FXAA, as DLSS runs before the grading), so the game's own draw must be skipped; the render
-// target clear likewise.
+// Notes the FXAA pass as it is recorded. Returns true when the draw was made on the UI target instead
+// (the 2D pass and GammaControl while upscaling), or must not be made (FXAA, as DLSS runs before the
+// grading), so the game's own draw must be skipped; the render target clear likewise.
 bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
-// Before the add-on's other draw hooks: notes the game's grading, which DLSS runs before. While
-// upscaling, true for its full-size draws (the lens flare layer's composite and the grading), which
-// are then bound to the output size (ui_redirect.hpp) and must be made in that state, whoever makes
-// them; afterPostDraw then puts the game's bindings back.
+// After the notes, before the draws that may take the draw: notes the camera velocity pass, whose input
+// holds the moving meshes' velocity, and the game's grading, which DLSS runs before. While upscaling,
+// true for its full-size draws (the lens flare layer's composite and the grading), which are then
+// bound to the output size (ui_redirect.hpp) and must be made in that state, whoever makes them;
+// afterPostDraw then puts the game's bindings back.
 bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
 void afterPostDraw(ID3D11DeviceContext* context) noexcept;
 bool clearTarget(ID3D11DeviceContext* context, ID3D11RenderTargetView* view, const float color[4]) noexcept;

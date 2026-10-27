@@ -51,6 +51,12 @@ constexpr std::uint64_t SkyLogInterval = 10000;
 
 // The fog pass draws two triangles per slice.
 constexpr unsigned FogPassVertices = Slices * 6;
+
+// The draws the fog and the sky work with: the fog pass's, and the other passes' full-screen triangles.
+bool isFogOrFullScreen(const ui_redirect::DrawCall& call)
+{
+    return !call.indexed && call.instances == 1 && (call.count == 3 || call.count == FogPassVertices);
+}
 // Constant buffer slots and sizes of the game's passes: cPSSystem, cPSScene, the sun pass's cPSLight,
 // cPSMaterial (the fog pass's and the sky's, whose registers nothing reads by name), cPSObject.
 constexpr UINT SystemSlot = SystemConstants::Slot, SceneSlot = SceneConstants::Slot, LightSlot = SunLightConstants::Slot, MaterialSlot = 4,
@@ -679,31 +685,42 @@ void resourceDestroyed(ID3D11Resource* resource) noexcept
     }
 }
 
+void note(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
+{
+    if (!gameFog.load(std::memory_order_relaxed) || !active.load(std::memory_order_relaxed) || !isFogOrFullScreen(call)) return;
+
+    try
+    {
+        // The sun inside the shadow range binds the shadow map and its cascades; the resolves with TppTonemap
+        // are the first to read the fog, after the shadow map is drawn.
+        const auto* row = shader.row();
+        if (!row) return;
+
+        if (row->pass == GamePass::Sun && row->isShadowMapped) noteSun(context);
+        else if (row->pass == GamePass::Resolve && row->hasTppTonemap) fill(context, physicalLook.load(std::memory_order_relaxed));
+    }
+    catch (const std::exception& error)
+    {
+        std::lock_guard lock(resourceMutex);
+        logOnce(std::string("Volumetric fog: a pass kept the game's fog: ") + error.what());
+    }
+    catch (...)
+    {
+    }
+}
+
 bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
-    if (!gameFog.load(std::memory_order_relaxed) || call.indexed || call.instances != 1 || (call.count != 3 && call.count != FogPassVertices))
-        return false;
+    if (!gameFog.load(std::memory_order_relaxed) || !isFogOrFullScreen(call)) return false;
 
     try
     {
         const auto* row = shader.row();
         if (!row) return false;
 
-        // The sun inside the shadow range binds the shadow map and its cascades; the resolves with TppTonemap
-        // are the first to read the fog, after the shadow map is drawn.
         const bool fog = active.load(std::memory_order_relaxed), physical = fog && physicalLook.load(std::memory_order_relaxed);
-        switch (row->pass)
-        {
-        case GamePass::FogPass: return call.count == FogPassVertices && drawFogPass(context, call, fog);
-        case GamePass::Sun:
-            if (fog && row->isShadowMapped) noteSun(context);
-            return false;
-        case GamePass::Resolve:
-            if (fog && row->hasTppTonemap) fill(context, physical);
-            return false;
-        case GamePass::Sky: return physical && drawSky(context, call, row->hasSprite, shader.object());
-        default: return false;
-        }
+        if (row->pass == GamePass::FogPass) return call.count == FogPassVertices && drawFogPass(context, call, fog);
+        if (row->pass == GamePass::Sky) return physical && drawSky(context, call, row->hasSprite, shader.object());
     }
     catch (const std::exception& error)
     {

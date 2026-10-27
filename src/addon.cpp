@@ -196,6 +196,9 @@ bool hiddenUi(command_list* list)
     return photo_mode::uiHidden() && ui_redirect::drawing2D(native(list)) && ui_redirect::drawingIntoScene(native(list));
 }
 
+// A draw meets the modules in three steps: the notes take what they need from it and never draw it;
+// while upscaling, the grading is redirected to the output size; then the owners, the first of which
+// that draws it in the game's place, or skips it, takes it from the game.
 bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t first, uint32_t firstInstance)
 {
     const ui_redirect::DrawCall call{vertices, instances, first, firstInstance, 0, false};
@@ -203,13 +206,16 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
 
     auto* context = native(list);
     game_shaders::DrawnShader shader(context);
-    // HDR's work comes first, as others may make the draw: the resolve's curve, the depth of field's
-    // float copy. A draw through an sRGB view of the scene (the resolve) writes linear colour, which
-    // is encoded once drawn, by whoever draws it.
+
+    // 1. The notes. HDR's: the resolve's curve, the depth of field's float copy. A draw through an sRGB
+    // view of the scene (the resolve) writes linear colour, which is encoded once drawn, by whoever
+    // draws it.
     const bool encode = hdr::beforeDraw(context, call, shader);
-    // The global illumination only notes what it needs (the sky's probe constants).
-    ray_tracing::draw(context, call, shader);
-    // While upscaling, the game's grading draws at the output size, whoever draws it.
+    ray_tracing::note(context, call, shader);
+    atmosphere::note(context, call, shader);
+    indirect_light_pass::note(context, call, shader);
+
+    // 2. While upscaling, the game's grading draws at the output size, whoever draws it.
     if (upscaler::beforePostDraw(context, call, shader))
     {
         if (!hdr::draw(context, call, shader)) context->DrawInstanced(vertices, instances, first, firstInstance);
@@ -218,8 +224,8 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
         return true;
     }
 
-    // The fog notes the sun pass and fills its texture before the resolve, whoever draws them. GTVBAO
-    // notes the sun pass's G-buffer before the sun shadows may draw that pass themselves.
+    // 3. The owners. Each takes game passes of its own (the upscaler also the 2D pass), so their order
+    // does not matter.
     const bool drawn = atmosphere::draw(context, call, shader) || indirect_light_pass::draw(context, call, shader)
         || sun_light_pass::draw(context, call, shader) || hdr::draw(context, call, shader) || upscaler::draw(context, call, shader);
     if (!encode) return drawn;
@@ -235,9 +241,9 @@ bool onDrawIndexed(command_list* list, uint32_t indices, uint32_t instances, uin
     const ui_redirect::DrawCall call{indices, instances, first, firstInstance, offset, true};
     auto* context = native(list);
     game_shaders::DrawnShader shader(context);
-    // The global illumination notes the camera and the terrain's inputs from the draws; it never takes one.
-    ray_tracing::draw(context, call, shader);
-    // The ray-traced lights' draws before the local light pass's, which leaves a light the rays shadow alone.
+    ray_tracing::note(context, call, shader);
+    // The one order among the owners that matters: a point or spot light's draws have two, and the
+    // ray-traced lights come first, so the local light pass never draws a light the rays shadow.
     return hiddenUi(list) || local_lights::draw(context, call, shader) || local_light_pass::draw(context, call, shader)
         || upscaler::draw(context, call, shader);
 }
