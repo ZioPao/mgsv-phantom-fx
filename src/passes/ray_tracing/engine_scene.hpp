@@ -2,7 +2,7 @@
 
 #include "game_constants.hpp"
 #include "passes/ray_tracing/gi_inputs.hpp"
-#include "passes/ray_tracing/gi_renderer.hpp"
+#include "passes/ray_tracing/scene_description.hpp"
 
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -28,10 +28,10 @@ void setActive(bool active) noexcept;
 struct Snapshot
 {
     bool instancesUpdated{}; // A newer list came: `instances` and `characters` replace the last, even when empty
-    std::vector<gi_renderer::ModelInstance> instances;
-    std::vector<gi_renderer::CharacterInstance> characters;
+    std::vector<scene_description::ModelInstance> instances;
+    std::vector<scene_description::CharacterInstance> characters;
     // Models first seen since the last take, read from their files.
-    std::vector<std::shared_ptr<const gi_renderer::Model>> newModels;
+    std::vector<std::shared_ptr<const scene_description::Model>> newModels;
 };
 
 // On the render thread: the latest snapshot's instances and characters, when one came since the last
