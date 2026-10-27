@@ -1,6 +1,7 @@
 #pragma once
 
 #include "game_constants.hpp"
+#include "game_shaders.hpp"
 #include "ui_redirect.hpp"
 
 #include <d3d11.h>
@@ -22,8 +23,7 @@ void detach() noexcept;
 void setActive(bool active) noexcept;
 
 // ---- Recording, on the game's render and worker threads ----
-void vertexShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
-void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept;
+void vertexShaderBound(ID3D11DeviceContext* context, game_shaders::VertexShader kind) noexcept;
 // Before an indexed draw of the game's models or terrain: notes the camera and the terrain's inputs.
 void drawIndexed(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
 // FinishCommandList: what `context` noted now belongs to `list`.

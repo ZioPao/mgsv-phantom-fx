@@ -15,7 +15,6 @@
 #include "passes/ray_tracing/ray_tracing.hpp"
 #include "performance.hpp"
 #include "render_scale.hpp"
-#include "shader_bytecode.hpp"
 
 #include <Windows.h>
 #include <d3d11_1.h>
@@ -42,26 +41,10 @@ namespace phantom_fx::upscaler
 namespace
 {
 using Microsoft::WRL::ComPtr;
+using game_shaders::GamePass, game_shaders::GameShader, game_shaders::GameShaders;
 
-// The game's pixel shaders the add-on looks for, each drawn as one full-screen triangle. From Copy on
-// they are the post processing after the depth of field, which the upscaler runs before.
-enum class Pass : std::uint8_t { Fxaa, CameraVelocity, GammaControl, Copy, LutBuild, Grade, Count, None = Count };
-
-struct GameShader
-{
-    const char* name;
-    const char* checksum; // docs/DEVELOPMENT.md, "Shaders"
-};
-
-constexpr GameShader Shaders[]{
-    {"Fxaa", "deef1a5e3462ab091b5612a37662d15d"},
-    {"MotionBlurCameraVelocity", "5d0241dd9804f41c780cd36669c71198"},
-    {"GammaControl", "12790f061c5f1460aa40c264e4bc9f07"},
-    {"CopyRenderBuffer", "9f93a957f1e21656e0d86bf112b71d6d"},
-    {"ColorCorrection_BlndLut_Tex_Gen", "82a954d0fe3755bb0a79aaaded5cce74"},
-    {"Tonemap", "422ba739df267d9f92d4d62b0d2b4e09"},
-};
-static_assert(std::size(Shaders) == static_cast<std::size_t>(Pass::Count));
+// FXAA's shader: the status says whether the game has made it.
+constexpr const GameShader& FxaaShader = *std::ranges::find(GameShaders, GamePass::Fxaa, &GameShader::pass);
 
 // The FXAA pass as recorded: it reads the scene copy and writes the scene target, with the depth copy
 // bound. The upscaler reads the scene target and the depth copy before the grading.
@@ -204,13 +187,6 @@ struct BiasedSampler
 std::shared_mutex samplerMutex;
 std::map<std::pair<ID3D11SamplerState*, float>, BiasedSampler> biasedSamplers;
 
-// Identified game shaders: read lock-free on every full-screen draw. The game can create a shader more
-// than once, so each pass keeps every copy; holding them keeps their addresses from being reused.
-constexpr std::size_t CopiesPerShader = 4;
-std::mutex shaderMutex;
-std::array<std::array<std::atomic<IUnknown*>, CopiesPerShader>, std::size(Shaders)> gameShaders{};
-std::array<std::array<ComPtr<IUnknown>, CopiesPerShader>, std::size(Shaders)> shaderOwners;
-
 // ---- Recording ----
 std::mutex recordMutex;
 std::unordered_map<std::uint64_t, Recorded> recordedLists;
@@ -313,34 +289,6 @@ void fail(std::string_view reason)
     }
 
     log("Upscaling stopped: " + failure);
-}
-
-// ---- Shader identity ----
-
-void remember(std::size_t pass, ComPtr<IUnknown> shader)
-{
-    std::lock_guard lock(shaderMutex);
-    auto& copies = gameShaders[pass];
-    for (std::size_t i = 0; i < CopiesPerShader; ++i)
-    {
-        if (copies[i].load()) continue;
-
-        shaderOwners[pass][i] = std::move(shader);
-        copies[i] = shaderOwners[pass][i].Get();
-        log(std::string("Identified ") + Shaders[pass].name + ".");
-        return;
-    }
-}
-
-Pass passOf(IUnknown* shader)
-{
-    if (!shader) return Pass::None;
-
-    for (std::size_t pass = 0; pass < std::size(Shaders); ++pass)
-        for (const auto& copy : gameShaders[pass])
-            if (copy.load(std::memory_order_relaxed) == shader) return static_cast<Pass>(pass);
-
-    return Pass::None;
 }
 
 // ---- Recording ----
@@ -1398,18 +1346,8 @@ void detach() noexcept
         recordedFxaa.reset();
     }
 
-    {
-        std::unique_lock samplerLock(samplerMutex);
-        biasedSamplers.clear();
-    }
-
-    std::lock_guard shaderLock(shaderMutex);
-    for (std::size_t pass = 0; pass < std::size(Shaders); ++pass)
-        for (std::size_t i = 0; i < CopiesPerShader; ++i)
-        {
-            gameShaders[pass][i] = nullptr;
-            shaderOwners[pass][i].Reset();
-        }
+    std::unique_lock samplerLock(samplerMutex);
+    biasedSamplers.clear();
 }
 
 void setOutputSize(unsigned width, unsigned height) noexcept
@@ -1423,26 +1361,7 @@ void setOutputSize(unsigned width, unsigned height) noexcept
     ui_redirect::setOutputSize(width, height);
 }
 
-void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
-{
-    const auto checksum = dxbcHashOf(code, size);
-    if (!checksum || !shader) return;
-
-    const auto text = toHex(*checksum);
-    for (std::size_t pass = 0; pass < std::size(Shaders); ++pass)
-        if (text == Shaders[pass].checksum)
-        {
-            try
-            {
-                remember(pass, ComPtr<IUnknown>(shader));
-            }
-            catch (...)
-            {
-            }
-        }
-}
-
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
     if (bypass) return false;
 
@@ -1459,10 +1378,10 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
 
         if (call.indexed || call.count != 3 || call.instances != 1) return false;
 
-        ComPtr<ID3D11PixelShader> shader;
-        context->PSGetShader(shader.GetAddressOf(), nullptr, nullptr);
-        const auto pass = passOf(shader.Get());
-        if (pass == Pass::GammaControl)
+        const auto* row = shader.row();
+        if (!row) return false;
+
+        if (row->pass == GamePass::GammaControl)
         {
             // With HDR every GammaControl draw, the hudless one too, encodes for the display.
             const hdr::OutputShader output(context);
@@ -1490,14 +1409,14 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
         if (!replacing.load(std::memory_order_relaxed)) return false;
 
         // DLSS ran before the grading; FXAA would only blur its image.
-        if (pass == Pass::Fxaa)
+        if (row->pass == GamePass::Fxaa)
         {
             recordFxaa(context);
 
             return true;
         }
 
-        if (pass == Pass::CameraVelocity) recordVelocity(context);
+        if (row->pass == GamePass::CameraVelocity) recordVelocity(context);
     }
     catch (...)
     {
@@ -1506,19 +1425,20 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexc
     return false;
 }
 
-bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
+bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
     if (bypass || call.indexed || call.count != 3 || call.instances != 1 || !replacing.load(std::memory_order_relaxed)) return false;
 
     try
     {
-        ComPtr<ID3D11PixelShader> shader;
-        context->PSGetShader(shader.GetAddressOf(), nullptr, nullptr);
-        const auto pass = passOf(shader.Get());
+        const auto* row = shader.row();
+        if (!row) return false;
+
+        const auto pass = row->pass;
         // CopyRenderBuffer is a plain copy the game makes anywhere; the layer's composite shares its
         // list with the LUT build.
-        if (pass == Pass::LutBuild || pass == Pass::Grade || pass == Pass::Fxaa) recordGrading(context);
-        if (pass != Pass::Copy && pass != Pass::Grade) return false;
+        if (pass == GamePass::LutBuild || pass == GamePass::Grade || pass == GamePass::Fxaa) recordGrading(context);
+        if (pass != GamePass::Copy && pass != GamePass::Grade) return false;
 
         ComPtr<ID3D11RenderTargetView> target;
         context->OMGetRenderTargets(1, target.GetAddressOf(), nullptr);
@@ -1526,7 +1446,7 @@ bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
 
         using enum ui_redirect::Surface;
         auto& redirected = postDraw.redirected;
-        if (pass == Pass::Copy)
+        if (pass == GamePass::Copy)
         {
             // The two copies into a render-size target in every recorded frame: the depth of field's
             // copy of the scene, before DLSS, and the half-size layer (lens flares) drawn over it after.
@@ -1768,10 +1688,7 @@ frame_generation::Inputs frameGenerationInputs() noexcept
 Status status()
 {
     Status result;
-    {
-        std::lock_guard lock(shaderMutex);
-        result.fxaaRecognised = gameShaders[static_cast<std::size_t>(Pass::Fxaa)][0].load() != nullptr;
-    }
+    result.fxaaRecognised = game_shaders::firstCreated(FxaaShader) != nullptr;
 
     std::lock_guard lock(executionMutex);
     const auto setup = currentConfiguration();

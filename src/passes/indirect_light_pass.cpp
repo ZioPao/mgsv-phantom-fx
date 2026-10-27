@@ -11,66 +11,28 @@
 #include "passes/indirect_light_pass_shaders.hpp"
 #include "passes/ray_tracing/ray_tracing.hpp"
 #include "passes/visibility_bitmask.hpp"
-#include "shader_bytecode.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
-#include <optional>
-#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
-#include <vector>
 
 namespace phantom_fx::indirect_light_pass
 {
 namespace
 {
 using Microsoft::WRL::ComPtr;
+using game_shaders::GamePass, game_shaders::GameShader;
 
-// The game's pixel shaders the effects work with (docs/DEVELOPMENT.md, "Ambient occlusion").
-enum class Role : std::uint8_t
-{
-    SkyLight,      // Binds the G-buffer normals, right before the upscale in the same command list
-    Upscale,       // Writes the indirect light into the diffuse light buffer
-    Resolve,       // Multiplies all light by the game's occlusion
-    GameOcclusion, // The game's SSAO, whose result only the resolve reads
-    Sun,           // Binds the G-buffer's specular target, which holds the material
-    SunShadowMap,  // The same, inside the shadow map's range
-    SkySpecular,   // Indoors, where no sun shines, the sky's specular alone in the sun pass's place
-};
-
-struct GameShader
-{
-    Role role;
-    const char* name;
-    const char* checksum;
-};
-
-constexpr GameShader Shaders[]{
-    {Role::SkyLight, "SSLighting2_SH_SkyLight_Encode", "ac49de83da6ebb80336de04c4ef7d022"},
-    {Role::Upscale, "BilateralUpscale2x2", "1314ac1eb31bb06b4e972fdc2c24ccbf"},
-    {Role::Resolve, "DR_VolFog_TppTonemap", "00a609370c2e8b47a645263f91f6d3e8"},
-    {Role::Resolve, "DR_VolFog_TppTonemap_MD", "79c001e295254d8a749e41d1d7e49de7"},
-    {Role::Resolve, "DR_TonemapRainFilter", "9a4abc815afc5f121572d695f07af5af"},
-    {Role::Resolve, "DR_TonemapRainFilter_NoIR", "47f52852eaccaa83c25745ce790a212c"},
-    {Role::Resolve, "DeferredRendering", "df87979884e90877ee0337c13e01664f"},
-    {Role::Resolve, "DeferredRendering_VolFog", "322890810465ee05f4895bc69e80a187"},
-    {Role::Resolve, "DeferredRenderingTone", "47256d38f45b59b6c46cf32bf29564f0"},
-    {Role::Resolve, "DeferredRenderingTone_GVFog", "86a042757928c965fff1c016647c4dfa"},
-    {Role::Resolve, "DeferredRenderingFilmic", "586e33bca62435478f23154da9e25187"},
-    {Role::Resolve, "DeferredRenderingFilmic_VolFog", "504b446c3e795d75e6adcd6753c11d12"},
-    {Role::GameOcclusion, "SSAOLineIntegrals", "1e716301e9c644c4d59c620e9b84f7de"},
-    {Role::GameOcclusion, "AmbientObscuranceSSAO", "9f963f50539aafc2ee77b888c56d3a0f"},
-    {Role::SunShadowMap, "SunLight_DL_CS_ES", "56ed4db892a7940f038146eeb0df0d30"},
-    {Role::Sun, "SunLight_DL_ES", "92726e8d231c8ed85f0db90400ef2258"},
-    {Role::SunShadowMap, "SunLight_DL_CS", "7e5c2fc99c9d84ddd32df4e789e7082a"}, // In rain
-    {Role::Sun, "SunLight_DL", "853f56a63e5bc66e6ee301c85ebfeaa8"},    // In rain
-    {Role::SkySpecular, "SunLight_ES", "367e8f6128befd48f2840ab3d6ed19b4"}, // Indoors
-};
+// The game passes the effects work with (docs/DEVELOPMENT.md, "Ambient occlusion"): every resolve and
+// every sun pass, inside the shadow range or beyond it. The sky light binds the G-buffer normals right
+// before the upscale in the same command list.
+constexpr GamePass Passes[]{GamePass::SkyLight, GamePass::IndirectUpscale, GamePass::GameOcclusion, GamePass::Sun, GamePass::SkySpecular, GamePass::Resolve};
 
 constexpr UINT NormalSlot = 0;   // The sky light's g_NormalTexture
 constexpr UINT SpecularSlot = 1; // The sun's g_SpecularTexture
@@ -91,12 +53,6 @@ struct Composition
 
 FrameLatch<Composition> latch;
 std::atomic<bool> active{}, pipelineFailed{};
-
-// Identified game shaders, by the object the game draws with. Holding them keeps their addresses
-// from being reused.
-std::shared_mutex shaderMutex;
-std::unordered_map<IUnknown*, Role> roles;
-std::vector<ComPtr<IUnknown>> shaderOwners;
 
 // The normals each context's sky light pass bound, for the upscale it records next. The resolve is
 // in another command list; it takes the G-buffer normals any sky light pass bound last. The sun pass
@@ -151,16 +107,6 @@ bool ensurePipeline()
 
         return false;
     }
-}
-
-std::optional<Role> roleOf(IUnknown* shader)
-{
-    if (!shader) return std::nullopt;
-
-    std::shared_lock lock(shaderMutex);
-    const auto found = roles.find(shader);
-
-    return found != roles.end() ? std::optional(found->second) : std::nullopt;
 }
 
 void noteNormals(ID3D11DeviceContext* context)
@@ -233,7 +179,7 @@ bool drawUpscale(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
 // The resolve, with the diffuse light SSILVB added to while it runs, and white in place of the
 // game's occlusion while GTVBAO runs; or, for the diagnostics, either effect alone. False leaves
 // the draw to the game.
-bool drawResolve(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, const Composition& composition)
+bool drawResolve(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, const Composition& composition, ID3D11PixelShader* gameShader)
 {
     const auto normalView = composition.light ? latestNormals() : nullptr;
     std::lock_guard lock(resourceMutex);
@@ -254,9 +200,7 @@ bool drawResolve(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
 
     if (!lit && !composition.occlusion) return false;
 
-    ComPtr<ID3D11PixelShader> gameShader;
     ComPtr<ID3D11ShaderResourceView> gameDiffuse, gameOcclusion;
-    context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
     context->PSGetShaderResources(DiffuseSlot, 1, gameDiffuse.GetAddressOf());
     context->PSGetShaderResources(OcclusionSlot, 1, gameOcclusion.GetAddressOf());
 
@@ -271,7 +215,7 @@ bool drawResolve(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     }
 
     context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
-    context->PSSetShader(gameShader.Get(), nullptr, 0);
+    context->PSSetShader(gameShader, nullptr, 0);
     context->PSSetShaderResources(DiffuseSlot, 1, gameDiffuse.GetAddressOf());
     context->PSSetShaderResources(OcclusionSlot, 1, gameOcclusion.GetAddressOf());
 
@@ -281,49 +225,44 @@ bool drawResolve(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
 // What the ray-traced scene needs from the game's passes (ray_tracing.hpp): the normals, the
 // kick at the upscale, the wait at the resolve, and the sun; the first of the sun pass, the sky's specular
 // pass and the resolve draws the point and spot lights too.
-void noteForRayTracing(ID3D11DeviceContext* context, Role role)
+void noteForRayTracing(ID3D11DeviceContext* context, const GameShader& shader)
 {
     ComPtr<ID3D11ShaderResourceView> view;
-    switch (role)
+    switch (shader.pass)
     {
-    case Role::SkyLight:
+    case GamePass::SkyLight:
         context->PSGetShaderResources(NormalSlot, 1, view.GetAddressOf());
         ray_tracing::noteNormals(context, view.Get());
         return;
-    case Role::Upscale:
+    case GamePass::IndirectUpscale:
         context->PSGetShaderResources(DepthSlot, 1, view.GetAddressOf());
         ray_tracing::noteUpscale(context, view.Get());
         return;
-    case Role::Resolve:
+    case GamePass::Resolve:
         context->PSGetShaderResources(AlbedoSlot, 1, view.GetAddressOf());
         ray_tracing::noteResolve(context, view.Get());
         local_lights::noteDrawPoint(context);
         return;
-    case Role::Sun:
-        ray_tracing::noteSun(context, false);
+    case GamePass::Sun:
+        ray_tracing::noteSun(context, shader.isShadowMapped);
         local_lights::noteDrawPoint(context);
         return;
-    case Role::SunShadowMap:
-        ray_tracing::noteSun(context, true);
-        local_lights::noteDrawPoint(context);
-        return;
-    case Role::SkySpecular:
+    case GamePass::SkySpecular:
         ray_tracing::noteSkySpecular(context);
         local_lights::noteDrawPoint(context);
         return;
-    case Role::GameOcclusion: return;
+    default: return;
     }
 }
 
 // The resolve while the global illumination runs: the diffuse light with the traced light in place
 // of the game's probe light, white in place of the game's occlusion; or, for the diagnostics, the
 // global illumination's output alone. False leaves the draw to the game.
-bool drawResolveForGlobal(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, const Composition& composition)
+bool drawResolveForGlobal(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, const Composition& composition, ID3D11PixelShader* gameShader)
 {
     if (!ray_tracing::lightRuns()) return false;
 
     ComPtr<ID3D11ShaderResourceView> depth, diffuse, gameOcclusion;
-    ComPtr<ID3D11PixelShader> gameShader;
     context->PSGetShaderResources(ResolveDepthSlot, 1, depth.GetAddressOf());
     context->PSGetShaderResources(DiffuseSlot, 1, diffuse.GetAddressOf());
 
@@ -333,7 +272,6 @@ bool drawResolveForGlobal(ID3D11DeviceContext* context, const ui_redirect::DrawC
     if (!ensurePipeline()) return false;
     if (!light_combine::combine(context, diffuse.Get(), light, size, diffuseWithLight)) return false;
 
-    context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
     context->PSGetShaderResources(OcclusionSlot, 1, gameOcclusion.GetAddressOf());
     if (composition.showGlobalIllumination)
     {
@@ -344,7 +282,7 @@ bool drawResolveForGlobal(ID3D11DeviceContext* context, const ui_redirect::DrawC
 
     context->PSSetShaderResources(OcclusionSlot, 1, whiteView.GetAddressOf());
     context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
-    context->PSSetShader(gameShader.Get(), nullptr, 0);
+    context->PSSetShader(gameShader, nullptr, 0);
     context->PSSetShaderResources(DiffuseSlot, 1, diffuse.GetAddressOf());
     context->PSSetShaderResources(OcclusionSlot, 1, gameOcclusion.GetAddressOf());
 
@@ -399,10 +337,6 @@ void detach() noexcept
         lastNormals.Reset();
         lastSpecular.Reset();
     }
-
-    std::unique_lock lock(shaderMutex);
-    roles.clear();
-    shaderOwners.clear();
 }
 
 void configure(const Configuration& configuration) noexcept
@@ -443,72 +377,42 @@ ComPtr<ID3D11ShaderResourceView> specularTarget(UINT width, UINT height) noexcep
     }
 }
 
-void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
-{
-    const auto checksum = dxbcHashOf(code, size);
-    if (!checksum || !shader) return;
-
-    const auto text = toHex(*checksum);
-    for (const auto& known : Shaders)
-    {
-        if (text != known.checksum) continue;
-
-        try
-        {
-            std::unique_lock lock(shaderMutex);
-            roles[shader] = known.role;
-            shaderOwners.emplace_back(shader);
-        }
-        catch (...)
-        {
-            return;
-        }
-
-        log(std::string("Identified ") + known.name + ".");
-        return;
-    }
-}
-
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
     if (!active.load(std::memory_order_relaxed) || call.indexed || call.count != 3 || call.instances != 1) return false;
 
     try
     {
-        ComPtr<ID3D11PixelShader> shader;
-        context->PSGetShader(shader.GetAddressOf(), nullptr, nullptr);
-        const auto role = roleOf(shader.Get());
-        if (!role) return false;
+        const auto* row = shader.row();
+        if (!row || std::ranges::find(Passes, row->pass) == std::end(Passes)) return false;
 
         const auto composition = latch.frame();
 
         // The rays trace the main view only, one kick a frame: a smaller camera's view in a corner of the
         // same targets, as the intro's mirror, keeps the game's light.
         const bool mainView = viewportFillsTarget(context);
-        if (composition.rayTracing && mainView) noteForRayTracing(context, *role);
+        if (composition.rayTracing && mainView) noteForRayTracing(context, *row);
         if (composition.globalIllumination)
-            switch (*role)
+            switch (row->pass)
             {
-            case Role::Upscale:
+            case GamePass::IndirectUpscale:
                 if (mainView && ray_tracing::lightRuns()) light_combine::drawProbeLightAside(context, call);
                 return false;
-            case Role::Resolve: return mainView ? drawResolveForGlobal(context, call, composition) : drawSmallerViewResolve(context, call);
-            case Role::GameOcclusion: return ray_tracing::lightRuns();
-            case Role::Sun:
-            case Role::SunShadowMap: noteSpecular(context); return false;
-            case Role::SkyLight:
-            case Role::SkySpecular: return false;
+            case GamePass::Resolve:
+                return mainView ? drawResolveForGlobal(context, call, composition, shader.object()) : drawSmallerViewResolve(context, call);
+            case GamePass::GameOcclusion: return ray_tracing::lightRuns();
+            case GamePass::Sun: noteSpecular(context); return false;
+            default: return false;
             }
 
-        switch (*role)
+        switch (row->pass)
         {
-        case Role::SkyLight: noteNormals(context); return false;
-        case Role::Upscale: return composition.occlusion && drawUpscale(context, call);
-        case Role::Resolve: return drawResolve(context, call, composition);
-        case Role::GameOcclusion: return composition.occlusion;
-        case Role::Sun:
-        case Role::SunShadowMap: noteSpecular(context); return false;
-        case Role::SkySpecular: return false;
+        case GamePass::SkyLight: noteNormals(context); return false;
+        case GamePass::IndirectUpscale: return composition.occlusion && drawUpscale(context, call);
+        case GamePass::Resolve: return drawResolve(context, call, composition, shader.object());
+        case GamePass::GameOcclusion: return composition.occlusion;
+        case GamePass::Sun: noteSpecular(context); return false;
+        default: return false;
         }
     }
     catch (const std::exception& error)

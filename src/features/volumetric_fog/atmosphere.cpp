@@ -9,7 +9,6 @@
 #include "game_constants.hpp"
 #include "log.hpp"
 #include "performance.hpp"
-#include "shader_bytecode.hpp"
 
 #include <Windows.h>
 #include <wrl/client.h>
@@ -18,13 +17,10 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
-#include <optional>
-#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
-#include <vector>
 
 namespace phantom_fx::atmosphere
 {
@@ -32,6 +28,7 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 using game_constants::ObjectConstants, game_constants::SceneConstants, game_constants::SunLightConstants, game_constants::SystemConstants;
+using game_shaders::GamePass;
 
 // The game's fog texture: 128 depth slices in 32 x 4 tiles of 16x64 texels. The add-on's tiles are
 // finer across the view, for the edges of the light shafts: a froxel spans about 16 pixels at 4K.
@@ -51,36 +48,6 @@ constexpr UINT TransmittanceWidth = 256, TransmittanceHeight = 64, MultipleScatt
 constexpr UINT SkyParameterTexels = 7;
 // Milliseconds between the sky parameters in the log, while the physical look runs.
 constexpr std::uint64_t SkyLogInterval = 10000;
-
-// The game's pixel shaders the fog and the sky work with (docs/DEVELOPMENT.md, "Volumetric fog").
-enum class Role : std::uint8_t
-{
-    FogPass,          // Fills the fog texture at the start of the frame
-    Sun,              // The sun inside the shadow range: binds the shadow map and its cascades
-    Resolve,          // The first to read the fog, after the shadow map is drawn
-    SkyWithSprite,    // The sky, with the sun's or the moon's sprite
-    SkyWithoutSprite, // The sky in fog and sandstorms: the fog's colour alone
-};
-
-struct GameShader
-{
-    Role role;
-    const char* name;
-    const char* checksum;
-};
-
-constexpr GameShader Shaders[]{
-    {Role::FogPass, "VolFog_TppVolFog", "b25013a77ea177c7eab8110269b754f2"},
-    {Role::Sun, "SunLight_DL_CS_ES", "56ed4db892a7940f038146eeb0df0d30"},
-    {Role::Sun, "SunLight_DL_CS", "7e5c2fc99c9d84ddd32df4e789e7082a"},
-    {Role::Resolve, "DR_VolFog_TppTonemap", "00a609370c2e8b47a645263f91f6d3e8"},
-    {Role::Resolve, "DR_VolFog_TppTonemap_MD", "79c001e295254d8a749e41d1d7e49de7"},
-    {Role::Resolve, "DR_TonemapRainFilter", "9a4abc815afc5f121572d695f07af5af"},
-    {Role::Resolve, "DR_TonemapRainFilter_NoIR", "47f52852eaccaa83c25745ce790a212c"},
-    {Role::SkyWithSprite, "Sky_Draw_TppBaked", "0fddc9d03f8bd436af2eabe2bc620c44"},
-    {Role::SkyWithSprite, "Sky_Draw_Tpp", "175290aae288daa07d2440ce316c7a50"},
-    {Role::SkyWithoutSprite, "Sky_Draw_TppNoSky", "3cf390b8d8af0de27c093019a693b636"},
-};
 
 // The fog pass draws two triangles per slice.
 constexpr unsigned FogPassVertices = Slices * 6;
@@ -138,12 +105,6 @@ std::atomic<std::uint64_t> lastFill{}; // GetTickCount64
 // The game's fog texture, once made larger. The game owns it.
 std::atomic<ID3D11Resource*> gameFog{};
 thread_local bool creatingFog{};
-
-// Identified game shaders, by the object the game draws with. Holding them keeps their addresses
-// from being reused.
-std::shared_mutex shaderMutex;
-std::unordered_map<IUnknown*, Role> roles;
-std::vector<ComPtr<IUnknown>> shaderOwners;
 
 // What the game's passes bound, for the fill.
 std::mutex captureMutex;
@@ -304,16 +265,6 @@ ID3D11UnorderedAccessView* fogOutput(ID3D11Resource* fog)
     fogAccessOf = fog;
 
     return fogAccess.Get();
-}
-
-std::optional<Role> roleOf(IUnknown* shader)
-{
-    if (!shader) return std::nullopt;
-
-    std::shared_lock lock(shaderMutex);
-    const auto found = roles.find(shader);
-
-    return found != roles.end() ? std::optional(found->second) : std::nullopt;
 }
 
 // Copies the game's constant buffer `source` into `copy` on `context`, when it has the expected size.
@@ -563,9 +514,8 @@ void logSkyParameters()
 // The physical sky in place of the game's sky draw, with its vertex shader and bindings. A sky with
 // the sun's sprite also gives its constants to the next fill: the sun the game lights its sky with,
 // and how overcast it draws it.
-bool drawSky(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, bool sprite)
+bool drawSky(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, bool sprite, ID3D11PixelShader* gameShader)
 {
-    ComPtr<ID3D11PixelShader> gameShader;
     std::array<ID3D11ShaderResourceView*, 2> gameViews{};
     bool copied{};
     {
@@ -581,7 +531,6 @@ bool drawSky(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, bo
                 && copyConstants(context, copies.skyObject.Get(), object.Get(), ObjectSize);
         }
 
-        context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
         context->PSGetShaderResources(SkyParameterSlot, static_cast<UINT>(gameViews.size()), gameViews.data());
         ID3D11ShaderResourceView* const views[]{skyParameters.view.Get(), skyView.view.Get()};
         context->PSSetShader(skyShaders[sprite ? 1 : 0].Get(), nullptr, 0);
@@ -591,7 +540,7 @@ bool drawSky(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, bo
     performance::Timed timed(context, performance::Pass::Sky);
     context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
     timed.end();
-    context->PSSetShader(gameShader.Get(), nullptr, 0);
+    context->PSSetShader(gameShader, nullptr, 0);
     context->PSSetShaderResources(SkyParameterSlot, static_cast<UINT>(gameViews.size()), gameViews.data());
     for (auto* view : gameViews)
         if (view) view->Release();
@@ -668,10 +617,6 @@ void detach() noexcept
         fogPassSeen = false;
         skySunSeen = false;
     }
-
-    std::unique_lock lock(shaderMutex);
-    roles.clear();
-    shaderOwners.clear();
 }
 
 void configure(const Configuration& configuration) noexcept
@@ -734,55 +679,30 @@ void resourceDestroyed(ID3D11Resource* resource) noexcept
     }
 }
 
-void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
-{
-    const auto checksum = dxbcHashOf(code, size);
-    if (!checksum || !shader) return;
-
-    const auto text = toHex(*checksum);
-    for (const auto& known : Shaders)
-    {
-        if (text != known.checksum) continue;
-
-        try
-        {
-            std::unique_lock lock(shaderMutex);
-            roles[shader] = known.role;
-            shaderOwners.emplace_back(shader);
-        }
-        catch (...)
-        {
-            return;
-        }
-
-        return;
-    }
-}
-
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
     if (!gameFog.load(std::memory_order_relaxed) || call.indexed || call.instances != 1 || (call.count != 3 && call.count != FogPassVertices))
         return false;
 
     try
     {
-        ComPtr<ID3D11PixelShader> shader;
-        context->PSGetShader(shader.GetAddressOf(), nullptr, nullptr);
-        const auto role = roleOf(shader.Get());
-        if (!role) return false;
+        const auto* row = shader.row();
+        if (!row) return false;
 
+        // The sun inside the shadow range binds the shadow map and its cascades; the resolves with TppTonemap
+        // are the first to read the fog, after the shadow map is drawn.
         const bool fog = active.load(std::memory_order_relaxed), physical = fog && physicalLook.load(std::memory_order_relaxed);
-        switch (*role)
+        switch (row->pass)
         {
-        case Role::FogPass: return call.count == FogPassVertices && drawFogPass(context, call, fog);
-        case Role::Sun:
-            if (fog) noteSun(context);
+        case GamePass::FogPass: return call.count == FogPassVertices && drawFogPass(context, call, fog);
+        case GamePass::Sun:
+            if (fog && row->isShadowMapped) noteSun(context);
             return false;
-        case Role::Resolve:
-            if (fog) fill(context, physical);
+        case GamePass::Resolve:
+            if (fog && row->hasTppTonemap) fill(context, physical);
             return false;
-        case Role::SkyWithSprite: return physical && drawSky(context, call, true);
-        case Role::SkyWithoutSprite: return physical && drawSky(context, call, false);
+        case GamePass::Sky: return physical && drawSky(context, call, row->hasSprite, shader.object());
+        default: return false;
         }
     }
     catch (const std::exception& error)

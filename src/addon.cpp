@@ -27,6 +27,7 @@
 #include "frame_log.hpp"
 #include "fxui/fxui.hpp"
 #include "game_loop.hpp"
+#include "game_shaders.hpp"
 #include "log.hpp"
 #include "menu.hpp"
 #include "modules.hpp"
@@ -158,6 +159,7 @@ void detachEffects()
     upscaler::detach();
     modules::detach();
     hdr::detach();
+    game_shaders::forget();
 }
 
 void onDestroyCommandQueue(command_queue* queue)
@@ -181,21 +183,10 @@ void onInitPipeline(device* device, pipeline_layout, uint32_t count, const pipel
         {
             // Shaders HDR made from patched code are known by the game's own.
             const auto [code, size] = hdr::originalOf(shader->code, shader->code_size);
-            auto* created = reinterpret_cast<IUnknown*>(pipeline.handle);
-            upscaler::shaderCreated(code, size, created);
-            sun_light_pass::shaderCreated(code, size, created);
-            local_light_pass::shaderCreated(code, size, created);
-            indirect_light_pass::shaderCreated(code, size, created);
-            ray_tracing::pixelShaderCreated(code, size, created);
-            local_lights::pixelShaderCreated(code, size, created);
-            atmosphere::shaderCreated(code, size, created);
-            hdr::shaderCreated(code, size, created);
+            game_shaders::pixelShaderCreated(code, size, reinterpret_cast<IUnknown*>(pipeline.handle));
         }
         else if (subobjects[i].type == pipeline_subobject_type::vertex_shader)
-        {
-            ui_redirect::vertexShaderCreated(shader->code, shader->code_size, reinterpret_cast<IUnknown*>(pipeline.handle));
-            ray_tracing::vertexShaderCreated(shader->code, shader->code_size, reinterpret_cast<IUnknown*>(pipeline.handle));
-        }
+            game_shaders::vertexShaderCreated(shader->code, shader->code_size, reinterpret_cast<IUnknown*>(pipeline.handle));
     }
 }
 
@@ -211,16 +202,17 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
     if (hiddenUi(list)) return true;
 
     auto* context = native(list);
+    game_shaders::DrawnShader shader(context);
     // HDR's work comes first, as others may make the draw: the resolve's curve, the depth of field's
     // float copy. A draw through an sRGB view of the scene (the resolve) writes linear colour, which
     // is encoded once drawn, by whoever draws it.
-    const bool encode = hdr::beforeDraw(context, call);
+    const bool encode = hdr::beforeDraw(context, call, shader);
     // The global illumination only notes what it needs (the sky's probe constants).
-    ray_tracing::draw(context, call);
+    ray_tracing::draw(context, call, shader);
     // While upscaling, the game's grading draws at the output size, whoever draws it.
-    if (upscaler::beforePostDraw(context, call))
+    if (upscaler::beforePostDraw(context, call, shader))
     {
-        if (!hdr::draw(context, call)) context->DrawInstanced(vertices, instances, first, firstInstance);
+        if (!hdr::draw(context, call, shader)) context->DrawInstanced(vertices, instances, first, firstInstance);
         upscaler::afterPostDraw(context);
 
         return true;
@@ -228,8 +220,8 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
 
     // The fog notes the sun pass and fills its texture before the resolve, whoever draws them. GTVBAO
     // notes the sun pass's G-buffer before the sun shadows may draw that pass themselves.
-    const bool drawn = atmosphere::draw(context, call) || indirect_light_pass::draw(context, call) || sun_light_pass::draw(context, call)
-        || hdr::draw(context, call) || upscaler::draw(context, call);
+    const bool drawn = atmosphere::draw(context, call, shader) || indirect_light_pass::draw(context, call, shader)
+        || sun_light_pass::draw(context, call, shader) || hdr::draw(context, call, shader) || upscaler::draw(context, call, shader);
     if (!encode) return drawn;
 
     if (!drawn) context->DrawInstanced(vertices, instances, first, firstInstance);
@@ -241,11 +233,13 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
 bool onDrawIndexed(command_list* list, uint32_t indices, uint32_t instances, uint32_t first, int32_t offset, uint32_t firstInstance)
 {
     const ui_redirect::DrawCall call{indices, instances, first, firstInstance, offset, true};
+    auto* context = native(list);
+    game_shaders::DrawnShader shader(context);
     // The global illumination notes the camera and the terrain's inputs from the draws; it never takes one.
-    ray_tracing::draw(native(list), call);
+    ray_tracing::draw(context, call, shader);
     // The ray-traced lights' draws before the local light pass's, which leaves a light the rays shadow alone.
-    return hiddenUi(list) || local_lights::draw(native(list), call) || local_light_pass::draw(native(list), call)
-        || upscaler::draw(native(list), call);
+    return hiddenUi(list) || local_lights::draw(context, call, shader) || local_light_pass::draw(context, call, shader)
+        || upscaler::draw(context, call, shader);
 }
 
 bool onClearRenderTarget(command_list* list, resource_view view, const float color[4], uint32_t rects, const rect*)
@@ -266,11 +260,11 @@ bool onClearDepthStencil(command_list* list, resource_view view, const float* de
 
 void onBindPipeline(command_list* list, pipeline_stage stages, pipeline pipeline)
 {
-    if ((stages & pipeline_stage::vertex_shader) == pipeline_stage::vertex_shader)
-    {
-        ui_redirect::vertexShaderBound(native(list), reinterpret_cast<IUnknown*>(pipeline.handle));
-        ray_tracing::vertexShaderBound(native(list), reinterpret_cast<IUnknown*>(pipeline.handle));
-    }
+    if ((stages & pipeline_stage::vertex_shader) != pipeline_stage::vertex_shader) return;
+
+    const auto kind = game_shaders::vertexShaderOf(reinterpret_cast<IUnknown*>(pipeline.handle));
+    ui_redirect::vertexShaderBound(native(list), kind == game_shaders::VertexShader::Draw2D);
+    ray_tracing::vertexShaderBound(native(list), kind);
 }
 
 // ReShade reports bound samplers and views after binding them; rebind biased samplers, and HDR's

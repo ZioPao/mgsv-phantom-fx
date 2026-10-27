@@ -5,14 +5,13 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <string_view>
 
-// The game's point and spot light shaders of its light pass (docs/DEVELOPMENT.md, "Ray-traced lights"),
-// and what their constants (game_constants::LampLightConstants) say. Lamp contact shadows (lamp_contact_shadows.hpp) and the ray-traced lights
-// (local_lights.hpp) both recognise them.
+// The game's point and spot lights as the shaders of its light pass draw them (docs/DEVELOPMENT.md,
+// "Ray-traced lights"; each shader's row is in game_shaders.hpp), and what their constants
+// (game_constants::LampLightConstants) say. Lamp contact shadows (lamp_contact_shadows.hpp) and the
+// ray-traced lights (local_lights.hpp) both work with them.
 namespace phantom_fx::game_lights
 {
 enum class Shape : std::uint8_t { Point, Spot };
@@ -27,7 +26,6 @@ enum class Twin : std::uint8_t { PointNA, SpotNA, MaskedSpotNA, Point2, Spot2, M
 
 struct GameLight
 {
-    const char* checksum;
     Shape shape;
     Falloff falloff;
     Twin twin;
@@ -36,55 +34,9 @@ struct GameLight
     bool flashlight{};   // The weapon flashlights' shader: every light it drew in the captures was one
 };
 
-// Every point and spot light shader of the game's light pass.
-constexpr GameLight GameLights[]{
-    {"e61cc726c5c877555261f03dbc4aa967", Shape::Point, Falloff::Sixteenth, Twin::PointNA, true, true},       // Lighting_Point_NA
-    {"32bdd328651cf4f11ebcc47c0b65dfde", Shape::Point, Falloff::Sixteenth, Twin::PointNA, true, false},      // Lighting_Point_NA_NShdw
-    {"f037f71a002e42f0cb07ad2768f7b8ac", Shape::Point, Falloff::Sixteenth, Twin::PointNA, false, true},      // Lighting_Point_NA_NoSpec
-    {"259fff504d9caef06a467ff6ce9ee1bf", Shape::Point, Falloff::Sixteenth, Twin::PointNA, false, false},     // Lighting_Point_NA_NoSpec_NShdw
-    {"57b7365fcfb89c3f91fffcebf1a6b1e5", Shape::Spot, Falloff::Sixteenth, Twin::SpotNA, true, true},         // Lighting_Spot_NA
-    {"dddab560572d7352181cd83f00f6dd63", Shape::Spot, Falloff::Sixteenth, Twin::SpotNA, true, false},        // Lighting_Spot_NA_NShdw
-    {"7d2ed256fcff999707444bb115321c7f", Shape::Spot, Falloff::Sixteenth, Twin::SpotNA, false, true},        // Lighting_Spot_NA_NoSpec
-    {"91bc5dd518df1368e60d53c5f065e9f4", Shape::Spot, Falloff::Sixteenth, Twin::SpotNA, false, false},       // Lighting_Spot_NA_NoSpec_NShdw
-    {"d53793289e8c2824800876d8525aab2c", Shape::Spot, Falloff::Sixteenth, Twin::MaskedSpotNA, true, true},   // Lighting_Spot_NA_Mask
-    {"dcc81c5f2c97e20003a27a9e7db54376", Shape::Spot, Falloff::Sixteenth, Twin::MaskedSpotNA, true, false},  // Lighting_Spot_NA_Mask_NShdw
-    {"a435549d3334a5715c165a68083ea66e", Shape::Spot, Falloff::Sixteenth, Twin::MaskedSpotNA, false, true},  // Lighting_Spot_NA_Mask_NSpec
-    {"fd570742642f09e699d193ffb02bf0df", Shape::Spot, Falloff::Sixteenth, Twin::MaskedSpotNA, false, false, true}, // Lighting_Spot_NA_Mask_NSpec_NShdw (flashlights)
-    {"afbc12167037e4e0d653da184c7e3e82", Shape::Point, Falloff::Quartic, Twin::Point2, true, true},          // SSLighting2_Point
-    {"4eb687f92330ee7b11ccf8e32950e4a9", Shape::Point, Falloff::Quartic, Twin::Point2, true, false},         // SSLighting2_Point_NoShadow
-    {"a1c56a0978c706222ebeacbf6fc9ebe4", Shape::Point, Falloff::Quartic, Twin::Point2, false, true},         // SSLighting2_Point_NoSpec
-    {"e9cd14a10e3f1df895cb6799c232f99e", Shape::Point, Falloff::Quartic, Twin::Point2, false, false},        // SSLighting2_Point_NoSpec_NoShadow
-    {"ac0947110cb0f17f4ffe930a6a11617d", Shape::Spot, Falloff::Quartic, Twin::Spot2, true, true},            // SSLighting2_Spot
-    {"74063ef2a991625184fdf283ba58c43f", Shape::Spot, Falloff::Quartic, Twin::Spot2, true, false},           // SSLighting2_Spot_NoShadow
-    {"cdc559ec2ca4d52a54697cf5ca023667", Shape::Spot, Falloff::Quartic, Twin::Spot2, false, true},           // SSLighting2_Spot_NoSpec
-    {"a823ffb58661c508e6270227d4910c91", Shape::Spot, Falloff::Quartic, Twin::Spot2, false, false},          // SSLighting2_Spot_NoSpec_NoShadow
-    {"9ead0f83217db6af698f860fd3233441", Shape::Spot, Falloff::Quartic, Twin::MaskedSpot2, true, true},      // SSLighting2_Spot_Mask
-    {"2d985165a56e0622d42f086a28c305d0", Shape::Spot, Falloff::Quartic, Twin::MaskedSpot2, true, false},     // SSLighting2_Spot_Mask_NShdw
-    {"fa6ad11cfc35a2281a22b92c1a2aa6db", Shape::Spot, Falloff::Quartic, Twin::MaskedSpot2, false, true},     // SSLighting2_Spot_Mask_NSpec
-    {"74872741b699fdefa13ae71349f41ec9", Shape::Spot, Falloff::Quartic, Twin::MaskedSpot2, false, false},    // SSLighting2_Spot_Mask_NSpec_NShdw
-};
-
 constexpr bool isTwin(const GameLight& light)
 {
     return light.specular && !light.shadowMap;
-}
-
-static_assert(
-    [] {
-        std::array<int, static_cast<std::size_t>(Twin::Count)> twins{};
-        for (const auto& light : GameLights)
-            if (isTwin(light)) ++twins[static_cast<std::size_t>(light.twin)];
-
-        return std::ranges::all_of(twins, [](int count) { return count == 1; });
-    }(),
-    "every kind of light needs exactly one twin");
-
-// The light shader with this checksum (toHex's form); null for any other shader.
-inline const GameLight* findGameLight(std::string_view checksum)
-{
-    const auto found = std::find_if(std::begin(GameLights), std::end(GameLights), [&](const GameLight& light) { return checksum == light.checksum; });
-
-    return found != std::end(GameLights) ? found : nullptr;
 }
 
 // How far a light reaches when its falloff does not end, metres.

@@ -1,11 +1,11 @@
 #pragma once
 
+#include "game_shaders.hpp"
 #include "phantom_fx_settings.hpp"
 #include "ui_redirect.hpp"
 
 #include <d3d11.h>
 #include <wrl/client.h>
-#include <cstddef>
 
 // The game's indirect light passes (docs/DEVELOPMENT.md, "Ambient occlusion"): the sky light pass binds
 // the G-buffer normals, the upscale writes the indirect light into the diffuse light buffer, and the
@@ -31,10 +31,9 @@ bool failed() noexcept;
 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> specularTarget(UINT width, UINT height) noexcept;
 
 // ---- Recording, on the game's render and worker threads ----
-void shaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept;
 // Before a draw. The upscale and the resolve, while an effect changes them, are drawn here instead;
 // returns true when the game's draw must be skipped.
-bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept;
+bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
 // Each present. The game records a whole frame between presents, so all of a frame's passes see the
 // same effects.
 void present() noexcept;

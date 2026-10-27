@@ -5,18 +5,13 @@
 #include "game_constants.hpp"
 #include "log.hpp"
 #include "render_scale.hpp"
-#include "shader_bytecode.hpp"
 
 #include <array>
 #include <atomic>
-#include <cctype>
 #include <cmath>
 #include <memory>
 #include <mutex>
-#include <shared_mutex>
 #include <string>
-#include <string_view>
-#include <unordered_map>
 
 namespace phantom_fx::ui_redirect
 {
@@ -76,9 +71,6 @@ struct BoundShader
 
 std::atomic<unsigned> outputWidth{}, outputHeight{};
 
-// The 2D pass's vertex shaders; holding them keeps their addresses from being reused.
-std::shared_mutex shaderMutex;
-std::unordered_map<IUnknown*, ComPtr<IUnknown>> draw2DShaders;
 // The game has 24 deferred contexts and the immediate one.
 std::array<BoundShader, 64> boundShaders;
 std::atomic<bool> loggedDraw{};
@@ -271,30 +263,9 @@ BoundShader* slotOf(ID3D11DeviceContext* context, bool add)
 }
 }
 
-void vertexShaderCreated(const void* code, std::size_t size, IUnknown* shader) noexcept
+void vertexShaderBound(ID3D11DeviceContext* context, bool isDraw2D) noexcept
 {
-    if (!code || !shader || !draw2DSource(std::string_view(static_cast<const char*>(code), size), "_vs.hlsl")) return;
-
-    try
-    {
-        std::unique_lock lock(shaderMutex);
-        draw2DShaders.try_emplace(shader, shader);
-    }
-    catch (...)
-    {
-    }
-}
-
-void vertexShaderBound(ID3D11DeviceContext* context, IUnknown* shader) noexcept
-{
-    bool draw2D{};
-    if (shader)
-    {
-        std::shared_lock lock(shaderMutex);
-        draw2D = draw2DShaders.contains(shader);
-    }
-
-    if (auto* slot = slotOf(context, draw2D)) slot->draw2D.store(draw2D, std::memory_order_relaxed);
+    if (auto* slot = slotOf(context, isDraw2D)) slot->draw2D.store(isDraw2D, std::memory_order_relaxed);
 }
 
 void contextFinished(ID3D11DeviceContext* context) noexcept
@@ -334,9 +305,6 @@ void detach() noexcept
         scene.Reset();
         device.Reset();
     }
-
-    std::unique_lock lock(shaderMutex);
-    draw2DShaders.clear();
 }
 
 void setOutputSize(unsigned width, unsigned height) noexcept
@@ -397,12 +365,8 @@ bool draw2D(ID3D11DeviceContext* context, const DrawCall& call) noexcept
         rememberScene(views[0].Get());
 
         if (!loggedDraw.exchange(true))
-        {
-            std::shared_lock lock(shaderMutex);
             log("The 2D pass draws at " + std::to_string(output->width) + "x" + std::to_string(output->height) + " while the engine renders at "
-                + std::to_string(target.Width) + "x" + std::to_string(target.Height) + "; " + std::to_string(draw2DShaders.size())
-                + " of its vertex shaders are known.");
-        }
+                + std::to_string(target.Width) + "x" + std::to_string(target.Height) + ".");
 
         return true;
     }

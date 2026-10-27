@@ -56,7 +56,7 @@ documentation and licenses are in `PhantomFX/`.
 ctest --test-dir build/release
 ```
 
-This runs two tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
+This runs three tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
 (defaults, round trip, clamping, invalid files and values), the mode maths (render scales, texture LOD
 bias) and the camera maths (main-view recognition, jitter direction and units, reprojection, camera
 cuts, jitter phases and the Halton sequence, the camera frame generation gets). The main view and a sun
@@ -66,7 +66,11 @@ reads only its own writes and only at their size, and each effect keeps only wha
 `tests/scene_description_tests.cpp`: what the ray-traced scene takes of a model file, from small FMDL
 files it writes: the mesh roles of each case measured in the game (a tarp's stand-in, a pylon's
 lattice, glass, sky domes, inner walls, decals, hair, bushes), what each role gives its rays, a
-cut-out mesh's texture, unreadable files and skins. Everything else is checked in the game.
+cut-out mesh's texture, unreadable files and skins. `tests/game_shaders_tests.cpp`: the game's shaders
+on a WARP device, each created from a DXBC header carrying a row's checksum: a sun shader known by its
+checksum and drawn with it, unknown and missing shaders, every copy of one shader known, code that is not
+DXBC, the first of a row's shaders kept (the ray-traced lights' twins), everything let go at device
+teardown, and vertex shaders by their source name. Everything else is checked in the game.
 
 ## Package a release
 
@@ -123,7 +127,7 @@ what draws it, when that is the feature's own.
 
 | Folder | What draws it |
 | --- | --- |
-| `upscaling/` | `upscaler.*`: DLSS or FSR before the grading, in place of FXAA: pass recognition, jitter, frames, render size plan, NGX, composite, the grading at the output size, texture LOD bias. `upscaler_shaders.hpp`: the upscaler's inputs and motion vectors, composite with RCAS and debug views, stretch fallback. `fsr_upscaler.*`: FSR upscaling on Direct3D 12. `fxaa.*`: hook on the FXAA plugin, the FXAA pass at any post processing setting |
+| `upscaling/` | `upscaler.*`: DLSS or FSR before the grading, in place of FXAA: jitter, frames, render size plan, NGX, composite, the grading at the output size, texture LOD bias. `upscaler_shaders.hpp`: the upscaler's inputs and motion vectors, composite with RCAS and debug views, stretch fallback. `fsr_upscaler.*`: FSR upscaling on Direct3D 12. `fxaa.*`: hook on the FXAA plugin, the FXAA pass at any post processing setting |
 | `frame_generation/` | `presenter.*`: the game's stand-in swap chain, presented through Direct3D 12. `frame_generation.*`: DLSS Frame Generation, Streamline, its inputs and camera, Reflex. `fsr_frame_generation.*`: AMD's swap chain and its inputs |
 | `sun/` | Settings only: the sun size the soft and ray-traced shadows and the global illumination share |
 | `soft_shadows/` | Settings only: a mode of the sun light pass's shaders (`passes/sun_light_pass.*`) |
@@ -147,10 +151,10 @@ what draws it, when that is the feature's own.
 | File | Purpose |
 | --- | --- |
 | `src/passes/sun_light_pass.*` | The game's sun light pass drawn with replacement shaders, with soft shadows, the sun's contact shadows and the ray-traced shadow composed in. `sun_light_pass_shaders.hpp`: the game's sun light shaders rebuilt with them |
-| `src/passes/local_light_pass.*` | The game's point and spot light draws, with the lamps' contact shadows and soft shadows composed in: the light shaders by checksum, the marking and lighting draws |
+| `src/passes/local_light_pass.*` | The game's point and spot light draws, with the lamps' contact shadows and soft shadows composed in: the marking and lighting draws |
 | `src/passes/contact_shadow_trace.*` | Bend Studio's screen-space shadow trace, for the sun's and the lamps' contact shadows. `contact_shadow_trace_shaders.hpp`: Bend's trace ported to FXC |
 | `third_party/bend_sss/bend_sss_cpu.h` | Bend Studio's dispatch layout, unchanged (Apache License 2.0) |
-| `src/passes/indirect_light_pass.*` | The game's sky light, upscale and resolve: pass recognition, the G-buffer notes, the resolve's white occlusion and diffuse light, the diagnostics views, the ray-traced scene's notes. `indirect_light_pass_shaders.hpp`: the diagnostics views |
+| `src/passes/indirect_light_pass.*` | The game's sky light, upscale and resolve: the G-buffer notes, the resolve's white occlusion and diffuse light, the diagnostics views, the ray-traced scene's notes. `indirect_light_pass_shaders.hpp`: the diagnostics views |
 | `src/passes/visibility_bitmask.*` | The visibility bitmask march GTVBAO and SSILVB share: the depth prefilter, the march, the denoiser. `visibility_bitmask_shaders.hpp`: the march (GTVBAO from three-gtvbao, SSILVB's light as SSRT3 gathers it), XeGTAO's noise and denoiser |
 | `src/passes/ray_tracing/ray_tracing.*` | The ray-traced scene's frame on Direct3D 11: the kick, the waits, the shared textures the global illumination and the ray-traced shadows hand back |
 | `src/passes/ray_tracing/gi_renderer.*` | The Direct3D 12 side: the device, the scene's frame, each feature's passes recorded in turn |
@@ -173,7 +177,8 @@ what draws it, when that is the feature's own.
 | `src/game_constants.hpp` | The game's constant buffers by name (see "Constant buffers"): the system, scene, sun and lamp light, material, object, bones and probe constants, each with its slot, and a light pass's view space in the world |
 | `src/constant_capture.cpp`, `src/constant_capture.hpp` | The constant capture: what each of the game's threads last wrote to the constant buffers the contact shadows and the ray tracing read, copied at the game's unmap after the upscaler's jitter, read by type and only at the size written |
 | `src/camera.cpp`, `src/camera.hpp` | The main camera in the scene constants: main-view recognition, jitter, reprojection, camera cuts |
-| `src/game_lights.hpp` | The game's point and spot light shaders, for the local light pass and the ray-traced lights: the checksums, a light's range, its sphere on screen |
+| `src/game_shaders.cpp`, `src/game_shaders.hpp` | The game's shaders the add-on knows, in one table: each pixel shader's checksum, the game pass it draws and what tells it apart from its pass's others (a sun's shadow map, a light's kind); its vertex shaders by source name (the 2D pass, models, terrain). Every copy the game makes is known; a draw looks its pixel shader up once (`DrawnShader`) |
+| `src/game_lights.hpp` | What a point or spot light shader is (its row in `game_shaders.hpp`), for the local light pass and the ray-traced lights: its kind and twin, a light's range, its sphere on screen |
 | `src/device_check.cpp`, `src/device_check.hpp` | Lets the game start under ReShade (see below); the build check |
 | `src/game_code.hpp` | The game's image, checks of its code, hooks (MinHook) and code patches |
 | `src/game_memory.hpp` | Guarded reads of the game's objects |
