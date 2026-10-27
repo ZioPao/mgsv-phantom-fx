@@ -235,7 +235,7 @@ State read(std::uint8_t* vars)
 
 std::string allowFobCharacters() noexcept
 {
-    if (!supportedBuild()) return "Unknown game build; Ocelot and Quiet stay FOB characters.";
+    if (!isSupportedGameBuild()) return "Unknown game build; Ocelot and Quiet stay FOB characters.";
 
     auto* const check = game_code::image() + FobCheckRva;
     if (std::memcmp(check, FobCheckCode, sizeof(FobCheckCode))) return "The player update has unexpected code; Ocelot and Quiet stay FOB characters.";
@@ -247,7 +247,7 @@ std::string allowFobCharacters() noexcept
 
 bool supported() noexcept
 {
-    static const bool expected = supportedBuild() && game_code::matches(Checked);
+    static const bool expected = isSupportedGameBuild() && game_code::matches(Checked);
 
     return expected;
 }

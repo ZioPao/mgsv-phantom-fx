@@ -11,7 +11,7 @@
 #include <string_view>
 
 // The game's point and spot light shaders of its light pass (docs/DEVELOPMENT.md, "Ray-traced lights"),
-// and the constants they read. Lamp contact shadows (shadows.hpp) and the ray-traced lights
+// and the constants they read. Lamp contact shadows (lamp_contact_shadows.hpp) and the ray-traced lights
 // (local_lights.hpp) both recognise them.
 namespace phantom_fx::game_lights
 {

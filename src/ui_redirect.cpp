@@ -2,7 +2,7 @@
 
 #include "camera.hpp"
 #include "d3d11_helpers.hpp"
-#include "hdr.hpp"
+#include "features/hdr/hdr.hpp"
 #include "log.hpp"
 #include "render_scale.hpp"
 #include "shader_bytecode.hpp"

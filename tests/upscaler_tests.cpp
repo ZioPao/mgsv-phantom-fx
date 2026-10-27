@@ -1,8 +1,9 @@
 #include "camera.hpp"
-#include "gi_lighting.hpp"
+#include "features/global_illumination/gi_lighting.hpp"
+#include "frame_latch.hpp"
+#include "phantom_fx_settings.hpp"
 #include "range_allocator.hpp"
 #include "shader_bytecode.hpp"
-#include "upscaler_settings.hpp"
 
 #include <Windows.h>
 #include <d3d11.h>
@@ -62,75 +63,163 @@ void settingsPersist(const fs::path& root)
 {
     const auto path = root / L"PhantomFX.ini";
     const auto first = loadSettings(path);
-    expect(first == firstLaunchSettings() && first.upscaler == Upscaler::Dlss && first.mode == Mode::Quality
+    expect(first == firstLaunchSettings() && first.upscaling.upscaler == Upscaler::Dlss && first.upscaling.mode == Mode::Quality
             && presetOf(first) == EffectPreset::ScreenSpace,
         "A first launch upscales with DLSS Quality and the screen-space preset.");
     expect(!fs::exists(path), "Loading defaults must not create a settings file.");
 
-    const Settings chosen{.upscaler = Upscaler::Fsr, .mode = Mode::Off, .preset = Preset::J, .sharpness = 0.5f, .unlockFps = true, .frameGeneration = FrameGeneration::X3,
-        .softShadows = true, .sunSize = 1.25f, .sunScreenSpaceShadows = true, .lightScreenSpaceShadows = true, .rayTracedShadows = true,
-        .vanillaShadowsWithRayTracing = true, .rayTracedLights = true, .rayQuality = 8, .flashlightBrightness = 3.5f, .ambientOcclusion = true, .occlusionRadius = 2, .occlusionStrength = 1.5f, .indirectLight = true, .indirectLightRadius = 3,
-        .indirectLightStrength = 0.5f, .globalIlluminationRays = 4, .volumetricFog = true, .atmosphereLook = AtmosphereLook::Physical, .atmosphereHaze = 0.5f};
+    const Settings chosen{.upscaling = {.upscaler = Upscaler::Fsr, .mode = Mode::Off, .dlssPreset = Preset::J, .sharpness = 0.5f},
+        .frameGeneration = {.mode = FrameGenerationMode::X3}, .sun = {.diameterDegrees = 1.25f}, .rayTracedShadows = {.on = true, .withGameShadows = true}, .softShadows = {.on = true},
+        .sunContactShadows = {.on = true}, .rayTracedLights = {.on = true, .shadowRaysPerPixel = 8, .flashlightBrightness = 3.5f},
+        .lampContactShadows = {.on = true}, .lampSoftShadows = {.on = true},
+        .contactShadowShape = {.contrast = 2, .reachPixels = 40, .thickness = 0.01f, .fadeMetres = 300}, .globalIllumination = {.raysPerLightPixel = 4}, .ambientOcclusion = {.on = true, .radiusMetres = 2, .strength = 1.5f},
+        .indirectLight = {.on = true, .radiusMetres = 3, .strength = 0.5f}, .volumetricFog = {.on = true, .look = AtmosphereLook::Physical, .haze = 0.5f},
+        .frameRate = {.unlocked = true}};
     saveSettings(path, chosen);
     expect(loadSettings(path) == chosen,
         "Restart restores the upscaler, mode, preset, sharpening, frame rate unlock, frame generation, soft, screen-space and ray-traced "
-        "shadows, GTVBAO, SSILVB, the global illumination's rays and the volumetric fog.");
+        "shadows, the contact shadows' shape, GTVBAO, SSILVB, the global illumination's rays and the volumetric fog.");
     write(path, "frame_generation=dynamic\n");
-    expect(loadSettings(path).frameGeneration == FrameGeneration::Dynamic, "Dynamic frame generation is read back.");
+    expect(loadSettings(path).frameGeneration.mode == FrameGenerationMode::Dynamic, "Dynamic frame generation is read back.");
     write(path, "frame_generation=fsr\n");
-    expect(loadSettings(path).frameGeneration == FrameGeneration::Fsr, "FSR frame generation is read back.");
+    expect(loadSettings(path).frameGeneration.mode == FrameGenerationMode::Fsr, "FSR frame generation is read back.");
     write(path, "frame_generation=8x\n");
-    expect(loadSettings(path).frameGeneration == FrameGeneration::Off, "An unknown multiplier leaves frame generation off.");
+    expect(loadSettings(path).frameGeneration.mode == FrameGenerationMode::Off, "An unknown multiplier leaves frame generation off.");
 
     write(path, "# DLSS\r\nunknown=future\r\n mode = dlaa \r\npreset=13\r\nbroken\r\n");
-    expect(loadSettings(path) == Settings{.mode = Mode::Dlaa, .preset = Preset::M}, "CRLF, whitespace and unknown keys keep the valid fields.");
+    expect(loadSettings(path) == Settings{.upscaling = {.mode = Mode::Dlaa, .dlssPreset = Preset::M}}, "CRLF, whitespace and unknown keys keep the valid fields.");
     write(path, "upscaler=xess\nmode=ultra\npreset=7\nsharpness=nan\ncustom_scale=inf\n");
     expect(loadSettings(path) == Settings{}, "Unknown upscalers and modes, reserved presets and invalid numbers fall back to defaults.");
     write(path, "sharpness=-1\n");
-    expect(loadSettings(path).sharpness == 0, "Negative sharpening turns it off.");
+    expect(loadSettings(path).upscaling.sharpness == 0, "Negative sharpening turns it off.");
     write(path, "sharpness=7\n");
-    expect(loadSettings(path).sharpness == Settings::MaxSharpness, "Sharpening is clamped.");
+    expect(loadSettings(path).upscaling.sharpness == 1, "Sharpening is clamped.");
     write(path, "custom_scale=0.1\nmip_bias_offset=-5\n");
-    expect(loadSettings(path).customScale == Settings::MinScale && loadSettings(path).mipBiasOffset == Settings::MinMipBias,
+    const auto clamped = loadSettings(path).upscaling;
+    expect(clamped.customRenderScale == Upscaling::MinRenderScale && clamped.textureBiasOffset == Upscaling::MinTextureBiasOffset,
         "The custom scale and the texture bias offset are clamped.");
     write(path, "ambient_occlusion=gtvbao\nocclusion_radius=10\nocclusion_strength=-1\n");
-    const auto occlusion = loadSettings(path);
-    expect(!occlusion.ambientOcclusion && occlusion.occlusionRadius == Settings::MaxOcclusionRadius && occlusion.occlusionStrength == 0,
+    const auto occlusion = loadSettings(path).ambientOcclusion;
+    expect(!occlusion.on && occlusion.radiusMetres == 4 && occlusion.strength == 0,
         "An invalid toggle leaves GTVBAO off, and its radius and strength are clamped.");
     write(path, "soft_shadows=on\nsun_size=20\n");
     const auto shadows = loadSettings(path);
-    expect(!shadows.softShadows && shadows.sunSize == Settings::MaxSunSize, "An invalid toggle leaves soft shadows off, and the sun size is clamped.");
+    expect(!shadows.softShadows.on && shadows.sun.diameterDegrees == 4, "An invalid toggle leaves soft shadows off, and the sun size is clamped.");
     write(path, "indirect_light=yes\nindirect_light_radius=0\nindirect_light_strength=9\n");
-    const auto light = loadSettings(path);
-    expect(!light.indirectLight && light.indirectLightRadius == Settings::MinIndirectLightRadius
-            && light.indirectLightStrength == Settings::MaxIndirectLightStrength,
+    const auto light = loadSettings(path).indirectLight;
+    expect(!light.on && light.radiusMetres == 0.25f && light.strength == 3,
         "An invalid toggle leaves SSILVB off, and its radius and strength are clamped.");
 
-    const Settings upscaling{.mode = Mode::Custom, .preset = Preset::K, .sharpness = 0.25f, .customScale = 0.75f, .mipBiasOffset = -0.5f};
+    const Settings upscaling{.upscaling = {.mode = Mode::Custom, .dlssPreset = Preset::K, .sharpness = 0.25f, .customRenderScale = 0.75f, .textureBiasOffset = -0.5f}};
     saveSettings(path, upscaling);
     expect(loadSettings(path) == upscaling, "Restart restores an upscaling mode with its custom scale and texture bias offset.");
 
-    for (const auto& invalid : {Settings{.upscaler = Upscaler::Count}, Settings{.mode = Mode::Count}, Settings{.preset = static_cast<Preset>(7)},
-             Settings{.sharpness = std::numeric_limits<float>::quiet_NaN()}, Settings{.sharpness = 2}, Settings{.customScale = 2},
-             Settings{.mipBiasOffset = 3}, Settings{.frameGeneration = FrameGeneration::Count}, Settings{.occlusionRadius = 0},
-             Settings{.sunSize = 0}, Settings{.occlusionStrength = 4}, Settings{.indirectLightRadius = 5}, Settings{.indirectLightStrength = -1}})
+    for (const auto& invalid : {Settings{.upscaling = {.upscaler = Upscaler::Count}}, Settings{.upscaling = {.mode = Mode::Count}},
+             Settings{.upscaling = {.dlssPreset = static_cast<Preset>(7)}}, Settings{.upscaling = {.sharpness = std::numeric_limits<float>::quiet_NaN()}},
+             Settings{.upscaling = {.sharpness = 2}}, Settings{.upscaling = {.customRenderScale = 2}}, Settings{.upscaling = {.textureBiasOffset = 3}},
+             Settings{.frameGeneration = {.mode = FrameGenerationMode::Count}}, Settings{.sun = {.diameterDegrees = 0}},
+             Settings{.globalIllumination = {.raysPerLightPixel = 3}}, Settings{.ambientOcclusion = {.radiusMetres = 0}},
+             Settings{.ambientOcclusion = {.strength = 4}}, Settings{.indirectLight = {.radiusMetres = 5}}, Settings{.indirectLight = {.strength = -1}}})
         expect(saveRejected(path, chosen, invalid), "Invalid settings cannot replace valid saved ones.");
 }
 
 void effectPresets()
 {
-    Settings settings{.mode = Mode::Performance, .hdr = true};
-    settings.softShadows = true;
-    settings.globalIlluminationRays = 4;
+    Settings settings{.upscaling = {.mode = Mode::Performance}, .hdr = {.on = true}};
+    settings.softShadows.on = true;
+    settings.globalIllumination.raysPerLightPixel = 4;
     applyPreset(settings, EffectPreset::RayTraced);
-    expect(presetOf(settings) == EffectPreset::RayTraced && !settings.softShadows && settings.volumetricFog
-            && settings.atmosphereLook == AtmosphereLook::Physical && settings.unlockFps,
+    expect(presetOf(settings) == EffectPreset::RayTraced && !settings.softShadows.on && settings.volumetricFog.on
+            && settings.volumetricFog.look == AtmosphereLook::Physical && settings.frameRate.unlocked,
         "The ray-traced preset switches the screen-space effects off, the fog on.");
-    expect(settings.mode == Mode::Performance && settings.hdr && settings.globalIlluminationRays == 4,
+    expect(settings.upscaling.mode == Mode::Performance && settings.hdr.on && settings.globalIllumination.raysPerLightPixel == 4,
         "A preset keeps the upscaler, HDR and the effects' own settings.");
 
-    settings.indirectLight = true;
+    settings.indirectLight.on = true;
     expect(!presetOf(settings), "One effect switched otherwise matches no preset.");
+}
+
+class IniKeys final : public SettingVisitor
+{
+public:
+    void feature(bool&, const FeatureInfo& info) override { keys.push_back(info.iniKey); }
+
+    void toggle(bool&, const ToggleInfo& info) override { keys.push_back(info.iniKey); }
+
+    void slider(float&, const SliderInfo& info) override { keys.push_back(info.iniKey); }
+
+    void choice(int&, const ChoiceInfo& info) override { keys.push_back(info.iniKey); }
+
+    std::vector<std::string_view> keys;
+};
+
+void featuresDescribed()
+{
+    for (const auto effect : AllEffects)
+        expect(featureOf(effect).menuId && featureOf(effect).effect == effect, "Every lighting effect has a feature.");
+
+    Settings settings;
+    IniKeys described;
+    describe(settings, described);
+    std::ranges::sort(described.keys);
+    expect(std::ranges::adjacent_find(described.keys) == described.keys.end(), "No two settings share a PhantomFX.ini key.");
+}
+
+// Custom settings with every lighting effect on: the presets never turn on a replacer with what it replaces.
+void effectPlan()
+{
+    Settings all;
+    all.rayTracedShadows.on = all.softShadows.on = all.sunContactShadows.on = true;
+    all.rayTracedLights.on = all.lampContactShadows.on = all.lampSoftShadows.on = true;
+    all.globalIllumination.on = all.ambientOcclusion.on = all.indirectLight.on = true;
+    all.volumetricFog.on = true;
+
+    const auto plan = planEffects(all, {});
+    expect(plan.runs(Effect::RayTracedShadows) && plan.runs(Effect::RayTracedLights) && plan.runs(Effect::GlobalIllumination)
+            && plan.runs(Effect::VolumetricFog),
+        "The effects nothing replaces run.");
+
+    for (const auto effect : {Effect::SoftShadows, Effect::SunContactShadows, Effect::LampContactShadows, Effect::LampSoftShadows, Effect::AmbientOcclusion,
+             Effect::IndirectLight})
+        expect(plan[effect] == EffectState::Replaced, "The ray-traced effects replace the soft and contact shadows, GTVBAO and SSILVB.");
+
+    Settings withoutTracedLights = all;
+    withoutTracedLights.rayTracedLights.on = false;
+    const auto withoutTracedLightsPlan = planEffects(withoutTracedLights, {});
+    expect(withoutTracedLightsPlan.runs(Effect::LampContactShadows) && withoutTracedLightsPlan.runs(Effect::LampSoftShadows),
+        "Only the ray-traced lights replace the lamps' contact and soft shadows.");
+
+    LeftOut tracedShadowsLeftOut;
+    tracedShadowsLeftOut.effects[Effect::RayTracedShadows] = true;
+    const auto measured = planEffects(all, {.leftOut = tracedShadowsLeftOut});
+    expect(measured[Effect::RayTracedShadows] == EffectState::LeftOut && measured[Effect::SoftShadows] == EffectState::Replaced
+            && measured[Effect::SunContactShadows] == EffectState::Replaced,
+        "Leaving out the ray-traced shadows keeps what they replace off.");
+
+    expect(planEffects(Settings{}, {.enhancements = false})[Effect::SoftShadows] == EffectState::Off, "An effect switched off is off, held or not.");
+    LeftOut softShadowsLeftOut;
+    softShadowsLeftOut.effects[Effect::SoftShadows] = true;
+    expect(planEffects(all, {.enhancements = false, .leftOut = softShadowsLeftOut})[Effect::SoftShadows] == EffectState::Held, "Held comes before replaced and left out.");
+    expect(planEffects(all, {.leftOut = softShadowsLeftOut})[Effect::SoftShadows] == EffectState::Replaced, "Replaced comes before left out.");
+
+    Settings softAndGlobal;
+    softAndGlobal.softShadows.on = softAndGlobal.globalIllumination.on = true;
+    const auto unsupported = planEffects(softAndGlobal, {.supportedBuild = false});
+    expect(unsupported.runs(Effect::SoftShadows) && unsupported[Effect::GlobalIllumination] == EffectState::Unsupported && !unsupported.tracesScene(),
+        "An unsupported game build stops the ray tracing, not the soft shadows.");
+    expect(planEffects(softAndGlobal, {.supportedBuild = false, .enhancements = false})[Effect::GlobalIllumination] == EffectState::Unsupported,
+        "Unsupported comes before held.");
+}
+
+// A frame keeps the settings it started with.
+void frameLatch()
+{
+    FrameLatch<int> latch;
+    latch.set(1);
+    latch.present();
+    latch.set(2);
+    expect(latch.frame() == 1 && latch.latest() == 2, "A change waits for the next present.");
+    expect(latch.present() == 2 && latch.frame() == 2, "Present starts the next frame with the latest settings.");
 }
 
 // The main view of a recorded frame (docs/DEVELOPMENT.md, "Constant buffers"): P00 = -1.75, P11 = 28/9,
@@ -347,17 +436,17 @@ void modeMaths()
             && close(nominalScale(Fsr, Mode::Performance, 0), 0.5) && close(nominalScale(Fsr, Mode::UltraPerformance, 0), 1.0 / 3)
             && nominalScale(Fsr, Mode::Dlaa, 0.5f) == 1,
         "FSR's modes keep AMD's render scales.");
-    expect(nominalScale(Dlss, Mode::Custom, 0.8f) == 0.8f && nominalScale(Fsr, Mode::Custom, 0.1f) == Settings::MinScale
-            && nominalScale(Dlss, Mode::Custom, std::numeric_limits<float>::quiet_NaN()) == Settings::DefaultCustomScale,
+    expect(nominalScale(Dlss, Mode::Custom, 0.8f) == 0.8f && nominalScale(Fsr, Mode::Custom, 0.1f) == Upscaling::MinRenderScale
+            && nominalScale(Dlss, Mode::Custom, std::numeric_limits<float>::quiet_NaN()) == Upscaling{}.customRenderScale,
         "Custom uses its scale within the supported range.");
 
     expect(mipBias(1, 0) == 0 && close(mipBias(0.5f, 0), -1) && close(mipBias(2.0f / 3, 0), std::log2(2.0 / 3)),
         "The texture LOD bias is log2(render / output).");
-    expect(close(mipBias(0.5f, 0.25f), -0.75) && close(mipBias(0.5f, -9), -1 + Settings::MinMipBias) && mipBias(0, 0) == 0,
+    expect(close(mipBias(0.5f, 0.25f), -0.75) && close(mipBias(0.5f, -9), -1 + Upscaling::MinTextureBiasOffset) && mipBias(0, 0) == 0,
         "The offset is added within its range, and invalid scales give no bias.");
 
-    expect(multiplier(FrameGeneration::Off) == 0 && multiplier(FrameGeneration::X2) == 2 && multiplier(FrameGeneration::X6) == 6
-            && multiplier(FrameGeneration::Dynamic) == 0 && multiplier(FrameGeneration::Fsr) == 0,
+    expect(multiplier(FrameGenerationMode::Off) == 0 && multiplier(FrameGenerationMode::X2) == 2 && multiplier(FrameGenerationMode::X6) == 6
+            && multiplier(FrameGenerationMode::Dynamic) == 0 && multiplier(FrameGenerationMode::Fsr) == 0,
         "Fixed DLSS frame generation modes present 2 to 6 frames per rendered frame.");
 }
 
@@ -387,44 +476,44 @@ void jitterSequence()
 void photoModeSettingsPersist(const fs::path& root)
 {
     const auto path = root / L"PhantomFX-photo-mode.ini";
-    const Settings chosen{.fNumber = 2.8f};
+    const Settings chosen{.photoMode = {.fNumber = 2.8f}};
     saveSettings(path, chosen);
     expect(loadSettings(path) == chosen, "Restart restores photo mode's f-stop.");
 
     write(path, "f_number=0.1\n");
-    expect(loadSettings(path).fNumber == Settings::MinFNumber, "An f-stop out of range is clamped.");
+    expect(loadSettings(path).photoMode.fNumber == 0.7f, "An f-stop out of range is clamped.");
 
-    expect(saveRejected(path, chosen, Settings{.fNumber = 64}), "An invalid f-stop cannot replace a valid saved one.");
+    expect(saveRejected(path, chosen, Settings{.photoMode = {.fNumber = 64}}), "An invalid f-stop cannot replace a valid saved one.");
 }
 
 // The engine's motion blur toggle and strength persist, and the strength is clamped.
 void motionBlurSettingsPersist(const fs::path& root)
 {
     const auto path = root / L"PhantomFX-motion-blur.ini";
-    const Settings chosen{.motionBlur = false, .motionBlurStrength = 1.5f};
+    const Settings chosen{.motionBlur = {.on = false, .strength = 1.5f}};
     saveSettings(path, chosen);
     expect(loadSettings(path) == chosen, "Restart restores the motion blur toggle and its strength.");
 
     write(path, "motion_blur_strength=9\n");
-    expect(loadSettings(path).motionBlurStrength == Settings::MaxMotionBlurStrength, "The motion blur strength is clamped.");
+    expect(loadSettings(path).motionBlur.strength == 2, "The motion blur strength is clamped.");
 }
 
 void hdrSettingsPersist(const fs::path& root)
 {
     const auto path = root / L"PhantomFX-hdr.ini";
-    const Settings chosen{.hdr = true, .peakNits = 1500, .paperWhiteNits = 250};
+    const Settings chosen{.hdr = {.on = true, .peakNits = 1500, .paperWhiteNits = 250}};
     saveSettings(path, chosen);
     expect(loadSettings(path) == chosen, "Restart restores HDR output, the peak brightness and the paper white.");
 
     write(path, "hdr=yes\nhdr_peak_nits=50000\nhdr_paper_white_nits=10\n");
-    const auto read = loadSettings(path);
-    expect(!read.hdr && read.peakNits == Settings::MaxPeakNits && read.paperWhiteNits == Settings::MinPaperWhiteNits,
+    const auto read = loadSettings(path).hdr;
+    expect(!read.on && read.peakNits == 10000 && read.paperWhiteNits == 80,
         "An invalid toggle leaves HDR off, and the peak brightness and paper white are clamped.");
     write(path, "hdr_peak_nits=0\n");
-    expect(loadSettings(path).peakNits == 0, "A peak brightness of 0 keeps the display's own.");
+    expect(loadSettings(path).hdr.peakNits == 0, "A peak brightness of 0 keeps the display's own.");
 
-    for (const auto& invalid : {Settings{.peakNits = 100}, Settings{.peakNits = std::numeric_limits<float>::quiet_NaN()},
-             Settings{.paperWhiteNits = std::numeric_limits<float>::infinity()}})
+    for (const auto& invalid : {Settings{.hdr = {.peakNits = 100}}, Settings{.hdr = {.peakNits = std::numeric_limits<float>::quiet_NaN()}},
+             Settings{.hdr = {.paperWhiteNits = std::numeric_limits<float>::infinity()}}})
         expect(saveRejected(path, chosen, invalid), "Invalid HDR settings cannot replace valid saved ones.");
 }
 
@@ -485,11 +574,11 @@ void outputSaturation()
 void globalIlluminationSettingsPersist(const fs::path& root)
 {
     const auto path = root / L"PhantomFX-gi.ini";
-    const Settings chosen{.globalIllumination = true, .globalIlluminationStrength = 1.5f};
+    const Settings chosen{.globalIllumination = {.on = true, .strength = 1.5f}};
     saveSettings(path, chosen);
     expect(loadSettings(path) == chosen, "Restart restores the global illumination and its strength.");
     write(path, "global_illumination_strength=99\n");
-    expect(loadSettings(path).globalIlluminationStrength == Settings::MaxGlobalIlluminationStrength, "The strength is clamped.");
+    expect(loadSettings(path).globalIllumination.strength == 3, "The strength is clamped.");
 }
 
 // The scene's geometry and acceleration structures live in large buffers handed out in ranges.
@@ -558,6 +647,9 @@ int main()
         fs::create_directories(root);
         settingsPersist(root);
         effectPresets();
+        featuresDescribed();
+        effectPlan();
+        frameLatch();
         mainViewRecognised();
         jitterShiftsTheImage();
         reprojection();

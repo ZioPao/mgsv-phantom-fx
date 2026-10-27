@@ -2,7 +2,7 @@
 
 #include "fxui/fxui.hpp"
 #include "performance.hpp"
-#include "upscaler_settings.hpp"
+#include "phantom_fx_settings.hpp"
 
 #include <span>
 
@@ -10,12 +10,9 @@
 // the game, and PhantomFX-performance.txt.
 namespace phantom_fx::menu
 {
-// The window's sections, in the rail's order. Only the dev build has Developer (dev_tools.hpp).
-enum class Section { Budget, Upscaling, Shadows, Lighting, Atmosphere, Camera, Display, World, Diagnostics, Developer };
-
 std::span<const fxui::Section> sections();
 
 // Each effect's state from its setting and its module, and its cost from the timed passes. Its switch
 // writes into `wanted`, which must outlive the budget.
-fxui::Budget budget(upscaler::Settings& wanted, const performance::Costs& costs);
+fxui::Budget budget(Settings& wanted, const performance::Costs& costs);
 }

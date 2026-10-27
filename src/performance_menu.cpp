@@ -1,9 +1,10 @@
 // The costs in the settings window's budget page, over the game, and as text for PhantomFX-performance.txt.
 #include "performance.hpp"
 
+#include "core.hpp"
+#include "features/upscaling/upscaler.hpp"
 #include "fxui/fxui.hpp"
 #include "menu_budget.hpp"
-#include "upscaler.hpp"
 
 #include <Windows.h>
 #include <imgui.h>
@@ -34,10 +35,8 @@ void drawRealCost(const Measurement& m, bool explained)
 }
 
 // The effects switched together; neither lights up while they are switched otherwise.
-void drawPresets(upscaler::Settings& wanted)
+void drawPresets(Settings& wanted)
 {
-    using upscaler::EffectPreset;
-
     constexpr EffectPreset presets[]{EffectPreset::ScreenSpace, EffectPreset::RayTraced};
     constexpr fxui::Option options[]{
         {.label = "Screen-space",
@@ -45,18 +44,18 @@ void drawPresets(upscaler::Settings& wanted)
         {.label = "Ray-traced",
             .tip = "Ray-traced shadows, lights and global illumination in place of the screen-space effects. Needs a GPU that traces rays (DXR 1.1)."},
     };
-    const auto current = upscaler::presetOf(wanted);
+    const auto current = presetOf(wanted);
     const int selected = current ? static_cast<int>(std::ranges::find(presets, *current) - std::begin(presets)) : -1;
     const int pressed = fxui::segmented("Preset", selected, options,
         "Switches the effects in every section at once. Both also unlock the frame rate and turn on the volumetric fog in the physical look. "
         "The upscaler, HDR and each effect's own settings stay as they are.");
-    if (pressed >= 0) upscaler::applyPreset(wanted, presets[pressed]);
+    if (pressed >= 0) applyPreset(wanted, presets[pressed]);
 }
 }
 
-void drawBudget(upscaler::Settings& wanted)
+void drawBudget(Settings& wanted)
 {
-    const fxui::Page page(menu::Section::Budget);
+    const fxui::Page page(Section::Budget);
     if (!page) return;
 
     drawPresets(wanted);
@@ -89,7 +88,7 @@ void drawOverlay()
     const auto state = status();
     if (!state.overlay) return;
 
-    auto settings = upscaler::currentSettings();
+    auto settings = core::currentSettings();
     const auto budget = menu::budget(settings, state.costs);
     if (const fxui::CostOverlay overlay(menu::sections(), budget, "Phantom FX"); overlay && state.measurement.steps.size() >= 2)
     {
@@ -101,7 +100,7 @@ void drawOverlay()
 // A heading, the frame, one line per effect with its passes, and the real cost.
 std::string report(const Status& state)
 {
-    auto settings = upscaler::currentSettings();
+    auto settings = core::currentSettings();
     const auto budget = menu::budget(settings, state.costs);
     const auto& c = state.costs;
     std::string text = "Phantom FX GPU costs in milliseconds, averaged over about half a second. The timed passes miss what they change in "

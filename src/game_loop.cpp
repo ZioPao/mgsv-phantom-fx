@@ -3,7 +3,7 @@
 #include "character.hpp"
 #include "dev_tools.hpp"
 #include "device_check.hpp"
-#include "frame_generation.hpp"
+#include "features/frame_generation/frame_generation.hpp"
 #include "game_code.hpp"
 #include "game_lua.hpp"
 #include "travel.hpp"
@@ -68,7 +68,7 @@ void frameEnd(std::uint8_t* loop)
 
 std::string hook() noexcept
 {
-    if (!supportedBuild()) return "Unknown game build; the game loop is not hooked.";
+    if (!isSupportedGameBuild()) return "Unknown game build; the game loop is not hooked.";
 
     auto* base = game_code::image();
     if (std::memcmp(base + FrameStartRva, FrameStartCode, sizeof(FrameStartCode)) || std::memcmp(base + FrameEndRva, FrameEndCode, sizeof(FrameEndCode)))

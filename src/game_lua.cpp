@@ -110,16 +110,16 @@ std::optional<std::string> pending;
 Console published;
 }
 
-bool supported() noexcept
+bool isSupported() noexcept
 {
-    static const bool expected = supportedBuild() && game_code::matches(Checked);
+    static const bool expected = isSupportedGameBuild() && game_code::matches(Checked);
 
     return expected;
 }
 
 std::optional<Outcome> run(std::string_view code, std::string_view name, bool expression) noexcept
 {
-    if (!supported()) return std::nullopt;
+    if (!isSupported()) return std::nullopt;
 
     auto* const engine = game_code::image();
     auto* const system = *reinterpret_cast<std::uint8_t**>(engine + ScriptSystemRva);

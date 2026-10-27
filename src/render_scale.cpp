@@ -86,7 +86,7 @@ void rendererStep(std::uint8_t* renderer)
 
 std::string hook() noexcept
 {
-    if (!supportedBuild()) return "Unknown game build; the engine renders at the display size.";
+    if (!isSupportedGameBuild()) return "Unknown game build; the engine renders at the display size.";
 
     auto* target = game_code::image() + RendererStepRva;
     if (std::memcmp(target, RendererStepStart, sizeof(RendererStepStart))) return "The renderer has unexpected code; upscaling is unavailable.";
