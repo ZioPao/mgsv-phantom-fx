@@ -59,7 +59,7 @@ documentation and licenses are in `PhantomFX/`.
 ctest --test-dir build/release
 ```
 
-This runs six tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
+This runs seven tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
 (defaults, round trip, clamping, invalid files and values), the mode maths (render scales, texture LOD
 bias), the render size plan (DLSS's own size or the nominal one, rounded up to even and never above the
 output size, Custom's DLSS quality, the settings that make a new plan), the frames (when one starts,
@@ -86,6 +86,9 @@ the game's shaders on a WARP device, each created from a DXBC header carrying a 
 shader known by its checksum and drawn with it, unknown and missing shaders, every copy of one shader
 known, code that is not DXBC, the first of a row's shaders kept (the ray-traced lights' twins),
 everything let go at device teardown, and vertex shaders by their source name.
+`tests/shader_bytecode_tests.cpp`: the dither patch on a WARP device, on shaders compiled as the game's
+are: a dither centred on zero and one added whole, each flat at the dithered image's average once
+patched, and the G-buffer's fade mask kept.
 `tests/command_list_notes_tests.cpp`: how a module's notes go from a deferred context to its command list
 and are handed over: once, a context starting empty after its finish or at a gone one's address, a list
 run inside a deferred context joining its notes in the order they run, a forgotten list, notes expiring
@@ -208,12 +211,13 @@ what draws it, when that is the feature's own.
 | `src/fidelityfx.cpp`, `src/fidelityfx.hpp` | Loads the AMD FSR API, for FSR upscaling and frame generation |
 | `src/weather.cpp`, `src/weather.hpp` | The overlay's weather and time control, in Utility (see "Weather and time") |
 | `src/sun_movement.cpp`, `src/sun_movement.hpp` | The sun and moon move every frame instead of in the game's steps (see "Sun movement") |
+| `src/game_dither.cpp`, `src/game_dither.hpp` | The game's colour dither taken out of its shaders as they are made (see "Dither") |
 | `src/dev_tools.hpp` | Whether the build has the Developer page (the dev preset) |
 | `src/game_lua.cpp`, `src/game_lua.hpp` | Lua in the game's script state, and the Developer page's console (see "Game Lua") |
 | `src/travel.cpp`, `src/travel.hpp` | The Developer page's travel: free roam in another map (see "Travel") |
 | `src/frame_log.cpp`, `src/frame_log.hpp` | Development diagnostics, off by default: shader log, F10 frame record, constant and texture dumps |
 | `src/resource_dump.cpp`, `src/resource_dump.hpp` | Format names, constant rows, DDS saving for the dumps |
-| `src/shader_bytecode.cpp`, `src/shader_bytecode.hpp` | DXBC checksum (bytes 4 to 20 of the container), the instruction walk, the output saturation patch |
+| `src/shader_bytecode.cpp`, `src/shader_bytecode.hpp` | DXBC checksum (bytes 4 to 20 of the container), the instruction walk, the output saturation patch, the dither patch |
 | `src/log.cpp`, `src/log.hpp` | `PhantomFX.log` beside the add-on, one per game session |
 | `src/clock.hpp` | `QueryPerformanceCounter` ticks and the milliseconds between them |
 | `src/frame_latch.hpp` | A module's settings as configure sets them and as the frame being recorded uses them, latched at present |
@@ -864,6 +868,41 @@ The game moves its sun and moon light in steps, so shadows tick forward about on
 - **Patch.** The flag's test at `0x79D51D` ends in `je` to the unstepped path; the add-on turns it
   into `nop; jmp` to the same place. The light then counts as moving every frame, as it already did
   between steps in the weather seen (`+0x54` bit `0x800` of the light was clear there too).
+
+### Dither
+
+The game adds a fixed 8x8 ordered dither to some of its colour, against banding in its 8-bit scene.
+Before the upscaler it is a cell per render pixel, which DLSS enlarges with the image: a grid over
+dark areas, worst at night in fog (issue #28). Found 2026-10-28 in the shaders' disassembly
+(`%TEMP%\mgsv-fog\all`) and the frame records.
+
+- **The textures.** Four 8x8 `B8G8R8A8_UNORM` textures, read through `g_samplerPoint_Wrap` (`s8`) at
+  `frac(pixel / 8)`. Red is an ordered pattern from 1 or 2 to 253 or 254, averaging a half; alpha
+  averages a quarter (64 of 255; 71 in one), flat in two of them and ordered in the others; green and
+  blue hold 1. 42 pixel shaders call one `inMesh` and add it to their colour: the three sky draws
+  (`t8`) and `DR_VolFog_TppTonemap_MD` (`t15`) its red as `(d - 0.5) / 128`, `tpp3dfw_constant_sky`
+  and `tpp3dfw_generativeClouds` as `(d - 0.5) / 64`, the other forward materials (`fox3dfw_*`, glass)
+  mostly its alpha as `d / 128` on their fog's colour and transmittance. 211 G-buffer shaders read the
+  same textures as `g_tex_mesh`: red against the model's fade, which dissolves it, and alpha times
+  `cPSSystem` `m_param.w` as the alpha test's threshold, so the textures stay.
+- **When.** All 7 frame records with `Sky_Draw_TppNoSky` (fog) resolve with `DR_VolFog_TppTonemap_MD`;
+  none of the other 161 does. The plain resolve has no dither. The dither is added after TppTonemap,
+  in linear colour before the sRGB view encodes it: at night's 8 to 16 of 255 a step of 1/256 is
+  several levels.
+- **Patch.** `create_pipeline` hands Direct3D a copy of each shader with an `inMesh` texture (by
+  reflection) in which every sample of it is a `mov` of the textures' average in each channel (a half,
+  1/255, 1/255, a quarter), in the sample's swizzle, and nops to the same length. Every pixel then gets
+  what the dither added on average: the centred forms nothing, the forward materials a quarter of
+  1/128, so they keep their brightness. It runs before HDR's patch, which finds its TppTonemap the
+  same way; both orders give the same code. The add-on's own sky draw has no dither either.
+- **SDR.** Without the dither SDR's 8-bit scene bands a little in smooth fog (2026-10-28: steps of 1
+  and 2 levels at DLSS Quality); with it, DLSS's image was softer. It comes out in SDR too; the
+  banding is issue #54. HDR's 16-bit float scene does not band.
+- **Left as they are.** The G-buffer's alpha test with the ordered alpha stipples cut-out edges (hair,
+  manes) before DLSS too; taking it out would make those edges hard. The shadow filters'
+  `MicroDither` and the sun pass's 2x2 tap offset move a comparison by an eighth of a texel.
+- Checked over the 806 pixel shaders the frame log saved: exactly the 42 (and HDR's 4 copies of
+  them) patched, all taken by Direct3D on an RTX 5080.
 
 ### Ambient occlusion
 
@@ -2669,8 +2708,8 @@ planet's centre is the origin, in km; the game's world has y up in metres.
   and colour in `TEXCOORD2`): the sky-view table times the sunlight (below the horizon, its horizon
   row, as the game's sky does: the sea at Mother Base ends short of the planet's horizon, and the
   dark air in front of the planet showed between them as a grey band), the game's sprite over it, the
-  last slice's fog in front, the game's dither (`t8`), then the game's TppTonemap (`cPSMaterial`
-  `c1`) and sRGB encoding, or the encoding alone with HDR, which takes TppTonemap out of the scene.
+  last slice's fog in front, then the game's TppTonemap (`cPSMaterial` `c1`) and sRGB encoding, or
+  the encoding alone with HDR, which takes TppTonemap out of the scene. No dither (see "Dither").
   Its two textures go to `t6` and `t7` for the draw; the game's are bound again after it.
 - Checked on WARP with made-up constants: blue sky with a pale horizon at noon, orange towards the sun
   at 1 degree, the pink band and the Earth's shadow at -2 degrees.

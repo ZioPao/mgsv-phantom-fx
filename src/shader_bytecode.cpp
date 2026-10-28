@@ -1,5 +1,8 @@
 #include "shader_bytecode.hpp"
 
+#include <d3d11shader.h>
+#include <d3dcompiler.h>
+#include <wrl/client.h>
 #include <algorithm>
 #include <bit>
 #include <cctype>
@@ -54,9 +57,53 @@ void md5Block(std::array<std::uint32_t, 4>& state, const std::uint8_t* block)
 }
 
 // The shader token format (d3d11TokenizedProgramFormat.hpp in the Windows Driver Kit).
-constexpr std::uint32_t CustomData = 0x35, DeclareOutput = 0x65, Saturate = 1u << 13, OutputOperand = 2, Immediate32Operand = 4;
+constexpr std::uint32_t CustomData = 0x35, Mov = 0x36, Nop = 0x3A, Sample = 0x45, DeclareOutput = 0x65, Saturate = 1u << 13;
+constexpr std::uint32_t OutputOperand = 2, Immediate32Operand = 4, ResourceOperand = 7, SwizzleMode = 1;
+// A four-component immediate operand's token: its four values follow.
+constexpr std::uint32_t Immediate4 = Immediate32Operand << 12 | 2;
 // Instructions that write floats and take a saturate: add, div, dp2, dp3, dp4, mad, min, max, mov, movc, mul.
 constexpr std::uint32_t Saturable[]{0x00, 0x0E, 0x0F, 0x10, 0x11, 0x32, 0x33, 0x34, 0x36, 0x37, 0x38};
+
+// Where the operand at `operand` ends: its token, an extended token when bit 31 is set, then
+// immediates or indices. Relative indices hold an operand of their own.
+std::size_t operandEnd(const std::uint8_t* code, std::size_t operand)
+{
+    const auto token = wordAt(code, operand);
+    operand += (token >> 31) ? 8 : 4;
+    if (((token >> 12) & 0xFF) == Immediate32Operand) return operand + ((token & 3) == 2 ? 16 : 4);
+
+    for (std::uint32_t dimension = 0; dimension < ((token >> 20) & 3); ++dimension)
+    {
+        const auto representation = (token >> (22 + 3 * dimension)) & 7;
+        if (representation == 0 || representation == 3) operand += 4;
+        if (representation == 1 || representation == 4) operand += 8;
+        if (representation >= 2) operand = operandEnd(code, operand);
+    }
+
+    return operand;
+}
+
+// Where each of the instruction's operands starts, after its opcode and extended tokens.
+std::vector<std::size_t> operandsOf(const std::uint8_t* code, const Instruction& instruction)
+{
+    const std::size_t end = instruction.offset + 4 * instruction.length;
+    std::size_t at = instruction.offset + 4;
+    for (bool extended = wordAt(code, instruction.offset) >> 31; extended && at < end; at += 4) extended = wordAt(code, at) >> 31;
+
+    std::vector<std::size_t> operands;
+    for (; at < end; at = operandEnd(code, at)) operands.push_back(at);
+
+    return operands;
+}
+
+// True for the operand t<slot>.
+bool isTexture(const std::uint8_t* code, std::size_t operand, std::uint32_t slot)
+{
+    const auto token = wordAt(code, operand);
+    const bool hasImmediateIndex = ((token >> 20) & 3) == 1 && ((token >> 22) & 7) == 0;
+
+    return ((token >> 12) & 0xFF) == ResourceOperand && hasImmediateIndex && wordAt(code, operand + ((token >> 31) ? 8 : 4)) == slot;
+}
 }
 
 std::optional<DxbcHash> dxbcHashOf(const void* code, std::size_t size)
@@ -158,34 +205,11 @@ std::optional<std::vector<Instruction>> instructionsOf(const std::uint8_t* code,
 std::vector<std::size_t> immediatesOf(const std::uint8_t* code, const Instruction& instruction)
 {
     std::vector<std::size_t> found;
-    const std::size_t end = instruction.offset + 4 * instruction.length;
-    std::size_t at = instruction.offset + 4;
-    for (bool extended = wordAt(code, instruction.offset) >> 31; extended && at < end; at += 4) extended = wordAt(code, at) >> 31;
-
-    // Operands: a token, an extended token when bit 31 is set, then immediates or indices. Relative
-    // indices hold an operand of their own.
-    const auto skipOperand = [&](auto& self, std::size_t operand) -> std::size_t
+    for (const auto operand : operandsOf(code, instruction))
     {
         const auto token = wordAt(code, operand);
-        operand += (token >> 31) ? 8 : 4;
-        if (((token >> 12) & 0xFF) == Immediate32Operand)
-        {
-            if ((token & 3) == 2) found.push_back(operand);
-            return operand + ((token & 3) == 2 ? 16 : 4);
-        }
-
-        for (std::uint32_t dimension = 0; dimension < ((token >> 20) & 3); ++dimension)
-        {
-            const auto representation = (token >> (22 + 3 * dimension)) & 7;
-            if (representation == 0 || representation == 3) operand += 4;
-            if (representation == 1 || representation == 4) operand += 8;
-            if (representation >= 2) operand = self(self, operand);
-        }
-
-        return operand;
-    };
-
-    while (at < end) at = skipOperand(skipOperand, at);
+        if (((token >> 12) & 0xFF) == Immediate32Operand && (token & 3) == 2) found.push_back(operand + ((token >> 31) ? 8 : 4));
+    }
 
     return found;
 }
@@ -221,6 +245,61 @@ std::optional<std::vector<std::uint8_t>> saturateOutput(const void* code, std::s
         const auto saturated = token | Saturate;
         std::memcpy(bytes + instruction.offset, &saturated, 4);
     }
+
+    resign(patched);
+
+    return patched;
+}
+
+std::optional<std::vector<std::uint8_t>> withoutDither(const void* code, std::size_t size)
+{
+    // Most shaders never mention the name; only those that do are reflected.
+    constexpr std::string_view DitherName = "inMesh";
+    if (!code || std::string_view(static_cast<const char*>(code), size).find(DitherName) == std::string_view::npos) return std::nullopt;
+
+    Microsoft::WRL::ComPtr<ID3D11ShaderReflection> reflection;
+    D3D11_SHADER_INPUT_BIND_DESC dither{};
+    if (FAILED(D3DReflect(code, size, IID_PPV_ARGS(reflection.GetAddressOf())))
+        || FAILED(reflection->GetResourceBindingDescByName(DitherName.data(), &dither)) || dither.Type != D3D_SIT_TEXTURE)
+        return std::nullopt;
+
+    std::vector<std::uint8_t> patched(static_cast<const std::uint8_t*>(code), static_cast<const std::uint8_t*>(code) + size);
+    auto* bytes = patched.data();
+    const auto program = instructionsOf(bytes, size);
+    if (!program) return std::nullopt;
+
+    // The game's dither textures average a half in red and a quarter in alpha (64 of 255; one 71);
+    // green and blue hold 1 of 255.
+    constexpr float Averages[]{0.5f, 1.0f / 255, 1.0f / 255, 0.25f};
+    bool isPatched{};
+    for (const auto& instruction : *program)
+    {
+        if (instruction.opcode != Sample) continue;
+
+        // A sample's operands: destination, address, texture, sampler.
+        const auto operands = operandsOf(bytes, instruction);
+        if (operands.size() != 4 || !isTexture(bytes, operands[2], dither.BindPoint)) continue;
+
+        const auto texture = wordAt(bytes, operands[2]);
+        if (((texture >> 2) & 3) != SwizzleMode) return std::nullopt;
+
+        // In its place: mov <destination>, the averages in the sample's swizzle; then nops to its length.
+        std::vector<std::uint32_t> words{Mov};
+        for (auto at = operands[0]; at < operands[1]; at += 4) words.push_back(wordAt(bytes, at));
+
+        words.push_back(Immediate4);
+        for (std::uint32_t component = 0; component < 4; ++component)
+            words.push_back(std::bit_cast<std::uint32_t>(Averages[(texture >> (4 + 2 * component)) & 3]));
+
+        if (words.size() > instruction.length) return std::nullopt;
+
+        words[0] |= static_cast<std::uint32_t>(words.size()) << 24;
+        words.resize(instruction.length, Nop | 1u << 24);
+        std::memcpy(bytes + instruction.offset, words.data(), 4 * words.size());
+        isPatched = true;
+    }
+
+    if (!isPatched) return std::nullopt;
 
     resign(patched);
 
