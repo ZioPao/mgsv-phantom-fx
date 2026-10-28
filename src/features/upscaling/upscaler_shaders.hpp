@@ -170,9 +170,10 @@ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 }
 )";
 
-// The motion blur's start at half the output size: DLSS's image, halved as the game halves its scene,
-// with the alpha of the game's own half-size copy, which scales how much of the blur shows. The scene
-// at the output size has the composite's alpha, not the game's.
+// The motion blur's start at half the output size: DLSS's image while upscaling, or else the scene the
+// game halved, halved as the game halves it, with the alpha of the game's own half-size copy, which
+// scales how much of the blur shows. The scene at the output size has the composite's alpha, not the
+// game's.
 inline constexpr char BlurSource[] = R"(
 Texture2D<float4> Scene : register(t0);
 Texture2D<float4> GameCopy : register(t1);

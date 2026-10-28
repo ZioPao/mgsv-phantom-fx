@@ -1244,6 +1244,13 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
     of the game's, writes the other, and keeps the game's `cPSSystem`, so the samples land as far
     away on screen; the composite reads the last one. The game's targets are matched by address on
     the recording thread, within the frame being recorded.
+  - With HDR the blur takes the same route without upscaling too (DLAA, or the upscaler off), as
+    the game's two targets are 8-bit. They are the game's shared half-size scratch targets, which
+    its SSAO draws into earlier in the frame (frame 141835, #491 to #496), so they are not made
+    float where the game creates them. The first pass halves the scene the game's own halving
+    `CopyRenderBuffer` read (the last copy on the thread whose target the pass reads), and the
+    composite stays on the scene, reading the add-on's result at t0; the game's input goes back
+    after the draw.
   - `Tonemap` (the grading): the output target is copied into the second target on the context, and
     the grading reads it (slot 0) and writes the output target. The graded image is then stretched
     back into the render-size scene target, which the game copies next for its 2D filters
@@ -1517,9 +1524,8 @@ Not handled:
 - Particles or glass that blend with alpha above 1 would darken their background, as the 2D pass did;
   none were seen.
 - The reflections' own targets are 8-bit, so reflected highlights stop at the game's white.
-- Without upscaling, motion blur blurs through the game's 8-bit copy, so moving highlights stop at
-  white. While upscaling it blurs through the add-on's targets, float with HDR, so moving highlights
-  keep their brightness.
+- Motion blur blurs through the add-on's float targets in place of the game's 8-bit ones (see "The
+  UI at the output size"), so moving highlights keep their brightness.
 - The HUD has the scene's paper white; it is not separate.
 
 ## Soft shadows

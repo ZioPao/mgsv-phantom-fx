@@ -789,11 +789,14 @@ struct PostDraw
     std::optional<ui_redirect::OutputSizeDraw> redirected;
     // The grading's render-size target, the scene target, which then gets the graded image as well.
     ComPtr<ID3D11RenderTargetView> graded;
+    // The game's input at t0, put back after a draw that read the add-on's in its place.
+    ComPtr<ID3D11ShaderResourceView> gameInput;
 
     void clear()
     {
         redirected.reset();
         graded.Reset();
+        gameInput.Reset();
     }
 };
 thread_local PostDraw postDraw;
@@ -946,16 +949,50 @@ bool isBlurResult(ID3D11ShaderResourceView* source)
     return blurChain.gameTarget && blurChain.frame == currentRecordingFrame() && resourceOf(source).Get() == blurChain.gameTarget;
 }
 
+// The game's last copy on this thread: its target, by address only, and what it copied. Without
+// upscaling, the motion blur's first pass starts from the scene the game halved for it.
+struct LastCopy
+{
+    const ID3D11Resource* target{};
+    ComPtr<ID3D11ShaderResourceView> source;
+};
+thread_local LastCopy lastCopy;
+
+void noteCopy(ID3D11DeviceContext* context)
+{
+    ComPtr<ID3D11RenderTargetView> target;
+    context->OMGetRenderTargets(1, target.GetAddressOf(), nullptr);
+    lastCopy.target = resourceOf(target.Get()).Get();
+    context->PSGetShaderResources(0, 1, lastCopy.source.ReleaseAndGetAddressOf());
+}
+
+// The game's motion blur goes through the add-on's surfaces while upscaling (gatherBlur), and with HDR
+// at every upscaler setting: the game's own are 8-bit, which clips HDR highlights while the camera
+// moves. Otherwise the game's passes stay as they are.
+bool isBlurRedirected()
+{
+    return ui_redirect::isUpscaling() ? replacing.load(std::memory_order_relaxed) : hdr::active();
+}
+
+// What the blur's first pass starts from in place of `gameHalf`, the game's 8-bit half of the scene:
+// DLSS's image at the output size while upscaling, or else the scene the game halved. Null when the
+// copy that made `gameHalf` was not seen.
+ComPtr<ID3D11ShaderResourceView> blurScene(ID3D11ShaderResourceView* gameHalf)
+{
+    if (ui_redirect::isUpscaling()) return ui_redirect::output().view;
+    if (lastCopy.target && lastCopy.target == resourceOf(gameHalf).Get()) return lastCopy.source;
+
+    return nullptr;
+}
+
 // While upscaling, the game's motion blur gathers at half the output size from DLSS's image, as it
 // does at half the render size without upscaling. At half the render size it gathered from the
 // jittered scene before DLSS, and its composite stretched that over the output: pixelated. Its first
-// pass reads the add-on's halved output instead of the game's halved scene, the second the first's
+// pass reads the add-on's halved image instead of the game's halved scene, the second the first's
 // result, and the composite the second's (beforePostDraw). The game's constants stay: they place the
 // samples in texture coordinates, so the blur reaches as far on screen.
-bool gatherBlurAtOutputSize(ID3D11DeviceContext* context)
+bool gatherBlur(ID3D11DeviceContext* context)
 {
-    if (!ui_redirect::isUpscaling()) return false;
-
     ComPtr<ID3D11ShaderResourceView> source;
     ComPtr<ID3D11RenderTargetView> target;
     context->PSGetShaderResources(0, 1, source.GetAddressOf());
@@ -966,13 +1003,13 @@ bool gatherBlurAtOutputSize(ID3D11DeviceContext* context)
     const bool isFirstPass = !isBlurResult(source.Get());
     if (isFirstPass)
     {
-        const auto scene = ui_redirect::output();
+        const auto scene = blurScene(source.Get());
         const auto blur = ui_redirect::surfaceViews(Blur);
         const auto stretch = ensureStretch();
-        if (!scene.view || !blur.target || !stretch) return false;
+        if (!scene || !blur.target || !stretch) return false;
 
         const SavedStretchState saved(context);
-        drawStretch(context, *stretch, stretch->blurSource.Get(), {scene.view.Get(), source.Get()}, blur.target.Get());
+        drawStretch(context, *stretch, stretch->blurSource.Get(), {scene.Get(), source.Get()}, blur.target.Get());
     }
 
     const auto input = isFirstPass ? Blur : blurChain.surface;
@@ -985,9 +1022,43 @@ bool gatherBlurAtOutputSize(ID3D11DeviceContext* context)
     }
 
     blurChain = {currentRecordingFrame(), resourceOf(target.Get()).Get(), output};
-    recordUiTargetUse(context);
+    if (ui_redirect::isUpscaling()) recordUiTargetUse(context);
 
     return true;
+}
+
+// Without upscaling, the blur's composite stays on the game's scene and reads the add-on's result at
+// t0 in place of the game's; afterPostDraw puts the game's back.
+bool composeBlurInPlace(ID3D11DeviceContext* context)
+{
+    ComPtr<ID3D11ShaderResourceView> source;
+    context->PSGetShaderResources(0, 1, source.GetAddressOf());
+    if (!isBlurResult(source.Get())) return false;
+
+    const auto blur = ui_redirect::surfaceViews(blurChain.surface);
+    blurChain = {};
+    if (!blur.view) return false;
+
+    context->PSSetShaderResources(0, 1, blur.view.GetAddressOf());
+    postDraw.gameInput = std::move(source);
+
+    return true;
+}
+
+// The motion blur's draws, which HDR redirects at every upscaler setting (isBlurRedirected). Returns
+// true when the add-on makes the draw: the gathers, and the composite without upscaling.
+bool redirectBlur(ID3D11DeviceContext* context, GamePass pass)
+{
+    if (!isBlurRedirected()) return false;
+    if (pass == GamePass::MotionBlur) return gatherBlur(context);
+    if (pass != GamePass::Copy || ui_redirect::isUpscaling()) return false;
+
+    if (composeBlurInPlace(context)) return true;
+
+    // Any other copy may be the one that halves the scene for the blur's first pass.
+    noteCopy(context);
+
+    return false;
 }
 
 // ---- Per frame, on the immediate context ----
@@ -1544,7 +1615,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
 
 bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
-    if (bypass || call.indexed || call.count != 3 || call.instances != 1 || !replacing.load(std::memory_order_relaxed)) return false;
+    if (bypass || call.indexed || call.count != 3 || call.instances != 1) return false;
 
     try
     {
@@ -1552,6 +1623,9 @@ bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         if (!row) return false;
 
         const auto pass = row->pass;
+        if (redirectBlur(context, pass)) return true;
+        if (!replacing.load(std::memory_order_relaxed)) return false;
+
         if (pass == GamePass::CameraVelocity)
         {
             recordVelocity(context);
@@ -1561,7 +1635,6 @@ bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         // CopyRenderBuffer is a plain copy the game makes anywhere; the layer's composite shares its
         // list with the LUT build.
         if (pass == GamePass::LutBuild || pass == GamePass::Grade || pass == GamePass::Fxaa) recordGrading(context);
-        if (pass == GamePass::MotionBlur) return gatherBlurAtOutputSize(context);
         if (pass != GamePass::Copy && pass != GamePass::Grade) return false;
 
         ComPtr<ID3D11RenderTargetView> target;
@@ -1609,6 +1682,8 @@ bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
 
 void afterPostDraw(ID3D11DeviceContext* context) noexcept
 {
+    if (postDraw.gameInput) context->PSSetShaderResources(0, 1, postDraw.gameInput.GetAddressOf());
+
     const auto graded = std::move(postDraw.graded);
     postDraw.clear();
     if (!graded) return;
