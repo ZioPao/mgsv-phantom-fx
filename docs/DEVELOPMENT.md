@@ -1680,8 +1680,9 @@ light, in the light's own volume draw.
   overlapping terrain patches from reading as a wall in front of their own surface, and the march
   stops once the shadow is as dark as `Contact shadow contrast` allows. A pixel outside the light's
   reach (one depth read and a distance) or past the fade is lit without marching, and a lamp wholly
-  past the fade keeps the game's draws. The sun keeps Bend's trace: one a frame is cheap, and its
-  look is the reference the lamps' march was matched to.
+  past the fade keeps the game's draws. The sun keeps Bend's trace, which costs one to eight dispatches
+  for each recording of the depth it reads, and its look is the reference the lamps' march was matched
+  to.
 - **One face, not two.** The shadow draw used a rasteriser state of its own with culling off, so a
   closed volume ran the march on both faces and threw one result away. It now draws with the game's
   own rasteriser state - the one the marking draw and the lighting draw after it use - so it covers

@@ -32,7 +32,8 @@
   depth buffer inside that draw, the shape `renodx-mgsv`'s term has: about 48 steps a pixel crowded
   near the surface, a caster counted only within a quarter of a metre of the ray, and pixels the
   light cannot reach left without a step. A lamp wholly past the contact shadows' fade keeps the
-  game's draws. The sun keeps Bend's trace, which costs one dispatch a frame.
+  game's draws. The sun keeps Bend's trace, which costs one to eight dispatches for each recording of
+  the depth it reads.
 - Fix a fine grid pattern over dark areas, worst at night and in fog with upscaling: the game added a
   fixed 8x8 dither to its sky, its foggy scene and its glass before DLSS, which enlarged it with the
   image. The dither is taken out of those shaders, and out of the physical sky. In SDR, smooth fog
