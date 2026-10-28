@@ -61,11 +61,14 @@ ctest --test-dir build/release
 
 This runs five tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
 (defaults, round trip, clamping, invalid files and values), the mode maths (render scales, texture LOD
-bias) and the camera maths (main-view recognition, jitter direction and units, reprojection, camera
-cuts, jitter phases and the Halton sequence, the camera frame generation gets). The main view and a sun
-pass from frame logs, pasted in as the log printed them, check main-view recognition and a light
-pass's view space on the game's own numbers. The constant capture runs on a WARP device: a thread
-reads only its own writes and only at their size, and each effect keeps only what it reads.
+bias), the render size plan (DLSS's own size or the nominal one, rounded up to even and never above the
+output size, Custom's DLSS quality, the settings that make a new plan), the frames (when one starts,
+the frame a pass belongs to, the main view, which uploads get the jitter and after which frames) and
+the camera maths (main-view recognition, jitter direction and units, reprojection, camera cuts, jitter
+phases and the Halton sequence, the camera frame generation gets). The main view and a sun pass from
+frame logs, pasted in as the log printed them, check main-view recognition and a light pass's view space
+on the game's own numbers. The constant capture runs on a WARP device: a thread reads only its own
+writes and only at their size, and each effect keeps only what it reads.
 `tests/scene_description_tests.cpp`: what the ray-traced scene takes of a model file, from small FMDL
 files it writes: the mesh roles of each case measured in the game (a tarp's stand-in, a pylon's
 lattice, glass, sky domes, inner walls, decals, hair, bushes), what each role gives its rays, a
@@ -139,7 +142,7 @@ what draws it, when that is the feature's own.
 
 | Folder | What draws it |
 | --- | --- |
-| `upscaling/` | `upscaler.*`: DLSS or FSR before the grading, in place of FXAA: jitter, frames, render size plan, NGX, composite, the grading at the output size, texture LOD bias. `upscaler_shaders.hpp`: the upscaler's inputs and motion vectors, composite with RCAS and debug views, stretch fallback. `fsr_upscaler.*`: FSR upscaling on Direct3D 12. `fxaa.*`: hook on the FXAA plugin, the FXAA pass at any post processing setting |
+| `upscaling/` | `upscaler.*`: DLSS or FSR before the grading, in place of FXAA: NGX, composite, the grading at the output size, texture LOD bias. `frames.*`: the frames the upscaler runs on: when one starts, its main view and its jitter. `render_size_plan.*`: the render size plan, from the upscaler, mode and output size, with DLSS's own size from NGX. `upscaler_shaders.hpp`: the upscaler's inputs and motion vectors, composite with RCAS and debug views, stretch fallback. `fsr_upscaler.*`: FSR upscaling on Direct3D 12. `fxaa.*`: hook on the FXAA plugin, the FXAA pass at any post processing setting |
 | `frame_generation/` | `presenter.*`: the game's stand-in swap chain, presented through Direct3D 12. `frame_generation.*`: DLSS Frame Generation, Streamline, its inputs and camera, Reflex. `fsr_frame_generation.*`: AMD's swap chain and its inputs |
 | `sun/` | Settings only: the sun size the soft and ray-traced shadows and the global illumination share |
 | `soft_shadows/` | Settings only: a mode of the sun light pass's shaders (`passes/sun_light_pass.*`) |

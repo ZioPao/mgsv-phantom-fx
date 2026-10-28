@@ -195,7 +195,7 @@ set(PHANTOM_FX_FEATURES src/features/upscaling/settings.cpp src/features/frame_g
     src/features/motion_blur/settings.cpp)
 
 # The add-on uses ReShade's ImGui through the overlay function table, so none is linked.
-add_library(phantom_fx SHARED src/addon.cpp src/core.cpp src/modules.cpp src/features/upscaling/upscaler.cpp src/menu.cpp src/menu_budget.cpp src/fxui/fxui.cpp src/phantom_fx_settings.cpp ${PHANTOM_FX_FEATURES} src/camera.cpp src/constant_capture.cpp
+add_library(phantom_fx SHARED src/addon.cpp src/core.cpp src/modules.cpp src/features/upscaling/upscaler.cpp src/features/upscaling/render_size_plan.cpp src/features/upscaling/frames.cpp src/menu.cpp src/menu_budget.cpp src/fxui/fxui.cpp src/phantom_fx_settings.cpp ${PHANTOM_FX_FEATURES} src/camera.cpp src/constant_capture.cpp
     src/device_check.cpp src/features/motion_blur/motion_blur.cpp src/features/upscaling/fxaa.cpp src/features/frame_rate/frame_rate.cpp src/render_scale.cpp src/ui_redirect.cpp src/frame_log.cpp src/resource_dump.cpp
     src/log.cpp src/shader_bytecode.cpp src/game_shaders.cpp src/features/frame_generation/presenter.cpp src/features/frame_generation/frame_generation.cpp src/game_loop.cpp src/passes/contact_shadow_trace.cpp src/passes/sun_light_pass.cpp src/features/sun_contact_shadows/sun_contact_shadows.cpp
     src/passes/local_light_pass.cpp src/features/lamp_contact_shadows/lamp_contact_shadows.cpp src/features/lamp_soft_shadows/lamp_soft_shadows.cpp
@@ -245,7 +245,7 @@ install(FILES licenses/AMD-FidelityFX-LICENSE.txt licenses/Bend-Studio-SSS-LICEN
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(upscaler_tests tests/upscaler_tests.cpp src/phantom_fx_settings.cpp ${PHANTOM_FX_FEATURES} src/camera.cpp src/constant_capture.cpp
+    add_executable(upscaler_tests tests/upscaler_tests.cpp src/features/upscaling/render_size_plan.cpp src/features/upscaling/frames.cpp src/phantom_fx_settings.cpp ${PHANTOM_FX_FEATURES} src/camera.cpp src/constant_capture.cpp
         src/log.cpp src/shader_bytecode.cpp src/features/global_illumination/gi_lighting.cpp)
     target_include_directories(upscaler_tests PRIVATE src)
     target_link_libraries(upscaler_tests PRIVATE d3d11 d3dcompiler)

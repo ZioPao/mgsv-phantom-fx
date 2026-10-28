@@ -1,6 +1,8 @@
 #include "camera.hpp"
 #include "constant_capture.hpp"
 #include "features/global_illumination/gi_lighting.hpp"
+#include "features/upscaling/frames.hpp"
+#include "features/upscaling/render_size_plan.hpp"
 #include "frame_latch.hpp"
 #include "game_constants.hpp"
 #include "phantom_fx_settings.hpp"
@@ -21,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace
@@ -527,6 +530,68 @@ void modeMaths()
         "Fixed DLSS frame generation modes present 2 to 6 frames per rendered frame.");
 }
 
+void dlssModesTakeDlssSize()
+{
+    const auto plan = planRenderSize({.mode = Mode::Balanced}, {3840, 2160}, render_scale::Size{2226, 1252});
+    expect(plan.render == render_scale::Size{2226, 1252} && plan.output == render_scale::Size{3840, 2160} && plan.quality == DlssQuality::Balanced,
+        "DLSS's modes render at DLSS's own size, with its quality.");
+}
+
+void nominalSizeWithoutDlssSize()
+{
+    constexpr render_scale::Size Output{3840, 2160}, FromDlss{2400, 1350}, TwoThirds{2560, 1440};
+    expect(planRenderSize({.upscaler = Upscaler::Fsr, .mode = Mode::Quality}, Output, FromDlss).render == TwoThirds, "FSR keeps AMD's scale.");
+    expect(planRenderSize({.mode = Mode::Custom, .customRenderScale = 0.75f}, Output, FromDlss).render == render_scale::Size{2880, 1620},
+        "Custom keeps its own scale.");
+    expect(planRenderSize({.mode = Mode::Quality}, Output, std::nullopt).render == TwoThirds
+            && planRenderSize({.mode = Mode::Quality}, Output, render_scale::Size{0, 0}).render == TwoThirds,
+        "DLSS without a size from NGX, or with a zero one, keeps NVIDIA's scale.");
+}
+
+// The engine rounds its own sizes up to even (0x2496A0).
+void oddSizesRoundUpToEven()
+{
+    expect(planRenderSize({.mode = Mode::Quality}, {3840, 2160}, render_scale::Size{2227, 1253}).render == render_scale::Size{2228, 1254},
+        "An odd render size is rounded up to even.");
+}
+
+void renderSizeNeverAboveOutput()
+{
+    const auto fromDlss = planRenderSize({.mode = Mode::Quality}, {1920, 1080}, render_scale::Size{2000, 1200}).render;
+    const auto full = planRenderSize({.mode = Mode::Custom, .customRenderScale = 1}, {1919, 1079}, std::nullopt).render;
+    expect(fromDlss == render_scale::Size{1920, 1080} && full.width <= 1919 && full.height <= 1079,
+        "The render size never exceeds the output size, rounded up or not.");
+}
+
+// Custom asks DLSS for DLAA from 99%, Quality from 66%, Balanced from 58% and Performance from 50%.
+void customQualityFollowsScale()
+{
+    using enum DlssQuality;
+    const std::pair<float, DlssQuality> cases[]{{1.0f, Dlaa},{0.99f, Dlaa}, {0.98f, MaxQuality}, {0.66f, MaxQuality}, {0.65f, Balanced}, {0.58f, Balanced},
+        {0.57f, MaxPerformance}, {0.5f, MaxPerformance}, {0.49f, UltraPerformance}};
+    for (const auto& [scale, quality] : cases) expect(dlssQuality(Mode::Custom, scale) == quality, "Custom's DLSS quality follows its scale.");
+}
+
+// Anything but what decides the render size would rebuild the engine's targets for nothing.
+void planKeptForOtherSettings()
+{
+    const Upscaling wanted{.mode = Mode::Custom, .customRenderScale = 0.75f};
+    constexpr render_scale::Size Output{2560, 1440};
+    const auto plan = planRenderSize(wanted, Output, std::nullopt);
+    auto other = wanted;
+    other.dlssPreset = Preset::K;
+    other.sharpness = 1;
+    other.textureBiasOffset = -1;
+    expect(plan.isFor(other, Output), "The preset, sharpening and the texture bias keep the plan.");
+
+    auto fsr = wanted, quality = wanted, scaled = wanted;
+    fsr.upscaler = Upscaler::Fsr;
+    quality.mode = Mode::Quality;
+    scaled.customRenderScale = 0.7f;
+    expect(!plan.isFor(fsr, Output) && !plan.isFor(quality, Output) && !plan.isFor(scaled, Output) && !plan.isFor(wanted, {1920, 1080}),
+        "Another upscaler, mode, custom scale or output size makes a new plan.");
+}
+
 void jitterSequence()
 {
     expect(camera::jitterPhases(1.0f) == 8, "DLAA uses 8 phases.");
@@ -548,6 +613,120 @@ void jitterSequence()
     expect(std::abs(sumX / 8) < 0.07 && std::abs(sumY / 8) < 0.07, "The phases are centred on the pixel.");
     expect(camera::jitterPixels(3, 8) == camera::jitterPixels(11, 8), "The sequence repeats after its phases.");
     expect(close(camera::jitterPixels(0, 8)[0], 0) && close(camera::jitterPixels(0, 8)[1], 1.0 / 3 - 0.5), "It is Halton(2, 3) from index 1.");
+}
+
+// A scene constants upload as bufferUnmapped hands it to the frames; returns it as the game's draws
+// then read it.
+game_constants::SceneConstants upload(Frames& frames, game_constants::SceneConstants scene, const FrameStart& start = {.canJitter = true})
+{
+    frames.sceneWritten(scene, camera::classify(scene), start);
+    return scene;
+}
+
+// The frame being run: executed, upscaled at its grading, presented.
+void upscaledAndPresented(Frames& frames)
+{
+    frames.executed();
+    frames.upscaled(true);
+    frames.presented(true);
+}
+
+void frameStartsAfterAnExecute()
+{
+    Frames frames;
+    upload(frames, DumpedMainView, {.gameFrame = 7});
+    upload(frames, DumpedMainView, {.gameFrame = 8});
+    expect(frames.current().index == 1 && frames.current().gameFrame == 7, "A frame starts at its first main-view upload, with the game loop's frame then.");
+
+    frames.executed();
+    upload(frames, DumpedMainView, {.gameFrame = 9});
+    expect(frames.current().index == 2 && frames.current().gameFrame == 9, "The first main-view upload after an execute starts the next frame.");
+}
+
+// The FXAA pass and the object velocity note the frame they were recorded for.
+void passesAfterAnExecuteBelongToTheNextFrame()
+{
+    Frames frames;
+    upload(frames, DumpedMainView);
+    expect(frames.recordingFrame() == 1, "Passes recorded after a frame's first upload are its own.");
+
+    frames.executed();
+    expect(frames.recordingFrame() == 2 && frames.current().index == 1, "Passes recorded after an execute, before the next upload, are the next frame's.");
+}
+
+// The intro draws a smaller view first: a mirror's, 1080x608 of a 2560x1440 frame (2026-10-26).
+void mainViewIsTheLargestCamera()
+{
+    constexpr float eye[3]{93.75f, 314.25f, 244.15f};
+    game_constants::SceneConstants main;
+    fill(main, ViewRows, eye);
+    main.width = 2560;
+    main.height = 1440;
+    auto smaller = DumpedMainView;
+    smaller.width = 1080;
+    smaller.height = 608;
+
+    Frames frames;
+    upload(frames, smaller);
+    expect(frames.current().view && frames.current().view->width == 1080, "A smaller view is the main view until a larger one.");
+
+    upload(frames, main);
+    upload(frames, DumpedMainView);
+    const auto& view = frames.current().view;
+    expect(view && view->width == 2560 && view->projectionView == camera::viewOf(main).projectionView,
+        "The main view is the frame's largest camera; of two the same size, the first.");
+}
+
+// Shadow maps' views are orthographic.
+void otherViewsNeitherStartNorJitter()
+{
+    Frames frames;
+    upload(frames, DumpedMainView);
+    upscaledAndPresented(frames);
+    auto shadow = DumpedMainView;
+    shadow.projection[3][2] = 0;
+    shadow.projection[3][3] = 1;
+    const auto written = upload(frames, shadow);
+    expect(frames.current().index == 1 && std::memcmp(&written, &shadow, sizeof(shadow)) == 0, "A shadow view neither starts a frame nor gets the jitter.");
+}
+
+// The motion blur's velocity pass has the previous frame's matrices in its view, and is jittered as well.
+void everyMainViewUploadGetsTheFramesJitter()
+{
+    Frames frames;
+    upload(frames, DumpedMainView);
+    upscaledAndPresented(frames);
+    auto motionBlur = DumpedMainView;
+    motionBlur.view[0][3] += 5;
+    const auto main = upload(frames, DumpedMainView), velocity = upload(frames, motionBlur);
+    const auto ndc = camera::jitterNdc(frames.current().jitter, 2560, 1440);
+    expect(ndc[0] != 0 && ndc[1] != 0 && main.cameraCenterOffset[0] == ndc[0] && main.cameraCenterOffset[1] == ndc[1]
+            && velocity.cameraCenterOffset[0] == ndc[0] && velocity.cameraCenterOffset[1] == ndc[1],
+        "Every main-view upload of a jittered frame, the camera's and the motion blur's, gets the frame's jitter.");
+}
+
+// So a 3D view without FXAA never shakes.
+void jitterOnlyAfterAnUpscaledFrame()
+{
+    struct Case
+    {
+        bool shouldJitterNext = true, wasUpscaled = true, canJitter = true;
+    };
+    // The frame after one that ran, went through the upscaler at its grading, and was presented.
+    const auto isNextFrameJittered = [](Case run)
+    {
+        Frames frames;
+        upload(frames, DumpedMainView);
+        frames.executed();
+        frames.upscaled(run.shouldJitterNext);
+        frames.presented(run.wasUpscaled);
+        upload(frames, DumpedMainView, {.canJitter = run.canJitter});
+        return frames.current().isJittered;
+    };
+    expect(isNextFrameJittered({}), "The frame after an upscaled one is jittered.");
+    expect(!isNextFrameJittered({.wasUpscaled = false}), "A present without an upscale leaves the next frame unjittered.");
+    expect(!isNextFrameJittered({.canJitter = false}), "Nothing is jittered while the upscaler does not replace FXAA.");
+    expect(!isNextFrameJittered({.shouldJitterNext = false}), "Diagnostics' Jitter off, or a fallback, leaves the next frame unjittered.");
 }
 
 void photoModeSettingsPersist(const fs::path& root)
@@ -841,7 +1020,19 @@ int main()
         cuts();
         streamlineCamera();
         modeMaths();
+        dlssModesTakeDlssSize();
+        nominalSizeWithoutDlssSize();
+        oddSizesRoundUpToEven();
+        renderSizeNeverAboveOutput();
+        customQualityFollowsScale();
+        planKeptForOtherSettings();
         jitterSequence();
+        frameStartsAfterAnExecute();
+        passesAfterAnExecuteBelongToTheNextFrame();
+        mainViewIsTheLargestCamera();
+        otherViewsNeitherStartNorJitter();
+        everyMainViewUploadGetsTheFramesJitter();
+        jitterOnlyAfterAnUpscaledFrame();
         photoModeSettingsPersist(root);
         hdrSettingsPersist(root);
         motionBlurSettingsPersist(root);
