@@ -29,7 +29,7 @@
 - **Lamp contact shadows cost a fraction of what they did.** Each lamp traced Bend Studio's
   screen-space shadows in a compute pass over its whole screen rectangle, 120 samples a pixel, and
   then drew its volume a second time to put the result in the light targets. The lamps now march the
-  depth buffer inside that draw, the shape `renodx-mgsv`'s term has: about 48 steps a pixel crowded
+  depth buffer inside that draw, the shape `renodx-mgsv`'s term has: about 40 steps a pixel crowded
   near the surface, a caster counted only within a quarter of a metre of the ray, and pixels the
   light cannot reach left without a step. A lamp wholly past the contact shadows' fade keeps the
   game's draws. The sun keeps Bend's trace, which costs one to eight dispatches for each recording of
