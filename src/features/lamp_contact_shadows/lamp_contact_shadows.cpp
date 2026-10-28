@@ -45,10 +45,10 @@ std::mutex resourceMutex;
 ComPtr<ID3D11Device> device;
 ComPtr<ID3D11PixelShader> lightShadowShader;
 ComPtr<ID3D11Buffer> optionsBuffer;
-// The light shadow's draw: alpha only, over the whole light volume.
+// The light shadow's draw: alpha only, over the light volume the game is already drawing.
 ComPtr<ID3D11BlendState> alphaOnly;
+// The same draw with the game's depth test off: it writes alpha, not depth.
 ComPtr<ID3D11DepthStencilState> noDepth;
-ComPtr<ID3D11RasterizerState> bothFaces;
 // The game's additive light blend, by the state it binds, and the same scaled by the target's alpha.
 std::unordered_map<ID3D11BlendState*, std::pair<ComPtr<ID3D11BlendState>, ComPtr<ID3D11BlendState>>> shadowedBlends;
 
@@ -80,12 +80,6 @@ bool ensurePipeline()
         depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
         depth.DepthFunc = D3D11_COMPARISON_ALWAYS;
         check(device->CreateDepthStencilState(&depth, noDepth.ReleaseAndGetAddressOf()), "Creating the light shadow depth state");
-
-        D3D11_RASTERIZER_DESC rasterizer{};
-        rasterizer.FillMode = D3D11_FILL_SOLID;
-        rasterizer.CullMode = D3D11_CULL_NONE;
-        rasterizer.DepthClipEnable = TRUE;
-        check(device->CreateRasterizerState(&rasterizer, bothFaces.ReleaseAndGetAddressOf()), "Creating the light shadow rasterizer state");
 
         optionsBuffer = makeConstantBuffer(device.Get(), sizeof(Options), "Creating the lamp contact shadow options");
 
@@ -178,7 +172,7 @@ void detach() noexcept
         lightShadowShader.Reset();
         alphaOnly.Reset();
         noDepth.Reset();
-        bothFaces.Reset();
+        optionsBuffer.Reset();
         shadowedBlends.clear();
         device.Reset();
         pipelineFailed = false;
@@ -205,9 +199,11 @@ Health health()
     return {};
 }
 
-// At the marking draw (colour writes off), the light's shadow is marched through the depth buffer, and
-// the light's volume drawn once more, both faces and without depth test, to put the shadow in the
-// alpha of both light targets wherever the light can reach.
+// At the marking draw (colour writes off), the game's draw is made, then the light's volume is drawn
+// once more with the shadow shader, to put the march's shadow in the alpha of both light targets
+// wherever the light can reach. The second draw takes the game's own rasteriser state, so it covers
+// exactly the face, and so exactly the pixels, the game's marking draw and the lighting draw after it
+// cover - which is one face of the volume, where drawing both cost twice the pixels for the same image.
 bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Falloff falloff, const BoundBlend& gameBlend)
 {
     const auto scene = constant_capture::pixelShaderReads<game_constants::SceneConstants>(context);
@@ -258,17 +254,6 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     context->OMGetDepthStencilState(gameDepth.GetAddressOf(), &stencilReference);
     context->RSGetState(gameRasterizer.GetAddressOf());
 
-    // Once, for the log: the game's own culling of a light's volume says whether drawing both faces of
-    // it here is needed, or whether the game's own coverage would do and cost half the pixels (see
-    // bothFaces above).
-    static std::atomic<bool> loggedCulling{};
-    if (!loggedCulling.exchange(true) && gameRasterizer)
-    {
-        D3D11_RASTERIZER_DESC desc{};
-        gameRasterizer->GetDesc(&desc);
-        log("Shadows: the game draws a light's volume with culling " + std::to_string(static_cast<int>(desc.CullMode)) + ".");
-    }
-
     context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
 
     performance::Timed timed(context, performance::Pass::LampShadows);
@@ -276,7 +261,7 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     context->PSSetConstantBuffers(BoundsSlot, 1, optionsBuffer.GetAddressOf());
     context->OMSetBlendState(alphaOnly.Get(), gameBlend.factor, gameBlend.sampleMask);
     context->OMSetDepthStencilState(noDepth.Get(), 0);
-    context->RSSetState(bothFaces.Get());
+    context->RSSetState(gameRasterizer.Get());
     context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
     timed.end();
 

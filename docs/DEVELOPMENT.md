@@ -1643,6 +1643,10 @@ light, in the light's own volume draw.
   reach (one depth read and a distance) or past the fade is lit without marching, and a lamp wholly
   past the fade keeps the game's draws. The sun keeps Bend's trace: one a frame is cheap, and its
   look is the reference the lamps' march was matched to.
+- **One face, not two.** The shadow draw used a rasteriser state of its own with culling off, so a
+  closed volume ran the march on both faces and threw one result away. It now draws with the game's
+  own rasteriser state - the one the marking draw and the lighting draw after it use - so it covers
+  the pixels they cover and costs half the pixels for the same image.
 - **A lamp's reach comes from its falloff** in `cPSLight` `c6` (from the disassembly, `d` the distance
   plus `c6.x` for points): `SSLighting2_*` light `1 / d^2 - d^2 c6.w`, zero at `c6.w^(-1/4)`;
   `Lighting_*_NA` light `(1 - d^16 c6.z) / d^2`, zero at `c6.z^(-1/16)`. The march takes it as the

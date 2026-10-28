@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Lamp contact shadows draw one face of a light's volume, not two.** The shadow draw used its own
+  rasteriser state with culling off, so a closed volume ran the march on both its faces and threw one
+  away. It now takes the game's own rasteriser state, the one the marking draw and the lighting draw
+  after it use, so it covers the same pixels they do at half the cost. The image is unchanged.
 - **Lamp contact shadows cost a fraction of what they did.** Each lamp traced Bend Studio's
   screen-space shadows in a compute pass over its whole screen rectangle, 120 samples a pixel, and
   then drew its volume a second time to put the result in the light targets. The lamps now march the
