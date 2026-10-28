@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fix a fine grid pattern over dark areas, worst at night and in fog with upscaling: the game added a
+  fixed 8x8 dither to its sky, its foggy scene and its glass before DLSS, which enlarged it with the
+  image. The dither is taken out of those shaders, and out of the physical sky.
 - Add **Contact shadow contrast**, **reach**, **thickness** and **fade** settings, under the shadows:
   how dark and how hard the trace is (0.5 to 4, 1 by default), how far along the screen it marches
   (8 to 120 pixels, 80 by default), how deep a surface counts as a contact (0.2% to 2.5% of its depth
