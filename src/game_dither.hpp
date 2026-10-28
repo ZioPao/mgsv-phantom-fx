@@ -8,7 +8,7 @@
 
 // The game adds a fixed 8x8 dither to the colour of its sky draws, its resolve in fog and its forward
 // materials, before the upscaler, which enlarges it into a grid over dark areas. Those shaders are made
-// with the dither read as a flat half. docs/DEVELOPMENT.md, "Dither".
+// with the dither read as its average. docs/DEVELOPMENT.md, "Dither".
 namespace phantom_fx::game_dither
 {
 // A pixel shader about to be made: the code to make it from instead, kept for the session, or null to

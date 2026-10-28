@@ -58,7 +58,9 @@ void md5Block(std::array<std::uint32_t, 4>& state, const std::uint8_t* block)
 
 // The shader token format (d3d11TokenizedProgramFormat.hpp in the Windows Driver Kit).
 constexpr std::uint32_t CustomData = 0x35, Mov = 0x36, Nop = 0x3A, Sample = 0x45, DeclareOutput = 0x65, Saturate = 1u << 13;
-constexpr std::uint32_t OutputOperand = 2, Immediate32Operand = 4, ResourceOperand = 7;
+constexpr std::uint32_t OutputOperand = 2, Immediate32Operand = 4, ResourceOperand = 7, SwizzleMode = 1;
+// A four-component immediate operand's token: its four values follow.
+constexpr std::uint32_t Immediate4 = Immediate32Operand << 12 | 2;
 // Instructions that write floats and take a saturate: add, div, dp2, dp3, dp4, mad, min, max, mov, movc, mul.
 constexpr std::uint32_t Saturable[]{0x00, 0x0E, 0x0F, 0x10, 0x11, 0x32, 0x33, 0x34, 0x36, 0x37, 0x38};
 
@@ -98,9 +100,9 @@ std::vector<std::size_t> operandsOf(const std::uint8_t* code, const Instruction&
 bool isTexture(const std::uint8_t* code, std::size_t operand, std::uint32_t slot)
 {
     const auto token = wordAt(code, operand);
-    const bool immediateIndex = ((token >> 20) & 3) == 1 && ((token >> 22) & 7) == 0;
+    const bool hasImmediateIndex = ((token >> 20) & 3) == 1 && ((token >> 22) & 7) == 0;
 
-    return ((token >> 12) & 0xFF) == ResourceOperand && immediateIndex && wordAt(code, operand + ((token >> 31) ? 8 : 4)) == slot;
+    return ((token >> 12) & 0xFF) == ResourceOperand && hasImmediateIndex && wordAt(code, operand + ((token >> 31) ? 8 : 4)) == slot;
 }
 }
 
@@ -266,28 +268,38 @@ std::optional<std::vector<std::uint8_t>> withoutDither(const void* code, std::si
     const auto program = instructionsOf(bytes, size);
     if (!program) return std::nullopt;
 
-    bool found{};
+    // The game's dither textures average a half in red and a quarter in alpha (64 of 255; one 71);
+    // green and blue hold 1 of 255.
+    constexpr float Averages[]{0.5f, 1.0f / 255, 1.0f / 255, 0.25f};
+    bool isPatched{};
     for (const auto& instruction : *program)
     {
+        if (instruction.opcode != Sample) continue;
+
         // A sample's operands: destination, address, texture, sampler.
-        const auto operands = instruction.opcode == Sample ? operandsOf(bytes, instruction) : std::vector<std::size_t>{};
+        const auto operands = operandsOf(bytes, instruction);
         if (operands.size() != 4 || !isTexture(bytes, operands[2], dither.BindPoint)) continue;
 
-        // In its place, the same length: mov <destination>, l(0.5, 0.5, 0.5, 0.5), then nops.
-        constexpr std::uint32_t Immediate4 = Immediate32Operand << 12 | 2, Half = 0x3F000000;
-        const std::size_t destinationWords = (operands[1] - operands[0]) / 4, movWords = 1 + destinationWords + 5;
-        if (movWords > instruction.length) return std::nullopt;
+        const auto texture = wordAt(bytes, operands[2]);
+        if (((texture >> 2) & 3) != SwizzleMode) return std::nullopt;
 
-        std::vector<std::uint32_t> words{Mov | static_cast<std::uint32_t>(movWords) << 24};
-        for (std::size_t word = 0; word < destinationWords; ++word) words.push_back(wordAt(bytes, operands[0] + 4 * word));
+        // In its place: mov <destination>, the averages in the sample's swizzle; then nops to its length.
+        std::vector<std::uint32_t> words{Mov};
+        for (auto at = operands[0]; at < operands[1]; at += 4) words.push_back(wordAt(bytes, at));
 
-        words.insert(words.end(), {Immediate4, Half, Half, Half, Half});
+        words.push_back(Immediate4);
+        for (std::uint32_t component = 0; component < 4; ++component)
+            words.push_back(std::bit_cast<std::uint32_t>(Averages[(texture >> (4 + 2 * component)) & 3]));
+
+        if (words.size() > instruction.length) return std::nullopt;
+
+        words[0] |= static_cast<std::uint32_t>(words.size()) << 24;
         words.resize(instruction.length, Nop | 1u << 24);
         std::memcpy(bytes + instruction.offset, words.data(), 4 * words.size());
-        found = true;
+        isPatched = true;
     }
 
-    if (!found) return std::nullopt;
+    if (!isPatched) return std::nullopt;
 
     resign(patched);
 

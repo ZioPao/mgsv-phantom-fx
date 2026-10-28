@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -54,14 +55,15 @@ std::vector<std::uint8_t> compiled(const std::string& source, const char* target
 
 constexpr UINT Size = 8;
 
-// The game's 8x8 dither, in its x and w: a different value in every pixel.
+// As the game's 8x8 dither: a different value in every pixel, from 2 to 254 in red, averaging a half,
+// and from 1 to 127 in alpha, averaging a quarter.
 ComPtr<ID3D11ShaderResourceView> ditherTexture(const Gpu& gpu)
 {
     std::array<std::uint32_t, Size * Size> texels{};
     for (std::uint32_t i = 0; i < texels.size(); ++i)
     {
-        const std::uint32_t value = (i * 37 % 64) * 4;
-        texels[i] = value | value << 24;
+        const std::uint32_t step = i * 37 % 64;
+        texels[i] = (2 + 4 * step) | 0x00010100 | (1 + 2 * step) << 24;
     }
 
     const D3D11_TEXTURE2D_DESC desc{Size, Size, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D11_USAGE_IMMUTABLE, D3D11_BIND_SHADER_RESOURCE};
@@ -74,9 +76,11 @@ ComPtr<ID3D11ShaderResourceView> ditherTexture(const Gpu& gpu)
     return view;
 }
 
+using Image = std::array<float, Size * Size>;
+
 // What `pixelShader` draws over an 8x8 float target with the dither in t8 and t15 and a point wrap
 // sampler in s8, as the game binds them: the red of every pixel.
-std::array<float, Size * Size> drawn(const Gpu& gpu, const std::vector<std::uint8_t>& pixelShader)
+Image drawn(const Gpu& gpu, const std::vector<std::uint8_t>& pixelShader)
 {
     const auto vertexCode = compiled(R"(
 float4 main(uint id : SV_VertexID) : SV_Position
@@ -97,6 +101,7 @@ float4 main(uint id : SV_VertexID) : SV_Position
     ComPtr<ID3D11RenderTargetView> targetView;
     expect(SUCCEEDED(gpu.device->CreateTexture2D(&desc, nullptr, target.GetAddressOf())), "Create the target.");
     expect(SUCCEEDED(gpu.device->CreateRenderTargetView(target.Get(), nullptr, targetView.GetAddressOf())), "View the target.");
+
     desc.Usage = D3D11_USAGE_STAGING;
     desc.BindFlags = 0;
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -114,10 +119,11 @@ float4 main(uint id : SV_VertexID) : SV_Position
     gpu.context->PSSetShaderResources(8, 1, views);
     gpu.context->PSSetShaderResources(15, 1, views);
     gpu.context->PSSetSamplers(8, 1, sampler.GetAddressOf());
+
+    const D3D11_VIEWPORT viewport{0, 0, Size, Size, 0, 1};
     gpu.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     gpu.context->VSSetShader(vertex.Get(), nullptr, 0);
     gpu.context->PSSetShader(pixel.Get(), nullptr, 0);
-    const D3D11_VIEWPORT viewport{0, 0, Size, Size, 0, 1};
     gpu.context->RSSetViewports(1, &viewport);
     gpu.context->OMSetRenderTargets(1, targetView.GetAddressOf(), nullptr);
     gpu.context->Draw(3, 0);
@@ -125,7 +131,7 @@ float4 main(uint id : SV_VertexID) : SV_Position
 
     D3D11_MAPPED_SUBRESOURCE mapped{};
     expect(SUCCEEDED(gpu.context->Map(readable.Get(), 0, D3D11_MAP_READ, 0, &mapped)), "Read the target.");
-    std::array<float, Size * Size> reds{};
+    Image reds{};
     for (UINT y = 0; y < Size; ++y)
         for (UINT x = 0; x < Size; ++x) reds[y * Size + x] = static_cast<const float*>(mapped.pData)[y * mapped.RowPitch / 4 + x * 4];
 
@@ -134,12 +140,18 @@ float4 main(uint id : SV_VertexID) : SV_Position
     return reds;
 }
 
-bool isFlat(const std::array<float, Size * Size>& reds, float expected)
+float averageOf(const Image& reds)
 {
-    return std::ranges::all_of(reds, [&](float red) { return std::abs(red - expected) < 1e-6f; });
+    return std::accumulate(reds.begin(), reds.end(), 0.0f) / reds.size();
 }
 
-// The sky draws' and the foggy resolve's form: a dither centred on zero, added to the colour.
+// Every pixel at `level`, well within an 8-bit step of it.
+bool isFlatAt(const Image& reds, float level)
+{
+    return std::ranges::all_of(reds, [&](float red) { return std::abs(red - level) < 1e-4f; });
+}
+
+// The sky draws' and the foggy resolve's form: the dither's red, centred on zero, added to the colour.
 void centredDitherIsRemoved(const Gpu& gpu)
 {
     const auto code = compiled(R"(
@@ -155,15 +167,16 @@ float4 main(float4 position : SV_Position) : SV_Target
 )",
         "ps_5_0");
 
-    expect(!isFlat(drawn(gpu, code), 0.25f), "The game's shader dithers its colour.");
+    const auto dithered = drawn(gpu, code);
+    expect(!isFlatAt(dithered, averageOf(dithered)), "The game's shader dithers its colour.");
 
     const auto patched = withoutDither(code.data(), code.size());
     expect(patched.has_value(), "A shader with the dither is patched.");
-    expect(isFlat(drawn(gpu, *patched), 0.25f), "Without the dither every pixel keeps the colour.");
+    expect(isFlatAt(drawn(gpu, *patched), averageOf(dithered)), "Without the dither every pixel gets the dithered colour's average.");
 }
 
-// The forward materials' form: the dither's alpha added whole to the fog, at its mean of a half.
-void wholeDitherKeepsItsMean(const Gpu& gpu)
+// The forward materials' form: the dither's alpha added whole to the fog, which keeps its average.
+void wholeDitherKeepsItsAverage(const Gpu& gpu)
 {
     const auto code = compiled(R"(
 SamplerState g_samplerPoint_Wrap : register(s8);
@@ -178,14 +191,14 @@ float4 main(float4 position : SV_Position) : SV_Target
 )",
         "ps_5_0");
 
-    expect(!isFlat(drawn(gpu, code), 0.25f), "The game's shader dithers its fog.");
+    const auto dithered = drawn(gpu, code);
+    expect(!isFlatAt(dithered, averageOf(dithered)), "The game's shader dithers its fog.");
 
     const auto patched = withoutDither(code.data(), code.size());
-    const float half = 0.5f / 128;
-    expect(patched && isFlat(drawn(gpu, *patched), 0.25f + half + (0.5f + half) * 0.1f), "Without the dither every pixel gets its mean.");
+    expect(patched && isFlatAt(drawn(gpu, *patched), averageOf(dithered)), "Without the dither every pixel gets the dithered fog's average.");
 }
 
-// The G-buffer's fade reads the same texture as a mask under another name; a flat half would turn
+// The G-buffer's fade reads the same texture as a mask under another name; its average would turn
 // the fade into a cut.
 void fadeMaskIsKept()
 {
@@ -212,7 +225,7 @@ int main()
     {
         const auto gpu = warp();
         centredDitherIsRemoved(gpu);
-        wholeDitherKeepsItsMean(gpu);
+        wholeDitherKeepsItsAverage(gpu);
         fadeMaskIsKept();
         std::cout << "Shader bytecode tests passed.\n";
 

@@ -59,7 +59,7 @@ documentation and licenses are in `PhantomFX/`.
 ctest --test-dir build/release
 ```
 
-This runs six tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
+This runs seven tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
 (defaults, round trip, clamping, invalid files and values), the mode maths (render scales, texture LOD
 bias), the render size plan (DLSS's own size or the nominal one, rounded up to even and never above the
 output size, Custom's DLSS quality, the settings that make a new plan), the frames (when one starts,
@@ -86,6 +86,9 @@ the game's shaders on a WARP device, each created from a DXBC header carrying a 
 shader known by its checksum and drawn with it, unknown and missing shaders, every copy of one shader
 known, code that is not DXBC, the first of a row's shaders kept (the ray-traced lights' twins),
 everything let go at device teardown, and vertex shaders by their source name.
+`tests/shader_bytecode_tests.cpp`: the dither patch on a WARP device, on shaders compiled as the game's
+are: a dither centred on zero and one added whole, each flat at the dithered image's average once
+patched, and the G-buffer's fade mask kept.
 `tests/command_list_notes_tests.cpp`: how a module's notes go from a deferred context to its command list
 and are handed over: once, a context starting empty after its finish or at a gone one's address, a list
 run inside a deferred context joining its notes in the order they run, a forgotten list, notes expiring
@@ -873,21 +876,28 @@ Before the upscaler it is a cell per render pixel, which DLSS enlarges with the 
 dark areas, worst at night in fog (issue #28). Found 2026-10-28 in the shaders' disassembly
 (`%TEMP%\mgsv-fog\all`) and the frame records.
 
-- **The texture.** An 8x8 `B8G8R8A8_UNORM` texture, read through `g_samplerPoint_Wrap` (`s8`) at
-  `frac(pixel / 8)`. 42 pixel shaders call it `inMesh` and add it to their colour: the three sky
-  draws (`t8`) and `DR_VolFog_TppTonemap_MD` (`t15`) as `(d - 0.5) / 128`, `tpp3dfw_constant_sky` and
-  `tpp3dfw_generativeClouds` as `(d - 0.5) / 64`, the other forward materials (`fox3dfw_*`, glass) as
-  `d / 128` on their fog's colour and transmittance. 211 G-buffer shaders read the same texture as
-  `g_tex_mesh`, the mask that fades a model out (its threshold in `cPSObject`), so the texture stays.
+- **The textures.** Four 8x8 `B8G8R8A8_UNORM` textures, read through `g_samplerPoint_Wrap` (`s8`) at
+  `frac(pixel / 8)`. Red is an ordered pattern from 1 or 2 to 253 or 254, averaging a half; alpha
+  averages a quarter (64 of 255; 71 in one), flat in two of them and ordered in the others; green and
+  blue hold 1. 42 pixel shaders call one `inMesh` and add it to their colour: the three sky draws
+  (`t8`) and `DR_VolFog_TppTonemap_MD` (`t15`) its red as `(d - 0.5) / 128`, `tpp3dfw_constant_sky`
+  and `tpp3dfw_generativeClouds` as `(d - 0.5) / 64`, the other forward materials (`fox3dfw_*`, glass)
+  mostly its alpha as `d / 128` on their fog's colour and transmittance. 211 G-buffer shaders read the
+  same textures as `g_tex_mesh`: red against the model's fade, which dissolves it, and alpha times
+  `cPSSystem` `m_param.w` as the alpha test's threshold, so the textures stay.
 - **When.** All 7 frame records with `Sky_Draw_TppNoSky` (fog) resolve with `DR_VolFog_TppTonemap_MD`;
   none of the other 161 does. The plain resolve has no dither. The dither is added after TppTonemap,
   in linear colour before the sRGB view encodes it: at night's 8 to 16 of 255 a step of 1/256 is
   several levels.
 - **Patch.** `create_pipeline` hands Direct3D a copy of each shader with an `inMesh` texture (by
-  reflection) in which every sample of it is `mov <destination>, l(0.5, 0.5, 0.5, 0.5)` and nops of the
-  same length. The centred forms then add nothing; `d / 128` adds its mean, 1/256, so the forward
-  materials keep their brightness. It runs before HDR's patch, which finds its TppTonemap the same
-  way; both orders give the same code. The add-on's own sky draw has no dither either.
+  reflection) in which every sample of it is a `mov` of the textures' average in each channel (a half,
+  1/255, 1/255, a quarter), in the sample's swizzle, and nops to the same length. Every pixel then gets
+  what the dither added on average: the centred forms nothing, the forward materials a quarter of
+  1/128, so they keep their brightness. It runs before HDR's patch, which finds its TppTonemap the
+  same way; both orders give the same code. The add-on's own sky draw has no dither either.
+- **Left as they are.** The G-buffer's alpha test with the ordered alpha stipples cut-out edges (hair,
+  manes) before DLSS too; taking it out would make those edges hard. The shadow filters'
+  `MicroDither` and the sun pass's 2x2 tap offset move a comparison by an eighth of a texel.
 - Checked over the 806 pixel shaders the frame log saved: exactly the 42 (and HDR's 4 copies of
   them) patched, all taken by Direct3D on an RTX 5080.
 

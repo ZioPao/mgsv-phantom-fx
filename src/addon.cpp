@@ -415,9 +415,9 @@ bool onCreatePipeline(device* device, pipeline_layout, uint32_t count, const pip
     {
         if (subobjects[i].type != pipeline_subobject_type::pixel_shader || !subobjects[i].data) continue;
 
+        auto* shader = static_cast<shader_desc*>(subobjects[i].data);
         // The dither first: HDR's copy of the code it patches keeps the undithered code's checksum,
         // by which game_dither knows it.
-        auto* shader = static_cast<shader_desc*>(subobjects[i].data);
         if (const auto* undithered = game_dither::undithered(reinterpret_cast<ID3D11Device*>(device->get_native()), shader->code, shader->code_size))
         {
             shader->code = undithered->data();
