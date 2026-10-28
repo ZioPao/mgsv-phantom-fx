@@ -8,12 +8,12 @@
 #include <d3d11.h>
 
 // The lamps' contact shadows (docs/DEVELOPMENT.md, "Screen-space shadows"), drawn by the local light
-// pass (local_light_pass.hpp). A point or spot light draws its volume twice, to mark the stencil and
-// then to light. At the first, the add-on marches Bend-style contact shadows through the depth buffer
-// towards the light, inside that draw, and writes them into the light targets' unused alpha; the
-// second's light is then scaled by it. A march per light's own fits, where renodx-mgsv's runs in the
-// light shader itself, because Phantom FX cannot replace every one of the game's 24 light shaders.
-// One march per light, so it costs more where many lights are on screen.
+// pass (local_light_pass.hpp). A shadow-mapped point or spot light draws its volume twice, to mark the
+// stencil and then to light. At the first, the add-on marches Bend-style contact shadows through the
+// depth buffer towards the light, inside that draw, and writes them into the light targets' unused
+// alpha; the second's light is then scaled by it. A march per light's own fits, where renodx-mgsv's
+// runs in the light shader itself, because Phantom FX cannot replace every one of the game's 24 light
+// shaders. One march per light, so it costs more where many lights are on screen.
 namespace phantom_fx::lamp_contact_shadows
 {
 void attach(ID3D11Device* device) noexcept;

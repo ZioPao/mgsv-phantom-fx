@@ -9,9 +9,10 @@ void describe(LampContactShadows& shadows, SettingVisitor& visit)
             .iniKey = "light_screen_space_shadows",
             .section = Section::Shadows,
             .name = "Lamp contact shadows",
-            .tip = "Bend Studio's screen-space shadows for every lamp, spot light and flashlight, which gives lights that have no shadow of their "
-                   "own one. Costly: one trace per light, so the frame rate drops where many lights are on screen, as in a base at night.",
-            .summary = "Contact shadows for every lamp and flashlight. One trace per light, so it costs more where many lights are on screen.",
+            .tip = "Bend Studio's screen-space shadows for point and spot lights: the short shadows of feet, rocks and folds of cloth, which a "
+                   "lamp's shadow map does not resolve. Only lamps that cast a shadow get them. One trace per light, so it costs most in a base "
+                   "at night.",
+            .summary = "Screen-space shadows for point and spot lights.",
             .keywords = "screen-space SSS",
             .effect = Effect::LampContactShadows,
             .replacedBy = Effect::RayTracedLights});
