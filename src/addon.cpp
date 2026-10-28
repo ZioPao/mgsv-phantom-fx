@@ -588,7 +588,9 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
 
     reshade::register_event<reshade::addon_event::init_command_queue>(onInitCommandQueue);
     reshade::register_event<reshade::addon_event::destroy_command_queue>(onDestroyCommandQueue);
-    reshade::register_event<reshade::addon_event::create_pipeline>(onCreatePipeline);
+    // The dither and HDR patches know this build's shaders only.
+    if (isSupportedGameBuild()) reshade::register_event<reshade::addon_event::create_pipeline>(onCreatePipeline);
+
     reshade::register_event<reshade::addon_event::init_pipeline>(onInitPipeline);
     reshade::register_event<reshade::addon_event::draw>(onDraw);
     reshade::register_event<reshade::addon_event::draw_indexed>(onDrawIndexed);
