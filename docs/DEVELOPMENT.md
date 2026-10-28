@@ -1722,9 +1722,12 @@ close to the camera keep only the shadow near their feet.
   their march's step count, a step every two pixels. It is in pixels, so at 4K
   the same reach covers half the world distance it does at 1080p.
 - **Thickness.** Bend's 0.5% window was a constant. It is a setting now (`SurfaceThickness`, 0.2% to
-  2.5% of the depth between a sample and the far plane, or of the view depth for the lamps' march):
-  how deep a surface may sit behind the receiver and still count as a contact. RenoDX exposes the same
-  dial per light type.
+  2.5% of the depth between a sample and the far plane): how deep a surface may sit behind the
+  receiver and still count as a contact. RenoDX exposes the same dial per light type for the sun. The
+  lamps' march keeps RenoDX's own, a fixed 5 mm (`ThicknessMetres` in `lamp_contact_shadows.cpp`): the
+  share grows with the distance until, past 1%, it reaches the bound a caster may sit in and leaves no
+  window at all, so the term died silently for receivers past 10 m, and below that raising it narrowed
+  the march where it widens the sun's trace. The setting now shapes the sun's contact shadows alone.
 - **Distance fade.** Bend's shader has no fade, so a contact shadow at 100 m was as sharp as one
   underfoot. The trace now fades its result with view depth (B and A from `cPSScene` c21 give the view
   Z from the depth it already reads), full strength out to 60% of the setting and nothing past it.

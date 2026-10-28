@@ -43,7 +43,7 @@ cbuffer cPSLight : register(b3)
 cbuffer cLampTrace : register(b6)
 {
     float g_reachPixels;    // Pixels of the render size the march covers, along the screen
-    float g_thickness;      // A share of the view depth: how far behind the ray a surface counts
+    float g_thickness;      // Metres: how far in front of the ray a surface must sit to count
     float g_contrast;       // How dark what the march finds comes out
     float g_fadeMetres;     // Metres: past this the contact shadow is gone
     float g_rangeMetres;    // Metres: how far the light reaches
@@ -131,7 +131,7 @@ void main(float4 position : SV_Position, out float4 diffuse : SV_Target0, out fl
             const float reach = min(reachNdc * abs(viewZ * projectionParam.y), MaxReachMetres);
             const float stepLength = reach / max(steps, 1);
             const float3 direction = toLight / max(lightDistance, 1e-4);
-            const float thickness = max(g_thickness * viewZ, 1e-3);
+            const float thickness = max(g_thickness, 1e-3);
             const float casterMax = max(CasterMaxMetres, viewZ * CasterPerMetre);
             const float jitter = interleavedGradientNoise(position.xy);
 

@@ -1193,6 +1193,23 @@ float4 main(uint id : SV_VertexID) : SV_Position
     expect(render(blocked, optionsFor(1, 100), light)[receiver] == 1, "Past the fade the pixel is lit.");
     expect(render(blocked, optionsFor(500, 0.5f), light)[receiver] == 1, "A pixel beyond the light's reach is lit.");
 
+    // The march counts a caster 7.5 mm in front, where Contact shadow thickness - a share of the depth
+    // left to the far plane, 0.5% of this receiver's 2 m - would have put the near bound at 1 cm.
+    auto close = flat;
+    for (std::size_t i = 0; i < 3 * Size; ++i) close[i] = 1.9925f;
+    expect(render(close, optionsFor(500, 100), light)[receiver] < 0.95f, "A caster 7.5 mm in front counts as a contact.");
+
+    // A receiver at 12 m, with a caster 10 cm in front of it. That same share reaches the bound a caster
+    // may sit in by 10 m and leaves no window at all, so the term died with the distance; the march's
+    // fixed 5 mm does not, and the caster still counts.
+    const std::array<float, 3> farLight{0, 2, 12};
+    std::array<float, Size * Size> distant{};
+    distant.fill(12);
+    auto distantBlocked = distant;
+    for (std::size_t i = 4 * Size; i < 6 * Size; ++i) distantBlocked[i] = 11.9f;
+    expect(render(distant, optionsFor(500, 100), farLight)[receiver] == 1, "A receiver at 12 m with nothing in front of it is lit.");
+    expect(render(distantBlocked, optionsFor(500, 100), farLight)[receiver] < 0.95f, "A caster 10 cm in front counts 12 m out.");
+
     // The G-buffer's normals, when the marking draw has them: a surface facing away from the light takes
     // none of it, so there is nothing to shadow and no march to spend. The light is above the receiver,
     // so the encoded normals below decode to one facing up at it and one facing down away from it.

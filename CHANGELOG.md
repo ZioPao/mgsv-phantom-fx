@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Lamp contact shadows count a caster within their own 5 mm, not Contact shadow thickness.** That
+  setting is a share of the depth left to the far plane, which grows with the distance: past 1% it
+  reaches the bound a caster may sit in and leaves no window at all, so the term silently died for
+  receivers past 10 m, and below that raising it narrowed the march where it widens the sun's trace.
+  The lamps now use `renodx-mgsv`'s fixed 5 mm, as its spot lights do, and the setting shapes the
+  sun's contact shadows alone.
 - **Lamp contact shadows read the depth buffer four texels at a time.** The march took one depth a
   step, forty of them a pixel; a gather returns the four texels inside a two-pixel square for one
   instruction, which is the ground two steps cover, so the same span now takes half the requests and

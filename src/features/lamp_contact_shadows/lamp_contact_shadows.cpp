@@ -34,6 +34,11 @@ constexpr UINT BoundsSlot = 6; // b6 of the light shadow shader: the add-on's op
 // A march step per two pixels of the reach, as renodx-mgsv sizes its steps to the reach, and no more
 // than the shader's own loop takes.
 constexpr float MinSteps = 16, MaxSteps = 64, PixelsPerStep = 2;
+// The caster size the march counts within, in metres, as renodx-mgsv's spot shadows take it. Its own,
+// not Contact shadow thickness: that one is a share of the depth left to the far plane, which grows
+// with the distance until it passes the bound a caster may sit in and leaves no window at all - and it
+// is the sun's window width, so raising it would narrow the lamp's march where it widens the sun's.
+constexpr float ThicknessMetres = 0.005f;
 
 std::atomic<bool> wantedRunning{}, pipelineFailed{};
 
@@ -265,7 +270,7 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     if (!reachesScreen(*scene, position, range, size)) return false;
 
     const Options options{.reachPixels = shape.reachPixels,
-        .thickness = shape.thickness,
+        .thickness = ThicknessMetres,
         .contrast = shape.contrast,
         .fadeMetres = shape.fadeMetres,
         .rangeMetres = range,
