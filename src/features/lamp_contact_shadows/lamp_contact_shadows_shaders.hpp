@@ -79,13 +79,14 @@ float interleavedGradientNoise(float2 position)
 }
 
 // The G-buffer's normal, decoded as the game's own light shaders decode it, so the terminator the
-// march is skipped on is the one the game's lighting has.
+// march is skipped on is the one the game's lighting has. The game takes 1 - z^2, unrooted, both as
+// the scale and inside the root, which leaves xy sqrt(1 - z^2) long.
 float3 decodeNormal(float3 encoded)
 {
     const float2 slope = encoded.xy * 2 - 1;
     const float z = encoded.z * encoded.z * 2 - 1;
-    const float w = sqrt(max(1 - z * z, 0));
-    const float scale = w * rsqrt(1e-7 + w * w * dot(slope, slope));
+    const float rest = max(1 - z * z, 0);
+    const float scale = rest * rsqrt(1e-7 + rest * dot(slope, slope));
 
     return float3(slope * scale, z);
 }

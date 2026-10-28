@@ -1220,6 +1220,16 @@ float4 main(uint id : SV_VertexID) : SV_Position
         "A surface facing the light is shadowed, as it is without the normals.");
     expect(render(blocked, optionsFor(500, 100), light, facingDown)[receiver] < 0.95f,
         "Without the normals bound, the march runs on every pixel it covers.");
+
+    // A grazing light: a surface turned mostly to the camera (z -0.9), its slope away from a light above
+    // and in front of it. The game's decode gives it a little of the light, so it is marched; taking the
+    // normal's xy as a unit long, as the march once did, turned it away and left it lit.
+    const std::array<float, 3> nearLight{0, 1, 1};
+    auto ceiling = flat;
+    for (std::size_t i = 0; i < 6 * Size; ++i) ceiling[i] = 1.7f;
+    const std::array<float, 3> grazing{0.8536f, 0.1464f, 0.2236f};
+    expect(render(ceiling, optionsFor(500, 100, true), nearLight, grazing)[receiver] < 0.95f,
+        "A surface the light grazes is shadowed: its normal decodes as the game's does.");
 }
 
 int main()
