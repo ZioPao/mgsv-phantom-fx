@@ -26,6 +26,7 @@
 #include "features/volumetric_fog/atmosphere.hpp"
 #include "frame_log.hpp"
 #include "fxui/fxui.hpp"
+#include "game_dither.hpp"
 #include "game_loop.hpp"
 #include "game_shaders.hpp"
 #include "log.hpp"
@@ -191,8 +192,9 @@ void onInitPipeline(device* device, pipeline_layout, uint32_t count, const pipel
 
         if (subobjects[i].type == pipeline_subobject_type::pixel_shader)
         {
-            // Shaders HDR made from patched code are known by the game's own.
-            const auto [code, size] = hdr::originalOf(shader->code, shader->code_size);
+            // Shaders made from patched code are known by the game's own.
+            const auto [hdrOriginal, hdrSize] = hdr::originalOf(shader->code, shader->code_size);
+            const auto [code, size] = game_dither::originalOf(hdrOriginal, hdrSize);
             game_shaders::pixelShaderCreated(code, size, reinterpret_cast<IUnknown*>(pipeline.handle));
         }
         else if (subobjects[i].type == pipeline_subobject_type::vertex_shader)
@@ -414,6 +416,15 @@ bool onCreatePipeline(device* device, pipeline_layout, uint32_t count, const pip
         if (subobjects[i].type != pipeline_subobject_type::pixel_shader || !subobjects[i].data) continue;
 
         auto* shader = static_cast<shader_desc*>(subobjects[i].data);
+        // The dither first: HDR's copy of the code it patches keeps the undithered code's checksum,
+        // by which game_dither knows it.
+        if (const auto* undithered = game_dither::undithered(reinterpret_cast<ID3D11Device*>(device->get_native()), shader->code, shader->code_size))
+        {
+            shader->code = undithered->data();
+            shader->code_size = undithered->size();
+            changed = true;
+        }
+
         if (const auto* patched = hdr::patchedShader(shader->code, shader->code_size))
         {
             shader->code = patched->data();
@@ -577,6 +588,9 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
 
     reshade::register_event<reshade::addon_event::init_command_queue>(onInitCommandQueue);
     reshade::register_event<reshade::addon_event::destroy_command_queue>(onDestroyCommandQueue);
+    // The dither and HDR patches know this build's shaders only.
+    if (isSupportedGameBuild()) reshade::register_event<reshade::addon_event::create_pipeline>(onCreatePipeline);
+
     reshade::register_event<reshade::addon_event::init_pipeline>(onInitPipeline);
     reshade::register_event<reshade::addon_event::draw>(onDraw);
     reshade::register_event<reshade::addon_event::draw_indexed>(onDrawIndexed);
@@ -614,7 +628,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
         reshade::register_event<reshade::addon_event::init_resource_view>(onInitResourceView);
         reshade::register_event<reshade::addon_event::destroy_resource_view>(onDestroyResourceView);
         reshade::register_event<reshade::addon_event::copy_resource>(onCopyResource);
-        reshade::register_event<reshade::addon_event::create_pipeline>(onCreatePipeline);
     }
 
     return true;
