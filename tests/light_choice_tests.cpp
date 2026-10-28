@@ -123,6 +123,27 @@ void fewestPixelsDroppedPastTheCap()
     expect(std::ranges::find(choice.taken, std::size_t{0}) == choice.taken.end(), "The light reaching the fewest pixels goes without.");
 }
 
+void sameChoiceInAnyOrder()
+{
+    // Past the cap, lights alike in pixels and distance but for their colour.
+    std::vector<DrawnLight> lights;
+    for (std::size_t i = 0; i <= GI_MAX_LOCAL_LIGHTS; ++i)
+    {
+        lights.push_back(aroundCamera(100, 100));
+        lights.back().light.color[0] = 1.0f + static_cast<float>(i);
+    }
+
+    const auto keysTaken = [](const std::vector<DrawnLight>& from) {
+        std::vector<std::uint64_t> keys;
+        for (const auto index : chooseFrom(from).taken) keys.push_back(keyOf(from[index]));
+
+        return keys;
+    };
+    auto reversed = lights;
+    std::ranges::reverse(reversed);
+    expect(keysTaken(lights) == keysTaken(reversed), "The same lights are chosen, in the same order, whatever order the game drew them in.");
+}
+
 void otherEyeLeftAndCounted()
 {
     auto lights = std::vector{aroundCamera(100, 100), aroundCamera(100, 100)};
@@ -246,6 +267,7 @@ int main()
         nearestBreaksPixelTies();
         allTakenAtTheCap();
         fewestPixelsDroppedPastTheCap();
+        sameChoiceInAnyOrder();
         otherEyeLeftAndCounted();
         noPixelNotTaken();
         wholeViewportWhenInside();

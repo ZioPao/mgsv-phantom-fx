@@ -74,7 +74,8 @@ contents over a fake scene memory with room limits: when models, variants, chara
 let go, waiting for room, a variant without room (never traced, as today), texture copies arriving and
 replacing one another, characters built, refitted and made again, the palette budget, frames without a
 newer list, the instance cap's order and the terrain rings' remaking. `tests/light_choice_tests.cpp`:
-which lights a kick gives the rays: the most pixels first, then the nearest, the light cap's edge, a
+which lights a kick gives the rays: the most pixels first, then the nearest, the light cap's edge, the
+same choice whatever order the lights come in, a
 light drawn from another eye left and counted, one reaching no pixel left out; a light's reach (around
 the camera, behind it, a narrow spot's, the viewport's corner); a light as the rays take it (its range,
 its rays' radius, where its shadow map starts) and its key from two cameras. `tests/game_shaders_tests.cpp`:
@@ -2256,7 +2257,9 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   is the kick camera's (within a millimetre) go to Direct3D 12 in world space (`cPSScene` `c8` to `c10`
   take the light passes' view space there), up to 128, those reaching the most pixels on screen first,
   so that past 128 the smallest go without, the same ones frame after frame; those reaching none are
-  never drawn again. (On 2026-10-23, with a bit a light, they were taken in the order of a hash map of
+  never drawn again. Among as many pixels the nearest come first, and exact ties go by the light's key
+  (its kind, its place to the centimetre, its colour), so which lights go without depends on the lights
+  alone, not on the order the game drew them in (since 2026-10-28; `light_choice.cpp`). (On 2026-10-23, with a bit a light, they were taken in the order of a hash map of
   command lists, which changes every frame: in a base at night with about 100 lights and 64 bits, a
   different 45 went without each frame and a spotlight flickered between its shadow and none.)
 - **Soft shadows** (`TraceLocalLightShadows` in `src/features/ray_traced_lights/light_shadows.hlsl`, 2026-10-24). One value a

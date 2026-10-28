@@ -101,6 +101,7 @@ Choice choose(std::span<const DrawnLight* const> lights, const SceneConstants& c
     {
         LONG pixels;
         float distance;
+        std::uint64_t key;
         std::size_t index;
     };
 
@@ -120,11 +121,18 @@ Choice choose(std::span<const DrawnLight* const> lights, const SceneConstants& c
 
         const float* position = light.light.position;
         reaching.push_back({(reach->right - reach->left) * (reach->bottom - reach->top),
-            std::sqrt(position[0] * position[0] + position[1] * position[1] + position[2] * position[2]), i});
+            std::sqrt(position[0] * position[0] + position[1] * position[1] + position[2] * position[2]), keyOf(light), i});
     }
 
-    std::sort(reaching.begin(), reaching.end(),
-        [](const Reaching& a, const Reaching& b) { return a.pixels != b.pixels ? a.pixels > b.pixels : a.distance < b.distance; });
+    // Exact ties go by the key, so the choice depends on which lights there are, not on the order the game
+    // drew them in.
+    std::sort(reaching.begin(), reaching.end(), [](const Reaching& a, const Reaching& b) {
+        if (a.pixels != b.pixels) return a.pixels > b.pixels;
+        if (a.distance != b.distance) return a.distance < b.distance;
+
+        return a.key < b.key;
+    });
+
     if (reaching.size() > GI_MAX_LOCAL_LIGHTS)
     {
         choice.overCap = reaching.size() - GI_MAX_LOCAL_LIGHTS;
