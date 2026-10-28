@@ -6,9 +6,6 @@ namespace
 {
 constexpr ContactShadowShape Defaults{};
 constexpr Effect ShownIn[]{Effect::SunContactShadows, Effect::LampContactShadows};
-// Thickness shapes only the sun's trace: it is a share of the depth left to the far plane, which the
-// lamps' march cannot use (lamp_contact_shadows.cpp, ThicknessMetres).
-constexpr Effect ThicknessShownIn[]{Effect::SunContactShadows};
 }
 
 void describe(ContactShadowShape& shape, SettingVisitor& visit)
@@ -45,9 +42,9 @@ void describe(ContactShadowShape& shape, SettingVisitor& visit)
             .readoutScale = 100,
             .tip = "How deep a surface has to be behind the receiver to count as a contact. Bend Studio's 0.5% is thin: the trace only sees "
                    "something sitting almost exactly at the receiver's depth, which is why its contact shadows are so tight. Raising it widens "
-                   "what counts, and darkens and softens every contact. The lamps' own march counts a caster within a fixed 5 mm instead, as "
+                   "what counts, and darkens and softens every contact. The lamps' march counts a caster within a fixed 5 mm instead, as "
                    "RenoDX's spot lights do, so this shapes the sun's contact shadows alone.",
-            .shownIn = ThicknessShownIn});
+            .shownIn = ShownIn});
     visit.slider(shape.fadeMetres,
         {.iniKey = "contact_shadow_fade",
             .label = "Contact shadow fade",
