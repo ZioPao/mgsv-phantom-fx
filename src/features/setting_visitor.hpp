@@ -56,6 +56,9 @@ struct SliderInfo
     bool visible{true};
     bool enabled{true};
     std::span<const Effect> shownIn; // Other features' items it shows in, when its own feature has none
+    // Shown with the page's last item's end rather than the first item it shows in: for a setting the
+    // items in `shownIn` share, which belongs to all of them and reads as theirs only once all are past.
+    bool shownLast{};
 };
 
 struct SettingChoice

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **The contact shadow sliders sit below both of their toggles.** Contrast, reach, thickness and fade
+  belong to the sun's contact shadows and the lamps' alike, so they now end the Shadows page, after
+  the lamps' toggle, instead of sitting inside the sun's.
 - **Lamp contact shadows count a caster within their own 5 mm, not Contact shadow thickness.** That
   setting is a share of the depth left to the far plane, which grows with the distance: past 1% it
   reaches the bound a caster may sit in and leaves no window at all, so the term silently died for

@@ -145,7 +145,20 @@ class MenuPage final : public SettingVisitor
 public:
     MenuPage(Section section, const SharedControls& shared) : section(section), shared(shared) {}
 
-    ~MenuPage() { endItem(); }
+    ~MenuPage()
+    {
+        endItem();
+
+        // The settings that end the page, once every item is past: the contact shadows' own, which both
+        // of their items share.
+        for (auto& [value, info] : shared.sliders)
+        {
+            if (!info.shownLast || !info.visible || std::ranges::find(sharedShown, value) != sharedShown.end()) continue;
+
+            drawSlider(*value, info);
+            sharedShown.push_back(value);
+        }
+    }
 
     // Asked only when the next feature's item shows.
     void nextStatus(std::function<ItemStatus()> statusOfNext) { nextFeatureStatus = std::move(statusOfNext); }
@@ -207,6 +220,7 @@ private:
         if (open() && effect)
             for (auto& [value, info] : shared.sliders)
             {
+                if (info.shownLast) continue; // The page's end draws these.
                 const bool shownHere = info.visible && std::ranges::find(info.shownIn, *effect) != info.shownIn.end();
                 if (!shownHere || std::ranges::find(sharedShown, value) != sharedShown.end()) continue;
 

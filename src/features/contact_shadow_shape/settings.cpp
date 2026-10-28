@@ -20,7 +20,7 @@ void describe(ContactShadowShape& shape, SettingVisitor& visit)
             .tip = "How dark and how hard-edged the contact shadows come out. The trace always finds a distance to a surface, and this decides "
                    "how much of that distance still counts as shadow: higher darkens more and sharpens the edge, lower leaves a soft grey wash. 1 "
                    "is the trace itself, the softest it gets; Bend Studio's own value is 4.",
-            .shownIn = ShownIn});
+            .shownIn = ShownIn, .shownLast = true});
     visit.slider(shape.reachPixels,
         {.iniKey = "contact_shadow_reach",
             .label = "Contact shadow reach",
@@ -31,7 +31,7 @@ void describe(ContactShadowShape& shape, SettingVisitor& visit)
             .tip = "How far along the screen the contact shadows are traced, in pixels of the render size. Longer picks up casters further "
                    "from what they shadow, and costs more; shorter is the cheap end. At 4K the same pixels reach half as far in the world as at "
                    "1080p.",
-            .shownIn = ShownIn});
+            .shownIn = ShownIn, .shownLast = true});
     visit.slider(shape.thickness,
         {.iniKey = "contact_shadow_thickness",
             .label = "Contact shadow thickness",
@@ -44,7 +44,7 @@ void describe(ContactShadowShape& shape, SettingVisitor& visit)
                    "something sitting almost exactly at the receiver's depth, which is why its contact shadows are so tight. Raising it widens "
                    "what counts, and darkens and softens every contact. The lamps' march counts a caster within a fixed 5 mm instead, as "
                    "RenoDX's spot lights do, so this shapes the sun's contact shadows alone.",
-            .shownIn = ShownIn});
+            .shownIn = ShownIn, .shownLast = true});
     visit.slider(shape.fadeMetres,
         {.iniKey = "contact_shadow_fade",
             .label = "Contact shadow fade",
@@ -55,6 +55,6 @@ void describe(ContactShadowShape& shape, SettingVisitor& visit)
             .tip = "How far away the contact shadows reach, in metres. Full strength underfoot, then a straight fade to nothing by this "
                    "distance, where the shadow map is the better tool. RenoDX fades them the same way; without it they stay as sharp at a "
                    "hundred metres as at your feet.",
-            .shownIn = ShownIn});
+            .shownIn = ShownIn, .shownLast = true});
 }
 }
