@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Lamp contact shadows cost a fraction of what they did.** Each lamp traced Bend Studio's
+  screen-space shadows in a compute pass over its whole screen rectangle, 120 samples a pixel, and
+  then drew its volume a second time to put the result in the light targets. The lamps now march the
+  depth buffer inside that draw, the shape `renodx-mgsv`'s term has: about 48 steps a pixel crowded
+  near the surface, a caster counted only within a quarter of a metre of the ray, and pixels the
+  light cannot reach left without a step. A lamp wholly past the contact shadows' fade keeps the
+  game's draws. The sun keeps Bend's trace, which costs one dispatch a frame.
 - Add **Contact shadow contrast**, **reach**, **thickness** and **fade** settings, under the shadows:
   how dark and how hard the trace is (0.5 to 4, 1 by default), how far along the screen it marches
   (8 to 120 pixels, 80 by default), how deep a surface counts as a contact (0.2% to 2.5% of its depth

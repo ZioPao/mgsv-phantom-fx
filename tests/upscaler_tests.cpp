@@ -1,10 +1,12 @@
 #include "camera.hpp"
 #include "constant_capture.hpp"
 #include "features/global_illumination/gi_lighting.hpp"
+#include "features/lamp_contact_shadows/lamp_contact_shadows_shaders.hpp"
 #include "features/upscaling/frames.hpp"
 #include "features/upscaling/render_size_plan.hpp"
 #include "frame_latch.hpp"
 #include "game_constants.hpp"
+#include "passes/contact_shadow_trace.hpp"
 #include "phantom_fx_settings.hpp"
 #include "range_allocator.hpp"
 #include "shader_bytecode.hpp"
@@ -14,7 +16,9 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -999,6 +1003,169 @@ void skyLightMatchesTheGame()
     }
 }
 
+// The lamps' shadows skip a light that stands wholly past the contact shadows' fade, which would be
+// lit everywhere: the light keeps the game's draws.
+void lampShadowsSkipLightsPastTheFade()
+{
+    expect(contact_shadow_trace::beyondFade(600, 8, 500), "A lamp wholly past the contact shadows' fade keeps the game's shadows.");
+    expect(!contact_shadow_trace::beyondFade(505, 8, 500), "A lamp that reaches inside the fade marches.");
+    expect(!contact_shadow_trace::beyondFade(520, 40, 500), "A wide lamp that reaches inside the fade marches.");
+    expect(!contact_shadow_trace::beyondFade(600, std::numeric_limits<float>::infinity(), 500), "A lamp of unknown range marches.");
+}
+
+// The lamps' shadow draw (lamp_contact_shadows_shaders.hpp): a march through the depth buffer towards
+// the light, drawn into the alpha of both light targets. A pixel with nothing between it and the light
+// stays lit; one with a surface close to its ray comes out shadowed; one whose blocker is behind it,
+// or wholly past the fade or the light's reach, stays lit.
+void lampShadowMarch()
+{
+    using Microsoft::WRL::ComPtr;
+    constexpr UINT Size = 8;
+    constexpr float P00 = 1.4f, P11 = 1.75f; // A and B are the dumped view's, above
+    constexpr char FullscreenVertex[] = R"(
+float4 main(uint id : SV_VertexID) : SV_Position
+{
+    return float4(id == 1 ? 3.0 : -1.0, id == 2 ? 3.0 : -1.0, 0.5, 1.0);
+}
+)";
+
+    const auto device = warpDevice();
+    ComPtr<ID3D11DeviceContext> context;
+    device->GetImmediateContext(context.GetAddressOf());
+
+    const auto compiled = [&](const char* source, const char* profile) {
+        ComPtr<ID3DBlob> code, errors;
+        const auto result = D3DCompile(source, std::strlen(source), "lamp shadow", nullptr, nullptr, "main", profile, 0, 0, code.GetAddressOf(),
+            errors.GetAddressOf());
+        expect(SUCCEEDED(result), "Compile the lamp shadow test's shaders.");
+
+        return code;
+    };
+    const auto shaderCode = compiled(lamp_contact_shadows::shaders::LightShadow, "ps_5_0");
+    ComPtr<ID3D11PixelShader> shader;
+    expect(SUCCEEDED(device->CreatePixelShader(shaderCode->GetBufferPointer(), shaderCode->GetBufferSize(), nullptr, shader.GetAddressOf())),
+        "Create the lamp shadow's shader.");
+    const auto vertexCode = compiled(FullscreenVertex, "vs_5_0");
+    ComPtr<ID3D11VertexShader> vertexShader;
+    expect(SUCCEEDED(device->CreateVertexShader(vertexCode->GetBufferPointer(), vertexCode->GetBufferSize(), nullptr, vertexShader.GetAddressOf())),
+        "Create the test's vertex shader.");
+    D3D11_RASTERIZER_DESC rasterizerDesc{};
+    rasterizerDesc.FillMode = D3D11_FILL_SOLID;
+    rasterizerDesc.CullMode = D3D11_CULL_NONE;
+    rasterizerDesc.DepthClipEnable = TRUE;
+    ComPtr<ID3D11RasterizerState> rasterizer;
+    expect(SUCCEEDED(device->CreateRasterizerState(&rasterizerDesc, rasterizer.GetAddressOf())), "Create the test's rasterizer state.");
+
+    const auto makeBuffer = [&](const void* data, UINT size) {
+        const D3D11_BUFFER_DESC desc{size, D3D11_USAGE_IMMUTABLE, D3D11_BIND_CONSTANT_BUFFER};
+        const D3D11_SUBRESOURCE_DATA initial{data};
+        ComPtr<ID3D11Buffer> buffer;
+        expect(SUCCEEDED(device->CreateBuffer(&desc, &initial, buffer.GetAddressOf())), "Create a constant buffer.");
+
+        return buffer;
+    };
+    const auto depthOf = [](float viewZ) { return B / viewZ + A; };
+
+    // `depths` is the depth buffer's view depth per pixel; `options` is b6 as lamp_contact_shadows.cpp
+    // writes it. Returns the diffuse target's alpha, which is the shadow.
+    const auto render = [&](const std::array<float, Size * Size>& viewDepths, const std::array<float, 8>& options,
+                            const std::array<float, 3>& lightPosition) {
+        std::array<float, Size * Size> depths{};
+        for (std::size_t i = 0; i < depths.size(); ++i) depths[i] = depthOf(viewDepths[i]);
+        const D3D11_TEXTURE2D_DESC depthDesc{Size, Size, 1, 1, DXGI_FORMAT_R32_FLOAT, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE};
+        const D3D11_SUBRESOURCE_DATA depthInitial{depths.data(), Size * sizeof(float)};
+        ComPtr<ID3D11Texture2D> depth;
+        expect(SUCCEEDED(device->CreateTexture2D(&depthDesc, &depthInitial, depth.GetAddressOf())), "Create the depth.");
+        ComPtr<ID3D11ShaderResourceView> depthView;
+        expect(SUCCEEDED(device->CreateShaderResourceView(depth.Get(), nullptr, depthView.GetAddressOf())), "View the depth.");
+
+        std::array<float, 30 * 4> scene{};
+        scene[21 * 4 + 0] = 1 / P00;
+        scene[21 * 4 + 1] = 1 / P11;
+        scene[21 * 4 + 2] = B;
+        scene[21 * 4 + 3] = A;
+        scene[22 * 4 + 0] = static_cast<float>(Size);
+        scene[22 * 4 + 1] = static_cast<float>(Size);
+        std::array<float, 11 * 4> lamp{};
+        lamp[3 * 4 + 0] = lightPosition[0];
+        lamp[3 * 4 + 1] = lightPosition[1];
+        lamp[3 * 4 + 2] = lightPosition[2];
+
+        std::array<ComPtr<ID3D11Texture2D>, 2> targets;
+        std::array<ComPtr<ID3D11RenderTargetView>, 2> views;
+        for (std::size_t i = 0; i < targets.size(); ++i)
+        {
+            const D3D11_TEXTURE2D_DESC desc{Size, Size, 1, 1, DXGI_FORMAT_R8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET};
+            expect(SUCCEEDED(device->CreateTexture2D(&desc, nullptr, targets[i].GetAddressOf())), "Create a light target.");
+            expect(SUCCEEDED(device->CreateRenderTargetView(targets[i].Get(), nullptr, views[i].GetAddressOf())), "View a light target.");
+        }
+
+        ID3D11RenderTargetView* raw[2]{views[0].Get(), views[1].Get()};
+        context->OMSetRenderTargets(2, raw, nullptr);
+        const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(Size), static_cast<float>(Size), 0, 1};
+        context->RSSetViewports(1, &viewport);
+        context->RSSetState(rasterizer.Get());
+        context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+
+        const auto sceneBuffer = makeBuffer(scene.data(), static_cast<UINT>(sizeof(scene)));
+        const auto lampBuffer = makeBuffer(lamp.data(), static_cast<UINT>(sizeof(lamp)));
+        const auto optionBuffer = makeBuffer(options.data(), static_cast<UINT>(sizeof(options)));
+        ID3D11Buffer* bound[1]{};
+        bound[0] = sceneBuffer.Get();
+        context->PSSetConstantBuffers(2, 1, bound);
+        bound[0] = lampBuffer.Get();
+        context->PSSetConstantBuffers(3, 1, bound);
+        bound[0] = optionBuffer.Get();
+        context->PSSetConstantBuffers(6, 1, bound);
+        context->PSSetShaderResources(2, 1, depthView.GetAddressOf());
+        context->PSSetShader(shader.Get(), nullptr, 0);
+        context->VSSetShader(vertexShader.Get(), nullptr, 0);
+        context->IASetInputLayout(nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->Draw(3, 0);
+
+        const D3D11_TEXTURE2D_DESC stagingDesc{Size, Size, 1, 1, DXGI_FORMAT_R8_UNORM, {1, 0}, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ};
+        ComPtr<ID3D11Texture2D> staging;
+        expect(SUCCEEDED(device->CreateTexture2D(&stagingDesc, nullptr, staging.GetAddressOf())), "Create the read-back texture.");
+        context->CopyResource(staging.Get(), targets[0].Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        expect(SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)), "Read the light target back.");
+        std::array<float, Size * Size> shadow{};
+        for (UINT y = 0; y < Size; ++y)
+            for (UINT x = 0; x < Size; ++x) shadow[y * Size + x] = static_cast<const std::uint8_t*>(mapped.pData)[y * mapped.RowPitch + x] / 255.0f;
+        context->Unmap(staging.Get(), 0);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+
+        return shadow;
+    };
+
+    // The options as the module writes them: the default shape, this light, and this screen.
+    const auto optionsFor = [](float fade, float range) {
+        return std::array<float, 8>{80, 0.005f, 1, fade, range, 48, static_cast<float>(Size), static_cast<float>(Size)};
+    };
+    const std::array<float, 3> light{0, 2, 2}; // Above the receiver at the bottom of the screen
+    const auto receiver = 6 * Size + 4;        // A pixel low on the screen, at 2 m
+
+    std::array<float, Size * Size> flat{};
+    flat.fill(2);
+    const auto lit = render(flat, optionsFor(500, 100), light);
+    expect(lit[receiver] == 1, "A pixel with nothing between it and the light stays lit.");
+
+    // A surface 10 cm in front of the ray, where the ray climbs towards the light.
+    auto blocked = flat;
+    for (std::size_t i = 0; i < 3 * Size; ++i) blocked[i] = 1.9f;
+    const auto shadowed = render(blocked, optionsFor(500, 100), light);
+    expect(shadowed[receiver] < 0.95f, "A surface in front of the ray shadows the pixel.");
+
+    // Behind the receiver: the ray is in front of it, so it cannot block.
+    auto behind = flat;
+    for (std::size_t i = 0; i < 3 * Size; ++i) behind[i] = 2.1f;
+    expect(render(behind, optionsFor(500, 100), light)[receiver] == 1, "A surface behind the ray does not shadow the pixel.");
+
+    expect(render(blocked, optionsFor(1, 100), light)[receiver] == 1, "Past the fade the pixel is lit.");
+    expect(render(blocked, optionsFor(500, 0.5f), light)[receiver] == 1, "A pixel beyond the light's reach is lit.");
+}
+
 int main()
 {
     const auto root =
@@ -1037,6 +1204,8 @@ int main()
         hdrSettingsPersist(root);
         motionBlurSettingsPersist(root);
         outputSaturation();
+        lampShadowsSkipLightsPastTheFade();
+        lampShadowMarch();
         writeIsReadOnItsOwnThreadOnly();
         lightPassesKeepOnlySceneAndLight();
         mainCameraWriteNotedOnlyWhileAllKept();

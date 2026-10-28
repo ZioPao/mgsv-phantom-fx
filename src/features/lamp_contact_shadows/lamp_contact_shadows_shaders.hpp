@@ -1,29 +1,143 @@
 #pragma once
 
 // HLSL for the lamps' contact shadows (lamp_contact_shadows.hpp), compiled at runtime with
-// d3dcompiler_47.
+// d3dcompiler_47 (docs/DEVELOPMENT.md, "Screen-space shadows").
 namespace phantom_fx::lamp_contact_shadows::shaders
 {
 // A point or spot light's screen-space shadow into the alpha of both light targets, drawn with the
-// light's own volume; nothing reads that alpha after the lights. The trace wrote only the pixels
-// within its bounds (BendShadow's constants, in b6); the light does not reach the others, which are
-// taken as lit.
+// light's own volume; nothing reads that alpha after the lights.
+//
+// A march through the depth buffer towards the light, in the light's own draw: the shape of
+// renodx-mgsv's screen-space term, which costs a handful of depth reads per pixel the light's volume
+// covers, where Bend Studio's trace cost a compute dispatch over that volume's whole screen
+// rectangle with 120 samples a pixel. The ray starts at the surface the pixel shows, steps a fraction
+// of the contact shadow's reach towards the light, and counts the steps the depth buffer puts a
+// surface in front of. A caster only counts within a separation that grows with the distance, so
+// layered gear on a character is not read as a wall in front of its own surface.
 inline constexpr char LightShadow[] = R"(
-cbuffer Parameters : register(b6)
+cbuffer cPSScene : register(b2)
 {
-    float2 DepthBounds : packoffset(c3.x);
-    int2 BoundsMin : packoffset(c3.z);
-    int2 BoundsMax : packoffset(c4.x);
+    struct
+    {
+        float4x4 m_projectionView;
+        float4x4 m_projection;
+        float4x4 m_view;
+        float4 m_shadowProjection[4];
+        float4 m_cascades[4];
+        float4 m_eyepos;
+        float4 m_projectionParam;       // 1 / P00, 1 / P11, B, A
+        float4 m_viewportSize;
+    } g_psScene : packoffset(c0);
 };
-Texture2D<float> g_DepthTexture : register(t2);
-Texture2D<float> g_ScreenSpaceShadow : register(t7);
+
+cbuffer cPSLight : register(b3)
+{
+    struct
+    {
+        float4 m_lightParams[11];
+    } g_psLight : packoffset(c0);
+};
+
+// The add-on's own options, in the slot the game leaves unbound on this draw.
+cbuffer cLampTrace : register(b6)
+{
+    float g_reachPixels;    // Pixels of the render size the march covers, along the screen
+    float g_thickness;      // A share of the view depth: how far behind the ray a surface counts
+    float g_contrast;       // How dark what the march finds comes out
+    float g_fadeMetres;     // Metres: past this the contact shadow is gone
+    float g_rangeMetres;    // Metres: how far the light reaches
+    float g_steps;          // The march's steps
+    float g_viewportWidth;
+    float g_viewportHeight;
+};
+
+Texture2D<float> g_depth : register(t2);
+
+// The longest the march reaches into the world, whatever the reach in pixels works out to at range: a
+// contact shadow is short, and past this the light's own shadow, or its absence, is the better answer.
+static const float MaxReachMetres = 6.0;
+static const int MaxSteps = 64;
+// How far behind the ray a surface may sit and still count: a quarter of a metre close up, a centimetre
+// a metre further out.
+static const float CasterMaxMetres = 0.25;
+static const float CasterPerMetre = 0.01;
+// The contact shadows keep their strength out to this share of the fade distance.
+static const float FadeStartShare = 0.6;
+
+// renodx-mgsv's per-pixel rotation of the march's steps, so a step pattern reads as grain, not bands.
+float interleavedGradientNoise(float2 position)
+{
+    const float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
+
+    return frac(magic.z * frac(dot(position, magic.xy)));
+}
 
 void main(float4 position : SV_Position, out float4 diffuse : SV_Target0, out float4 specular : SV_Target1)
 {
-    int2 pixel = int2(position.xy);
-    float depth = g_DepthTexture.Load(int3(pixel, 0));
-    bool traced = all(pixel >= BoundsMin) && all(pixel < BoundsMax) && depth > DepthBounds.x && depth < DepthBounds.y;
-    diffuse = specular = traced ? g_ScreenSpaceShadow.Load(int3(pixel, 0)) : 1;
+    const int2 pixel = int2(position.xy);
+    const float depth = g_depth.Load(int3(pixel, 0));
+    const float4 projectionParam = g_psScene.m_projectionParam;
+    // Fox Engine's depth is reversed: B / (depth - A) is the view depth in metres.
+    const float viewZ = projectionParam.z / max(depth - projectionParam.w, 1e-6);
+
+    // Lit: outside the fade, and for a pixel the light cannot reach at all. Both are most of a light's
+    // volume on screen, which is why they come first.
+    float shadow = 1;
+    [branch] if (viewZ > 0 && viewZ < g_fadeMetres)
+    {
+        const float2 uv = (pixel + 0.5) / float2(g_viewportWidth, g_viewportHeight);
+        const float2 ndc = float2(uv.x * 2 - 1, 1 - uv.y * 2);
+        const float3 viewPosition = float3(ndc.x * viewZ * projectionParam.x, ndc.y * viewZ * projectionParam.y, viewZ);
+
+        // m_lightParams[3].xyz is the light's own view-space position.
+        const float3 toLight = g_psLight.m_lightParams[3].xyz - viewPosition;
+        const float lightDistance = length(toLight);
+
+        [branch] if (lightDistance < g_rangeMetres)
+        {
+            const int steps = (int)g_steps;
+            const float fade = saturate((g_fadeMetres - viewZ) / max(g_fadeMetres * (1 - FadeStartShare), 1e-3));
+            const float strength = 2 * g_contrast;
+            // A count of steps in shadow this dark is as dark as it gets: past it the march is spent.
+            const int saturated = (int)ceil(steps / max(strength * fade, 1e-6));
+
+            // The reach is in pixels of the screen, so the world it covers grows with the depth; the
+            // step's own screen length is the same at every distance, which is what keeps a contact
+            // shadow under a character's feet from sweeping the whole frame.
+            const float reachNdc = g_reachPixels * 2 / g_viewportHeight;
+            const float reach = min(reachNdc * abs(viewZ * projectionParam.y), MaxReachMetres);
+            const float stepLength = reach / max(steps, 1);
+            const float3 direction = toLight / max(lightDistance, 1e-4);
+            const float thickness = max(g_thickness * viewZ, 1e-3);
+            const float casterMax = max(CasterMaxMetres, viewZ * CasterPerMetre);
+            const float jitter = interleavedGradientNoise(position.xy);
+
+            int occluded = 0;
+            [loop] for (int step = 0; step < MaxSteps; ++step)
+            {
+                if (step >= steps || occluded >= saturated) break;
+
+                // Steps crowd near the surface, where a contact is, and thin out with the distance.
+                const float u = ((float)step + jitter) / steps;
+                const float travelled = stepLength * (0.25 * u + 0.75 * u * u) * steps;
+                const float3 along = viewPosition + direction * travelled;
+                if (along.z <= 1e-4) break;
+
+                const float2 alongNdc = float2(along.x / (along.z * projectionParam.x), along.y / (along.z * projectionParam.y));
+                const float2 alongUv = float2(alongNdc.x * 0.5 + 0.5, 0.5 - alongNdc.y * 0.5);
+                if (any(alongUv < 0) || any(alongUv >= 1)) break;
+
+                const float sceneDepth = g_depth.Load(int3(int2(alongUv * float2(g_viewportWidth, g_viewportHeight)), 0));
+                const float sceneZ = projectionParam.z / max(sceneDepth - projectionParam.w, 1e-6);
+                const float separation = along.z - sceneZ;
+                if (separation > thickness && separation < casterMax) ++occluded;
+            }
+
+            shadow = saturate(1 - (float)occluded / max(steps, 1) * strength * fade);
+        }
+    }
+
+    diffuse = specular = shadow;
 }
 )";
 }
