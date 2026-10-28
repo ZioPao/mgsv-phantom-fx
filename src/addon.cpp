@@ -408,8 +408,7 @@ void onDestroyResourceView(device*, resource_view destroyed)
 
 bool onCreatePipeline(device* device, pipeline_layout, uint32_t count, const pipeline_subobject* subobjects)
 {
-    // Both patches are HDR's: SDR's scene is 8-bit, and without the game's dither its fog bands.
-    if (device->get_api() != device_api::d3d11 || !hdr::active()) return false;
+    if (device->get_api() != device_api::d3d11) return false;
 
     bool changed{};
     for (uint32_t i = 0; i < count; ++i)
@@ -589,6 +588,9 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
 
     reshade::register_event<reshade::addon_event::init_command_queue>(onInitCommandQueue);
     reshade::register_event<reshade::addon_event::destroy_command_queue>(onDestroyCommandQueue);
+    // The dither and HDR patches know this build's shaders only.
+    if (isSupportedGameBuild()) reshade::register_event<reshade::addon_event::create_pipeline>(onCreatePipeline);
+
     reshade::register_event<reshade::addon_event::init_pipeline>(onInitPipeline);
     reshade::register_event<reshade::addon_event::draw>(onDraw);
     reshade::register_event<reshade::addon_event::draw_indexed>(onDrawIndexed);
@@ -626,7 +628,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
         reshade::register_event<reshade::addon_event::init_resource_view>(onInitResourceView);
         reshade::register_event<reshade::addon_event::destroy_resource_view>(onDestroyResourceView);
         reshade::register_event<reshade::addon_event::copy_resource>(onCopyResource);
-        reshade::register_event<reshade::addon_event::create_pipeline>(onCreatePipeline);
     }
 
     return true;
