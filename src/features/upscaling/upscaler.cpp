@@ -7,6 +7,7 @@
 #include "features/hdr/hdr.hpp"
 #include "features/motion_blur/motion_blur.hpp"
 #include "features/photo_mode/focus.hpp"
+#include "features/upscaling/frames.hpp"
 #include "features/upscaling/fsr_upscaler.hpp"
 #include "features/upscaling/fxaa.hpp"
 #include "features/upscaling/render_size_plan.hpp"
@@ -98,19 +99,6 @@ struct Recorded
     }
 };
 
-// The game records a whole frame, then executes it (docs/DEVELOPMENT.md, "Command lists"). A frame
-// starts with the first main-view upload after the immediate context executed anything, and every
-// main-view upload of the frame gets the same jitter.
-struct Frame
-{
-    std::uint64_t index{};
-    // The game loop's frame (game_loop.hpp) as the frame's recording started, for Reflex.
-    std::uint32_t gameFrame{};
-    bool jittered{};
-    std::array<float, 2> jitter{}; // Render pixels
-    std::optional<camera::View> view;
-};
-
 struct Target
 {
     ComPtr<ID3D11Texture2D> texture;
@@ -176,8 +164,8 @@ struct Configured
 std::mutex configuredMutex;
 Configured configured;
 
-// Read on every recording thread: DLSS replaces FXAA this frame, and the next frame is jittered.
-std::atomic<bool> replacing{}, jitterNext{};
+// Read on every recording thread: DLSS replaces FXAA this frame.
+std::atomic<bool> replacing{};
 // The game presents through Direct3D 12 for frame generation.
 std::atomic<bool> frameGeneration{};
 // The current plan's jitter phases and texture LOD bias.
@@ -202,12 +190,12 @@ std::map<std::pair<ID3D11SamplerState*, float>, BiasedSampler> biasedSamplers;
 // ---- Recording ----
 CommandListNotes<Recorded> recordedLists;
 
+// Taken after executionMutex where both are held.
 std::mutex recordMutex;
 // The latest FXAA pass recorded. The whole frame is recorded before it executes, so the frame's own
 // is known when its grading starts.
 std::optional<FxaaPass> recordedFxaa;
-Frame frame;
-bool executedSinceFrameStart{true};
+Frames frames;
 // The scene constants a thread has mapped: Map, memcpy and Unmap run back to back on one thread.
 thread_local ID3D11Resource* mappedScene{};
 thread_local void* mappedSceneData{};
@@ -312,20 +300,13 @@ std::uint64_t keyOf(ID3D11DeviceContext* context)
     return reinterpret_cast<std::uint64_t>(context);
 }
 
-// The frame a pass recorded now belongs to; call with recordMutex held. Between the immediate
-// context's last call and the next frame's first upload, that is the next frame.
-std::uint64_t recordingFrame()
-{
-    return executedSinceFrameStart ? frame.index + 1 : frame.index;
-}
-
 void recordFxaa(ID3D11DeviceContext* context)
 {
     FxaaPass pass;
     context->OMGetRenderTargets(1, pass.sceneTarget.GetAddressOf(), pass.depth.GetAddressOf());
     {
         std::lock_guard lock(recordMutex);
-        pass.frame = recordingFrame();
+        pass.frame = frames.recordingFrame();
         recordedFxaa = std::move(pass);
     }
 
@@ -343,7 +324,7 @@ void recordVelocity(ID3D11DeviceContext* context)
     context->PSGetShaderResources(3, 1, found.view.GetAddressOf());
     {
         std::lock_guard lock(recordMutex);
-        found.frame = recordingFrame();
+        found.frame = frames.recordingFrame();
     }
 
     recordedLists.note(keyOf(context), [&](Recorded& notes) { notes.velocity = std::move(found); });
@@ -352,35 +333,6 @@ void recordVelocity(ID3D11DeviceContext* context)
 void recordUiTargetUse(ID3D11DeviceContext* context)
 {
     recordedLists.note(keyOf(context), [](Recorded& notes) { notes.drawsOnUiTarget = true; });
-}
-
-// The first main-view upload after the immediate context executed anything starts a frame.
-void startFrame()
-{
-    frame.index++;
-    frame.gameFrame = game_loop::currentFrame();
-    frame.jittered = jitterNext.load() && replacing.load();
-    frame.jitter = frame.jittered ? camera::jitterPixels(frame.index, jitterPhases.load()) : std::array<float, 2>{};
-    frame.view.reset();
-}
-
-void sceneWritten(game_constants::SceneConstants& scene)
-{
-    const auto kind = camera::classify(scene);
-    if (kind == camera::SceneView::Other) return;
-
-    std::lock_guard lock(recordMutex);
-    if (executedSinceFrameStart)
-    {
-        executedSinceFrameStart = false;
-        startFrame();
-    }
-
-    // The frame's largest camera view: a mirror's reflection is drawn first, and smaller (the intro's,
-    // 1080x608 of a 2560x1440 frame, 2026-10-26).
-    const float area = scene.width * scene.height;
-    if (kind == camera::SceneView::MainCamera && (!frame.view || area > frame.view->width * frame.view->height)) frame.view = camera::viewOf(scene);
-    if (frame.jittered) camera::applyJitter(scene, camera::jitterNdc(frame.jitter, scene.width, scene.height));
 }
 
 // In exclusive fullscreen the game draws GammaControl into a viewport of its scene's size, centred in
@@ -916,7 +868,7 @@ thread_local BlurChain blurChain;
 std::uint64_t currentRecordingFrame()
 {
     std::lock_guard lock(recordMutex);
-    return recordingFrame();
+    return frames.recordingFrame();
 }
 
 // Whether `source` is the result of this frame's last gather pass on this thread. Without the frame, a
@@ -1305,30 +1257,30 @@ void upscaleBeforeGrading()
     std::optional<FxaaPass> pass;
     {
         std::lock_guard lock(recordMutex);
-        current = frame;
+        current = frames.current();
         pass = recordedFxaa;
     }
 
     if (upscaledFrame == current.index) return;
 
     upscaledFrame = current.index;
-    if (!replacing)
-    {
-        jitterNext = false;
-        return;
-    }
 
     bool evaluated{};
-    try
+    if (replacing)
     {
-        evaluated = pass ? upscale(*pass, current) : fallback("no FXAA pass was recorded");
-    }
-    catch (const std::exception& error)
-    {
-        fail(error.what());
+        try
+        {
+            evaluated = pass ? upscale(*pass, current) : fallback("no FXAA pass was recorded");
+        }
+        catch (const std::exception& error)
+        {
+            fail(error.what());
+        }
     }
 
-    jitterNext = evaluated && !currentConfiguration().diagnostics.noJitter;
+    const bool shouldJitterNext = evaluated && !currentConfiguration().diagnostics.noJitter;
+    std::lock_guard lock(recordMutex);
+    frames.upscaled(shouldJitterNext);
 }
 
 // The graded image into frame generation's hudless texture, before the UI draws over it.
@@ -1744,13 +1696,17 @@ void bufferUnmapped(ID3D11Resource* buffer) noexcept
 {
     if (!mappedScene || buffer != mappedScene) return;
 
-    auto* data = mappedSceneData;
+    auto& scene = *static_cast<game_constants::SceneConstants*>(mappedSceneData);
     mappedScene = nullptr;
     mappedSceneData = nullptr;
 
     try
     {
-        sceneWritten(*static_cast<game_constants::SceneConstants*>(data));
+        const auto kind = camera::classify(scene);
+        if (kind == camera::SceneView::Other) return;
+
+        std::lock_guard lock(recordMutex);
+        frames.sceneWritten(scene, kind, {.gameFrame = game_loop::currentFrame(), .canJitter = replacing.load(), .jitterPhases = jitterPhases.load()});
     }
     catch (...)
     {
@@ -1780,7 +1736,7 @@ void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
 
         {
             std::lock_guard recordLock(recordMutex);
-            executedSinceFrameStart = true;
+            frames.executed();
         }
 
         auto entry = recordedLists.take(list);
@@ -1805,9 +1761,11 @@ void present() noexcept
 {
     std::lock_guard lock(executionMutex);
     pendingHudless.reset();
-    // A frame DLSS did not run on (menus, loading screens, a fallback) leaves the next one unjittered,
-    // so a 3D view without FXAA never shakes.
-    if (lastEvaluatedPresent != presents) jitterNext = false;
+    {
+        std::lock_guard recordLock(recordMutex);
+        frames.presented(lastEvaluatedPresent == presents);
+    }
+
     ++presents;
     uiTargetFilled = false;
     presented = {};
