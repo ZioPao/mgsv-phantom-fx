@@ -27,6 +27,7 @@ using Microsoft::WRL::ComPtr;
 using namespace game_lights;
 
 constexpr UINT DepthSlot = 2;  // t2 of the light passes
+constexpr UINT NormalSlot = 0; // t0 of the light passes: the G-buffer's normals
 constexpr UINT BoundsSlot = 6; // b6 of the light shadow shader: the add-on's options
 
 // A march step per two pixels of the reach, as renodx-mgsv sizes its steps to the reach, and no more
@@ -58,6 +59,8 @@ struct Options
 {
     float reachPixels, thickness, contrast, fadeMetres;
     float rangeMetres, steps, viewportWidth, viewportHeight;
+    float useNormals; // 1 when the marking draw has the G-buffer's normals at t0, 0 when it has not
+    float padding[3];
 };
 static_assert(sizeof(Options) % 16 == 0);
 
@@ -103,6 +106,18 @@ bool ensurePipeline()
 std::array<float, 3> positionOf(const game_constants::LampLightConstants& light)
 {
     return {light.position[0], light.position[1], light.position[2]};
+}
+
+// Whether a light that reaches `radius` metres from `centre` can touch the pass's screen at `size`
+// pixels: its sphere is off the screen, or wholly behind the camera, where the game's own lighting
+// draw reaches nothing and there is no shadow to leave. An unending reach covers the screen.
+bool reachesScreen(const game_constants::SceneConstants& scene, const std::array<float, 3>& centre, float radius, std::array<int, 2> size)
+{
+    if (!std::isfinite(radius) || radius <= 0) return true;
+    if (centre[2] + radius <= 0) return false;
+    if (centre[2] <= radius) return true; // The camera plane crosses the sphere, so part of it is in view.
+
+    return sphereOnScreen(scene, centre, radius, {static_cast<float>(size[0]), static_cast<float>(size[1])}).has_value();
 }
 
 void noteMarked(ID3D11DeviceContext* context, const std::array<float, 3>& position)
@@ -217,7 +232,9 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     const auto position = positionOf(*light);
 
     ComPtr<ID3D11ShaderResourceView> depth;
+    ComPtr<ID3D11ShaderResourceView> normals;
     context->PSGetShaderResources(DepthSlot, 1, depth.GetAddressOf());
+    context->PSGetShaderResources(NormalSlot, 1, normals.GetAddressOf());
     const auto shape = contact_shadow_trace::shape();
     std::lock_guard lock(resourceMutex);
     if (!ensurePipeline()) return false;
@@ -229,11 +246,12 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     }
 
     // A light that stands wholly past the contact shadows' fade keeps the game's draws: its shadow
-    // would be lit everywhere.
+    // would be lit everywhere, and so would one whose reach cannot touch the screen.
     const float range = eitherShapeRangeOf(*light, falloff);
-    if (contact_shadow_trace::beyondFade(position[2], range, shape.fadeMetres)) return false;
-
     const auto size = contact_shadow_trace::depthSize(depth.Get());
+    if (contact_shadow_trace::beyondFade(position[2], range, shape.fadeMetres)) return false;
+    if (!reachesScreen(*scene, position, range, size)) return false;
+
     const Options options{.reachPixels = shape.reachPixels,
         .thickness = shape.thickness,
         .contrast = shape.contrast,
@@ -241,8 +259,14 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
         .rangeMetres = range,
         .steps = std::clamp(shape.reachPixels / PixelsPerStep, MinSteps, MaxSteps),
         .viewportWidth = static_cast<float>(size[0]),
-        .viewportHeight = static_cast<float>(size[1])};
+        .viewportHeight = static_cast<float>(size[1]),
+        .useNormals = normals ? 1.f : 0.f};
     if (FAILED(write(context, optionsBuffer.Get(), options))) return false;
+
+    static std::atomic<bool> loggedNormals{};
+    if (!loggedNormals.exchange(true))
+        log(normals ? "Shadows: the lamp march skips the pixels that face away from the light."
+                    : "Shadows: a light without the G-buffer's normals marches every pixel it covers.");
 
     ComPtr<ID3D11PixelShader> gameShader;
     ComPtr<ID3D11Buffer> gameOptions;

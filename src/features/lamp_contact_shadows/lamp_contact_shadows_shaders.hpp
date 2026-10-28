@@ -13,7 +13,8 @@ namespace phantom_fx::lamp_contact_shadows::shaders
 // rectangle with 120 samples a pixel. The ray starts at the surface the pixel shows, steps a fraction
 // of the contact shadow's reach towards the light, and counts the steps the depth buffer puts a
 // surface in front of. A caster only counts within a separation that grows with the distance, so
-// layered gear on a character is not read as a wall in front of its own surface.
+// layered gear on a character is not read as a wall in front of its own surface. A pixel whose surface
+// faces away from the light is skipped: the light adds nothing there, so its shadow is never read.
 inline constexpr char LightShadow[] = R"(
 cbuffer cPSScene : register(b2)
 {
@@ -49,9 +50,12 @@ cbuffer cLampTrace : register(b6)
     float g_steps;          // The march's steps
     float g_viewportWidth;
     float g_viewportHeight;
+    float g_useNormals;     // 1 when the marking draw has the G-buffer's normals bound at t0
+    float3 g_padding;
 };
 
 Texture2D<float> g_depth : register(t2);
+Texture2D<float4> g_normals : register(t0);
 
 // The longest the march reaches into the world, whatever the reach in pixels works out to at range: a
 // contact shadow is short, and past this the light's own shadow, or its absence, is the better answer.
@@ -70,6 +74,18 @@ float interleavedGradientNoise(float2 position)
     const float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
 
     return frac(magic.z * frac(dot(position, magic.xy)));
+}
+
+// The G-buffer's normal, decoded as the game's own light shaders decode it, so the terminator the
+// march is skipped on is the one the game's lighting has.
+float3 decodeNormal(float3 encoded)
+{
+    const float2 slope = encoded.xy * 2 - 1;
+    const float z = encoded.z * encoded.z * 2 - 1;
+    const float w = sqrt(max(1 - z * z, 0));
+    const float scale = w * rsqrt(1e-7 + w * w * dot(slope, slope));
+
+    return float3(slope * scale, z);
 }
 
 void main(float4 position : SV_Position, out float4 diffuse : SV_Target0, out float4 specular : SV_Target1)
@@ -112,28 +128,35 @@ void main(float4 position : SV_Position, out float4 diffuse : SV_Target0, out fl
             const float casterMax = max(CasterMaxMetres, viewZ * CasterPerMetre);
             const float jitter = interleavedGradientNoise(position.xy);
 
-            int occluded = 0;
-            [loop] for (int step = 0; step < MaxSteps; ++step)
+            // Facing away from the light, which the game clamps at zero and scales both its diffuse and
+            // its specular by: this pixel takes no light from this one, so the alpha below is never
+            // read and the march is spent for nothing. The G-buffer's normal is free here, where
+            // recomputing the whole light to ask renodx-mgsv's question would not be.
+            [branch] if (g_useNormals == 0 || dot(decodeNormal(g_normals.Load(int3(pixel, 0)).xyz), direction) > 0)
             {
-                if (step >= steps || occluded >= saturated) break;
+                int occluded = 0;
+                [loop] for (int step = 0; step < MaxSteps; ++step)
+                {
+                    if (step >= steps || occluded >= saturated) break;
 
-                // Steps crowd near the surface, where a contact is, and thin out with the distance.
-                const float u = ((float)step + jitter) / steps;
-                const float travelled = stepLength * (0.25 * u + 0.75 * u * u) * steps;
-                const float3 along = viewPosition + direction * travelled;
-                if (along.z <= 1e-4) break;
+                    // Steps crowd near the surface, where a contact is, and thin out with the distance.
+                    const float u = ((float)step + jitter) / steps;
+                    const float travelled = stepLength * (0.25 * u + 0.75 * u * u) * steps;
+                    const float3 along = viewPosition + direction * travelled;
+                    if (along.z <= 1e-4) break;
 
-                const float2 alongNdc = float2(along.x / (along.z * projectionParam.x), along.y / (along.z * projectionParam.y));
-                const float2 alongUv = float2(alongNdc.x * 0.5 + 0.5, 0.5 - alongNdc.y * 0.5);
-                if (any(alongUv < 0) || any(alongUv >= 1)) break;
+                    const float2 alongNdc = float2(along.x / (along.z * projectionParam.x), along.y / (along.z * projectionParam.y));
+                    const float2 alongUv = float2(alongNdc.x * 0.5 + 0.5, 0.5 - alongNdc.y * 0.5);
+                    if (any(alongUv < 0) || any(alongUv >= 1)) break;
 
-                const float sceneDepth = g_depth.Load(int3(int2(alongUv * float2(g_viewportWidth, g_viewportHeight)), 0));
-                const float sceneZ = projectionParam.z / max(sceneDepth - projectionParam.w, 1e-6);
-                const float separation = along.z - sceneZ;
-                if (separation > thickness && separation < casterMax) ++occluded;
+                    const float sceneDepth = g_depth.Load(int3(int2(alongUv * float2(g_viewportWidth, g_viewportHeight)), 0));
+                    const float sceneZ = projectionParam.z / max(sceneDepth - projectionParam.w, 1e-6);
+                    const float separation = along.z - sceneZ;
+                    if (separation > thickness && separation < casterMax) ++occluded;
+                }
+
+                shadow = saturate(1 - (float)occluded / max(steps, 1) * strength * fade);
             }
-
-            shadow = saturate(1 - (float)occluded / max(steps, 1) * strength * fade);
         }
     }
 

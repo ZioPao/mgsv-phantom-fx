@@ -1067,9 +1067,10 @@ float4 main(uint id : SV_VertexID) : SV_Position
     const auto depthOf = [](float viewZ) { return B / viewZ + A; };
 
     // `depths` is the depth buffer's view depth per pixel; `options` is b6 as lamp_contact_shadows.cpp
-    // writes it. Returns the diffuse target's alpha, which is the shadow.
-    const auto render = [&](const std::array<float, Size * Size>& viewDepths, const std::array<float, 8>& options,
-                            const std::array<float, 3>& lightPosition) {
+    // writes it; `encodedNormal` is the G-buffer's normal, bound at t0 only when the options ask for it,
+    // as the marking draw either has it or has not. Returns the diffuse target's alpha, the shadow.
+    const auto render = [&](const std::array<float, Size * Size>& viewDepths, const std::array<float, 12>& options,
+                            const std::array<float, 3>& lightPosition, std::array<float, 3> encodedNormal = {0, 0, 0}) {
         std::array<float, Size * Size> depths{};
         for (std::size_t i = 0; i < depths.size(); ++i) depths[i] = depthOf(viewDepths[i]);
         const D3D11_TEXTURE2D_DESC depthDesc{Size, Size, 1, 1, DXGI_FORMAT_R32_FLOAT, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE};
@@ -1078,6 +1079,21 @@ float4 main(uint id : SV_VertexID) : SV_Position
         expect(SUCCEEDED(device->CreateTexture2D(&depthDesc, &depthInitial, depth.GetAddressOf())), "Create the depth.");
         ComPtr<ID3D11ShaderResourceView> depthView;
         expect(SUCCEEDED(device->CreateShaderResourceView(depth.Get(), nullptr, depthView.GetAddressOf())), "View the depth.");
+
+        std::array<std::uint8_t, Size * Size * 4> normalBytes{};
+        for (std::size_t i = 0; i < Size * Size; ++i)
+        {
+            for (std::size_t channel = 0; channel < 3; ++channel)
+                normalBytes[i * 4 + channel] = static_cast<std::uint8_t>(encodedNormal[channel] * 255 + 0.5f);
+            normalBytes[i * 4 + 3] = 255;
+        }
+        const D3D11_TEXTURE2D_DESC normalDesc{Size, Size, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D11_USAGE_IMMUTABLE,
+            D3D11_BIND_SHADER_RESOURCE};
+        const D3D11_SUBRESOURCE_DATA normalInitial{normalBytes.data(), Size * 4};
+        ComPtr<ID3D11Texture2D> normalTexture;
+        expect(SUCCEEDED(device->CreateTexture2D(&normalDesc, &normalInitial, normalTexture.GetAddressOf())), "Create the normals.");
+        ComPtr<ID3D11ShaderResourceView> normalView;
+        expect(SUCCEEDED(device->CreateShaderResourceView(normalTexture.Get(), nullptr, normalView.GetAddressOf())), "View the normals.");
 
         std::array<float, 30 * 4> scene{};
         scene[21 * 4 + 0] = 1 / P00;
@@ -1118,6 +1134,8 @@ float4 main(uint id : SV_VertexID) : SV_Position
         bound[0] = optionBuffer.Get();
         context->PSSetConstantBuffers(6, 1, bound);
         context->PSSetShaderResources(2, 1, depthView.GetAddressOf());
+        ID3D11ShaderResourceView* boundNormals[1]{options[8] != 0 ? normalView.Get() : nullptr};
+        context->PSSetShaderResources(0, 1, boundNormals);
         context->PSSetShader(shader.Get(), nullptr, 0);
         context->VSSetShader(vertexShader.Get(), nullptr, 0);
         context->IASetInputLayout(nullptr);
@@ -1139,9 +1157,10 @@ float4 main(uint id : SV_VertexID) : SV_Position
         return shadow;
     };
 
-    // The options as the module writes them: the default shape, this light, and this screen.
-    const auto optionsFor = [](float fade, float range) {
-        return std::array<float, 8>{80, 0.005f, 1, fade, range, 48, static_cast<float>(Size), static_cast<float>(Size)};
+    // The options as the module writes them: the default shape, this light, this screen, and whether
+    // the G-buffer's normals are bound.
+    const auto optionsFor = [](float fade, float range, bool normals = false) {
+        return std::array<float, 12>{80, 0.005f, 1, fade, range, 48, static_cast<float>(Size), static_cast<float>(Size), normals ? 1.f : 0.f, 0, 0, 0};
     };
     const std::array<float, 3> light{0, 2, 2}; // Above the receiver at the bottom of the screen
     const auto receiver = 6 * Size + 4;        // A pixel low on the screen, at 2 m
@@ -1164,6 +1183,17 @@ float4 main(uint id : SV_VertexID) : SV_Position
 
     expect(render(blocked, optionsFor(1, 100), light)[receiver] == 1, "Past the fade the pixel is lit.");
     expect(render(blocked, optionsFor(500, 0.5f), light)[receiver] == 1, "A pixel beyond the light's reach is lit.");
+
+    // The G-buffer's normals, when the marking draw has them: a surface facing away from the light takes
+    // none of it, so there is nothing to shadow and no march to spend. The light is above the receiver,
+    // so the encoded normals below decode to one facing up at it and one facing down away from it.
+    const std::array<float, 3> facingUp{0.5f, 1, 0.5f}, facingDown{0.5f, 0, 0.5f};
+    expect(render(blocked, optionsFor(500, 100, true), light, facingDown)[receiver] == 1,
+        "A surface facing away from the light is lit, even with a caster in front of it.");
+    expect(render(blocked, optionsFor(500, 100, true), light, facingUp)[receiver] < 0.95f,
+        "A surface facing the light is shadowed, as it is without the normals.");
+    expect(render(blocked, optionsFor(500, 100), light, facingDown)[receiver] < 0.95f,
+        "Without the normals bound, the march runs on every pixel it covers.");
 }
 
 int main()

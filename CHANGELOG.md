@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Lamp contact shadows skip what the light cannot light.** The march ran over every pixel a lamp's
+  volume covers, including the ones whose surface faces away from the light: the game clamps
+  `dot(normal, light)` at zero and scales both its diffuse and its specular by it, so those pixels get
+  no light and the shadow written for them is never read. They now return after one read of the
+  G-buffer's normal, and a lamp whose reach cannot touch the screen keeps the game's draws.
 - **Lamp contact shadows draw one face of a light's volume, not two.** The shadow draw used its own
   rasteriser state with culling off, so a closed volume ran the march on both its faces and threw one
   away. It now takes the game's own rasteriser state, the one the marking draw and the lighting draw

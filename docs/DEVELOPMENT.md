@@ -1647,6 +1647,14 @@ light, in the light's own volume draw.
   closed volume ran the march on both faces and threw one result away. It now draws with the game's
   own rasteriser state - the one the marking draw and the lighting draw after it use - so it covers
   the pixels they cover and costs half the pixels for the same image.
+- **Pixels the light cannot light are not marched.** A surface facing away from a lamp takes none of
+  it: the game's shaders clamp `dot(normal, light)` at zero and scale both the diffuse and the
+  specular by it, so the light adds nothing there and the alpha the march writes is never read. The
+  march returns after one read of the G-buffer's normals (`t0`, decoded as `lamp_soft_shadows_shaders.hpp`
+  decodes it) when that dot is zero or less. Where the marking draw leaves `t0` unbound the shader
+  marches as before, and the options say which it is. A lamp whose reach cannot touch the screen - its
+  sphere off it, or wholly behind the camera - keeps the game's draws, which is `reachesScreen` in
+  `lamp_contact_shadows.cpp`.
 - **A lamp's reach comes from its falloff** in `cPSLight` `c6` (from the disassembly, `d` the distance
   plus `c6.x` for points): `SSLighting2_*` light `1 / d^2 - d^2 c6.w`, zero at `c6.w^(-1/4)`;
   `Lighting_*_NA` light `(1 - d^16 c6.z) / d^2`, zero at `c6.z^(-1/16)`. The march takes it as the
