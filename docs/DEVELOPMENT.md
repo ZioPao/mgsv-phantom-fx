@@ -1647,6 +1647,12 @@ light, in the light's own volume draw.
   closed volume ran the march on both faces and threw one result away. It now draws with the game's
   own rasteriser state - the one the marking draw and the lighting draw after it use - so it covers
   the pixels they cover and costs half the pixels for the same image.
+- **Four texels a gather.** The march took one depth a step. A `Gather` returns the four texels inside
+  a two-pixel square for one instruction - the ground two steps cover - so a pair of steps is one
+  request and four comparisons: half the memory instructions, twice the samples. The window a caster
+  may sit in is compared in the buffer's own depth, `A + B / z` from `cPSScene` `c21`, so the two
+  conversions a pair costs are shared by its four texels instead of one a texel. The sampler it reads
+  through is the add-on's, bound at `s0` for the draw and put back after.
 - **Pixels the light cannot light are not marched.** A surface facing away from a lamp takes none of
   it: the game's shaders clamp `dot(normal, light)` at zero and scale both the diffuse and the
   specular by it, so the light adds nothing there and the alpha the march writes is never read. The

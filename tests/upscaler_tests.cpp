@@ -1055,6 +1055,14 @@ float4 main(uint id : SV_VertexID) : SV_Position
     rasterizerDesc.DepthClipEnable = TRUE;
     ComPtr<ID3D11RasterizerState> rasterizer;
     expect(SUCCEEDED(device->CreateRasterizerState(&rasterizerDesc, rasterizer.GetAddressOf())), "Create the test's rasterizer state.");
+    const D3D11_SAMPLER_DESC samplerDesc{.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT,
+        .AddressU = D3D11_TEXTURE_ADDRESS_CLAMP,
+        .AddressV = D3D11_TEXTURE_ADDRESS_CLAMP,
+        .AddressW = D3D11_TEXTURE_ADDRESS_CLAMP,
+        .ComparisonFunc = D3D11_COMPARISON_NEVER,
+        .MaxLOD = D3D11_FLOAT32_MAX};
+    ComPtr<ID3D11SamplerState> sampler;
+    expect(SUCCEEDED(device->CreateSamplerState(&samplerDesc, sampler.GetAddressOf())), "Create the test's sampler state.");
 
     const auto makeBuffer = [&](const void* data, UINT size) {
         const D3D11_BUFFER_DESC desc{size, D3D11_USAGE_IMMUTABLE, D3D11_BIND_CONSTANT_BUFFER};
@@ -1136,6 +1144,7 @@ float4 main(uint id : SV_VertexID) : SV_Position
         context->PSSetShaderResources(2, 1, depthView.GetAddressOf());
         ID3D11ShaderResourceView* boundNormals[1]{options[8] != 0 ? normalView.Get() : nullptr};
         context->PSSetShaderResources(0, 1, boundNormals);
+        context->PSSetSamplers(0, 1, sampler.GetAddressOf());
         context->PSSetShader(shader.Get(), nullptr, 0);
         context->VSSetShader(vertexShader.Get(), nullptr, 0);
         context->IASetInputLayout(nullptr);

@@ -28,6 +28,7 @@ using namespace game_lights;
 
 constexpr UINT DepthSlot = 2;  // t2 of the light passes
 constexpr UINT NormalSlot = 0; // t0 of the light passes: the G-buffer's normals
+constexpr UINT SamplerSlot = 0; // s0: the shadow shader's own, for its gather
 constexpr UINT BoundsSlot = 6; // b6 of the light shadow shader: the add-on's options
 
 // A march step per two pixels of the reach, as renodx-mgsv sizes its steps to the reach, and no more
@@ -50,6 +51,8 @@ ComPtr<ID3D11Buffer> optionsBuffer;
 ComPtr<ID3D11BlendState> alphaOnly;
 // The same draw with the game's depth test off: it writes alpha, not depth.
 ComPtr<ID3D11DepthStencilState> noDepth;
+// The shadow shader's gather reads the depth buffer through this, in the slot the game leaves it.
+ComPtr<ID3D11SamplerState> pointClamp;
 // The game's additive light blend, by the state it binds, and the same scaled by the target's alpha.
 std::unordered_map<ID3D11BlendState*, std::pair<ComPtr<ID3D11BlendState>, ComPtr<ID3D11BlendState>>> shadowedBlends;
 
@@ -85,6 +88,14 @@ bool ensurePipeline()
         check(device->CreateDepthStencilState(&depth, noDepth.ReleaseAndGetAddressOf()), "Creating the light shadow depth state");
 
         optionsBuffer = makeConstantBuffer(device.Get(), sizeof(Options), "Creating the lamp contact shadow options");
+
+        const D3D11_SAMPLER_DESC sampler{.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT,
+            .AddressU = D3D11_TEXTURE_ADDRESS_CLAMP,
+            .AddressV = D3D11_TEXTURE_ADDRESS_CLAMP,
+            .AddressW = D3D11_TEXTURE_ADDRESS_CLAMP,
+            .ComparisonFunc = D3D11_COMPARISON_NEVER,
+            .MaxLOD = D3D11_FLOAT32_MAX};
+        check(device->CreateSamplerState(&sampler, pointClamp.ReleaseAndGetAddressOf()), "Creating the lamp shadow sampler");
 
         // Last, so it marks a complete pipeline.
         lightShadowShader = pixelShader(device.Get(), shaders::LightShadow, "lamp-light-shadow");
@@ -187,6 +198,7 @@ void detach() noexcept
         lightShadowShader.Reset();
         alphaOnly.Reset();
         noDepth.Reset();
+        pointClamp.Reset();
         optionsBuffer.Reset();
         shadowedBlends.clear();
         device.Reset();
@@ -270,11 +282,13 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
 
     ComPtr<ID3D11PixelShader> gameShader;
     ComPtr<ID3D11Buffer> gameOptions;
+    ComPtr<ID3D11SamplerState> gameSampler;
     ComPtr<ID3D11DepthStencilState> gameDepth;
     UINT stencilReference{};
     ComPtr<ID3D11RasterizerState> gameRasterizer;
     context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
     context->PSGetConstantBuffers(BoundsSlot, 1, gameOptions.GetAddressOf());
+    context->PSGetSamplers(SamplerSlot, 1, gameSampler.GetAddressOf());
     context->OMGetDepthStencilState(gameDepth.GetAddressOf(), &stencilReference);
     context->RSGetState(gameRasterizer.GetAddressOf());
 
@@ -283,6 +297,7 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     performance::Timed timed(context, performance::Pass::LampShadows);
     context->PSSetShader(lightShadowShader.Get(), nullptr, 0);
     context->PSSetConstantBuffers(BoundsSlot, 1, optionsBuffer.GetAddressOf());
+    context->PSSetSamplers(SamplerSlot, 1, pointClamp.GetAddressOf());
     context->OMSetBlendState(alphaOnly.Get(), gameBlend.factor, gameBlend.sampleMask);
     context->OMSetDepthStencilState(noDepth.Get(), 0);
     context->RSSetState(gameRasterizer.Get());
@@ -291,6 +306,7 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
 
     context->PSSetShader(gameShader.Get(), nullptr, 0);
     context->PSSetConstantBuffers(BoundsSlot, 1, gameOptions.GetAddressOf());
+    context->PSSetSamplers(SamplerSlot, 1, gameSampler.GetAddressOf());
     context->OMSetBlendState(gameBlend.state.Get(), gameBlend.factor, gameBlend.sampleMask);
     context->OMSetDepthStencilState(gameDepth.Get(), stencilReference);
     context->RSSetState(gameRasterizer.Get());

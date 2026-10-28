@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Lamp contact shadows read the depth buffer four texels at a time.** The march took one depth a
+  step, forty of them a pixel; a gather returns the four texels inside a two-pixel square for one
+  instruction, which is the ground two steps cover, so the same span now takes half the requests and
+  makes twice the comparisons. The caster window is compared in the buffer's own depth (`A + B / z`)
+  rather than per-texel view depth, so the two conversions a pair costs are shared by its four
+  samples. The image is the same span of shadow, sampled more finely.
 - **Lamp contact shadows skip what the light cannot light.** The march ran over every pixel a lamp's
   volume covers, including the ones whose surface faces away from the light: the game clamps
   `dot(normal, light)` at zero and scales both its diffuse and its specular by it, so those pixels get
