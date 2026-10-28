@@ -937,7 +937,11 @@ float4 main(float4 position : SV_Position, float3 ray : TEXCOORD0, float4 moonPl
 
     color += (Dither.Sample(PointWrap, frac(pixel * 0.125)).x - 0.5) / 128;
 #if HDR
-    return float4(Encode(max(color, 0)), 0);
+    // The game's sky keeps the clamp at the game's white while HDR is on (hdr.cpp patches the same
+    // ceiling into its three sky draws), which is what keeps the sun's sprite a disc instead of a ring.
+    // The physical sky's own sun is the sky-view light, not a sprite, but it would otherwise be the one
+    // sky drawn past white: clamp it here so both looks share the same ceiling. One unit is paper white.
+    return float4(Encode(min(max(color, 0), 1)), 0);
 #else
     return float4(Encode(saturate(TppTonemap(color, m_materials[1].xyz))), 0);
 #endif
