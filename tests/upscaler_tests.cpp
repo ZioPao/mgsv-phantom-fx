@@ -1,6 +1,7 @@
 #include "camera.hpp"
 #include "constant_capture.hpp"
 #include "features/global_illumination/gi_lighting.hpp"
+#include "features/upscaling/render_size_plan.hpp"
 #include "frame_latch.hpp"
 #include "game_constants.hpp"
 #include "phantom_fx_settings.hpp"
@@ -21,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace
@@ -527,6 +529,68 @@ void modeMaths()
         "Fixed DLSS frame generation modes present 2 to 6 frames per rendered frame.");
 }
 
+void dlssModesTakeDlssSize()
+{
+    const auto plan = planRenderSize({.mode = Mode::Balanced}, {3840, 2160}, render_scale::Size{2226, 1252});
+    expect(plan.render == render_scale::Size{2226, 1252} && plan.output == render_scale::Size{3840, 2160} && plan.quality == DlssQuality::Balanced,
+        "DLSS's modes render at DLSS's own size, with its quality.");
+}
+
+void nominalSizeWithoutDlssSize()
+{
+    constexpr render_scale::Size Output{3840, 2160}, FromDlss{2400, 1350}, TwoThirds{2560, 1440};
+    expect(planRenderSize({.upscaler = Upscaler::Fsr, .mode = Mode::Quality}, Output, FromDlss).render == TwoThirds, "FSR keeps AMD's scale.");
+    expect(planRenderSize({.mode = Mode::Custom, .customRenderScale = 0.75f}, Output, FromDlss).render == render_scale::Size{2880, 1620},
+        "Custom keeps its own scale.");
+    expect(planRenderSize({.mode = Mode::Quality}, Output, std::nullopt).render == TwoThirds
+            && planRenderSize({.mode = Mode::Quality}, Output, render_scale::Size{0, 0}).render == TwoThirds,
+        "DLSS without a size from NGX, or with a zero one, keeps NVIDIA's scale.");
+}
+
+// The engine rounds its own sizes up to even (0x2496A0).
+void oddSizesRoundUpToEven()
+{
+    expect(planRenderSize({.mode = Mode::Quality}, {3840, 2160}, render_scale::Size{2227, 1253}).render == render_scale::Size{2228, 1254},
+        "An odd render size is rounded up to even.");
+}
+
+void renderSizeNeverAboveOutput()
+{
+    const auto fromDlss = planRenderSize({.mode = Mode::Quality}, {1920, 1080}, render_scale::Size{2000, 1200}).render;
+    const auto full = planRenderSize({.mode = Mode::Custom, .customRenderScale = 1}, {1919, 1079}, std::nullopt).render;
+    expect(fromDlss == render_scale::Size{1920, 1080} && full.width <= 1919 && full.height <= 1079,
+        "The render size never exceeds the output size, rounded up or not.");
+}
+
+// Custom asks DLSS for DLAA from 99%, Quality from 66%, Balanced from 58% and Performance from 50%.
+void customQualityFollowsScale()
+{
+    using enum DlssQuality;
+    const std::pair<float, DlssQuality> cases[]{{1.0f, Dlaa},{0.99f, Dlaa}, {0.98f, MaxQuality}, {0.66f, MaxQuality}, {0.65f, Balanced}, {0.58f, Balanced},
+        {0.57f, MaxPerformance}, {0.5f, MaxPerformance}, {0.49f, UltraPerformance}};
+    for (const auto& [scale, quality] : cases) expect(dlssQuality(Mode::Custom, scale) == quality, "Custom's DLSS quality follows its scale.");
+}
+
+// Anything but what decides the render size would rebuild the engine's targets for nothing.
+void planKeptForOtherSettings()
+{
+    const Upscaling wanted{.mode = Mode::Custom, .customRenderScale = 0.75f};
+    constexpr render_scale::Size Output{2560, 1440};
+    const auto plan = planRenderSize(wanted, Output, std::nullopt);
+    auto other = wanted;
+    other.dlssPreset = Preset::K;
+    other.sharpness = 1;
+    other.textureBiasOffset = -1;
+    expect(plan.isFor(other, Output), "The preset, sharpening and the texture bias keep the plan.");
+
+    auto fsr = wanted, quality = wanted, scaled = wanted;
+    fsr.upscaler = Upscaler::Fsr;
+    quality.mode = Mode::Quality;
+    scaled.customRenderScale = 0.7f;
+    expect(!plan.isFor(fsr, Output) && !plan.isFor(quality, Output) && !plan.isFor(scaled, Output) && !plan.isFor(wanted, {1920, 1080}),
+        "Another upscaler, mode, custom scale or output size makes a new plan.");
+}
+
 void jitterSequence()
 {
     expect(camera::jitterPhases(1.0f) == 8, "DLAA uses 8 phases.");
@@ -841,6 +905,12 @@ int main()
         cuts();
         streamlineCamera();
         modeMaths();
+        dlssModesTakeDlssSize();
+        nominalSizeWithoutDlssSize();
+        oddSizesRoundUpToEven();
+        renderSizeNeverAboveOutput();
+        customQualityFollowsScale();
+        planKeptForOtherSettings();
         jitterSequence();
         photoModeSettingsPersist(root);
         hdrSettingsPersist(root);
