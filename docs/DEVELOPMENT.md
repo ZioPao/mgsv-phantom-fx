@@ -1250,7 +1250,8 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
     float where the game creates them. The first pass halves the scene the game's own halving
     `CopyRenderBuffer` read (the last copy on the thread whose target the pass reads), and the
     composite stays on the scene, reading the add-on's result at t0; the game's input goes back
-    after the draw.
+    after the draw. The blur's two targets are made apart from the other output-size targets, so
+    this route makes only them: 33 MB at 4K, where the full set would add 166 MB unused.
   - `Tonemap` (the grading): the output target is copied into the second target on the context, and
     the grading reads it (slot 0) and writes the output target. The graded image is then stretched
     back into the render-size scene target, which the game copies next for its 2D filters

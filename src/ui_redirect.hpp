@@ -31,7 +31,8 @@ struct Output
     unsigned width{}, height{};
 };
 
-// The output-size surfaces the game's post processing draws with.
+// The output-size surfaces the game's post processing draws with. The motion blur's pair is made apart
+// from the others, so the blur alone (with HDR at native resolution) does not make the full-size ones.
 enum class Surface : std::uint8_t
 {
     Scene,    // The output target, in place of the scene target
@@ -84,7 +85,7 @@ struct SurfaceViews
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
     unsigned width{}, height{};
 };
-// The surface's target and view; empty when there are no output-size surfaces.
+// The surface's target and view; empty when its surfaces could not be made.
 SurfaceViews surfaceViews(Surface surface) noexcept;
 // The engine renders below the output size.
 bool isUpscaling() noexcept;
