@@ -59,7 +59,7 @@ documentation and licenses are in `PhantomFX/`.
 ctest --test-dir build/release
 ```
 
-This runs five tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
+This runs six tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
 (defaults, round trip, clamping, invalid files and values), the mode maths (render scales, texture LOD
 bias) and the camera maths (main-view recognition, jitter direction and units, reprojection, camera
 cuts, jitter phases and the Halton sequence, the camera frame generation gets). The main view and a sun
@@ -73,7 +73,11 @@ cut-out mesh's texture, unreadable files and skins. `tests/scene_contents_tests.
 contents over a fake scene memory with room limits: when models, variants, characters and textures are
 let go, waiting for room, a variant without room (never traced, as today), texture copies arriving and
 replacing one another, characters built, refitted and made again, the palette budget, frames without a
-newer list, the instance cap's order and the terrain rings' remaking. `tests/game_shaders_tests.cpp`:
+newer list, the instance cap's order and the terrain rings' remaking. `tests/light_choice_tests.cpp`:
+which lights a kick gives the rays: the most pixels first, then the nearest, the light cap's edge, a
+light drawn from another eye left and counted, one reaching no pixel left out; a light's reach (around
+the camera, behind it, a narrow spot's, the viewport's corner); a light as the rays take it (its range,
+its rays' radius, where its shadow map starts) and its key from two cameras. `tests/game_shaders_tests.cpp`:
 the game's shaders on a WARP device, each created from a DXBC header carrying a row's checksum: a sun
 shader known by its checksum and drawn with it, unknown and missing shaders, every copy of one shader
 known, code that is not DXBC, the first of a row's shaders kept (the ray-traced lights' twins),
@@ -148,7 +152,7 @@ what draws it, when that is the feature's own.
 | `lamp_soft_shadows/` | `lamp_soft_shadows.*`: the replacement shaders a point or spot light with a shadow map lights with, and their options. `lamp_soft_shadows_shaders.hpp`: the game's `SSLighting2_Point` and `SSLighting2_Spot` rebuilt, with the light's shadow map filtered by contact-hardening soft shadows |
 | `contact_shadow_shape/` | Settings only: the contrast, reach, thickness and fade of the contact shadow trace (`passes/contact_shadow_trace.*`), which the sun's and the lamps' share |
 | `ray_traced_shadows/` | `gi_shadow.*`: the sun's shadow rays and the FidelityFX Shadow Denoiser on Direct3D 12. `gi_shadow.hlsl`, `gi_shadow_filter.hlsl`: the rays, the denoiser's temporal pass and filters |
-| `ray_traced_lights/` | `local_lights.*`: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights"). `light_shadow_rays.*`, `light_shadows.hlsl`: the lights' shadow rays and filter on Direct3D 12 |
+| `ray_traced_lights/` | `local_lights.*`: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights"). `light_choice.*`: which lights a kick gives the rays (each light's reach, the light cap) and each light as the rays take it. `light_shadow_rays.*`, `light_shadows.hlsl`: the lights' shadow rays and filter on Direct3D 12 |
 | `global_illumination/` | `gi_light.*`, `gi_light.hlsl`: the light on Direct3D 12, its rays, their hits' light, the hash grid cache, the denoiser's inputs and the render size (see "Global illumination"). `gi_denoiser.*`: NVIDIA NRD's RELAX denoiser without NRI. `gi_lighting.*`: the game's sky and sun in the light's terms. `light_combine.*`: the traced light in place of the game's probe light at the resolve |
 | `ambient_occlusion/` | `gtvbao.*`: GTVBAO's occlusion multiplied into the indirect light at the upscale. `gtvbao_shaders.hpp`: that multiply |
 | `indirect_light/` | `ssilvb.*`: SSILVB's light, brought to the render size and added to the diffuse light the resolve reads. `ssilvb_shaders.hpp`: the upsample |

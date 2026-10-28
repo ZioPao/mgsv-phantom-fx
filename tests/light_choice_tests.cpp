@@ -1,0 +1,270 @@
+#include "features/ray_traced_lights/light_choice.hpp"
+#include "passes/ray_tracing/shaders/gi_shared.h"
+
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+#include <stdexcept>
+#include <vector>
+
+namespace
+{
+using namespace phantom_fx::light_choice;
+using phantom_fx::game_constants::SceneConstants;
+using phantom_fx::game_lights::Falloff, phantom_fx::game_lights::GameLight, phantom_fx::game_lights::Shape, phantom_fx::game_lights::Twin;
+
+void expect(bool condition, const char* message)
+{
+    if (!condition) throw std::runtime_error(message);
+}
+
+bool isNear(float value, float expected)
+{
+    return std::abs(value - expected) < 1e-4f * std::max(1.0f, std::abs(expected));
+}
+
+bool isRect(const std::optional<D3D11_RECT>& rect, LONG left, LONG top, LONG right, LONG bottom)
+{
+    return rect && rect->left == left && rect->top == top && rect->right == right && rect->bottom == bottom;
+}
+
+LONG pixelsOf(const D3D11_RECT& rect)
+{
+    return (rect.right - rect.left) * (rect.bottom - rect.top);
+}
+
+// The game's kinds of light, as their rows in game_shaders.hpp have them.
+constexpr GameLight QuarticPoint{Shape::Point, Falloff::Quartic, Twin::Point2, true, false};       // SSLighting2_Point_NoShadow
+constexpr GameLight QuarticSpot{Shape::Spot, Falloff::Quartic, Twin::Spot2, true, false};          // SSLighting2_Spot_NoShadow
+constexpr GameLight SixteenthSpot{Shape::Spot, Falloff::Sixteenth, Twin::SpotNA, true, false};     // Lighting_Spot_NA_NShdw
+constexpr GameLight ShadowMappedSpot{Shape::Spot, Falloff::Sixteenth, Twin::SpotNA, true, true};   // Lighting_Spot_NA
+
+// A light pass's scene constants for a camera at `eye`: its view space is the world's moved to the eye,
+// and it sees 90 degrees across (1 / P00 and 1 / P11 of 1).
+SceneConstants cameraAt(std::array<float, 3> eye)
+{
+    SceneConstants scene{};
+    for (int i = 0; i < 3; ++i)
+    {
+        scene.view[i][i] = 1;
+        scene.view[i][3] = eye[i];
+        scene.eye[i] = eye[i];
+    }
+
+    scene.view[3][3] = scene.eye[3] = 1;
+    scene.projectionParam[0] = scene.projectionParam[1] = 1;
+
+    return scene;
+}
+
+// A white light of kind `game` at view-space `position`, whose falloff ends `range` metres away, drawn by a
+// camera at the world's origin into a 100 x 100 viewport.
+DrawnLight lightAt(const GameLight& game, std::array<float, 3> position, float range)
+{
+    DrawnLight light{.game = &game, .scene = cameraAt({}), .viewport = {0, 0, 100, 100, 0, 1}};
+    std::ranges::copy(position, light.light.position);
+    light.light.color[0] = light.light.color[1] = light.light.color[2] = 1;
+    if (game.falloff == Falloff::Quartic) light.light.falloff[3] = std::pow(range, -4.0f);
+    else light.light.falloff[2] = std::pow(range, -16.0f);
+
+    return light;
+}
+
+// A light `distance` metres in front of the camera reaching far past it, so it reaches all of its
+// `width` x `height` viewport.
+DrawnLight aroundCamera(float width, float height, float distance = 1)
+{
+    auto light = lightAt(QuarticPoint, {0, 0, distance}, 100);
+    light.viewport.Width = width;
+    light.viewport.Height = height;
+
+    return light;
+}
+
+Choice chooseFrom(const std::vector<DrawnLight>& lights, const SceneConstants& camera = cameraAt({}))
+{
+    std::vector<const DrawnLight*> pointers;
+    for (const auto& light : lights) pointers.push_back(&light);
+
+    return choose(pointers, camera);
+}
+
+// `count` lights, each reaching more pixels than the one before.
+std::vector<DrawnLight> growingLights(std::size_t count)
+{
+    std::vector<DrawnLight> lights;
+    for (std::size_t i = 0; i < count; ++i) lights.push_back(aroundCamera(100.0f + static_cast<float>(i), 100));
+
+    return lights;
+}
+
+void mostPixelsFirst()
+{
+    const auto choice = chooseFrom({aroundCamera(50, 50), aroundCamera(100, 100), aroundCamera(70, 70)});
+    expect(choice.taken == std::vector<std::size_t>{1, 2, 0}, "The lights reaching the most pixels come first.");
+}
+
+void nearestBreaksPixelTies()
+{
+    const auto choice = chooseFrom({aroundCamera(100, 100, 3), aroundCamera(100, 100, 1), aroundCamera(100, 100, 2)});
+    expect(choice.taken == std::vector<std::size_t>{1, 2, 0}, "Among lights reaching as many pixels, the nearest come first.");
+}
+
+void allTakenAtTheCap()
+{
+    const auto choice = chooseFrom(growingLights(GI_MAX_LOCAL_LIGHTS));
+    expect(choice.taken.size() == GI_MAX_LOCAL_LIGHTS && choice.overCap == 0, "Every light is taken up to the light cap.");
+}
+
+void fewestPixelsDroppedPastTheCap()
+{
+    const auto choice = chooseFrom(growingLights(GI_MAX_LOCAL_LIGHTS + 1));
+    expect(choice.taken.size() == GI_MAX_LOCAL_LIGHTS && choice.overCap == 1, "A light past the cap is counted.");
+    expect(std::ranges::find(choice.taken, std::size_t{0}) == choice.taken.end(), "The light reaching the fewest pixels goes without.");
+}
+
+void otherEyeLeftAndCounted()
+{
+    auto lights = std::vector{aroundCamera(100, 100), aroundCamera(100, 100)};
+    lights[0].scene = cameraAt({1.002f, 2, 3});
+    lights[1].scene = cameraAt({1.0005f, 2, 3});
+    const auto choice = chooseFrom(lights, cameraAt({1, 2, 3}));
+    expect(choice.taken == std::vector<std::size_t>{1} && choice.otherFrame == 1,
+        "A light drawn from more than a millimetre off the camera's eye is left for another frame and counted.");
+}
+
+void noPixelNotTaken()
+{
+    const auto choice = chooseFrom({lightAt(QuarticPoint, {0, 0, -5}, 2), aroundCamera(100, 100)});
+    expect(choice.taken == std::vector<std::size_t>{1} && choice.otherFrame == 0 && choice.overCap == 0,
+        "A light reaching no pixel is not taken, nor counted.");
+}
+
+void wholeViewportWhenInside()
+{
+    auto light = lightAt(QuarticPoint, {0, 0, 1}, 2);
+    light.viewport = {200, 50, 640, 360, 0, 1};
+    expect(isRect(reachOf(light), 200, 50, 840, 410), "A light around the camera plane reaches its whole viewport.");
+}
+
+void noneBehindCamera()
+{
+    expect(!reachOf(lightAt(QuarticPoint, {0, 0, -3}, 2)), "A light wholly behind the camera reaches nothing.");
+}
+
+void narrowSpotReachesLessThanPoint()
+{
+    const auto point = reachOf(lightAt(QuarticPoint, {0, 0, 10}, 4));
+    auto spot = lightAt(QuarticSpot, {0, 0, 10}, 4);
+    spot.light.axis[2] = 1;
+    spot.light.cutOffCosine = 0.9f;
+    const auto spotReach = reachOf(spot);
+    expect(point && spotReach && pixelsOf(*spotReach) < pixelsOf(*point), "A narrow spot reaches fewer pixels than a point as far.");
+}
+
+void offsetByViewportCorner()
+{
+    auto light = lightAt(QuarticPoint, {2, 1, 10}, 2);
+    const auto atOrigin = reachOf(light);
+    light.viewport.TopLeftX = 200;
+    light.viewport.TopLeftY = 50;
+    expect(atOrigin && isRect(reachOf(light), atOrigin->left + 200, atOrigin->top + 50, atOrigin->right + 200, atOrigin->bottom + 50),
+        "A light's reach moves with its viewport's corner.");
+}
+
+void rangeEndsFalloff()
+{
+    auto point = lightAt(QuarticPoint, {0, 0, 5}, 4);
+    point.light.falloff[0] = 0.5f;
+    expect(isNear(forRays(point, {}).range, 3.5f), "A point's range ends where its falloff does, less its added distance.");
+
+    auto spot = lightAt(SixteenthSpot, {0, 0, 5}, 4);
+    spot.light.falloff[0] = 0.5f;
+    expect(isNear(forRays(spot, {}).range, 4), "A spot's range ends where its falloff does.");
+}
+
+void bulbRadiusWhenSizelessOrShadowMapped()
+{
+    auto lamp = lightAt(SixteenthSpot, {0, 0, 5}, 4);
+    lamp.light.size = 0.42f;
+    expect(forRays(lamp, {}).radius == 0.42f, "A light's shadow rays spread over its size.");
+
+    auto sizeless = lamp;
+    sizeless.light.size = 0;
+    expect(forRays(sizeless, {}).radius == 0.03f, "A light without a size takes a bulb's.");
+
+    auto shadowMapped = lamp;
+    shadowMapped.game = &ShadowMappedSpot;
+    expect(forRays(shadowMapped, {}).radius == 0.03f, "A shadow-mapped light takes a bulb's, whatever its size.");
+}
+
+void shadowStartAtMapNearPlane()
+{
+    // A spot pointing along z whose map's reversed depth, 0.25 / the distance along z past the light, is 1
+    // (its near plane) a quarter metre along its axis.
+    auto spot = lightAt(ShadowMappedSpot, {0, 1, 2}, 4);
+    spot.light.axis[2] = 2;
+    spot.scene.shadowProjection[2][3] = 0.25f;
+    spot.scene.shadowProjection[3][2] = 1;
+    spot.scene.shadowProjection[3][3] = -2;
+    expect(isNear(forRays(spot, {}).shadowStart, 0.25f), "A shadow-mapped spot's rays end where its map starts.");
+
+    auto unmapped = spot;
+    unmapped.game = &SixteenthSpot;
+    expect(forRays(unmapped, {}).shadowStart == 0, "A spot without a shadow map has no map start.");
+
+    auto pastRange = spot;
+    pastRange.scene.shadowProjection[2][3] = 5;
+    expect(forRays(pastRange, {}).shadowStart == 0, "A map starting past the light's range is none.");
+}
+
+void sameKeyFromTwoCameras()
+{
+    // The same lamp at (3, 1, 7) in the world, seen from the origin and from (1, 0, 2).
+    const auto fromOrigin = lightAt(QuarticPoint, {3, 1, 7}, 4);
+    auto fromElsewhere = lightAt(QuarticPoint, {2, 1, 5}, 4);
+    fromElsewhere.scene = cameraAt({1, 0, 2});
+    expect(keyOf(fromOrigin) == keyOf(fromElsewhere), "A light keeps its key from any camera.");
+}
+
+void kindOrColourChangesKey()
+{
+    const auto lamp = lightAt(QuarticPoint, {3, 1, 7}, 4);
+    auto otherKind = lamp;
+    otherKind.game = &QuarticSpot;
+    auto otherColour = lamp;
+    otherColour.light.color[1] = 2;
+    expect(keyOf(otherKind) != keyOf(lamp) && keyOf(otherColour) != keyOf(lamp), "Another kind or colour is another light.");
+}
+}
+
+int main()
+{
+    try
+    {
+        mostPixelsFirst();
+        nearestBreaksPixelTies();
+        allTakenAtTheCap();
+        fewestPixelsDroppedPastTheCap();
+        otherEyeLeftAndCounted();
+        noPixelNotTaken();
+        wholeViewportWhenInside();
+        noneBehindCamera();
+        narrowSpotReachesLessThanPoint();
+        offsetByViewportCorner();
+        rangeEndsFalloff();
+        bulbRadiusWhenSizelessOrShadowMapped();
+        shadowStartAtMapNearPlane();
+        sameKeyFromTwoCameras();
+        kindOrColourChangesKey();
+        std::cout << "Light choice tests passed.\n";
+
+        return 0;
+    }
+    catch (const std::exception& error)
+    {
+        std::cerr << error.what() << '\n';
+
+        return 1;
+    }
+}

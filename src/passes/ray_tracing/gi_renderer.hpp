@@ -1,5 +1,6 @@
 #pragma once
 
+#include "features/ray_traced_lights/light_choice.hpp"
 #include "passes/ray_tracing/scene_description.hpp"
 #include "passes/ray_tracing/scene_memory.hpp"
 
@@ -17,6 +18,7 @@
 // two take turns through a shared fence. Everything here runs on the game's render thread.
 namespace phantom_fx::gi_renderer
 {
+using light_choice::LocalLight;
 using scene_description::CharacterInstance;
 using scene_description::Model;
 using scene_description::ModelInstance;
@@ -38,29 +40,6 @@ struct Textures
     DXGI_FORMAT velocityFormat{};
     ID3D11Texture2D* localLightShadow{}; // R16_FLOAT, the share of the point and spot lights' light that reaches; null without lights
     ID3D11Texture2D* lightDebug{}; // R8G8B8A8_UNORM, the light's denoiser history (CompositeLight); null while off
-};
-
-// A point or spot light for its shadow rays and the global illumination's hits (GILocalLight), world
-// space: its light as the game's light shaders work it out, cut off past a range, and a spot's outside a
-// cone.
-struct LocalLight
-{
-    std::array<float, 3> position{}, axis{};
-    float range{};
-    float cosOuter{};  // The cosine of a spot's cone's outer edge; below -1 for a point
-    float clearance{}; // How far short of the light its rays end: the lamp around it
-    float penumbraScale{}, coneExponent{}; // A spot's cone: (cosine - cosOuter) x penumbraScale, saturated, to this power
-    float maxFalloff{};                    // The most a spot's falloff gives
-    std::array<float, 3> color{};          // Before exposure, as the game's cPSLight c4
-    bool sixteenth{};                      // (1 - d^16 factor) / d^2 (Lighting_*_NA); else 1 / d^2 - d^2 factor (SSLighting2_*)
-    float factor{};
-    float addedDistance{}, leastDistance{}; // A point's: its distance is at least the least, plus the added
-    float radius{};                         // Its shadow rays spread over a disc this wide around it
-    float shadowStart{};                    // A shadow-mapped spot's: how far along its axis the game's shadow map starts; 0 for none
-    // The bounds in the world of the game's volume for it (its box, a spot's cone within one), when known:
-    // its light stops there, as the game's does.
-    std::array<float, 3> volumeLowest{}, volumeHighest{};
-    bool volumeKnown{};
 };
 
 using Matrix = std::array<float, 16>; // Rows applied as dot(row, v), as the engine's

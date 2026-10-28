@@ -1,8 +1,8 @@
 #pragma once
 
+#include "features/ray_traced_lights/light_choice.hpp"
 #include "game_constants.hpp"
 #include "game_shaders.hpp"
-#include "passes/ray_tracing/gi_renderer.hpp"
 #include "phantom_fx_settings.hpp"
 #include "ui_redirect.hpp"
 
@@ -40,9 +40,9 @@ void recorded(std::uint64_t into, std::uint64_t from) noexcept;
 void forget(std::uint64_t contextOrList) noexcept;
 
 // ---- Immediate context ----
-// At the kick: the lights recorded for the frame `camera` draws and not traced yet, world space, the
-// largest on screen first (at most GI_MAX_LOCAL_LIGHTS); those given are drawn with the rays' shadow.
-std::vector<gi_renderer::LocalLight> takeForTrace(const game_constants::SceneConstants& camera) noexcept;
+// At the kick: the chosen lights (light_choice::choose) among those recorded and not traced yet, as the
+// rays take them; those given are drawn with the rays' shadow.
+std::vector<light_choice::LocalLight> takeForTrace(const game_constants::SceneConstants& camera) noexcept;
 // Before the immediate context executes `list`, after the global illumination's wait: at each list with
 // a draw point (noteDrawPoint), the lights of the lists run so far are drawn.
 void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept;
