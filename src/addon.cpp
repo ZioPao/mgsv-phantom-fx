@@ -588,6 +588,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
 
     reshade::register_event<reshade::addon_event::init_command_queue>(onInitCommandQueue);
     reshade::register_event<reshade::addon_event::destroy_command_queue>(onDestroyCommandQueue);
+    reshade::register_event<reshade::addon_event::create_pipeline>(onCreatePipeline);
     reshade::register_event<reshade::addon_event::init_pipeline>(onInitPipeline);
     reshade::register_event<reshade::addon_event::draw>(onDraw);
     reshade::register_event<reshade::addon_event::draw_indexed>(onDrawIndexed);
@@ -625,7 +626,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
         reshade::register_event<reshade::addon_event::init_resource_view>(onInitResourceView);
         reshade::register_event<reshade::addon_event::destroy_resource_view>(onDestroyResourceView);
         reshade::register_event<reshade::addon_event::copy_resource>(onCopyResource);
-        reshade::register_event<reshade::addon_event::create_pipeline>(onCreatePipeline);
     }
 
     return true;
