@@ -889,12 +889,16 @@ dark areas, worst at night in fog (issue #28). Found 2026-10-28 in the shaders' 
   none of the other 161 does. The plain resolve has no dither. The dither is added after TppTonemap,
   in linear colour before the sRGB view encodes it: at night's 8 to 16 of 255 a step of 1/256 is
   several levels.
-- **Patch.** `create_pipeline` hands Direct3D a copy of each shader with an `inMesh` texture (by
-  reflection) in which every sample of it is a `mov` of the textures' average in each channel (a half,
-  1/255, 1/255, a quarter), in the sample's swizzle, and nops to the same length. Every pixel then gets
-  what the dither added on average: the centred forms nothing, the forward materials a quarter of
-  1/128, so they keep their brightness. It runs before HDR's patch, which finds its TppTonemap the
-  same way; both orders give the same code. The add-on's own sky draw has no dither either.
+- **Patch.** With HDR, `create_pipeline` hands Direct3D a copy of each shader with an `inMesh` texture
+  (by reflection) in which every sample of it is a `mov` of the textures' average in each channel (a
+  half, 1/255, 1/255, a quarter), in the sample's swizzle, and nops to the same length. Every pixel
+  then gets what the dither added on average: the centred forms nothing, the forward materials a
+  quarter of 1/128, so they keep their brightness. It runs before HDR's patch, which finds its
+  TppTonemap the same way; both orders give the same code. The add-on's own sky draw leaves the dither
+  out with HDR.
+- **SDR keeps it.** HDR's scene is 16-bit float, so nothing bands. SDR's stays 8-bit: without the
+  dither its fog banded (2026-10-28, steps of 1 and 2 levels across smooth fog at DLSS Quality), so
+  the game's dither stays there, and the add-on's sky draw adds it too.
 - **Left as they are.** The G-buffer's alpha test with the ordered alpha stipples cut-out edges (hair,
   manes) before DLSS too; taking it out would make those edges hard. The shadow filters'
   `MicroDither` and the sun pass's 2x2 tap offset move a comparison by an eighth of a texel.
@@ -2705,8 +2709,9 @@ planet's centre is the origin, in km; the game's world has y up in metres.
   and colour in `TEXCOORD2`): the sky-view table times the sunlight (below the horizon, its horizon
   row, as the game's sky does: the sea at Mother Base ends short of the planet's horizon, and the
   dark air in front of the planet showed between them as a grey band), the game's sprite over it, the
-  last slice's fog in front, then the game's TppTonemap (`cPSMaterial` `c1`) and sRGB encoding, or
-  the encoding alone with HDR, which takes TppTonemap out of the scene. No dither (see "Dither").
+  last slice's fog in front, the game's dither (`t8`), then the game's TppTonemap (`cPSMaterial`
+  `c1`) and sRGB encoding, or the encoding alone with HDR, which takes TppTonemap out of the scene
+  and the dither too (see "Dither").
   Its two textures go to `t6` and `t7` for the draw; the game's are bound again after it.
 - Checked on WARP with made-up constants: blue sky with a pale horizon at noon, orange towards the sun
   at 1 degree, the pink band and the Earth's shadow at -2 degrees.
