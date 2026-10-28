@@ -398,8 +398,13 @@ void detach() noexcept
 
 void setOutputSize(unsigned width, unsigned height) noexcept
 {
+    if (width == outputWidth && height == outputHeight) return;
+
     outputWidth = width;
     outputHeight = height;
+    // A set that could not be made at the old size may fit at the new one.
+    std::lock_guard lock(mutex);
+    creationFailed = blurCreationFailed = false;
 }
 
 bool draw2D(ID3D11DeviceContext* context, const DrawCall& call) noexcept
