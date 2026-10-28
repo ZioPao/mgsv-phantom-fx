@@ -933,6 +933,24 @@ struct BlurChain
 };
 thread_local BlurChain blurChain;
 
+// Without an upscaler there is no output-size image: the game's own scene target, as the game's copy of
+// it at the render size read it this frame, is what the blur's first gather starts from.
+struct SceneSource
+{
+    std::uint64_t frame{};
+    ComPtr<ID3D11ShaderResourceView> view;
+};
+thread_local SceneSource sceneSource;
+
+// A draw the game made with one of the add-on's surfaces bound in place of its own: the game's binding
+// goes back before the next draw on that context.
+struct DeferredBinding
+{
+    ID3D11DeviceContext* context{};
+    ComPtr<ID3D11ShaderResourceView> gameView;
+};
+thread_local DeferredBinding deferredBinding;
+
 std::uint64_t currentRecordingFrame()
 {
     std::lock_guard lock(recordMutex);
@@ -946,15 +964,31 @@ bool isBlurResult(ID3D11ShaderResourceView* source)
     return blurChain.gameTarget && blurChain.frame == currentRecordingFrame() && resourceOf(source).Get() == blurChain.gameTarget;
 }
 
-// While upscaling, the game's motion blur gathers at half the output size from DLSS's image, as it
-// does at half the render size without upscaling. At half the render size it gathered from the
-// jittered scene before DLSS, and its composite stretched that over the output: pixelated. Its first
-// pass reads the add-on's halved output instead of the game's halved scene, the second the first's
-// result, and the composite the second's (beforePostDraw). The game's constants stay: they place the
-// samples in texture coordinates, so the blur reaches as far on screen.
-bool gatherBlurAtOutputSize(ID3D11DeviceContext* context)
+// The game's draw reads `view` in place of the one it bound; its own binding goes back before the next
+// draw (beforeDraw). The game's view is kept alive with this, for the frame it was bound in.
+void bindForNextDraw(ID3D11DeviceContext* context, ID3D11ShaderResourceView* view)
 {
-    if (!ui_redirect::isUpscaling()) return false;
+    if (!view) return;
+
+    ComPtr<ID3D11ShaderResourceView> game;
+    context->PSGetShaderResources(0, 1, game.GetAddressOf());
+    context->PSSetShaderResources(0, 1, &view);
+    deferredBinding = {context, std::move(game)};
+}
+
+// The game's two McGuire gathers through the add-on's targets: at half the output size while
+// upscaling, at half the render size otherwise. The first pass halves the scene into the add-on's
+// first target and the second reads that, so neither clips what the scene keeps; the composite then
+// reads the last one (beforePostDraw). The game's constants stay: they place the samples in texture
+// coordinates, so the blur reaches as far on screen.
+bool gatherBlurInFloat(ID3D11DeviceContext* context)
+{
+    // Only with HDR at native resolution: without it the game's 8-bit targets hold everything the
+    // scene does. With it the scene keeps the sun beyond 1 while the game's gather would clip it, and a
+    // layer clipped where the scene is not is what makes the disc flicker as the jitter moves its
+    // coverage between frames. While upscaling the gathers are the add-on's whatever the output.
+    const bool upscaling = ui_redirect::isUpscaling();
+    if (!upscaling && !hdr::active()) return false;
 
     ComPtr<ID3D11ShaderResourceView> source;
     ComPtr<ID3D11RenderTargetView> target;
@@ -966,13 +1000,17 @@ bool gatherBlurAtOutputSize(ID3D11DeviceContext* context)
     const bool isFirstPass = !isBlurResult(source.Get());
     if (isFirstPass)
     {
-        const auto scene = ui_redirect::output();
         const auto blur = ui_redirect::surfaceViews(Blur);
         const auto stretch = ensureStretch();
-        if (!scene.view || !blur.target || !stretch) return false;
+        // The upscaler's image at the output size while upscaling; at native resolution the game's own
+        // scene target, as its copy at the render size read it this frame.
+        ID3D11ShaderResourceView* scene = upscaling ? ui_redirect::output().view.Get()
+            : sceneSource.frame == currentRecordingFrame() ? sceneSource.view.Get()
+                                                           : nullptr;
+        if (!scene || !blur.target || !stretch) return false;
 
         const SavedStretchState saved(context);
-        drawStretch(context, *stretch, stretch->blurSource.Get(), {scene.view.Get(), source.Get()}, blur.target.Get());
+        drawStretch(context, *stretch, stretch->blurSource.Get(), {scene, source.Get()}, blur.target.Get());
     }
 
     const auto input = isFirstPass ? Blur : blurChain.surface;
@@ -1480,6 +1518,22 @@ void setOutputSize(unsigned width, unsigned height) noexcept
     ui_redirect::setOutputSize(width, height);
 }
 
+void beforeDraw(ID3D11DeviceContext* context) noexcept
+{
+    if (deferredBinding.context != context) return;
+
+    try
+    {
+        ID3D11ShaderResourceView* game = deferredBinding.gameView.Get();
+        context->PSSetShaderResources(0, 1, &game);
+    }
+    catch (...)
+    {
+    }
+
+    deferredBinding = {};
+}
+
 bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
     if (bypass) return false;
@@ -1544,7 +1598,12 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
 
 bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
-    if (bypass || call.indexed || call.count != 3 || call.instances != 1 || !replacing.load(std::memory_order_relaxed)) return false;
+    if (bypass || call.indexed || call.count != 3 || call.instances != 1) return false;
+
+    const bool replacingFxaa = replacing.load(std::memory_order_relaxed);
+    // Without an upscaler only the motion blur is ours, and only while HDR keeps light the game's 8-bit
+    // targets would clip.
+    if (!replacingFxaa && !hdr::active()) return false;
 
     try
     {
@@ -1554,14 +1613,51 @@ bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         const auto pass = row->pass;
         if (pass == GamePass::CameraVelocity)
         {
+            if (!replacingFxaa) return false;
             recordVelocity(context);
             return false;
         }
 
+        const bool upscaling = ui_redirect::isUpscaling();
+
+        // At native resolution the blur's first gather starts from the scene as the game's copy of it at
+        // the render size reads it: the game's own scene target, with the light its 8-bit copies clip.
+        if (!upscaling && pass == GamePass::Copy)
+        {
+            ComPtr<ID3D11ShaderResourceView> source;
+            context->PSGetShaderResources(0, 1, source.GetAddressOf());
+            const auto render = render_scale::current();
+            const auto desc = source ? textureDesc(source.Get()) : D3D11_TEXTURE2D_DESC{};
+            if (desc.Format == hdr::sceneFormat() && desc.Width == render.width && desc.Height == render.height)
+                sceneSource = {currentRecordingFrame(), source};
+        }
+
+        if (pass == GamePass::LutBuild || pass == GamePass::Grade || pass == GamePass::Fxaa) recordGrading(context);
+
         // CopyRenderBuffer is a plain copy the game makes anywhere; the layer's composite shares its
         // list with the LUT build.
-        if (pass == GamePass::LutBuild || pass == GamePass::Grade || pass == GamePass::Fxaa) recordGrading(context);
-        if (pass == GamePass::MotionBlur) return gatherBlurAtOutputSize(context);
+        if (pass == GamePass::MotionBlur) return gatherBlurInFloat(context);
+
+        // At native resolution the game makes the blur's composite itself, over the scene: it reads the
+        // add-on's surface in place of its 8-bit layer, which the gathers no longer write, and the
+        // game's binding goes back before the next draw. Nothing else of the add-on's is drawn at the
+        // game's own size, which every test below asks for (a render size below the output).
+        if (!upscaling)
+        {
+            if (pass == GamePass::Copy)
+            {
+                ComPtr<ID3D11ShaderResourceView> source;
+                context->PSGetShaderResources(0, 1, source.GetAddressOf());
+                if (isBlurResult(source.Get()))
+                {
+                    bindForNextDraw(context, ui_redirect::surfaceViews(blurChain.surface).view.Get());
+                    blurChain = {};
+                }
+            }
+
+            return false;
+        }
+
         if (pass != GamePass::Copy && pass != GamePass::Grade) return false;
 
         ComPtr<ID3D11RenderTargetView> target;

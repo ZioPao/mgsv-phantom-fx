@@ -43,6 +43,9 @@ void detach() noexcept;
 void setOutputSize(unsigned width, unsigned height) noexcept;
 
 // ---- Recording, on the game's render and worker threads ----
+// Before a draw: the game's own binding goes back after a draw the add-on let it make with one of the
+// add-on's surfaces (the motion blur's composite at native resolution with HDR).
+void beforeDraw(ID3D11DeviceContext* context) noexcept;
 // Notes the FXAA pass as it is recorded. Returns true when the draw was made on the UI target instead
 // (the 2D pass and GammaControl while upscaling), or must not be made (FXAA, as DLSS runs before the
 // grading), so the game's own draw must be skipped; the render target clear likewise.

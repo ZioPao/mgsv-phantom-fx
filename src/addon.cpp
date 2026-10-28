@@ -215,6 +215,7 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
     if (hiddenUi(list)) return true;
 
     auto* context = native(list);
+    upscaler::beforeDraw(context);
     game_shaders::DrawnShader shader(context);
 
     // 1. The notes. HDR's: the resolve's curve, the depth of field's float copy. A draw through an sRGB
@@ -250,6 +251,7 @@ bool onDrawIndexed(command_list* list, uint32_t indices, uint32_t instances, uin
 {
     const ui_redirect::DrawCall call{indices, instances, first, firstInstance, offset, true};
     auto* context = native(list);
+    upscaler::beforeDraw(context);
     game_shaders::DrawnShader shader(context);
     ray_tracing::note(context, call, shader);
     // The one order among the owners that matters: a point or spot light's draws have two, and the

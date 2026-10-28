@@ -1233,17 +1233,34 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
     field's copy of the scene (its input has the render size; it stays, before DLSS), the
     half-size layer's composite over the scene (lens flares) and, with motion blur on, the blur's
     composite: those two go to the output target.
-  - The motion blur gathers at half the output size from DLSS's image, as it does at half the render
-    size without upscaling (frame 141835, 1920x1080 to 3840x2160, before this: it gathered at 960x540
-    from the jittered scene before DLSS, and its composite stretched that four times over the
+  - The motion blur gathers at half the output size from DLSS's image while upscaling, and at half
+    the render size without it (frame 141835, 1920x1080 to 3840x2160, before this: it gathered at
+    960x540 from the jittered scene before DLSS, and its composite stretched that four times over the
     output, pixelated). Two more targets at half the output size stand in for the game's two, in the
-    scene's format: the game's are 8-bit, which clipped HDR highlights while the camera moved.
-    Before the first `MotionBlurMcGuire` pass, the output target is halved bilinearly into the
-    first, with the alpha of the game's own halved scene (the output target has the composite's
-    alpha, which the blur would take for its own). Each pass then reads the add-on's target in place
-    of the game's, writes the other, and keeps the game's `cPSSystem`, so the samples land as far
-    away on screen; the composite reads the last one. The game's targets are matched by address on
-    the recording thread, within the frame being recorded.
+    scene's format: the game's are 8-bit, which clipped HDR highlights while the camera moved. The
+    add-on's gathers run while upscaling whatever the output, and with HDR at native resolution too
+    (DLAA, FXAA): there the game's 8-bit layer clips the sun's disc while the scene behind keeps it
+    beyond 1, and the composite toggles the disc between the two as the jitter moves its coverage.
+    Before the first `MotionBlurMcGuire` pass, the scene is halved bilinearly into the first target:
+    the upscaler's image at the output size while upscaling, the game's own scene target at the render
+    size otherwise (as the game's copy of it read it that frame), with the alpha of the game's own
+    halved scene (the composite's alpha, which the blur would take for its own). Each pass then reads
+    the add-on's target in place of the game's, writes the other, and keeps the game's `cPSSystem`, so
+    the samples land as far away on screen; the composite reads the last one. The game's targets are
+    matched by address on the recording thread, within the frame being recorded. While upscaling the
+    composite is the add-on's, on the output target; at native resolution the game's own composite
+    draws, with the add-on's layer bound in place of its 8-bit one, and the game's binding returns
+    before its next draw.
+  - **Open: the bake still runs at half the render size, so its depth and coverage step at a
+    character's silhouette.** Measured 2026-10-28 on two crops of the same slide at 3840x2160 output,
+    counting the horizontal jump between the staircase's treads: 5-6 px wide at Ultra Performance
+    (render 1280, bake 640) and 2-3 px at Quality (render 2560, bake 1280) — the bake's width over the
+    output's, six times and three times. DLAA bakes at 1920, two pixels per step, and shows none.
+    Only the two gathers were moved to half the output; `MotionBlurTile`, `TileNeighbour` and
+    `MotionBlurBakeVelocityDepth` still write half the render size, and the gathers read their
+    velocity, depth and coverage there, so the edge of the depth test and of the alpha taken from the
+    game's halved scene is a six-times staircase. Only the character shows it because it is the only
+    edge in that shot.
   - `Tonemap` (the grading): the output target is copied into the second target on the context, and
     the grading reads it (slot 0) and writes the output target. The graded image is then stretched
     back into the render-size scene target, which the game copies next for its 2D filters
@@ -1517,9 +1534,9 @@ Not handled:
 - Particles or glass that blend with alpha above 1 would darken their background, as the 2D pass did;
   none were seen.
 - The reflections' own targets are 8-bit, so reflected highlights stop at the game's white.
-- Without upscaling, motion blur blurs through the game's 8-bit copy, so moving highlights stop at
-  white. While upscaling it blurs through the add-on's targets, float with HDR, so moving highlights
-  keep their brightness.
+- Motion blur blurs through the add-on's float targets while upscaling and with HDR at native
+  resolution, so moving highlights keep their brightness. Without HDR at native resolution it blurs
+  through the game's 8-bit copy, where moving highlights stop at white.
 - The HUD has the scene's paper white; it is not separate.
 
 ## Soft shadows

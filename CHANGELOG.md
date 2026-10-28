@@ -21,6 +21,10 @@
   from before DLSS (a third of the screen's width at Quality) and stretched it over the screen. It
   now blurs DLSS's image at half the screen's size, as it does without upscaling, and with HDR it
   keeps the highlights bright while the camera moves instead of clipping them at white.
+- Fix the sun and lights flickering with HDR on at native resolution, with DLAA or FXAA: the blur's
+  layer clipped them at white while the scene kept them, and its composite toggled between the two
+  as the jitter moved. The blur now runs through the add-on's float targets there too, and the
+  game's composite reads that layer in place of its own.
 
 ## 1.8.0
 
