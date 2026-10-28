@@ -28,6 +28,8 @@ cbuffer cPSScene : register(b2)
         float4 m_eyepos;
         float4 m_projectionParam;       // 1 / P00, 1 / P11, B, A
         float4 m_viewportSize;
+        float4 m_unused[5];
+        float4 m_cameraCenterOffset;    // The upscaler's jitter in NDC, which the game's shaders take out
     } g_psScene : packoffset(c0);
 };
 
@@ -105,7 +107,10 @@ void main(float4 position : SV_Position, out float4 diffuse : SV_Target0, out fl
     [branch] if (viewZ > 0 && viewZ < g_fadeMetres)
     {
         const float2 uv = (pixel + 0.5) / float2(g_viewportWidth, g_viewportHeight);
-        const float2 ndc = float2(uv.x * 2 - 1, 1 - uv.y * 2);
+        // The depth was drawn jittered; positions are rebuilt without it, and put back on the way to the
+        // screen, as the game's own light shaders do.
+        const float2 centreOffset = g_psScene.m_cameraCenterOffset.xy;
+        const float2 ndc = float2(uv.x * 2 - 1, 1 - uv.y * 2) - centreOffset;
         const float3 viewPosition = float3(ndc.x * viewZ * projectionParam.x, ndc.y * viewZ * projectionParam.y, viewZ);
 
         // m_lightParams[3].xyz is the light's own view-space position.
@@ -154,7 +159,7 @@ void main(float4 position : SV_Position, out float4 diffuse : SV_Target0, out fl
                     const float3 along = viewPosition + direction * travelled;
                     if (along.z <= 1e-4) break;
 
-                    const float2 alongNdc = float2(along.x / (along.z * projectionParam.x), along.y / (along.z * projectionParam.y));
+                    const float2 alongNdc = float2(along.x / (along.z * projectionParam.x), along.y / (along.z * projectionParam.y)) + centreOffset;
                     const float2 alongUv = float2(alongNdc.x * 0.5 + 0.5, 0.5 - alongNdc.y * 0.5);
                     if (any(alongUv < 0) || any(alongUv >= 1)) break;
 
