@@ -1709,10 +1709,10 @@ light, in the light's own volume draw.
   shadowed by the trace alone.
 
 Checked in game at 3840x2160 with DLAA and frame generation, in Afghanistan at dusk and in
-daylight: the shaders compiled and both sun shaders were identified at start-up, the trace ran
-every frame (one dispatch with the sun off screen), the lit image looked as before, and contact
-shadows showed under Snake's boots, in grass and around rocks. With the trace alone, characters
-close to the camera keep only the shadow near their feet.
+daylight: the shaders compiled and both sun shaders were identified at start-up, the trace ran for
+each frame's recording (a single dispatch, with the sun off screen), the lit image looked as before,
+and contact shadows showed under Snake's boots, in grass and around rocks. With the trace alone,
+characters close to the camera keep only the shadow near their feet.
 
 - **Contrast and reach.** Two settings shape both, under **Contact shadows** with their
   switches: **Contact shadow contrast** (0.5 to 4, 1 by default) scales the trace's distance-to-shadow
