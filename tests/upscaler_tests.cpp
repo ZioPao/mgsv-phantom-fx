@@ -1193,6 +1193,11 @@ float4 main(uint id : SV_VertexID) : SV_Position
     expect(render(blocked, optionsFor(1, 100), light)[receiver] == 1, "Past the fade the pixel is lit.");
     expect(render(blocked, optionsFor(500, 0.5f), light)[receiver] == 1, "A pixel beyond the light's reach is lit.");
 
+    // A lamp 30 cm above the receiver, under the same surface: the march ends at the light, so a
+    // surface past it casts nothing.
+    const std::array<float, 3> lowLight{0.18f, -0.4f, 2};
+    expect(render(blocked, optionsFor(500, 100), lowLight)[receiver] == 1, "A surface past the light does not shadow the pixel.");
+
     // The march counts a caster 7.5 mm in front, where Contact shadow thickness - a share of the depth
     // left to the far plane, 0.5% of this receiver's 2 m - would have put the near bound at 1 cm.
     auto close = flat;

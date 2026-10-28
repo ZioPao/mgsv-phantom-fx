@@ -127,9 +127,10 @@ void main(float4 position : SV_Position, out float4 diffuse : SV_Target0, out fl
 
             // The reach is in pixels of the screen, so the world it covers grows with the depth; the
             // step's own screen length is the same at every distance, which is what keeps a contact
-            // shadow under a character's feet from sweeping the whole frame.
+            // shadow under a character's feet from sweeping the whole frame. It ends at the light:
+            // nothing past it can shadow it.
             const float reachNdc = g_reachPixels * 2 / g_viewportHeight;
-            const float reach = min(reachNdc * abs(viewZ * projectionParam.y), MaxReachMetres);
+            const float reach = min(min(reachNdc * abs(viewZ * projectionParam.y), MaxReachMetres), lightDistance);
             const float stepLength = reach / max(steps, 1);
             const float3 direction = toLight / max(lightDistance, 1e-4);
             const float thickness = max(g_thickness, 1e-3);

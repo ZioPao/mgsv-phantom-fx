@@ -1675,7 +1675,8 @@ light, in the light's own volume draw.
   term has (`src/features/lamp_contact_shadows/lamp_contact_shadows_shaders.hpp`): the ray leaves the
   surface the pixel shows, steps towards the light, and counts the depth reads with a nearer surface
   in front of it. The reach is `Contact shadow reach` in pixels of the render size, capped at 6 m
-  (`min(reach, 6 m)`), with a step every two pixels and the steps crowded near the receiver; a caster
+  and at the light (`min(reach, 6 m, light distance)`: nothing past a light shadows it), with a step
+  every two pixels and the steps crowded near the receiver; a caster
   counts within `max(0.25 m, 1 cm a metre of depth)` of the ray, which keeps layered gear and
   overlapping terrain patches from reading as a wall in front of their own surface, and the march
   stops once the shadow is as dark as `Contact shadow contrast` allows. A pixel outside the light's
