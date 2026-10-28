@@ -150,10 +150,12 @@ public:
         endItem();
 
         // The settings that end the page, once every item is past: the contact shadows' own, which both
-        // of their items share.
+        // of their items share. Only on the page those items are on - `shared` holds every page's, and a
+        // page that shows none of the settings' items shows none of the settings.
         for (auto& [value, info] : shared.sliders)
         {
             if (!info.shownLast || !info.visible || std::ranges::find(sharedShown, value) != sharedShown.end()) continue;
+            if (std::ranges::find_first_of(seen, info.shownIn) == seen.end()) continue;
 
             drawSlider(*value, info);
             sharedShown.push_back(value);
@@ -211,6 +213,7 @@ private:
         item.emplace(fxui::ItemSpec{.id = info.menuId, .name = info.name, .tech = info.tech, .tag = info.tag, .tip = info.tip, .summary = info.summary,
             .keywords = info.keywords, .toggle = on, .state = state, .message = status.message});
         effect = info.effect;
+        if (info.effect) seen.push_back(*info.effect);
     }
 
     // Other features' settings shown in this item come last, each once a page: in the first of its
@@ -264,6 +267,7 @@ private:
     std::optional<fxui::Item> item;
     std::optional<Effect> effect;
     std::vector<const float*> sharedShown;
+    std::vector<Effect> seen; // The effects whose item this page showed, so its end knows its own settings.
 };
 
 // The section's features, in the menu's order.
