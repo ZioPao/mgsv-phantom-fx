@@ -895,6 +895,9 @@ dark areas, worst at night in fog (issue #28). Found 2026-10-28 in the shaders' 
   what the dither added on average: the centred forms nothing, the forward materials a quarter of
   1/128, so they keep their brightness. It runs before HDR's patch, which finds its TppTonemap the
   same way; both orders give the same code. The add-on's own sky draw has no dither either.
+- **SDR.** Without the dither SDR's 8-bit scene bands a little in smooth fog (2026-10-28: steps of 1
+  and 2 levels at DLSS Quality); with it, DLSS's image was softer. It comes out in SDR too; the
+  banding is issue #54. HDR's 16-bit float scene does not band.
 - **Left as they are.** The G-buffer's alpha test with the ordered alpha stipples cut-out edges (hair,
   manes) before DLSS too; taking it out would make those edges hard. The shadow filters'
   `MicroDither` and the sun pass's 2x2 tap offset move a comparison by an eighth of a texel.
