@@ -515,8 +515,11 @@ are stable. Pass names are the shaders' source files.
    target every frame with depth of field on; see "Depth of field").
 8. A 960x540 layer blended over the scene (`CopyRenderBuffer`, blend ONE / SRC_ALPHA).
 9. With motion blur on: `MotionBlurTile`, `MotionBlurTileNeighbour`, `MotionBlurBakeVelocityDepth`,
-   two `MotionBlurMcGuire` passes at 960x540, blended over the scene (`CopyRenderBuffer`, SRC_ALPHA
-   / INV_SRC_ALPHA).
+   the scene halved by a `CopyRenderBuffer`, two `MotionBlurMcGuire` passes at 960x540 between two
+   8-bit targets (the second reads the first's result), blended over the scene (`CopyRenderBuffer`,
+   SRC_ALPHA / INV_SRC_ALPHA). `MotionBlurMcGuire` places its samples in texture coordinates: the
+   step is the velocity times `cPSObject` c11.w times `cPSSystem`'s `m_renderBuffer.zw`, and the
+   result's alpha is scaled by its input's alpha.
 10. Colour grading: `ColorCorrection_BlndLut_Tex_Gen` builds a 256x16 LUT; the scene target is
     copied to its twin; `Tonemap` applies the LUT from the copy into the scene target.
 11. **FXAA:** the scene target is copied to its twin again; `Fxaa` reads the copy and writes the
@@ -1227,8 +1230,28 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
     texture coordinate (`CopyRenderBuffer` from the clip position through `cPSObject` c12, `Tonemap`
     at `SV_Position x m_renderBuffer.zw`), so smaller inputs still line up.
   - In every F10 record the only `CopyRenderBuffer` draws into a render-size target are the depth of
-    field's copy of the scene (its input has the render size; it stays, before DLSS) and the
-    half-size layer's composite over the scene (lens flares): that one goes to the output target.
+    field's copy of the scene (its input has the render size; it stays, before DLSS), the
+    half-size layer's composite over the scene (lens flares) and, with motion blur on, the blur's
+    composite: those two go to the output target.
+  - The motion blur gathers at half the output size from DLSS's image, as it does at half the render
+    size without upscaling (frame 141835, 1920x1080 to 3840x2160, before this: it gathered at 960x540
+    from the jittered scene before DLSS, and its composite stretched that four times over the
+    output, pixelated). Two more targets at half the output size stand in for the game's two, in the
+    scene's format: the game's are 8-bit, which clipped HDR highlights while the camera moved.
+    Before the first `MotionBlurMcGuire` pass, the output target is halved bilinearly into the
+    first, with the alpha of the game's own halved scene (the output target has the composite's
+    alpha, which the blur would take for its own). Each pass then reads the add-on's target in place
+    of the game's, writes the other, and keeps the game's `cPSSystem`, so the samples land as far
+    away on screen; the composite reads the last one. The game's targets are matched by address on
+    the recording thread, within the frame being recorded.
+  - With HDR the blur takes the same route without upscaling too (DLAA, or the upscaler off), as
+    the game's two targets are 8-bit. They are the game's shared half-size scratch targets, which
+    its SSAO draws into earlier in the frame (frame 141835, #491 to #496), so they are not made
+    float where the game creates them. The first pass halves the scene the game's own halving
+    `CopyRenderBuffer` read (the last copy on the thread whose target the pass reads), and the
+    composite stays on the scene, reading the add-on's result at t0; the game's input goes back
+    after the draw. The blur's two targets are made apart from the other output-size targets, so
+    this route makes only them: 33 MB at 4K, where the full set would add 166 MB unused.
   - `Tonemap` (the grading): the output target is copied into the second target on the context, and
     the grading reads it (slot 0) and writes the output target. The graded image is then stretched
     back into the render-size scene target, which the game copies next for its 2D filters
@@ -1264,22 +1287,25 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
   samplers. The rule takes the mipmapped, non-point wrap or mirror samplers; screen-space passes
   use the clamped and point ones, and a bias would also move their explicit mip reads.
 - **Motion blur.** DLSS needs the engine's velocity for characters, which the game draws only
-  with its motion blur on, but not the blur, which would only smear its output. `motion_blur.cpp`
+  with its motion blur on. `motion_blur.cpp`
   checks the build and the first bytes of PreExec (`80 79 68 00 49 8B 80 70 05 00 00`) and Exec
   (`48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20`) and detours both with MinHook at `AddonInit`.
   While DLSS replaces FXAA (any DLSS mode, not the FXAA comparison), PreExec runs the game's code
-  and then sets the velocity bit, and Exec returns without drawing. So the velocity passes run
-  every frame whatever the game's setting, and the blur passes do not run at all. Off and the
-  comparison give both back to the game's setting from the next frame. When a check fails nothing
-  is hooked and the game's setting stays in charge. `AddonUninit` removes all engine hooks with
-  `MH_Uninitialize`. Checked with F10 records:
+  and then sets the velocity bit, and Exec draws the blur only when the game's setting asks for it
+  and the add-on's **Motion blur** toggle is on. So the velocity passes run every frame whatever the
+  game's setting. Off and the comparison give both back to the game's setting from the next frame.
+  When a check fails nothing is hooked and the game's setting stays in charge. `AddonUninit` removes
+  all engine hooks with `MH_Uninitialize`. The blur runs after DLSS, at half the output size while
+  upscaling (see "The UI at the output size"). Checked with F10 records (the DLSS rows before the
+  blur came back with the toggle):
 
   | Motion blur | Add-on | Velocity passes | Blur passes |
   | --- | --- | --- | --- |
   | Off | DLAA | yes | none |
   | Off | Off | none | none |
-  | Low | DLAA | yes | none |
+  | Low | DLAA, before the toggle | yes | none |
   | Low | Off, or the FXAA comparison | yes | tiles and both McGuire passes |
+  | On | Performance at 4K, toggle on (frame 141835) | yes | tiles and both McGuire passes |
 
   With motion blur Off, the object motion debug view covers Snake standing and sprinting and the
   nearby trees; the ghosting of limbs moving toward the camera, seen without the hooks, is gone.
@@ -1310,7 +1336,9 @@ Not handled:
 - 2D filters that redraw the whole screen from the scene copy (chromatic aberration, radial blur)
   read the render-size copy, so while one is on, the image under it has the render size.
 - Bloom and the lens flares start from the scene before DLSS, jitter included; at a quarter of its
-  size it averages out. The game's motion blur stays off while DLSS runs.
+  size it averages out.
+- The motion blur's velocity stays at the render size: its tiles and `MotionBlurBakeVelocityDepth`
+  are left at half the render size, and the gather reads them by texture coordinate.
 
 ## Frame generation
 
@@ -1497,7 +1525,8 @@ Not handled:
 - Particles or glass that blend with alpha above 1 would darken their background, as the 2D pass did;
   none were seen.
 - The reflections' own targets are 8-bit, so reflected highlights stop at the game's white.
-- Motion blur (only without DLSS) blurs through an 8-bit copy, so moving highlights stop at white.
+- Motion blur blurs through the add-on's float targets in place of the game's 8-bit ones (see "The
+  UI at the output size"), so moving highlights keep their brightness.
 - The HUD has the scene's paper white; it is not separate.
 
 ## Soft shadows
