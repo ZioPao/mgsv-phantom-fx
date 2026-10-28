@@ -2368,7 +2368,9 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   few frames (as each readback returns), to see which step holds light after a light goes away.
   Every ten seconds the log counts the lights drawn with their shadow and without it
   (recorded after the kick, or not traced), those left at the kicks for another frame's camera or over
-  the 128 bits, and those lost. The cost table times the drawing and the Direct3D 12 rays ("Ray-traced
+  the 128 bits, and those lost; and how many lights' volume bounds are kept. Those are kept by light
+  until the device goes, so a count that grows every frame is a light whose key (its place to the
+  centimetre, its colour) keeps changing: a lamp that moves or flickers (a flashlight's are never kept). The cost table times the drawing and the Direct3D 12 rays ("Ray-traced
   lights") and measures the whole by leaving it out; the log has the rays too ("shadow rays for lights"). The flashlights alone took 0.18 ms of rays at 2560 x 1440 in their first session,
   every one traced at the kick.
 - **Lamp probe** (`ProbeLocalLights`, 2026-10-26). With the shadow rays' debug view chosen, one thread

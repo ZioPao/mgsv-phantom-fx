@@ -262,7 +262,8 @@ std::array<std::vector<std::uint64_t>, BoundsReadbacks> readbackLights;
 std::vector<std::uint64_t> frameBoundsLights;
 std::uint32_t boundsFrame{};
 
-// The bounds read back, by light; taken at the kick.
+// The bounds read back, by light; taken at the kick. Kept until detach: the ten-second log counts them,
+// as a light whose key changes every frame would add one each frame.
 std::mutex boundsMutex;
 std::unordered_map<std::uint64_t, Bounds> volumeBounds;
 
@@ -790,11 +791,18 @@ void logLights()
     const auto expiredCount = expiredNotes.exchange(0);
     if (shadowedCount + unshadowedCount + otherCount + overCount + lostCount + expiredCount == 0) return;
 
+    std::size_t boundsCount{};
+    {
+        std::lock_guard lock(boundsMutex);
+        boundsCount = volumeBounds.size();
+    }
+
     log("Lights in ten seconds: " + std::to_string(shadowedCount) + " drawn with their ray-traced shadow, " + std::to_string(unshadowedCount)
         + " without (recorded after the kick, or not traced), " + std::to_string(withoutVolumeCount)
         + " of all drawn without the game's volume; at the kicks " + std::to_string(otherCount) + " left for another frame's camera, "
         + std::to_string(overCount) + " over the " + std::to_string(GI_MAX_LOCAL_LIGHTS) + " the rays take; " + std::to_string(lostCount)
-        + " lost (no draw point after them); " + std::to_string(expiredCount) + " contexts' or lists' notes expired.");
+        + " lost (no draw point after them); " + std::to_string(expiredCount) + " contexts' or lists' notes expired; "
+        + std::to_string(boundsCount) + " lights' volume bounds kept.");
 }
 }
 
