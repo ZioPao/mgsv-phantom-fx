@@ -1683,10 +1683,11 @@ light, in the light's own volume draw.
   past the fade keeps the game's draws. The sun keeps Bend's trace, which costs one to eight dispatches
   for each recording of the depth it reads, and its look is the reference the lamps' march was matched
   to.
-- **One face, not two.** The shadow draw used a rasteriser state of its own with culling off, so a
-  closed volume ran the march on both faces and threw one result away. It now draws with the game's
-  own rasteriser state - the one the marking draw and the lighting draw after it use - so it covers
-  the pixels they cover and costs half the pixels for the same image.
+- **Far faces only.** The game's marking draw culls none and its lighting draw culls front faces
+  (frame logs, 2026-10-29: every one of 1,166 lights). The shadow draw drew with culling off too, so a
+  closed volume ran the march on both faces and threw one result away; the game's own marking state
+  would do the same. It draws the far faces instead, as the lighting draw does: it covers the pixels
+  that read the alpha, with the camera inside the volume too, at half the pixels.
 - **Four texels a gather.** The march took one depth a step. A `Gather` returns the four texels inside
   a two-pixel square for one instruction - the ground two steps cover - so a pair of steps is one
   request and four comparisons: half the memory instructions, twice the samples. The window a caster

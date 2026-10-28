@@ -22,10 +22,10 @@
   `dot(normal, light)` at zero and scales both its diffuse and its specular by it, so those pixels get
   no light and the shadow written for them is never read. They now return after one read of the
   G-buffer's normal, and a lamp whose reach cannot touch the screen keeps the game's draws.
-- **Lamp contact shadows draw one face of a light's volume, not two.** The shadow draw used its own
-  rasteriser state with culling off, so a closed volume ran the march on both its faces and threw one
-  away. It now takes the game's own rasteriser state, the one the marking draw and the lighting draw
-  after it use, so it covers the same pixels they do at half the cost. The image is unchanged.
+- **Lamp contact shadows draw only the far faces of a light's volume.** The shadow draw drew both
+  faces of a closed volume and threw one result away. It now draws the far faces, as the game's
+  lighting draw does, so it covers the pixels that read the shadow at half the cost. The image is
+  unchanged.
 - **Lamp contact shadows cost a fraction of what they did.** Each lamp traced Bend Studio's
   screen-space shadows in a compute pass over its whole screen rectangle, 120 samples a pixel, and
   then drew its volume a second time to put the result in the light targets. The lamps now march the

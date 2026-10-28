@@ -56,6 +56,8 @@ ComPtr<ID3D11Buffer> optionsBuffer;
 ComPtr<ID3D11BlendState> alphaOnly;
 // The same draw with the game's depth test off: it writes alpha, not depth.
 ComPtr<ID3D11DepthStencilState> noDepth;
+// The volume's far faces only, as the game's lighting draw takes them: its marking draw culls none.
+ComPtr<ID3D11RasterizerState> farFaces;
 // The shadow shader's gather reads the depth buffer through this, in the slot the game leaves it.
 ComPtr<ID3D11SamplerState> pointClamp;
 // The game's additive light blend, by the state it binds, and the same scaled by the target's alpha.
@@ -91,6 +93,12 @@ bool ensurePipeline()
         depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
         depth.DepthFunc = D3D11_COMPARISON_ALWAYS;
         check(device->CreateDepthStencilState(&depth, noDepth.ReleaseAndGetAddressOf()), "Creating the light shadow depth state");
+
+        D3D11_RASTERIZER_DESC rasterizer{};
+        rasterizer.FillMode = D3D11_FILL_SOLID;
+        rasterizer.CullMode = D3D11_CULL_FRONT;
+        rasterizer.DepthClipEnable = TRUE;
+        check(device->CreateRasterizerState(&rasterizer, farFaces.ReleaseAndGetAddressOf()), "Creating the light shadow rasterizer state");
 
         optionsBuffer = makeConstantBuffer(device.Get(), sizeof(Options), "Creating the lamp contact shadow options");
 
@@ -203,6 +211,7 @@ void detach() noexcept
         lightShadowShader.Reset();
         alphaOnly.Reset();
         noDepth.Reset();
+        farFaces.Reset();
         pointClamp.Reset();
         optionsBuffer.Reset();
         shadowedBlends.clear();
@@ -233,9 +242,9 @@ Health health()
 
 // At the marking draw (colour writes off), the game's draw is made, then the light's volume is drawn
 // once more with the shadow shader, to put the march's shadow in the alpha of both light targets
-// wherever the light can reach. The second draw takes the game's own rasteriser state, so it covers
-// exactly the face, and so exactly the pixels, the game's marking draw and the lighting draw after it
-// cover - which is one face of the volume, where drawing both cost twice the pixels for the same image.
+// wherever the light can reach. The second draw takes the volume's far faces, as the lighting draw
+// after it does, so it covers exactly the pixels that read the alpha. The game's marking draw culls
+// none, so its own state would draw both faces: twice the pixels for the same image.
 bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Falloff falloff, const BoundBlend& gameBlend)
 {
     const auto scene = constant_capture::pixelShaderReads<game_constants::SceneConstants>(context);
@@ -305,7 +314,7 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     context->PSSetSamplers(SamplerSlot, 1, pointClamp.GetAddressOf());
     context->OMSetBlendState(alphaOnly.Get(), gameBlend.factor, gameBlend.sampleMask);
     context->OMSetDepthStencilState(noDepth.Get(), 0);
-    context->RSSetState(gameRasterizer.Get());
+    context->RSSetState(farFaces.Get());
     context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
     timed.end();
 
