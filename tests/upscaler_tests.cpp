@@ -1,8 +1,12 @@
 #include "camera.hpp"
 #include "constant_capture.hpp"
 #include "features/global_illumination/gi_lighting.hpp"
+#include "features/lamp_contact_shadows/lamp_contact_shadows_shaders.hpp"
+#include "features/upscaling/frames.hpp"
+#include "features/upscaling/render_size_plan.hpp"
 #include "frame_latch.hpp"
 #include "game_constants.hpp"
+#include "passes/contact_shadow_trace.hpp"
 #include "phantom_fx_settings.hpp"
 #include "range_allocator.hpp"
 #include "shader_bytecode.hpp"
@@ -12,7 +16,9 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -21,6 +27,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace
@@ -527,6 +534,68 @@ void modeMaths()
         "Fixed DLSS frame generation modes present 2 to 6 frames per rendered frame.");
 }
 
+void dlssModesTakeDlssSize()
+{
+    const auto plan = planRenderSize({.mode = Mode::Balanced}, {3840, 2160}, render_scale::Size{2226, 1252});
+    expect(plan.render == render_scale::Size{2226, 1252} && plan.output == render_scale::Size{3840, 2160} && plan.quality == DlssQuality::Balanced,
+        "DLSS's modes render at DLSS's own size, with its quality.");
+}
+
+void nominalSizeWithoutDlssSize()
+{
+    constexpr render_scale::Size Output{3840, 2160}, FromDlss{2400, 1350}, TwoThirds{2560, 1440};
+    expect(planRenderSize({.upscaler = Upscaler::Fsr, .mode = Mode::Quality}, Output, FromDlss).render == TwoThirds, "FSR keeps AMD's scale.");
+    expect(planRenderSize({.mode = Mode::Custom, .customRenderScale = 0.75f}, Output, FromDlss).render == render_scale::Size{2880, 1620},
+        "Custom keeps its own scale.");
+    expect(planRenderSize({.mode = Mode::Quality}, Output, std::nullopt).render == TwoThirds
+            && planRenderSize({.mode = Mode::Quality}, Output, render_scale::Size{0, 0}).render == TwoThirds,
+        "DLSS without a size from NGX, or with a zero one, keeps NVIDIA's scale.");
+}
+
+// The engine rounds its own sizes up to even (0x2496A0).
+void oddSizesRoundUpToEven()
+{
+    expect(planRenderSize({.mode = Mode::Quality}, {3840, 2160}, render_scale::Size{2227, 1253}).render == render_scale::Size{2228, 1254},
+        "An odd render size is rounded up to even.");
+}
+
+void renderSizeNeverAboveOutput()
+{
+    const auto fromDlss = planRenderSize({.mode = Mode::Quality}, {1920, 1080}, render_scale::Size{2000, 1200}).render;
+    const auto full = planRenderSize({.mode = Mode::Custom, .customRenderScale = 1}, {1919, 1079}, std::nullopt).render;
+    expect(fromDlss == render_scale::Size{1920, 1080} && full.width <= 1919 && full.height <= 1079,
+        "The render size never exceeds the output size, rounded up or not.");
+}
+
+// Custom asks DLSS for DLAA from 99%, Quality from 66%, Balanced from 58% and Performance from 50%.
+void customQualityFollowsScale()
+{
+    using enum DlssQuality;
+    const std::pair<float, DlssQuality> cases[]{{1.0f, Dlaa},{0.99f, Dlaa}, {0.98f, MaxQuality}, {0.66f, MaxQuality}, {0.65f, Balanced}, {0.58f, Balanced},
+        {0.57f, MaxPerformance}, {0.5f, MaxPerformance}, {0.49f, UltraPerformance}};
+    for (const auto& [scale, quality] : cases) expect(dlssQuality(Mode::Custom, scale) == quality, "Custom's DLSS quality follows its scale.");
+}
+
+// Anything but what decides the render size would rebuild the engine's targets for nothing.
+void planKeptForOtherSettings()
+{
+    const Upscaling wanted{.mode = Mode::Custom, .customRenderScale = 0.75f};
+    constexpr render_scale::Size Output{2560, 1440};
+    const auto plan = planRenderSize(wanted, Output, std::nullopt);
+    auto other = wanted;
+    other.dlssPreset = Preset::K;
+    other.sharpness = 1;
+    other.textureBiasOffset = -1;
+    expect(plan.isFor(other, Output), "The preset, sharpening and the texture bias keep the plan.");
+
+    auto fsr = wanted, quality = wanted, scaled = wanted;
+    fsr.upscaler = Upscaler::Fsr;
+    quality.mode = Mode::Quality;
+    scaled.customRenderScale = 0.7f;
+    expect(!plan.isFor(fsr, Output) && !plan.isFor(quality, Output) && !plan.isFor(scaled, Output) && !plan.isFor(wanted, {1920, 1080}),
+        "Another upscaler, mode, custom scale or output size makes a new plan.");
+}
+
 void jitterSequence()
 {
     expect(camera::jitterPhases(1.0f) == 8, "DLAA uses 8 phases.");
@@ -548,6 +617,120 @@ void jitterSequence()
     expect(std::abs(sumX / 8) < 0.07 && std::abs(sumY / 8) < 0.07, "The phases are centred on the pixel.");
     expect(camera::jitterPixels(3, 8) == camera::jitterPixels(11, 8), "The sequence repeats after its phases.");
     expect(close(camera::jitterPixels(0, 8)[0], 0) && close(camera::jitterPixels(0, 8)[1], 1.0 / 3 - 0.5), "It is Halton(2, 3) from index 1.");
+}
+
+// A scene constants upload as bufferUnmapped hands it to the frames; returns it as the game's draws
+// then read it.
+game_constants::SceneConstants upload(Frames& frames, game_constants::SceneConstants scene, const FrameStart& start = {.canJitter = true})
+{
+    frames.sceneWritten(scene, camera::classify(scene), start);
+    return scene;
+}
+
+// The frame being run: executed, upscaled at its grading, presented.
+void upscaledAndPresented(Frames& frames)
+{
+    frames.executed();
+    frames.upscaled(true);
+    frames.presented(true);
+}
+
+void frameStartsAfterAnExecute()
+{
+    Frames frames;
+    upload(frames, DumpedMainView, {.gameFrame = 7});
+    upload(frames, DumpedMainView, {.gameFrame = 8});
+    expect(frames.current().index == 1 && frames.current().gameFrame == 7, "A frame starts at its first main-view upload, with the game loop's frame then.");
+
+    frames.executed();
+    upload(frames, DumpedMainView, {.gameFrame = 9});
+    expect(frames.current().index == 2 && frames.current().gameFrame == 9, "The first main-view upload after an execute starts the next frame.");
+}
+
+// The FXAA pass and the object velocity note the frame they were recorded for.
+void passesAfterAnExecuteBelongToTheNextFrame()
+{
+    Frames frames;
+    upload(frames, DumpedMainView);
+    expect(frames.recordingFrame() == 1, "Passes recorded after a frame's first upload are its own.");
+
+    frames.executed();
+    expect(frames.recordingFrame() == 2 && frames.current().index == 1, "Passes recorded after an execute, before the next upload, are the next frame's.");
+}
+
+// The intro draws a smaller view first: a mirror's, 1080x608 of a 2560x1440 frame (2026-10-26).
+void mainViewIsTheLargestCamera()
+{
+    constexpr float eye[3]{93.75f, 314.25f, 244.15f};
+    game_constants::SceneConstants main;
+    fill(main, ViewRows, eye);
+    main.width = 2560;
+    main.height = 1440;
+    auto smaller = DumpedMainView;
+    smaller.width = 1080;
+    smaller.height = 608;
+
+    Frames frames;
+    upload(frames, smaller);
+    expect(frames.current().view && frames.current().view->width == 1080, "A smaller view is the main view until a larger one.");
+
+    upload(frames, main);
+    upload(frames, DumpedMainView);
+    const auto& view = frames.current().view;
+    expect(view && view->width == 2560 && view->projectionView == camera::viewOf(main).projectionView,
+        "The main view is the frame's largest camera; of two the same size, the first.");
+}
+
+// Shadow maps' views are orthographic.
+void otherViewsNeitherStartNorJitter()
+{
+    Frames frames;
+    upload(frames, DumpedMainView);
+    upscaledAndPresented(frames);
+    auto shadow = DumpedMainView;
+    shadow.projection[3][2] = 0;
+    shadow.projection[3][3] = 1;
+    const auto written = upload(frames, shadow);
+    expect(frames.current().index == 1 && std::memcmp(&written, &shadow, sizeof(shadow)) == 0, "A shadow view neither starts a frame nor gets the jitter.");
+}
+
+// The motion blur's velocity pass has the previous frame's matrices in its view, and is jittered as well.
+void everyMainViewUploadGetsTheFramesJitter()
+{
+    Frames frames;
+    upload(frames, DumpedMainView);
+    upscaledAndPresented(frames);
+    auto motionBlur = DumpedMainView;
+    motionBlur.view[0][3] += 5;
+    const auto main = upload(frames, DumpedMainView), velocity = upload(frames, motionBlur);
+    const auto ndc = camera::jitterNdc(frames.current().jitter, 2560, 1440);
+    expect(ndc[0] != 0 && ndc[1] != 0 && main.cameraCenterOffset[0] == ndc[0] && main.cameraCenterOffset[1] == ndc[1]
+            && velocity.cameraCenterOffset[0] == ndc[0] && velocity.cameraCenterOffset[1] == ndc[1],
+        "Every main-view upload of a jittered frame, the camera's and the motion blur's, gets the frame's jitter.");
+}
+
+// So a 3D view without FXAA never shakes.
+void jitterOnlyAfterAnUpscaledFrame()
+{
+    struct Case
+    {
+        bool shouldJitterNext = true, wasUpscaled = true, canJitter = true;
+    };
+    // The frame after one that ran, went through the upscaler at its grading, and was presented.
+    const auto isNextFrameJittered = [](Case run)
+    {
+        Frames frames;
+        upload(frames, DumpedMainView);
+        frames.executed();
+        frames.upscaled(run.shouldJitterNext);
+        frames.presented(run.wasUpscaled);
+        upload(frames, DumpedMainView, {.canJitter = run.canJitter});
+        return frames.current().isJittered;
+    };
+    expect(isNextFrameJittered({}), "The frame after an upscaled one is jittered.");
+    expect(!isNextFrameJittered({.wasUpscaled = false}), "A present without an upscale leaves the next frame unjittered.");
+    expect(!isNextFrameJittered({.canJitter = false}), "Nothing is jittered while the upscaler does not replace FXAA.");
+    expect(!isNextFrameJittered({.shouldJitterNext = false}), "Diagnostics' Jitter off, or a fallback, leaves the next frame unjittered.");
 }
 
 void photoModeSettingsPersist(const fs::path& root)
@@ -820,6 +1003,240 @@ void skyLightMatchesTheGame()
     }
 }
 
+// The lamps' shadows skip a light that stands wholly past the contact shadows' fade, which would be
+// lit everywhere: the light keeps the game's draws.
+void lampShadowsSkipLightsPastTheFade()
+{
+    expect(contact_shadow_trace::beyondFade(600, 8, 500), "A lamp wholly past the contact shadows' fade keeps the game's shadows.");
+    expect(!contact_shadow_trace::beyondFade(505, 8, 500), "A lamp that reaches inside the fade marches.");
+    expect(!contact_shadow_trace::beyondFade(520, 40, 500), "A wide lamp that reaches inside the fade marches.");
+    expect(!contact_shadow_trace::beyondFade(600, std::numeric_limits<float>::infinity(), 500), "A lamp of unknown range marches.");
+}
+
+// The lamps' shadow draw (lamp_contact_shadows_shaders.hpp): a march through the depth buffer towards
+// the light, drawn into the alpha of both light targets. A pixel with nothing between it and the light
+// stays lit; one with a surface close to its ray comes out shadowed; one whose blocker is behind it,
+// or wholly past the fade or the light's reach, stays lit.
+void lampShadowMarch()
+{
+    using Microsoft::WRL::ComPtr;
+    constexpr UINT Size = 8;
+    constexpr float P00 = 1.4f, P11 = 1.75f; // A and B are the dumped view's, above
+    constexpr char FullscreenVertex[] = R"(
+float4 main(uint id : SV_VertexID) : SV_Position
+{
+    return float4(id == 1 ? 3.0 : -1.0, id == 2 ? 3.0 : -1.0, 0.5, 1.0);
+}
+)";
+
+    const auto device = warpDevice();
+    ComPtr<ID3D11DeviceContext> context;
+    device->GetImmediateContext(context.GetAddressOf());
+
+    const auto compiled = [&](const char* source, const char* profile) {
+        ComPtr<ID3DBlob> code, errors;
+        const auto result = D3DCompile(source, std::strlen(source), "lamp shadow", nullptr, nullptr, "main", profile, 0, 0, code.GetAddressOf(),
+            errors.GetAddressOf());
+        expect(SUCCEEDED(result), "Compile the lamp shadow test's shaders.");
+
+        return code;
+    };
+    const auto shaderCode = compiled(lamp_contact_shadows::shaders::LightShadow, "ps_5_0");
+    ComPtr<ID3D11PixelShader> shader;
+    expect(SUCCEEDED(device->CreatePixelShader(shaderCode->GetBufferPointer(), shaderCode->GetBufferSize(), nullptr, shader.GetAddressOf())),
+        "Create the lamp shadow's shader.");
+    const auto vertexCode = compiled(FullscreenVertex, "vs_5_0");
+    ComPtr<ID3D11VertexShader> vertexShader;
+    expect(SUCCEEDED(device->CreateVertexShader(vertexCode->GetBufferPointer(), vertexCode->GetBufferSize(), nullptr, vertexShader.GetAddressOf())),
+        "Create the test's vertex shader.");
+    D3D11_RASTERIZER_DESC rasterizerDesc{};
+    rasterizerDesc.FillMode = D3D11_FILL_SOLID;
+    rasterizerDesc.CullMode = D3D11_CULL_NONE;
+    rasterizerDesc.DepthClipEnable = TRUE;
+    ComPtr<ID3D11RasterizerState> rasterizer;
+    expect(SUCCEEDED(device->CreateRasterizerState(&rasterizerDesc, rasterizer.GetAddressOf())), "Create the test's rasterizer state.");
+    const D3D11_SAMPLER_DESC samplerDesc{.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT,
+        .AddressU = D3D11_TEXTURE_ADDRESS_CLAMP,
+        .AddressV = D3D11_TEXTURE_ADDRESS_CLAMP,
+        .AddressW = D3D11_TEXTURE_ADDRESS_CLAMP,
+        .ComparisonFunc = D3D11_COMPARISON_NEVER,
+        .MaxLOD = D3D11_FLOAT32_MAX};
+    ComPtr<ID3D11SamplerState> sampler;
+    expect(SUCCEEDED(device->CreateSamplerState(&samplerDesc, sampler.GetAddressOf())), "Create the test's sampler state.");
+
+    const auto makeBuffer = [&](const void* data, UINT size) {
+        const D3D11_BUFFER_DESC desc{size, D3D11_USAGE_IMMUTABLE, D3D11_BIND_CONSTANT_BUFFER};
+        const D3D11_SUBRESOURCE_DATA initial{data};
+        ComPtr<ID3D11Buffer> buffer;
+        expect(SUCCEEDED(device->CreateBuffer(&desc, &initial, buffer.GetAddressOf())), "Create a constant buffer.");
+
+        return buffer;
+    };
+    const auto depthOf = [](float viewZ) { return B / viewZ + A; };
+
+    // `depths` is the depth buffer's view depth per pixel; `options` is b6 as lamp_contact_shadows.cpp
+    // writes it; `encodedNormal` is the G-buffer's normal, bound at t0 only when the options ask for it,
+    // as the marking draw either has it or has not. Returns the diffuse target's alpha, the shadow.
+    const auto render = [&](const std::array<float, Size * Size>& viewDepths, const std::array<float, 12>& options,
+                            const std::array<float, 3>& lightPosition, std::array<float, 3> encodedNormal = {0, 0, 0}) {
+        std::array<float, Size * Size> depths{};
+        for (std::size_t i = 0; i < depths.size(); ++i) depths[i] = depthOf(viewDepths[i]);
+        const D3D11_TEXTURE2D_DESC depthDesc{Size, Size, 1, 1, DXGI_FORMAT_R32_FLOAT, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE};
+        const D3D11_SUBRESOURCE_DATA depthInitial{depths.data(), Size * sizeof(float)};
+        ComPtr<ID3D11Texture2D> depth;
+        expect(SUCCEEDED(device->CreateTexture2D(&depthDesc, &depthInitial, depth.GetAddressOf())), "Create the depth.");
+        ComPtr<ID3D11ShaderResourceView> depthView;
+        expect(SUCCEEDED(device->CreateShaderResourceView(depth.Get(), nullptr, depthView.GetAddressOf())), "View the depth.");
+
+        std::array<std::uint8_t, Size * Size * 4> normalBytes{};
+        for (std::size_t i = 0; i < Size * Size; ++i)
+        {
+            for (std::size_t channel = 0; channel < 3; ++channel)
+                normalBytes[i * 4 + channel] = static_cast<std::uint8_t>(encodedNormal[channel] * 255 + 0.5f);
+            normalBytes[i * 4 + 3] = 255;
+        }
+        const D3D11_TEXTURE2D_DESC normalDesc{Size, Size, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D11_USAGE_IMMUTABLE,
+            D3D11_BIND_SHADER_RESOURCE};
+        const D3D11_SUBRESOURCE_DATA normalInitial{normalBytes.data(), Size * 4};
+        ComPtr<ID3D11Texture2D> normalTexture;
+        expect(SUCCEEDED(device->CreateTexture2D(&normalDesc, &normalInitial, normalTexture.GetAddressOf())), "Create the normals.");
+        ComPtr<ID3D11ShaderResourceView> normalView;
+        expect(SUCCEEDED(device->CreateShaderResourceView(normalTexture.Get(), nullptr, normalView.GetAddressOf())), "View the normals.");
+
+        std::array<float, 30 * 4> scene{};
+        scene[21 * 4 + 0] = 1 / P00;
+        scene[21 * 4 + 1] = 1 / P11;
+        scene[21 * 4 + 2] = B;
+        scene[21 * 4 + 3] = A;
+        scene[22 * 4 + 0] = static_cast<float>(Size);
+        scene[22 * 4 + 1] = static_cast<float>(Size);
+        std::array<float, 11 * 4> lamp{};
+        lamp[3 * 4 + 0] = lightPosition[0];
+        lamp[3 * 4 + 1] = lightPosition[1];
+        lamp[3 * 4 + 2] = lightPosition[2];
+
+        std::array<ComPtr<ID3D11Texture2D>, 2> targets;
+        std::array<ComPtr<ID3D11RenderTargetView>, 2> views;
+        for (std::size_t i = 0; i < targets.size(); ++i)
+        {
+            const D3D11_TEXTURE2D_DESC desc{Size, Size, 1, 1, DXGI_FORMAT_R8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET};
+            expect(SUCCEEDED(device->CreateTexture2D(&desc, nullptr, targets[i].GetAddressOf())), "Create a light target.");
+            expect(SUCCEEDED(device->CreateRenderTargetView(targets[i].Get(), nullptr, views[i].GetAddressOf())), "View a light target.");
+        }
+
+        ID3D11RenderTargetView* raw[2]{views[0].Get(), views[1].Get()};
+        context->OMSetRenderTargets(2, raw, nullptr);
+        const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(Size), static_cast<float>(Size), 0, 1};
+        context->RSSetViewports(1, &viewport);
+        context->RSSetState(rasterizer.Get());
+        context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+
+        const auto sceneBuffer = makeBuffer(scene.data(), static_cast<UINT>(sizeof(scene)));
+        const auto lampBuffer = makeBuffer(lamp.data(), static_cast<UINT>(sizeof(lamp)));
+        const auto optionBuffer = makeBuffer(options.data(), static_cast<UINT>(sizeof(options)));
+        ID3D11Buffer* bound[1]{};
+        bound[0] = sceneBuffer.Get();
+        context->PSSetConstantBuffers(2, 1, bound);
+        bound[0] = lampBuffer.Get();
+        context->PSSetConstantBuffers(3, 1, bound);
+        bound[0] = optionBuffer.Get();
+        context->PSSetConstantBuffers(6, 1, bound);
+        context->PSSetShaderResources(2, 1, depthView.GetAddressOf());
+        ID3D11ShaderResourceView* boundNormals[1]{options[8] != 0 ? normalView.Get() : nullptr};
+        context->PSSetShaderResources(0, 1, boundNormals);
+        context->PSSetSamplers(0, 1, sampler.GetAddressOf());
+        context->PSSetShader(shader.Get(), nullptr, 0);
+        context->VSSetShader(vertexShader.Get(), nullptr, 0);
+        context->IASetInputLayout(nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->Draw(3, 0);
+
+        const D3D11_TEXTURE2D_DESC stagingDesc{Size, Size, 1, 1, DXGI_FORMAT_R8_UNORM, {1, 0}, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ};
+        ComPtr<ID3D11Texture2D> staging;
+        expect(SUCCEEDED(device->CreateTexture2D(&stagingDesc, nullptr, staging.GetAddressOf())), "Create the read-back texture.");
+        context->CopyResource(staging.Get(), targets[0].Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        expect(SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)), "Read the light target back.");
+        std::array<float, Size * Size> shadow{};
+        for (UINT y = 0; y < Size; ++y)
+            for (UINT x = 0; x < Size; ++x) shadow[y * Size + x] = static_cast<const std::uint8_t*>(mapped.pData)[y * mapped.RowPitch + x] / 255.0f;
+        context->Unmap(staging.Get(), 0);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+
+        return shadow;
+    };
+
+    // The options as the module writes them: the default shape, this light, this screen, and whether
+    // the G-buffer's normals are bound.
+    const auto optionsFor = [](float fade, float range, bool normals = false) {
+        return std::array<float, 12>{80, 0.005f, 1, fade, range, 48, static_cast<float>(Size), static_cast<float>(Size), normals ? 1.f : 0.f, 0, 0, 0};
+    };
+    const std::array<float, 3> light{0, 2, 2}; // Above the receiver at the bottom of the screen
+    const auto receiver = 6 * Size + 4;        // A pixel low on the screen, at 2 m
+
+    std::array<float, Size * Size> flat{};
+    flat.fill(2);
+    const auto lit = render(flat, optionsFor(500, 100), light);
+    expect(lit[receiver] == 1, "A pixel with nothing between it and the light stays lit.");
+
+    // A surface 10 cm in front of the ray, where the ray climbs towards the light.
+    auto blocked = flat;
+    for (std::size_t i = 0; i < 3 * Size; ++i) blocked[i] = 1.9f;
+    const auto shadowed = render(blocked, optionsFor(500, 100), light);
+    expect(shadowed[receiver] < 0.95f, "A surface in front of the ray shadows the pixel.");
+
+    // Behind the receiver: the ray is in front of it, so it cannot block.
+    auto behind = flat;
+    for (std::size_t i = 0; i < 3 * Size; ++i) behind[i] = 2.1f;
+    expect(render(behind, optionsFor(500, 100), light)[receiver] == 1, "A surface behind the ray does not shadow the pixel.");
+
+    expect(render(blocked, optionsFor(1, 100), light)[receiver] == 1, "Past the fade the pixel is lit.");
+    expect(render(blocked, optionsFor(500, 0.5f), light)[receiver] == 1, "A pixel beyond the light's reach is lit.");
+
+    // A lamp 30 cm above the receiver, under the same surface: the march ends at the light, so a
+    // surface past it casts nothing.
+    const std::array<float, 3> lowLight{0.18f, -0.4f, 2};
+    expect(render(blocked, optionsFor(500, 100), lowLight)[receiver] == 1, "A surface past the light does not shadow the pixel.");
+
+    // The march counts a caster 7.5 mm in front, where Contact shadow thickness - a share of the depth
+    // left to the far plane, 0.5% of this receiver's 2 m - would have put the near bound at 1 cm.
+    auto close = flat;
+    for (std::size_t i = 0; i < 3 * Size; ++i) close[i] = 1.9925f;
+    expect(render(close, optionsFor(500, 100), light)[receiver] < 0.95f, "A caster 7.5 mm in front counts as a contact.");
+
+    // A receiver at 12 m, with a caster 10 cm in front of it. That same share reaches the bound a caster
+    // may sit in by 10 m and leaves no window at all, so the term died with the distance; the march's
+    // fixed 5 mm does not, and the caster still counts.
+    const std::array<float, 3> farLight{0, 2, 12};
+    std::array<float, Size * Size> distant{};
+    distant.fill(12);
+    auto distantBlocked = distant;
+    for (std::size_t i = 4 * Size; i < 6 * Size; ++i) distantBlocked[i] = 11.9f;
+    expect(render(distant, optionsFor(500, 100), farLight)[receiver] == 1, "A receiver at 12 m with nothing in front of it is lit.");
+    expect(render(distantBlocked, optionsFor(500, 100), farLight)[receiver] < 0.95f, "A caster 10 cm in front counts 12 m out.");
+
+    // The G-buffer's normals, when the marking draw has them: a surface facing away from the light takes
+    // none of it, so there is nothing to shadow and no march to spend. The light is above the receiver,
+    // so the encoded normals below decode to one facing up at it and one facing down away from it.
+    const std::array<float, 3> facingUp{0.5f, 1, 0.5f}, facingDown{0.5f, 0, 0.5f};
+    expect(render(blocked, optionsFor(500, 100, true), light, facingDown)[receiver] == 1,
+        "A surface facing away from the light is lit, even with a caster in front of it.");
+    expect(render(blocked, optionsFor(500, 100, true), light, facingUp)[receiver] < 0.95f,
+        "A surface facing the light is shadowed, as it is without the normals.");
+    expect(render(blocked, optionsFor(500, 100), light, facingDown)[receiver] < 0.95f,
+        "Without the normals bound, the march runs on every pixel it covers.");
+
+    // A grazing light: a surface turned mostly to the camera (z -0.9), its slope away from a light above
+    // and in front of it. The game's decode gives it a little of the light, so it is marched; taking the
+    // normal's xy as a unit long, as the march once did, turned it away and left it lit.
+    const std::array<float, 3> nearLight{0, 1, 1};
+    auto ceiling = flat;
+    for (std::size_t i = 0; i < 6 * Size; ++i) ceiling[i] = 1.7f;
+    const std::array<float, 3> grazing{0.8536f, 0.1464f, 0.2236f};
+    expect(render(ceiling, optionsFor(500, 100, true), nearLight, grazing)[receiver] < 0.95f,
+        "A surface the light grazes is shadowed: its normal decodes as the game's does.");
+}
+
 int main()
 {
     const auto root =
@@ -841,11 +1258,25 @@ int main()
         cuts();
         streamlineCamera();
         modeMaths();
+        dlssModesTakeDlssSize();
+        nominalSizeWithoutDlssSize();
+        oddSizesRoundUpToEven();
+        renderSizeNeverAboveOutput();
+        customQualityFollowsScale();
+        planKeptForOtherSettings();
         jitterSequence();
+        frameStartsAfterAnExecute();
+        passesAfterAnExecuteBelongToTheNextFrame();
+        mainViewIsTheLargestCamera();
+        otherViewsNeitherStartNorJitter();
+        everyMainViewUploadGetsTheFramesJitter();
+        jitterOnlyAfterAnUpscaledFrame();
         photoModeSettingsPersist(root);
         hdrSettingsPersist(root);
         motionBlurSettingsPersist(root);
         outputSaturation();
+        lampShadowsSkipLightsPastTheFade();
+        lampShadowMarch();
         writeIsReadOnItsOwnThreadOnly();
         lightPassesKeepOnlySceneAndLight();
         mainCameraWriteNotedOnlyWhileAllKept();

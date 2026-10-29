@@ -31,17 +31,21 @@ struct Output
     unsigned width{}, height{};
 };
 
-// The output-size surfaces the game's grading draws with.
+// The output-size surfaces the game's post processing draws with. The motion blur's pair is made apart
+// from the others, so the blur alone (with HDR at native resolution) does not make the full-size ones.
 enum class Surface : std::uint8_t
 {
-    Scene, // The output target, in place of the scene target
-    Copy,  // In place of the scene target's copy that the grading reads
+    Scene,    // The output target, in place of the scene target
+    Copy,     // In place of the scene target's copy that the grading reads
+    Blur,     // Half the output size: in place of the motion blur's two half-size targets
+    BlurTwin,
 };
 
 // One draw of the game's at the output size, on a recording context: `target` in place of its render
-// target (without a depth-stencil), `inputs` in place of its shader resources, its viewports and
-// scissors scaled and cPSSystem (b0) at the output size. Destroying it puts the game's bindings back.
-// False when there are no output-size surfaces; the draw then stays as the game made it.
+// target (without a depth-stencil), `inputs` in place of its shader resources and its viewports and
+// scissors scaled to the target. Into Scene and Copy, cPSSystem (b0) has the output size; the motion
+// blur keeps the game's, whose sizes set how far it reaches. Destroying it puts the game's bindings
+// back. False when there are no output-size surfaces; the draw then stays as the game made it.
 class OutputSizeDraw
 {
 public:
@@ -75,6 +79,16 @@ private:
 
 // Copies one output-size surface into the other on a recording context.
 void copySurface(ID3D11DeviceContext* context, Surface to, Surface from) noexcept;
+struct SurfaceViews
+{
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> target;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
+    unsigned width{}, height{};
+};
+// The surface's target and view; empty when its surfaces could not be made.
+SurfaceViews surfaceViews(Surface surface) noexcept;
+// The engine renders below the output size.
+bool isUpscaling() noexcept;
 // The view's texture has the render size, while the engine renders below the output size.
 bool renderSized(ID3D11View* view) noexcept;
 

@@ -2,7 +2,6 @@
 
 #include "constant_capture.hpp"
 #include "frame_latch.hpp"
-#include "game_lights.hpp"
 #include "log.hpp"
 #include "passes/contact_shadow_trace_shaders.hpp"
 
@@ -24,7 +23,7 @@ using game_constants::SceneConstants;
 
 constexpr int WaveSize = 64; // WAVE_SIZE in shaders::BendShadow
 
-// BendShadow's constant buffer, which the light shadow shader reads too.
+// BendShadow's constant buffer.
 struct Parameters
 {
     float lightCoordinate[4];
@@ -131,6 +130,11 @@ void present() noexcept
     latch.present();
 }
 
+ContactShadowShape shape() noexcept
+{
+    return latch.frame();
+}
+
 bool failed() noexcept
 {
     return pipelineFailed;
@@ -159,40 +163,8 @@ std::array<int, 2> depthSize(ID3D11ShaderResourceView* view)
     return {static_cast<int>(width), static_cast<int>(height)};
 }
 
-std::optional<TraceBounds> boundsOf(const SceneConstants& scene, const std::array<float, 3>& center, float range, std::array<int, 2> size)
-{
-    // Pixels at any depth but the sky's.
-    TraceBounds bounds{{0, 0}, {size[0], size[1]}, 0, 2};
-    if (!std::isfinite(range) || range <= 0) return bounds;
-
-    const float z = center[2];
-    if (z + range <= 0) return std::nullopt;
-
-    // The light passes reconstruct the view depth as z = B / (depth - A).
-    const auto& projection = scene.projectionParam;
-    const auto depthAt = [&](float viewZ) { return projection[2] / viewZ + projection[3]; };
-    bounds.depthMin = std::max(depthAt(z + range), 0.0f);
-
-    // With the camera plane through the sphere, it covers the whole screen.
-    if (z - range <= 0) return bounds;
-
-    bounds.depthMax = depthAt(z - range);
-
-    // Pixels as Bend places the light.
-    const auto rect = game_lights::sphereOnScreen(scene, center, range, {static_cast<float>(size[0]), static_cast<float>(size[1])});
-    if (!rect) return std::nullopt;
-
-    for (int axis = 0; axis < 2; ++axis)
-    {
-        bounds.min[axis] = rect->min[axis];
-        bounds.max[axis] = rect->max[axis];
-    }
-
-    return bounds;
-}
-
 std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceView* depth, const SceneConstants& scene, std::array<float, 4> lightProjection,
-    const std::optional<TraceBounds>& bounds, ShadowTarget& target)
+    ShadowTarget& target)
 {
     auto size = depthSize(depth);
     const auto shape = latch.frame();
@@ -202,17 +174,13 @@ std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceVi
     ensureShadowTarget(target, static_cast<UINT>(size[0]), static_cast<UINT>(size[1]));
 
     // Bend's default depth bounds skip the sky.
-    const auto covered = bounds.value_or(TraceBounds{{0, 0}, {size[0], size[1]}, 0, 1});
-    int boundsMin[2]{covered.min[0], covered.min[1]}, boundsMax[2]{covered.max[0], covered.max[1]};
+    int boundsMin[2]{0, 0}, boundsMax[2]{size[0], size[1]};
     const auto dispatches = Bend::BuildDispatchList(lightProjection.data(), size.data(), boundsMin, boundsMax, false, WaveSize);
 
     const SavedComputeState saved(context, {.buffers = 1, .views = 1, .accesses = 1, .samplers = 1});
 
-    if (!bounds)
-    {
-        const float lit[4]{1, 1, 1, 1};
-        context->ClearUnorderedAccessViewFloat(target.access.Get(), lit);
-    }
+    const float lit[4]{1, 1, 1, 1};
+    context->ClearUnorderedAccessViewFloat(target.access.Get(), lit);
 
     context->CSSetShader(traceShader.Get(), nullptr, 0);
     context->CSSetShaderResources(0, 1, &depth);
@@ -237,22 +205,16 @@ std::optional<Traced> trace(ID3D11DeviceContext* context, ID3D11ShaderResourceVi
         parameters.projection[1] = scene.projectionParam[3];
         parameters.fade[0] = shape.fadeMetres * FadeStart;
         parameters.fade[1] = shape.fadeMetres;
-        parameters.depthBounds[0] = covered.depthMin;
-        parameters.depthBounds[1] = covered.depthMax;
-        std::memcpy(parameters.boundsMin, covered.min, sizeof(parameters.boundsMin));
-        std::memcpy(parameters.boundsMax, covered.max, sizeof(parameters.boundsMax));
+        parameters.depthBounds[0] = 0;
+        parameters.depthBounds[1] = 1;
+        std::memcpy(parameters.boundsMin, boundsMin, sizeof(parameters.boundsMin));
+        std::memcpy(parameters.boundsMax, boundsMax, sizeof(parameters.boundsMax));
         if (FAILED(write(context, parameterBuffer.Get(), parameters))) break;
 
         context->Dispatch(static_cast<UINT>(dispatch.WaveCount[0]), static_cast<UINT>(dispatch.WaveCount[1]), static_cast<UINT>(dispatch.WaveCount[2]));
     }
 
     return Traced{{dispatches.LightCoordinate_Shader[0], dispatches.LightCoordinate_Shader[1]}, dispatches.DispatchCount};
-}
-
-ID3D11Buffer* parameters() noexcept
-{
-    std::lock_guard lock(resourceMutex);
-    return parameterBuffer.Get();
 }
 
 std::string describe(const Traced& traced)

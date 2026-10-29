@@ -68,7 +68,7 @@ const EffectLine EffectLines[]{
     {.effect = Effect::SoftShadows, .health = sun_light_pass::softShadowHealth},
     {.effect = Effect::LampSoftShadows, .passes = {{Pass::LampSoftLight, "Light draws, with the soft shadow"}}, .health = lamp_soft_shadows::health},
     {.effect = Effect::SunContactShadows, .passes = {{Pass::SunTrace, "Contact shadow trace"}}, .health = sun_contact_shadows::health},
-    {.effect = Effect::LampContactShadows, .passes = {{Pass::LampTraces, "Traces"}, {Pass::LampShadows, "Shadow draws"}}, .health = lamp_contact_shadows::health},
+    {.effect = Effect::LampContactShadows, .passes = {{Pass::LampShadows, "Shadow draws"}}, .health = lamp_contact_shadows::health},
     {.effect = Effect::GlobalIllumination, .passes = {{Pass::GiRays, "Rays and the light cache"}, {Pass::GiDenoiser, "Denoiser and render size"},
             {Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}},
         .health = light_combine::health},

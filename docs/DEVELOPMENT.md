@@ -59,13 +59,16 @@ documentation and licenses are in `PhantomFX/`.
 ctest --test-dir build/release
 ```
 
-This runs five tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
+This runs seven tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
 (defaults, round trip, clamping, invalid files and values), the mode maths (render scales, texture LOD
-bias) and the camera maths (main-view recognition, jitter direction and units, reprojection, camera
-cuts, jitter phases and the Halton sequence, the camera frame generation gets). The main view and a sun
-pass from frame logs, pasted in as the log printed them, check main-view recognition and a light
-pass's view space on the game's own numbers. The constant capture runs on a WARP device: a thread
-reads only its own writes and only at their size, and each effect keeps only what it reads.
+bias), the render size plan (DLSS's own size or the nominal one, rounded up to even and never above the
+output size, Custom's DLSS quality, the settings that make a new plan), the frames (when one starts,
+the frame a pass belongs to, the main view, which uploads get the jitter and after which frames) and
+the camera maths (main-view recognition, jitter direction and units, reprojection, camera cuts, jitter
+phases and the Halton sequence, the camera frame generation gets). The main view and a sun pass from
+frame logs, pasted in as the log printed them, check main-view recognition and a light pass's view space
+on the game's own numbers. The constant capture runs on a WARP device: a thread reads only its own
+writes and only at their size, and each effect keeps only what it reads.
 `tests/scene_description_tests.cpp`: what the ray-traced scene takes of a model file, from small FMDL
 files it writes: the mesh roles of each case measured in the game (a tarp's stand-in, a pylon's
 lattice, glass, sky domes, inner walls, decals, hair, bushes), what each role gives its rays, a
@@ -73,11 +76,19 @@ cut-out mesh's texture, unreadable files and skins. `tests/scene_contents_tests.
 contents over a fake scene memory with room limits: when models, variants, characters and textures are
 let go, waiting for room, a variant without room (never traced, as today), texture copies arriving and
 replacing one another, characters built, refitted and made again, the palette budget, frames without a
-newer list, the instance cap's order and the terrain rings' remaking. `tests/game_shaders_tests.cpp`:
+newer list, the instance cap's order and the terrain rings' remaking. `tests/light_choice_tests.cpp`:
+which lights a kick gives the rays: the most pixels first, then the nearest, the light cap's edge, the
+same choice whatever order the lights come in, a
+light drawn from another eye left and counted, one reaching no pixel left out; a light's reach (around
+the camera, behind it, a narrow spot's, the viewport's corner); a light as the rays take it (its range,
+its rays' radius, where its shadow map starts) and its key from two cameras. `tests/game_shaders_tests.cpp`:
 the game's shaders on a WARP device, each created from a DXBC header carrying a row's checksum: a sun
 shader known by its checksum and drawn with it, unknown and missing shaders, every copy of one shader
 known, code that is not DXBC, the first of a row's shaders kept (the ray-traced lights' twins),
 everything let go at device teardown, and vertex shaders by their source name.
+`tests/shader_bytecode_tests.cpp`: the dither patch on a WARP device, on shaders compiled as the game's
+are: a dither centred on zero and one added whole, each flat at the dithered image's average once
+patched, and the G-buffer's fade mask kept.
 `tests/command_list_notes_tests.cpp`: how a module's notes go from a deferred context to its command list
 and are handed over: once, a context starting empty after its finish or at a gone one's address, a list
 run inside a deferred context joining its notes in the order they run, a forgotten list, notes expiring
@@ -139,16 +150,16 @@ what draws it, when that is the feature's own.
 
 | Folder | What draws it |
 | --- | --- |
-| `upscaling/` | `upscaler.*`: DLSS or FSR before the grading, in place of FXAA: jitter, frames, render size plan, NGX, composite, the grading at the output size, texture LOD bias. `upscaler_shaders.hpp`: the upscaler's inputs and motion vectors, composite with RCAS and debug views, stretch fallback. `fsr_upscaler.*`: FSR upscaling on Direct3D 12. `fxaa.*`: hook on the FXAA plugin, the FXAA pass at any post processing setting |
+| `upscaling/` | `upscaler.*`: DLSS or FSR before the grading, in place of FXAA: NGX, composite, the grading at the output size, texture LOD bias. `frames.*`: the frames the upscaler runs on: when one starts, its main view and its jitter. `render_size_plan.*`: the render size plan, from the upscaler, mode and output size, with DLSS's own size from NGX. `upscaler_shaders.hpp`: the upscaler's inputs and motion vectors, composite with RCAS and debug views, stretch fallback. `fsr_upscaler.*`: FSR upscaling on Direct3D 12. `fxaa.*`: hook on the FXAA plugin, the FXAA pass at any post processing setting |
 | `frame_generation/` | `presenter.*`: the game's stand-in swap chain, presented through Direct3D 12. `frame_generation.*`: DLSS Frame Generation, Streamline, its inputs and camera, Reflex. `fsr_frame_generation.*`: AMD's swap chain and its inputs |
 | `sun/` | Settings only: the sun size the soft and ray-traced shadows and the global illumination share |
 | `soft_shadows/` | Settings only: a mode of the sun light pass's shaders (`passes/sun_light_pass.*`) |
 | `sun_contact_shadows/` | `sun_contact_shadows.*`: the sun's screen-space shadow, traced once per depth a command list records |
-| `lamp_contact_shadows/` | `lamp_contact_shadows.*`: every point and spot light's screen-space shadow, drawn into the light targets' alpha between its two draws. `lamp_contact_shadows_shaders.hpp`: that draw |
+| `lamp_contact_shadows/` | `lamp_contact_shadows.*`: a shadow-mapped point or spot light's screen-space shadow, drawn into the light targets' alpha between its two draws. `lamp_contact_shadows_shaders.hpp`: that draw |
 | `lamp_soft_shadows/` | `lamp_soft_shadows.*`: the replacement shaders a point or spot light with a shadow map lights with, and their options. `lamp_soft_shadows_shaders.hpp`: the game's `SSLighting2_Point` and `SSLighting2_Spot` rebuilt, with the light's shadow map filtered by contact-hardening soft shadows |
 | `contact_shadow_shape/` | Settings only: the contrast, reach, thickness and fade of the contact shadow trace (`passes/contact_shadow_trace.*`), which the sun's and the lamps' share |
 | `ray_traced_shadows/` | `gi_shadow.*`: the sun's shadow rays and the FidelityFX Shadow Denoiser on Direct3D 12. `gi_shadow.hlsl`, `gi_shadow_filter.hlsl`: the rays, the denoiser's temporal pass and filters |
-| `ray_traced_lights/` | `local_lights.*`: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights"). `light_shadow_rays.*`, `light_shadows.hlsl`: the lights' shadow rays and filter on Direct3D 12 |
+| `ray_traced_lights/` | `local_lights.*`: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights"). `light_choice.*`: which lights a kick gives the rays (each light's reach, the light cap) and each light as the rays take it. `light_shadow_rays.*`, `light_shadows.hlsl`: the lights' shadow rays and filter on Direct3D 12 |
 | `global_illumination/` | `gi_light.*`, `gi_light.hlsl`: the light on Direct3D 12, its rays, their hits' light, the hash grid cache, the denoiser's inputs and the render size (see "Global illumination"). `gi_denoiser.*`: NVIDIA NRD's RELAX denoiser without NRI. `gi_lighting.*`: the game's sky and sun in the light's terms. `light_combine.*`: the traced light in place of the game's probe light at the resolve |
 | `ambient_occlusion/` | `gtvbao.*`: GTVBAO's occlusion multiplied into the indirect light at the upscale. `gtvbao_shaders.hpp`: that multiply |
 | `indirect_light/` | `ssilvb.*`: SSILVB's light, brought to the render size and added to the diffuse light the resolve reads. `ssilvb_shaders.hpp`: the upsample |
@@ -200,12 +211,13 @@ what draws it, when that is the feature's own.
 | `src/fidelityfx.cpp`, `src/fidelityfx.hpp` | Loads the AMD FSR API, for FSR upscaling and frame generation |
 | `src/weather.cpp`, `src/weather.hpp` | The overlay's weather and time control, in Utility (see "Weather and time") |
 | `src/sun_movement.cpp`, `src/sun_movement.hpp` | The sun and moon move every frame instead of in the game's steps (see "Sun movement") |
+| `src/game_dither.cpp`, `src/game_dither.hpp` | The game's colour dither taken out of its shaders as they are made (see "Dither") |
 | `src/dev_tools.hpp` | Whether the build has the Developer page (the dev preset) |
 | `src/game_lua.cpp`, `src/game_lua.hpp` | Lua in the game's script state, and the Developer page's console (see "Game Lua") |
 | `src/travel.cpp`, `src/travel.hpp` | The Developer page's travel: free roam in another map (see "Travel") |
 | `src/frame_log.cpp`, `src/frame_log.hpp` | Development diagnostics, off by default: shader log, F10 frame record, constant and texture dumps |
 | `src/resource_dump.cpp`, `src/resource_dump.hpp` | Format names, constant rows, DDS saving for the dumps |
-| `src/shader_bytecode.cpp`, `src/shader_bytecode.hpp` | DXBC checksum (bytes 4 to 20 of the container), the instruction walk, the output saturation patch |
+| `src/shader_bytecode.cpp`, `src/shader_bytecode.hpp` | DXBC checksum (bytes 4 to 20 of the container), the instruction walk, the output saturation patch, the dither patch |
 | `src/log.cpp`, `src/log.hpp` | `PhantomFX.log` beside the add-on, one per game session |
 | `src/clock.hpp` | `QueryPerformanceCounter` ticks and the milliseconds between them |
 | `src/frame_latch.hpp` | A module's settings as configure sets them and as the frame being recorded uses them, latched at present |
@@ -515,8 +527,11 @@ are stable. Pass names are the shaders' source files.
    target every frame with depth of field on; see "Depth of field").
 8. A 960x540 layer blended over the scene (`CopyRenderBuffer`, blend ONE / SRC_ALPHA).
 9. With motion blur on: `MotionBlurTile`, `MotionBlurTileNeighbour`, `MotionBlurBakeVelocityDepth`,
-   two `MotionBlurMcGuire` passes at 960x540, blended over the scene (`CopyRenderBuffer`, SRC_ALPHA
-   / INV_SRC_ALPHA).
+   the scene halved by a `CopyRenderBuffer`, two `MotionBlurMcGuire` passes at 960x540 between two
+   8-bit targets (the second reads the first's result), blended over the scene (`CopyRenderBuffer`,
+   SRC_ALPHA / INV_SRC_ALPHA). `MotionBlurMcGuire` places its samples in texture coordinates: the
+   step is the velocity times `cPSObject` c11.w times `cPSSystem`'s `m_renderBuffer.zw`, and the
+   result's alpha is scaled by its input's alpha.
 10. Colour grading: `ColorCorrection_BlndLut_Tex_Gen` builds a 256x16 LUT; the scene target is
     copied to its twin; `Tonemap` applies the LUT from the copy into the scene target.
 11. **FXAA:** the scene target is copied to its twin again; `Fxaa` reads the copy and writes the
@@ -853,6 +868,41 @@ The game moves its sun and moon light in steps, so shadows tick forward about on
 - **Patch.** The flag's test at `0x79D51D` ends in `je` to the unstepped path; the add-on turns it
   into `nop; jmp` to the same place. The light then counts as moving every frame, as it already did
   between steps in the weather seen (`+0x54` bit `0x800` of the light was clear there too).
+
+### Dither
+
+The game adds a fixed 8x8 ordered dither to some of its colour, against banding in its 8-bit scene.
+Before the upscaler it is a cell per render pixel, which DLSS enlarges with the image: a grid over
+dark areas, worst at night in fog (issue #28). Found 2026-10-28 in the shaders' disassembly
+(`%TEMP%\mgsv-fog\all`) and the frame records.
+
+- **The textures.** Four 8x8 `B8G8R8A8_UNORM` textures, read through `g_samplerPoint_Wrap` (`s8`) at
+  `frac(pixel / 8)`. Red is an ordered pattern from 1 or 2 to 253 or 254, averaging a half; alpha
+  averages a quarter (64 of 255; 71 in one), flat in two of them and ordered in the others; green and
+  blue hold 1. 42 pixel shaders call one `inMesh` and add it to their colour: the three sky draws
+  (`t8`) and `DR_VolFog_TppTonemap_MD` (`t15`) its red as `(d - 0.5) / 128`, `tpp3dfw_constant_sky`
+  and `tpp3dfw_generativeClouds` as `(d - 0.5) / 64`, the other forward materials (`fox3dfw_*`, glass)
+  mostly its alpha as `d / 128` on their fog's colour and transmittance. 211 G-buffer shaders read the
+  same textures as `g_tex_mesh`: red against the model's fade, which dissolves it, and alpha times
+  `cPSSystem` `m_param.w` as the alpha test's threshold, so the textures stay.
+- **When.** All 7 frame records with `Sky_Draw_TppNoSky` (fog) resolve with `DR_VolFog_TppTonemap_MD`;
+  none of the other 161 does. The plain resolve has no dither. The dither is added after TppTonemap,
+  in linear colour before the sRGB view encodes it: at night's 8 to 16 of 255 a step of 1/256 is
+  several levels.
+- **Patch.** `create_pipeline` hands Direct3D a copy of each shader with an `inMesh` texture (by
+  reflection) in which every sample of it is a `mov` of the textures' average in each channel (a half,
+  1/255, 1/255, a quarter), in the sample's swizzle, and nops to the same length. Every pixel then gets
+  what the dither added on average: the centred forms nothing, the forward materials a quarter of
+  1/128, so they keep their brightness. It runs before HDR's patch, which finds its TppTonemap the
+  same way; both orders give the same code. The add-on's own sky draw has no dither either.
+- **SDR.** Without the dither SDR's 8-bit scene bands a little in smooth fog (2026-10-28: steps of 1
+  and 2 levels at DLSS Quality); with it, DLSS's image was softer. It comes out in SDR too; the
+  banding is issue #54. HDR's 16-bit float scene does not band.
+- **Left as they are.** The G-buffer's alpha test with the ordered alpha stipples cut-out edges (hair,
+  manes) before DLSS too; taking it out would make those edges hard. The shadow filters'
+  `MicroDither` and the sun pass's 2x2 tap offset move a comparison by an eighth of a texel.
+- Checked over the 806 pixel shaders the frame log saved: exactly the 42 (and HDR's 4 copies of
+  them) patched, all taken by Direct3D on an RTX 5080.
 
 ### Ambient occlusion
 
@@ -1227,8 +1277,28 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
     texture coordinate (`CopyRenderBuffer` from the clip position through `cPSObject` c12, `Tonemap`
     at `SV_Position x m_renderBuffer.zw`), so smaller inputs still line up.
   - In every F10 record the only `CopyRenderBuffer` draws into a render-size target are the depth of
-    field's copy of the scene (its input has the render size; it stays, before DLSS) and the
-    half-size layer's composite over the scene (lens flares): that one goes to the output target.
+    field's copy of the scene (its input has the render size; it stays, before DLSS), the
+    half-size layer's composite over the scene (lens flares) and, with motion blur on, the blur's
+    composite: those two go to the output target.
+  - The motion blur gathers at half the output size from DLSS's image, as it does at half the render
+    size without upscaling (frame 141835, 1920x1080 to 3840x2160, before this: it gathered at 960x540
+    from the jittered scene before DLSS, and its composite stretched that four times over the
+    output, pixelated). Two more targets at half the output size stand in for the game's two, in the
+    scene's format: the game's are 8-bit, which clipped HDR highlights while the camera moved.
+    Before the first `MotionBlurMcGuire` pass, the output target is halved bilinearly into the
+    first, with the alpha of the game's own halved scene (the output target has the composite's
+    alpha, which the blur would take for its own). Each pass then reads the add-on's target in place
+    of the game's, writes the other, and keeps the game's `cPSSystem`, so the samples land as far
+    away on screen; the composite reads the last one. The game's targets are matched by address on
+    the recording thread, within the frame being recorded.
+  - With HDR the blur takes the same route without upscaling too (DLAA, or the upscaler off), as
+    the game's two targets are 8-bit. They are the game's shared half-size scratch targets, which
+    its SSAO draws into earlier in the frame (frame 141835, #491 to #496), so they are not made
+    float where the game creates them. The first pass halves the scene the game's own halving
+    `CopyRenderBuffer` read (the last copy on the thread whose target the pass reads), and the
+    composite stays on the scene, reading the add-on's result at t0; the game's input goes back
+    after the draw. The blur's two targets are made apart from the other output-size targets, so
+    this route makes only them: 33 MB at 4K, where the full set would add 166 MB unused.
   - `Tonemap` (the grading): the output target is copied into the second target on the context, and
     the grading reads it (slot 0) and writes the output target. The graded image is then stretched
     back into the render-size scene target, which the game copies next for its 2D filters
@@ -1264,22 +1334,25 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
   samplers. The rule takes the mipmapped, non-point wrap or mirror samplers; screen-space passes
   use the clamped and point ones, and a bias would also move their explicit mip reads.
 - **Motion blur.** DLSS needs the engine's velocity for characters, which the game draws only
-  with its motion blur on, but not the blur, which would only smear its output. `motion_blur.cpp`
+  with its motion blur on. `motion_blur.cpp`
   checks the build and the first bytes of PreExec (`80 79 68 00 49 8B 80 70 05 00 00`) and Exec
   (`48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20`) and detours both with MinHook at `AddonInit`.
   While DLSS replaces FXAA (any DLSS mode, not the FXAA comparison), PreExec runs the game's code
-  and then sets the velocity bit, and Exec returns without drawing. So the velocity passes run
-  every frame whatever the game's setting, and the blur passes do not run at all. Off and the
-  comparison give both back to the game's setting from the next frame. When a check fails nothing
-  is hooked and the game's setting stays in charge. `AddonUninit` removes all engine hooks with
-  `MH_Uninitialize`. Checked with F10 records:
+  and then sets the velocity bit, and Exec draws the blur only when the game's setting asks for it
+  and the add-on's **Motion blur** toggle is on. So the velocity passes run every frame whatever the
+  game's setting. Off and the comparison give both back to the game's setting from the next frame.
+  When a check fails nothing is hooked and the game's setting stays in charge. `AddonUninit` removes
+  all engine hooks with `MH_Uninitialize`. The blur runs after DLSS, at half the output size while
+  upscaling (see "The UI at the output size"). Checked with F10 records (the DLSS rows before the
+  blur came back with the toggle):
 
   | Motion blur | Add-on | Velocity passes | Blur passes |
   | --- | --- | --- | --- |
   | Off | DLAA | yes | none |
   | Off | Off | none | none |
-  | Low | DLAA | yes | none |
+  | Low | DLAA, before the toggle | yes | none |
   | Low | Off, or the FXAA comparison | yes | tiles and both McGuire passes |
+  | On | Performance at 4K, toggle on (frame 141835) | yes | tiles and both McGuire passes |
 
   With motion blur Off, the object motion debug view covers Snake standing and sprinting and the
   nearby trees; the ghosting of limbs moving toward the camera, seen without the hooks, is gone.
@@ -1310,7 +1383,9 @@ Not handled:
 - 2D filters that redraw the whole screen from the scene copy (chromatic aberration, radial blur)
   read the render-size copy, so while one is on, the image under it has the render size.
 - Bloom and the lens flares start from the scene before DLSS, jitter included; at a quarter of its
-  size it averages out. The game's motion blur stays off while DLSS runs.
+  size it averages out.
+- The motion blur's velocity stays at the render size: its tiles and `MotionBlurBakeVelocityDepth`
+  are left at half the render size, and the gather reads them by texture coordinate.
 
 ## Frame generation
 
@@ -1498,7 +1573,8 @@ Not handled:
 - Particles or glass that blend with alpha above 1 would darken their background, as the 2D pass did;
   none were seen.
 - The reflections' own targets are 8-bit, so reflected highlights stop at the game's white.
-- Motion blur (only without DLSS) blurs through an 8-bit copy, so moving highlights stop at white.
+- Motion blur blurs through the add-on's float targets in place of the game's 8-bit ones (see "The
+  UI at the output size"), so moving highlights keep their brightness.
 - The HUD has the scene's paper white; it is not separate.
 
 ## Soft shadows
@@ -1553,10 +1629,11 @@ shadows (`bend_sss_gpu.h` and `bend_sss_cpu.h` from "Inside Bend: Screen Space S
 License 2.0): contact shadows traced through the depth buffer, which the shadow map is too coarse
 to give. The game has no shadow mask to multiply (see "Sun light and shadows"), so the sun pass
 draws with replacement shaders. With soft shadows off too, the game's own shaders draw; the add-on
-then only checks a flag on each full-screen draw. **Lamp contact shadows** trace the same way for
-every point and spot light (`drawMarking` in `src/features/lamp_contact_shadows/lamp_contact_shadows.cpp`, from the local light pass), one trace per light, so they
-are a toggle of their own: the sun's is one trace a frame, the lamps' grows with the lights on
-screen.
+then only checks a flag on each full-screen draw. **Lamp contact shadows** give every point and spot
+light a short shadow of its own, marched through the depth buffer inside the light's own draw
+(`drawMarking` in `src/features/lamp_contact_shadows/lamp_contact_shadows.cpp`, from the local light
+pass), so they are a toggle of their own: the sun's is one Bend trace a frame, the lamps' a march per
+light, in the light's own volume draw.
 
 - **Replacement shaders** (`src/passes/sun_light_pass_shaders.hpp`). `SunLight_DL_CS_ES` and
   `SunLight_DL_ES`, and their rain pair without the sky reflection (`SKY_REFLECTION 0`),
@@ -1592,34 +1669,69 @@ screen.
   add-on, and the game's shader, `t7` and `b6` restored. The options apply from the frame after
   the next present, so both parts of a frame's sun pass see the same. A sun pass without its depth or constants, or an error, keeps
   the game's draw and logs the reason once.
-- **Lamps trace only what they reach.** A light's range comes from its falloff in `cPSLight` `c6`
-  (from the disassembly, `d` the distance plus `c6.x` for points): `SSLighting2_*` light
-  `1 / d^2 - d^2 c6.w`, zero at `c6.w^(-1/4)`; `Lighting_*_NA` light `(1 - d^16 c6.z) / d^2`, zero
-  at `c6.z^(-1/16)`. The range's sphere around `c3` gives a screen rectangle (the planes through the
-  eye that touch it, per axis) for `BuildDispatchList`'s bounds, and a depth range for Bend's
-  early-out, so a lamp costs its share of the screen, not all of it. The lamp's trace is not
-  cleared; its shadow draw reads the trace's constants (`b6`) and the depth (`t2`) and takes pixels
-  outside both bounds as lit. A sphere behind the camera or off screen keeps the game's draws; one
-  through the camera plane, or an unknown range, traces the whole screen.
+- **The lamps march instead.** Bend's compute shader costs a dispatch over the light's whole screen
+  rectangle at the render size, 120 samples a pixel, and a second draw of the light's volume to put
+  the result in the light targets' alpha: ten lamps in a night base turn that into a frame-rate drop.
+  The lamps' marking draw now marches the depth buffer itself, the shape `renodx-mgsv`'s screen-space
+  term has (`src/features/lamp_contact_shadows/lamp_contact_shadows_shaders.hpp`): the ray leaves the
+  surface the pixel shows, steps towards the light, and counts the depth reads with a nearer surface
+  in front of it. The reach is `Contact shadow reach` in pixels of the render size, capped at 6 m
+  and at the light (`min(reach, 6 m, light distance)`: nothing past a light shadows it), with a step
+  every two pixels and the steps crowded near the receiver; a caster
+  counts within `max(0.25 m, 1 cm a metre of depth)` of the ray, which keeps layered gear and
+  overlapping terrain patches from reading as a wall in front of their own surface, and the march
+  stops once the shadow is as dark as `Contact shadow contrast` allows. A pixel outside the light's
+  reach (one depth read and a distance) or past the fade is lit without marching, and a lamp wholly
+  past the fade keeps the game's draws. The sun keeps Bend's trace, which costs one to eight dispatches
+  for each recording of the depth it reads, and its look is the reference the lamps' march was matched
+  to.
+- **Far faces only.** The game's marking draw culls none and its lighting draw culls front faces
+  (frame logs, 2026-10-29: every one of 1,166 lights). The shadow draw drew with culling off too, so a
+  closed volume ran the march on both faces and threw one result away; the game's own marking state
+  would do the same. It draws the far faces instead, as the lighting draw does: it covers the pixels
+  that read the alpha, with the camera inside the volume too, at half the pixels.
+- **Four texels a gather.** The march took one depth a step. A `Gather` returns the four texels inside
+  a two-pixel square for one instruction - the ground two steps cover - so a pair of steps is one
+  request and four comparisons: half the memory instructions, twice the samples. The window a caster
+  may sit in is compared in the buffer's own depth, `A + B / z` from `cPSScene` `c21`, so the two
+  conversions a pair costs are shared by its four texels instead of one a texel. The sampler it reads
+  through is the add-on's, bound at `s0` for the draw and put back after.
+- **Pixels the light cannot light are not marched.** A surface facing away from a lamp takes none of
+  it: the game's shaders clamp `dot(normal, light)` at zero and scale both the diffuse and the
+  specular by it, so the light adds nothing there and the alpha the march writes is never read. The
+  march returns after one read of the G-buffer's normals (`t0`, decoded as `lamp_soft_shadows_shaders.hpp`
+  decodes it) when that dot is zero or less. Where the marking draw leaves `t0` unbound the shader
+  marches as before, and the options say which it is. A lamp whose reach cannot touch the screen - its
+  sphere off it, or wholly behind the camera - keeps the game's draws, which is `reachesScreen` in
+  `lamp_contact_shadows.cpp`.
+- **A lamp's reach comes from its falloff** in `cPSLight` `c6` (from the disassembly, `d` the distance
+  plus `c6.x` for points): `SSLighting2_*` light `1 / d^2 - d^2 c6.w`, zero at `c6.w^(-1/4)`;
+  `Lighting_*_NA` light `(1 - d^16 c6.z) / d^2`, zero at `c6.z^(-1/16)`. The march takes it as the
+  distance past which a pixel is lit without a step.
 - **Diagnostics.** "Sun contact shadows only" draws both parts with the far shader: the sun is then
   shadowed by the trace alone.
 
 Checked in game at 3840x2160 with DLAA and frame generation, in Afghanistan at dusk and in
-daylight: the shaders compiled and both sun shaders were identified at start-up, the trace ran
-every frame (one dispatch with the sun off screen), the lit image looked as before, and contact
-shadows showed under Snake's boots, in grass and around rocks. With the trace alone, characters
-close to the camera keep only the shadow near their feet.
+daylight: the shaders compiled and both sun shaders were identified at start-up, the trace ran for
+each frame's recording (a single dispatch, with the sun off screen), the lit image looked as before,
+and contact shadows showed under Snake's boots, in grass and around rocks. With the trace alone,
+characters close to the camera keep only the shadow near their feet.
 
-- **Contrast and reach.** Two settings shape both traces, under **Contact shadows** with their
+- **Contrast and reach.** Two settings shape both, under **Contact shadows** with their
   switches: **Contact shadow contrast** (0.5 to 4, 1 by default) scales the trace's distance-to-shadow
   window, so higher is darker and harder and lower is a soft grey wash, 1 being the trace itself;
-  and **Contact shadow reach** (8 to 120 pixels of the render size, 80 by default) is how far along the ray the march runs. The reach costs one depth read group when the
+  and **Contact shadow reach** (8 to 120 pixels of the render size, 80 by default) is how far along the ray the march runs. The sun's reach costs one depth read group when the
   shader's `SAMPLE_COUNT` went from 60 to 120, and the march stops at the setting, so a shorter reach
-  is cheap; the last eight samples of it fade out as Bend's last eight do. It is in pixels, so at 4K
+  is cheap; the last eight samples of it fade out as Bend's last eight do. The lamps take the reach as
+  their march's step count, a step every two pixels. It is in pixels, so at 4K
   the same reach covers half the world distance it does at 1080p.
 - **Thickness.** Bend's 0.5% window was a constant. It is a setting now (`SurfaceThickness`, 0.2% to
   2.5% of the depth between a sample and the far plane): how deep a surface may sit behind the
-  receiver and still count as a contact. RenoDX exposes the same dial per light type.
+  receiver and still count as a contact. RenoDX exposes the same dial per light type for the sun. The
+  lamps' march keeps RenoDX's own, a fixed 5 mm (`ThicknessMetres` in `lamp_contact_shadows.cpp`): the
+  share grows with the distance until, past 1%, it reaches the bound a caster may sit in and leaves no
+  window at all, so the term died silently for receivers past 10 m, and below that raising it narrowed
+  the march where it widens the sun's trace. The setting now shapes the sun's contact shadows alone.
 - **Distance fade.** Bend's shader has no fade, so a contact shadow at 100 m was as sharp as one
   underfoot. The trace now fades its result with view depth (B and A from `cPSScene` c21 give the view
   Z from the depth it already reads), full strength out to 60% of the setting and nothing past it.
@@ -2224,7 +2336,9 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   is the kick camera's (within a millimetre) go to Direct3D 12 in world space (`cPSScene` `c8` to `c10`
   take the light passes' view space there), up to 128, those reaching the most pixels on screen first,
   so that past 128 the smallest go without, the same ones frame after frame; those reaching none are
-  never drawn again. (On 2026-10-23, with a bit a light, they were taken in the order of a hash map of
+  never drawn again. Among as many pixels the nearest come first, and exact ties go by the light's key
+  (its kind, its place to the centimetre, its colour), so which lights go without depends on the lights
+  alone, not on the order the game drew them in (since 2026-10-28; `light_choice.cpp`). (On 2026-10-23, with a bit a light, they were taken in the order of a hash map of
   command lists, which changes every frame: in a base at night with about 100 lights and 64 bits, a
   different 45 went without each frame and a spotlight flickered between its shadow and none.)
 - **Soft shadows** (`TraceLocalLightShadows` in `src/features/ray_traced_lights/light_shadows.hlsl`, 2026-10-24). One value a
@@ -2333,7 +2447,9 @@ its own if neither the light nor the sun's shadows run. Lamp contact shadows are
   few frames (as each readback returns), to see which step holds light after a light goes away.
   Every ten seconds the log counts the lights drawn with their shadow and without it
   (recorded after the kick, or not traced), those left at the kicks for another frame's camera or over
-  the 128 bits, and those lost. The cost table times the drawing and the Direct3D 12 rays ("Ray-traced
+  the 128 bits, and those lost; and how many lights' volume bounds are kept. Those are kept by light
+  until the device goes, so a count that grows every frame is a light whose key (its place to the
+  centimetre, its colour) keeps changing: a lamp that moves or flickers (a flashlight's are never kept). The cost table times the drawing and the Direct3D 12 rays ("Ray-traced
   lights") and measures the whole by leaving it out; the log has the rays too ("shadow rays for lights"). The flashlights alone took 0.18 ms of rays at 2560 x 1440 in their first session,
   every one traced at the kick.
 - **Lamp probe** (`ProbeLocalLights`, 2026-10-26). With the shadow rays' debug view chosen, one thread
@@ -2629,8 +2745,8 @@ planet's centre is the origin, in km; the game's world has y up in metres.
   and colour in `TEXCOORD2`): the sky-view table times the sunlight (below the horizon, its horizon
   row, as the game's sky does: the sea at Mother Base ends short of the planet's horizon, and the
   dark air in front of the planet showed between them as a grey band), the game's sprite over it, the
-  last slice's fog in front, the game's dither (`t8`), then the game's TppTonemap (`cPSMaterial`
-  `c1`) and sRGB encoding, or the encoding alone with HDR, which takes TppTonemap out of the scene.
+  last slice's fog in front, then the game's TppTonemap (`cPSMaterial` `c1`) and sRGB encoding, or
+  the encoding alone with HDR, which takes TppTonemap out of the scene. No dither (see "Dither").
   Its two textures go to `t6` and `t7` for the draw; the game's are bound again after it.
 - Checked on WARP with made-up constants: blue sky with a pale horizon at noon, orange towards the sun
   at 1 degree, the pink band and the Earth's shadow at -2 degrees.

@@ -7,8 +7,10 @@
 #include "features/hdr/hdr.hpp"
 #include "features/motion_blur/motion_blur.hpp"
 #include "features/photo_mode/focus.hpp"
+#include "features/upscaling/frames.hpp"
 #include "features/upscaling/fsr_upscaler.hpp"
 #include "features/upscaling/fxaa.hpp"
+#include "features/upscaling/render_size_plan.hpp"
 #include "features/upscaling/upscaler_shaders.hpp"
 #include "game_constants.hpp"
 #include "game_loop.hpp"
@@ -97,19 +99,6 @@ struct Recorded
     }
 };
 
-// The game records a whole frame, then executes it (docs/DEVELOPMENT.md, "Command lists"). A frame
-// starts with the first main-view upload after the immediate context executed anything, and every
-// main-view upload of the frame gets the same jitter.
-struct Frame
-{
-    std::uint64_t index{};
-    // The game loop's frame (game_loop.hpp) as the frame's recording started, for Reflex.
-    std::uint32_t gameFrame{};
-    bool jittered{};
-    std::array<float, 2> jitter{}; // Render pixels
-    std::optional<camera::View> view;
-};
-
 struct Target
 {
     ComPtr<ID3D11Texture2D> texture;
@@ -134,18 +123,20 @@ struct CompositeConstants
     std::uint32_t objectMotion, linear;
 };
 
-// The render size the upscaler reads and the engine is asked for, and the output size it writes.
-struct Plan
-{
-    UINT renderWidth{}, renderHeight{}, outputWidth{}, outputHeight{};
-    NVSDK_NGX_PerfQuality_Value quality{NVSDK_NGX_PerfQuality_Value_DLAA};
+static_assert(static_cast<int>(DlssQuality::MaxPerformance) == NVSDK_NGX_PerfQuality_Value_MaxPerf
+        && static_cast<int>(DlssQuality::Balanced) == NVSDK_NGX_PerfQuality_Value_Balanced
+        && static_cast<int>(DlssQuality::MaxQuality) == NVSDK_NGX_PerfQuality_Value_MaxQuality
+        && static_cast<int>(DlssQuality::UltraPerformance) == NVSDK_NGX_PerfQuality_Value_UltraPerformance
+        && static_cast<int>(DlssQuality::UltraQuality) == NVSDK_NGX_PerfQuality_Value_UltraQuality
+        && static_cast<int>(DlssQuality::Dlaa) == NVSDK_NGX_PerfQuality_Value_DLAA,
+    "DlssQuality's values are NGX's.");
 
-    bool operator==(const Plan&) const = default;
-};
-
+// What the DLSS feature was created for; any change makes a new one, with a new history. Not the plan's
+// settings: a custom scale that rounds to the same size keeps the history.
 struct FeatureKey
 {
-    Plan plan;
+    render_scale::Size render, output;
+    DlssQuality quality{DlssQuality::Dlaa};
     Preset preset{};
 
     bool operator==(const FeatureKey&) const = default;
@@ -173,8 +164,8 @@ struct Configured
 std::mutex configuredMutex;
 Configured configured;
 
-// Read on every recording thread: DLSS replaces FXAA this frame, and the next frame is jittered.
-std::atomic<bool> replacing{}, jitterNext{};
+// Read on every recording thread: DLSS replaces FXAA this frame.
+std::atomic<bool> replacing{};
 // The game presents through Direct3D 12 for frame generation.
 std::atomic<bool> frameGeneration{};
 // The current plan's jitter phases and texture LOD bias.
@@ -199,12 +190,12 @@ std::map<std::pair<ID3D11SamplerState*, float>, BiasedSampler> biasedSamplers;
 // ---- Recording ----
 CommandListNotes<Recorded> recordedLists;
 
+// Taken after executionMutex where both are held.
 std::mutex recordMutex;
 // The latest FXAA pass recorded. The whole frame is recorded before it executes, so the frame's own
 // is known when its grading starts.
 std::optional<FxaaPass> recordedFxaa;
-Frame frame;
-bool executedSinceFrameStart{true};
+Frames frames;
 // The scene constants a thread has mapped: Map, memcpy and Unmap run back to back on one thread.
 thread_local ID3D11Resource* mappedScene{};
 thread_local void* mappedSceneData{};
@@ -235,8 +226,7 @@ ComPtr<ID3D11Resource> depthResource, sceneResource;
 ComPtr<ID3D11ShaderResourceView> depthView, sceneView;
 Ngx ngx;
 UINT outputSize[2]{};
-std::optional<Plan> plan;
-Upscaling planSettings;
+std::optional<RenderSizePlan> plan;
 // The UI target holds this frame's image: the grading, the 2D pass and GammaControl can draw on it.
 bool uiTargetFilled{};
 // The frame the upscaler ran for, at its first command list of the grading.
@@ -310,20 +300,13 @@ std::uint64_t keyOf(ID3D11DeviceContext* context)
     return reinterpret_cast<std::uint64_t>(context);
 }
 
-// The frame a pass recorded now belongs to; call with recordMutex held. Between the immediate
-// context's last call and the next frame's first upload, that is the next frame.
-std::uint64_t recordingFrame()
-{
-    return executedSinceFrameStart ? frame.index + 1 : frame.index;
-}
-
 void recordFxaa(ID3D11DeviceContext* context)
 {
     FxaaPass pass;
     context->OMGetRenderTargets(1, pass.sceneTarget.GetAddressOf(), pass.depth.GetAddressOf());
     {
         std::lock_guard lock(recordMutex);
-        pass.frame = recordingFrame();
+        pass.frame = frames.recordingFrame();
         recordedFxaa = std::move(pass);
     }
 
@@ -341,7 +324,7 @@ void recordVelocity(ID3D11DeviceContext* context)
     context->PSGetShaderResources(3, 1, found.view.GetAddressOf());
     {
         std::lock_guard lock(recordMutex);
-        found.frame = recordingFrame();
+        found.frame = frames.recordingFrame();
     }
 
     recordedLists.note(keyOf(context), [&](Recorded& notes) { notes.velocity = std::move(found); });
@@ -350,35 +333,6 @@ void recordVelocity(ID3D11DeviceContext* context)
 void recordUiTargetUse(ID3D11DeviceContext* context)
 {
     recordedLists.note(keyOf(context), [](Recorded& notes) { notes.drawsOnUiTarget = true; });
-}
-
-// The first main-view upload after the immediate context executed anything starts a frame.
-void startFrame()
-{
-    frame.index++;
-    frame.gameFrame = game_loop::currentFrame();
-    frame.jittered = jitterNext.load() && replacing.load();
-    frame.jitter = frame.jittered ? camera::jitterPixels(frame.index, jitterPhases.load()) : std::array<float, 2>{};
-    frame.view.reset();
-}
-
-void sceneWritten(game_constants::SceneConstants& scene)
-{
-    const auto kind = camera::classify(scene);
-    if (kind == camera::SceneView::Other) return;
-
-    std::lock_guard lock(recordMutex);
-    if (executedSinceFrameStart)
-    {
-        executedSinceFrameStart = false;
-        startFrame();
-    }
-
-    // The frame's largest camera view: a mirror's reflection is drawn first, and smaller (the intro's,
-    // 1080x608 of a 2560x1440 frame, 2026-10-26).
-    const float area = scene.width * scene.height;
-    if (kind == camera::SceneView::MainCamera && (!frame.view || area > frame.view->width * frame.view->height)) frame.view = camera::viewOf(scene);
-    if (frame.jittered) camera::applyJitter(scene, camera::jitterNdc(frame.jitter, scene.width, scene.height));
 }
 
 // In exclusive fullscreen the game draws GammaControl into a viewport of its scene's size, centred in
@@ -670,49 +624,24 @@ void releaseUnused(const Upscaling& wanted)
     if (wanted.mode == Mode::Off || wanted.upscaler != Upscaler::Fsr) fsr_upscaler::stop();
 }
 
-NVSDK_NGX_PerfQuality_Value perfQuality(Mode mode, float scale)
+// DLSS's own optimal render size for the mode at `output`; none when NGX has none.
+std::optional<render_scale::Size> dlssOptimalSize(const Upscaling& wanted, render_scale::Size output)
 {
-    switch (mode)
-    {
-    case Mode::Quality: return NVSDK_NGX_PerfQuality_Value_MaxQuality;
-    case Mode::Balanced: return NVSDK_NGX_PerfQuality_Value_Balanced;
-    case Mode::Performance: return NVSDK_NGX_PerfQuality_Value_MaxPerf;
-    case Mode::UltraPerformance: return NVSDK_NGX_PerfQuality_Value_UltraPerformance;
-    case Mode::Custom:
-        return scale >= 0.99f ? NVSDK_NGX_PerfQuality_Value_DLAA : scale >= 0.66f ? NVSDK_NGX_PerfQuality_Value_MaxQuality
-            : scale >= 0.58f ? NVSDK_NGX_PerfQuality_Value_Balanced : scale >= 0.5f ? NVSDK_NGX_PerfQuality_Value_MaxPerf
-            : NVSDK_NGX_PerfQuality_Value_UltraPerformance;
-    default: return NVSDK_NGX_PerfQuality_Value_DLAA;
-    }
-}
-
-// DLSS's own optimal render size for the preset modes, the nominal scale for Custom and FSR. Odd
-// sizes are rounded up to even, as the engine rounds its own (0x2496A0).
-Plan makePlan(const Upscaling& wanted, UINT outputWidth, UINT outputHeight)
-{
-    const auto scale = nominalScale(wanted.upscaler, wanted.mode, wanted.customRenderScale);
-    Plan result{0, 0, outputWidth, outputHeight, perfQuality(wanted.mode, scale)};
+    const auto quality = dlssQuality(wanted.mode, nominalScale(wanted.upscaler, wanted.mode, wanted.customRenderScale));
+    render_scale::Size size;
     UINT maxWidth{}, maxHeight{}, minWidth{}, minHeight{};
     float sharpness{};
-    if (wanted.mode == Mode::Custom || wanted.upscaler == Upscaler::Fsr
-        || NVSDK_NGX_FAILED(NGX_DLSS_GET_OPTIMAL_SETTINGS(ngx.parameters, outputWidth, outputHeight, result.quality, &result.renderWidth,
-            &result.renderHeight, &maxWidth, &maxHeight, &minWidth, &minHeight, &sharpness))
-        || !result.renderWidth || !result.renderHeight)
-    {
-        result.renderWidth = static_cast<UINT>(std::lround(outputWidth * scale));
-        result.renderHeight = static_cast<UINT>(std::lround(outputHeight * scale));
-    }
+    if (NVSDK_NGX_FAILED(NGX_DLSS_GET_OPTIMAL_SETTINGS(ngx.parameters, output.width, output.height, static_cast<NVSDK_NGX_PerfQuality_Value>(quality),
+            &size.width, &size.height, &maxWidth, &maxHeight, &minWidth, &minHeight, &sharpness)))
+        return std::nullopt;
 
-    result.renderWidth = std::min(result.renderWidth + (result.renderWidth & 1), outputWidth);
-    result.renderHeight = std::min(result.renderHeight + (result.renderHeight & 1), outputHeight);
-
-    return result;
+    return size;
 }
 
 // Returns true when the feature was created, which starts a new history.
-bool ensureFeature(const Plan& target, const Upscaling& wanted)
+bool ensureFeature(const RenderSizePlan& target, const Upscaling& wanted)
 {
-    const FeatureKey key{target, wanted.dlssPreset};
+    const FeatureKey key{target.render, target.output, target.quality, wanted.dlssPreset};
     if (ngx.feature && ngx.key == key) return false;
 
     releaseFeature();
@@ -722,11 +651,11 @@ bool ensureFeature(const Plan& target, const Upscaling& wanted)
         NVSDK_NGX_Parameter_SetUI(ngx.parameters, hint, static_cast<unsigned>(wanted.dlssPreset));
 
     NVSDK_NGX_DLSS_Create_Params create{};
-    create.Feature.InWidth = target.renderWidth;
-    create.Feature.InHeight = target.renderHeight;
-    create.Feature.InTargetWidth = target.outputWidth;
-    create.Feature.InTargetHeight = target.outputHeight;
-    create.Feature.InPerfQualityValue = target.quality;
+    create.Feature.InWidth = target.render.width;
+    create.Feature.InHeight = target.render.height;
+    create.Feature.InTargetWidth = target.output.width;
+    create.Feature.InTargetHeight = target.output.height;
+    create.Feature.InPerfQualityValue = static_cast<NVSDK_NGX_PerfQuality_Value>(target.quality);
     // The motion vectors are per render pixel; reversed-Z depth; the colour is LDR, or with HDR linear
     // light, the game's white at 1.
     create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_DepthInverted | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
@@ -739,8 +668,8 @@ bool ensureFeature(const Plan& target, const Upscaling& wanted)
     }
 
     ngx.key = key;
-    log("Created DLSS " + std::string(label(wanted.mode, Upscaler::Dlss)) + ": " + std::to_string(target.renderWidth) + "x" + std::to_string(target.renderHeight)
-        + " -> " + std::to_string(target.outputWidth) + "x" + std::to_string(target.outputHeight) + ", preset "
+    log("Created DLSS " + std::string(label(wanted.mode, Upscaler::Dlss)) + ": " + std::to_string(target.render.width) + "x" + std::to_string(target.render.height)
+        + " -> " + std::to_string(target.output.width) + "x" + std::to_string(target.output.height) + ", preset "
         + std::string(label(wanted.dlssPreset)) + ".");
 
     return true;
@@ -789,21 +718,25 @@ struct PostDraw
     std::optional<ui_redirect::OutputSizeDraw> redirected;
     // The grading's render-size target, the scene target, which then gets the graded image as well.
     ComPtr<ID3D11RenderTargetView> graded;
+    // The game's input at t0, put back after a draw that read the add-on's in its place.
+    ComPtr<ID3D11ShaderResourceView> gameInput;
 
     void clear()
     {
         redirected.reset();
         graded.Reset();
+        gameInput.Reset();
     }
 };
 thread_local PostDraw postDraw;
 
-// The full-screen triangle and the bilinear stretch, made once for the immediate context and the
-// recording threads. The composite draws with the triangle too: its pixel shader reads only SV_Position.
+// The full-screen triangle, the bilinear stretch and the motion blur's start, made once for the
+// immediate context and the recording threads. The composite draws with the triangle too: its pixel
+// shader reads only SV_Position.
 struct StretchShaders
 {
     ComPtr<ID3D11VertexShader> vertex;
-    ComPtr<ID3D11PixelShader> pixel;
+    ComPtr<ID3D11PixelShader> pixel, blurSource;
     ComPtr<ID3D11SamplerState> sampler;
 };
 std::mutex stretchShaderMutex;
@@ -819,6 +752,7 @@ std::shared_ptr<const StretchShaders> ensureStretch()
     check(device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, made->vertex.GetAddressOf()),
         "Creating the stretch vertex shader");
     made->pixel = pixelShader(device.Get(), shaders::Stretch, "stretch");
+    made->blurSource = pixelShader(device.Get(), shaders::BlurSource, "blur-source");
     D3D11_SAMPLER_DESC sampler{};
     sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -827,6 +761,84 @@ std::shared_ptr<const StretchShaders> ensureStretch()
     stretchShaders = std::move(made);
 
     return stretchShaders;
+}
+
+// The bindings a stretch changes on a recording context, the game's put back when this goes out of
+// scope.
+class SavedStretchState
+{
+public:
+    explicit SavedStretchState(ID3D11DeviceContext* context) : context(context)
+    {
+        context->IAGetInputLayout(layout.GetAddressOf());
+        context->IAGetPrimitiveTopology(&topology);
+        context->VSGetShader(vertex.GetAddressOf(), nullptr, nullptr);
+        context->PSGetShader(pixel.GetAddressOf(), nullptr, nullptr);
+        context->PSGetShaderResources(0, InputCount, inputs);
+        context->PSGetSamplers(0, 1, sampler.GetAddressOf());
+        context->RSGetState(rasterizer.GetAddressOf());
+        context->OMGetBlendState(blend.GetAddressOf(), blendFactor, &sampleMask);
+        context->OMGetRenderTargets(TargetCount, targets, depth.GetAddressOf());
+    }
+
+    ~SavedStretchState()
+    {
+        context->IASetInputLayout(layout.Get());
+        context->IASetPrimitiveTopology(topology);
+        context->VSSetShader(vertex.Get(), nullptr, 0);
+        context->PSSetShader(pixel.Get(), nullptr, 0);
+        context->PSSetShaderResources(0, InputCount, inputs);
+        context->PSSetSamplers(0, 1, sampler.GetAddressOf());
+        context->RSSetState(rasterizer.Get());
+        context->OMSetBlendState(blend.Get(), blendFactor, sampleMask);
+        context->OMSetRenderTargets(TargetCount, targets, depth.Get());
+
+        for (auto* input : inputs)
+            if (input) input->Release();
+
+        for (auto* target : targets)
+            if (target) target->Release();
+    }
+
+    SavedStretchState(const SavedStretchState&) = delete;
+    SavedStretchState& operator=(const SavedStretchState&) = delete;
+
+private:
+    static constexpr UINT InputCount = 2, TargetCount = D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT;
+
+    ID3D11DeviceContext* context;
+
+    ComPtr<ID3D11InputLayout> layout;
+    D3D11_PRIMITIVE_TOPOLOGY topology{};
+    ComPtr<ID3D11VertexShader> vertex;
+    ComPtr<ID3D11PixelShader> pixel;
+    ID3D11ShaderResourceView* inputs[InputCount]{};
+    ComPtr<ID3D11SamplerState> sampler;
+    ComPtr<ID3D11RasterizerState> rasterizer;
+    ComPtr<ID3D11BlendState> blend;
+    float blendFactor[4]{};
+    UINT sampleMask{};
+    ID3D11RenderTargetView* targets[TargetCount]{};
+    ComPtr<ID3D11DepthStencilView> depth;
+};
+
+// Binds the stretch's triangle, `pixel` and the bilinear sampler, with `inputs` from t0 and `target`
+// whole; then draws.
+void drawStretch(ID3D11DeviceContext* context, const StretchShaders& stretch, ID3D11PixelShader* pixel,
+    std::initializer_list<ID3D11ShaderResourceView*> inputs, ID3D11RenderTargetView* target)
+{
+    const auto size = textureDesc(target);
+    const WholeTargetViewport viewport(context, size.Width, size.Height);
+    context->IASetInputLayout(nullptr);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetShader(stretch.vertex.Get(), nullptr, 0);
+    context->PSSetShader(pixel, nullptr, 0);
+    context->PSSetShaderResources(0, static_cast<UINT>(inputs.size()), inputs.begin());
+    context->PSSetSamplers(0, 1, stretch.sampler.GetAddressOf());
+    context->RSSetState(nullptr);
+    context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+    context->OMSetRenderTargets(1, &target, nullptr);
+    context->Draw(3, 0);
 }
 
 // The graded image at the output size, stretched into the render-size scene target on `context`. The
@@ -838,52 +850,144 @@ void drawGradedScene(ID3D11DeviceContext* context, ID3D11RenderTargetView* scene
     const auto stretch = ensureStretch();
     if (!output.view || !stretch) return;
 
-    ComPtr<ID3D11InputLayout> layout;
-    D3D11_PRIMITIVE_TOPOLOGY topology{};
-    ComPtr<ID3D11VertexShader> vertex;
-    ComPtr<ID3D11PixelShader> pixel;
-    ComPtr<ID3D11ShaderResourceView> input;
-    ComPtr<ID3D11SamplerState> sampler;
-    ComPtr<ID3D11RasterizerState> rasterizer;
-    ComPtr<ID3D11BlendState> blend;
-    float blendFactor[4]{};
-    UINT sampleMask{};
-    ID3D11RenderTargetView* bound[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
-    ComPtr<ID3D11DepthStencilView> depth;
-    context->IAGetInputLayout(layout.GetAddressOf());
-    context->IAGetPrimitiveTopology(&topology);
-    context->VSGetShader(vertex.GetAddressOf(), nullptr, nullptr);
-    context->PSGetShader(pixel.GetAddressOf(), nullptr, nullptr);
-    context->PSGetShaderResources(0, 1, input.GetAddressOf());
-    context->PSGetSamplers(0, 1, sampler.GetAddressOf());
-    context->RSGetState(rasterizer.GetAddressOf());
-    context->OMGetBlendState(blend.GetAddressOf(), blendFactor, &sampleMask);
-    context->OMGetRenderTargets(static_cast<UINT>(std::size(bound)), bound, depth.GetAddressOf());
-    std::array<ComPtr<ID3D11RenderTargetView>, std::size(bound)> targets;
-    for (std::size_t i = 0; i < std::size(bound); ++i) targets[i].Attach(bound[i]);
+    const SavedStretchState saved(context);
+    drawStretch(context, *stretch, stretch->pixel.Get(), {output.view.Get()}, scene);
+}
 
-    const auto size = textureDesc(scene);
-    const WholeTargetViewport viewport(context, size.Width, size.Height);
-    context->IASetInputLayout(nullptr);
-    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    context->VSSetShader(stretch->vertex.Get(), nullptr, 0);
-    context->PSSetShader(stretch->pixel.Get(), nullptr, 0);
-    context->PSSetShaderResources(0, 1, output.view.GetAddressOf());
-    context->PSSetSamplers(0, 1, stretch->sampler.GetAddressOf());
-    context->RSSetState(nullptr);
-    context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
-    context->OMSetRenderTargets(1, &scene, nullptr);
-    context->Draw(3, 0);
+// The game's motion blur on one recording thread: the frame, the game's half-size target its last
+// gather pass wrote, by address only, and the surface at half the output size that holds that pass's
+// result.
+struct BlurChain
+{
+    std::uint64_t frame{};
+    const ID3D11Resource* gameTarget{};
+    ui_redirect::Surface surface{};
+};
+thread_local BlurChain blurChain;
 
-    context->IASetInputLayout(layout.Get());
-    context->IASetPrimitiveTopology(topology);
-    context->VSSetShader(vertex.Get(), nullptr, 0);
-    context->PSSetShader(pixel.Get(), nullptr, 0);
-    context->PSSetShaderResources(0, 1, input.GetAddressOf());
-    context->PSSetSamplers(0, 1, sampler.GetAddressOf());
-    context->RSSetState(rasterizer.Get());
-    context->OMSetBlendState(blend.Get(), blendFactor, sampleMask);
-    context->OMSetRenderTargets(static_cast<UINT>(std::size(bound)), bound, depth.Get());
+std::uint64_t currentRecordingFrame()
+{
+    std::lock_guard lock(recordMutex);
+    return frames.recordingFrame();
+}
+
+// Whether `source` is the result of this frame's last gather pass on this thread. Without the frame, a
+// frame that missed its composite would leave the next frame's first pass taken for its second.
+bool isBlurResult(ID3D11ShaderResourceView* source)
+{
+    return blurChain.gameTarget && blurChain.frame == currentRecordingFrame() && resourceOf(source).Get() == blurChain.gameTarget;
+}
+
+// The game's last copy on this thread: its target, by address only, and what it copied. Without
+// upscaling, the motion blur's first pass starts from the scene the game halved for it.
+struct LastCopy
+{
+    const ID3D11Resource* target{};
+    ComPtr<ID3D11ShaderResourceView> source;
+};
+thread_local LastCopy lastCopy;
+
+void noteCopy(ID3D11DeviceContext* context)
+{
+    ComPtr<ID3D11RenderTargetView> target;
+    context->OMGetRenderTargets(1, target.GetAddressOf(), nullptr);
+    lastCopy.target = resourceOf(target.Get()).Get();
+    context->PSGetShaderResources(0, 1, lastCopy.source.ReleaseAndGetAddressOf());
+}
+
+// The game's motion blur goes through the add-on's surfaces while upscaling (gatherBlur), and with HDR
+// at every upscaler setting: the game's own are 8-bit, which clips HDR highlights while the camera
+// moves. Otherwise the game's passes stay as they are.
+bool isBlurRedirected()
+{
+    return ui_redirect::isUpscaling() ? replacing.load(std::memory_order_relaxed) : hdr::active();
+}
+
+// What the blur's first pass starts from in place of `gameHalf`, the game's 8-bit half of the scene:
+// DLSS's image at the output size while upscaling, or else the scene the game halved. Null when the
+// copy that made `gameHalf` was not seen.
+ComPtr<ID3D11ShaderResourceView> blurScene(ID3D11ShaderResourceView* gameHalf)
+{
+    if (ui_redirect::isUpscaling()) return ui_redirect::output().view;
+    if (lastCopy.target && lastCopy.target == resourceOf(gameHalf).Get()) return lastCopy.source;
+
+    return nullptr;
+}
+
+// While upscaling, the game's motion blur gathers at half the output size from DLSS's image, as it
+// does at half the render size without upscaling. At half the render size it gathered from the
+// jittered scene before DLSS, and its composite stretched that over the output: pixelated. Its first
+// pass reads the add-on's halved image instead of the game's halved scene, the second the first's
+// result, and the composite the second's (beforePostDraw). The game's constants stay: they place the
+// samples in texture coordinates, so the blur reaches as far on screen.
+bool gatherBlur(ID3D11DeviceContext* context)
+{
+    ComPtr<ID3D11ShaderResourceView> source;
+    ComPtr<ID3D11RenderTargetView> target;
+    context->PSGetShaderResources(0, 1, source.GetAddressOf());
+    context->OMGetRenderTargets(1, target.GetAddressOf(), nullptr);
+    if (!source || !target) return false;
+
+    using enum ui_redirect::Surface;
+    const bool isFirstPass = !isBlurResult(source.Get());
+    if (isFirstPass)
+    {
+        const auto scene = blurScene(source.Get());
+        const auto blur = ui_redirect::surfaceViews(Blur);
+        const auto stretch = ensureStretch();
+        if (!scene || !blur.target || !stretch) return false;
+
+        const SavedStretchState saved(context);
+        drawStretch(context, *stretch, stretch->blurSource.Get(), {scene.Get(), source.Get()}, blur.target.Get());
+    }
+
+    const auto input = isFirstPass ? Blur : blurChain.surface;
+    const auto output = input == Blur ? BlurTwin : Blur;
+    postDraw.redirected.emplace(context, output, Inputs{{0, input}});
+    if (!*postDraw.redirected)
+    {
+        postDraw.clear();
+        return false;
+    }
+
+    blurChain = {currentRecordingFrame(), resourceOf(target.Get()).Get(), output};
+    if (ui_redirect::isUpscaling()) recordUiTargetUse(context);
+
+    return true;
+}
+
+// Without upscaling, the blur's composite stays on the game's scene and reads the add-on's result at
+// t0 in place of the game's; afterPostDraw puts the game's back.
+bool composeBlurInPlace(ID3D11DeviceContext* context)
+{
+    ComPtr<ID3D11ShaderResourceView> source;
+    context->PSGetShaderResources(0, 1, source.GetAddressOf());
+    if (!isBlurResult(source.Get())) return false;
+
+    const auto blur = ui_redirect::surfaceViews(blurChain.surface);
+    blurChain = {};
+    if (!blur.view) return false;
+
+    context->PSSetShaderResources(0, 1, blur.view.GetAddressOf());
+    postDraw.gameInput = std::move(source);
+
+    return true;
+}
+
+// The motion blur's draws, which HDR redirects at every upscaler setting (isBlurRedirected). Returns
+// true when the add-on makes the draw: the gathers, and the composite without upscaling.
+bool redirectBlur(ID3D11DeviceContext* context, GamePass pass)
+{
+    if (!isBlurRedirected()) return false;
+    if (pass == GamePass::MotionBlur) return gatherBlur(context);
+    if (pass != GamePass::Copy || ui_redirect::isUpscaling()) return false;
+
+    if (composeBlurInPlace(context)) return true;
+
+    // Any other copy may be the one that halves the scene for the blur's first pass.
+    noteCopy(context);
+
+    return false;
 }
 
 // ---- Per frame, on the immediate context ----
@@ -1003,11 +1107,11 @@ bool upscale(const FxaaPass& pass, const Frame& current)
 
     // The upscaling modes run at the planned size, DLAA at the engine's own; after a mode change the
     // engine reaches either once it has rebuilt its targets.
-    Plan planned{width, height, width, height, NVSDK_NGX_PerfQuality_Value_DLAA};
+    RenderSizePlan planned{.render = {width, height}, .output = {width, height}, .quality = DlssQuality::Dlaa};
     if (upscales(wanted.mode))
     {
         if (!plan) return fallback("no upscaling plan yet");
-        if (width != plan->renderWidth || height != plan->renderHeight) return fallback("waiting for the requested render size");
+        if (width != plan->render.width || height != plan->render.height) return fallback("waiting for the requested render size");
 
         planned = *plan;
     }
@@ -1016,9 +1120,9 @@ bool upscale(const FxaaPass& pass, const Frame& current)
 
     // Upscaled frames go to the UI target, which the grading and the UI then draw on; DLAA writes over
     // the scene target.
-    const bool upscaled = planned.renderWidth != planned.outputWidth || planned.renderHeight != planned.outputHeight;
+    const bool upscaled = planned.render != planned.output;
     const auto uiTarget = upscaled ? ui_redirect::output() : ui_redirect::Output{};
-    if (upscaled && (uiTarget.width != planned.outputWidth || uiTarget.height != planned.outputHeight)) return fallback("the UI target is not ready");
+    if (upscaled && (uiTarget.width != planned.output.width || uiTarget.height != planned.output.height)) return fallback("the UI target is not ready");
 
     ensurePipeline();
     initializeUpscaler(wanted.upscaler);
@@ -1030,7 +1134,7 @@ bool upscale(const FxaaPass& pass, const Frame& current)
         "Creating the upscaler's colour texture", fsr);
     ensureTarget(depthTarget, width, height, DXGI_FORMAT_R32_FLOAT, "Creating the upscaler's depth texture", fsr || frameGeneration);
     ensureTarget(motionTarget, width, height, DXGI_FORMAT_R16G16_FLOAT, "Creating the upscaler's motion texture", fsr || frameGeneration);
-    ensureTarget(outputTarget, planned.outputWidth, planned.outputHeight, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    ensureTarget(outputTarget, planned.output.width, planned.output.height, DXGI_FORMAT_R16G16B16A16_FLOAT,
         "Creating the upscaler's output texture", fsr);
 
     // A gap means the upscaler missed frames; its history and the previous camera are stale.
@@ -1136,8 +1240,8 @@ bool upscale(const FxaaPass& pass, const Frame& current)
     if (upscaled) uiTargetFilled = true;
     if (reset) ++resets;
     if (++evaluations == 1)
-        log("First " + std::string(label(wanted.upscaler)) + " frame: " + std::to_string(width) + "x" + std::to_string(height) + " -> " + std::to_string(planned.outputWidth) + "x"
-            + std::to_string(planned.outputHeight) + (objectVelocity ? ", with" : ", without") + " the engine's object velocity.");
+        log("First " + std::string(label(wanted.upscaler)) + " frame: " + std::to_string(width) + "x" + std::to_string(height) + " -> " + std::to_string(planned.output.width) + "x"
+            + std::to_string(planned.output.height) + (objectVelocity ? ", with" : ", without") + " the engine's object velocity.");
 
     lastEvaluated = current;
     lastEvaluation = now;
@@ -1153,30 +1257,30 @@ void upscaleBeforeGrading()
     std::optional<FxaaPass> pass;
     {
         std::lock_guard lock(recordMutex);
-        current = frame;
+        current = frames.current();
         pass = recordedFxaa;
     }
 
     if (upscaledFrame == current.index) return;
 
     upscaledFrame = current.index;
-    if (!replacing)
-    {
-        jitterNext = false;
-        return;
-    }
 
     bool evaluated{};
-    try
+    if (replacing)
     {
-        evaluated = pass ? upscale(*pass, current) : fallback("no FXAA pass was recorded");
-    }
-    catch (const std::exception& error)
-    {
-        fail(error.what());
+        try
+        {
+            evaluated = pass ? upscale(*pass, current) : fallback("no FXAA pass was recorded");
+        }
+        catch (const std::exception& error)
+        {
+            fail(error.what());
+        }
     }
 
-    jitterNext = evaluated && !currentConfiguration().diagnostics.noJitter;
+    const bool shouldJitterNext = evaluated && !currentConfiguration().diagnostics.noJitter;
+    std::lock_guard lock(recordMutex);
+    frames.upscaled(shouldJitterNext);
 }
 
 // The graded image into frame generation's hudless texture, before the UI draws over it.
@@ -1222,23 +1326,26 @@ void updatePlan()
         return;
     }
 
-    // Only the upscaler, the mode, the custom scale and the output size decide the render size:
-    // anything else would rebuild the engine's targets for nothing.
-    if (!plan || planSettings.upscaler != wanted.upscaler || planSettings.mode != wanted.mode || planSettings.customRenderScale != wanted.customRenderScale
-        || plan->outputWidth != outputSize[0] || plan->outputHeight != outputSize[1])
+    const render_scale::Size output{outputSize[0], outputSize[1]};
+    if (!plan || !plan->isFor(wanted, output))
     {
-        // NGX knows DLSS's optimal render sizes.
-        if (wanted.upscaler == Upscaler::Dlss) initializeNgx();
-        plan = makePlan(wanted, outputSize[0], outputSize[1]);
-        planSettings = wanted;
-        log(std::string(label(wanted.upscaler)) + " " + std::string(label(wanted.mode, wanted.upscaler)) + " renders at " + std::to_string(plan->renderWidth) + "x" + std::to_string(plan->renderHeight)
-            + " for " + std::to_string(plan->outputWidth) + "x" + std::to_string(plan->outputHeight) + ".");
+        // NGX knows DLSS's optimal render sizes; Custom keeps its own scale.
+        std::optional<render_scale::Size> dlssOptimal;
+        if (wanted.upscaler == Upscaler::Dlss)
+        {
+            initializeNgx();
+            if (wanted.mode != Mode::Custom) dlssOptimal = dlssOptimalSize(wanted, output);
+        }
+
+        plan = planRenderSize(wanted, output, dlssOptimal);
+        log(std::string(label(wanted.upscaler)) + " " + std::string(label(wanted.mode, wanted.upscaler)) + " renders at " + std::to_string(plan->render.width) + "x" + std::to_string(plan->render.height)
+            + " for " + std::to_string(plan->output.width) + "x" + std::to_string(plan->output.height) + ".");
     }
 
-    const float scale = static_cast<float>(plan->renderWidth) / static_cast<float>(plan->outputWidth);
+    const float scale = static_cast<float>(plan->render.width) / static_cast<float>(plan->output.width);
     jitterPhases = camera::jitterPhases(scale);
     targetMipBias = mipBias(scale, wanted.textureBiasOffset);
-    render_scale::request({plan->renderWidth, plan->renderHeight}, {plan->outputWidth, plan->outputHeight});
+    render_scale::request(plan->render, plan->output);
 }
 
 // Fox Engine's material samplers repeat their textures; the screen-space passes sample with point or
@@ -1440,7 +1547,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
 
 bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
-    if (bypass || call.indexed || call.count != 3 || call.instances != 1 || !replacing.load(std::memory_order_relaxed)) return false;
+    if (bypass || call.indexed || call.count != 3 || call.instances != 1) return false;
 
     try
     {
@@ -1448,6 +1555,9 @@ bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         if (!row) return false;
 
         const auto pass = row->pass;
+        if (redirectBlur(context, pass)) return true;
+        if (!replacing.load(std::memory_order_relaxed)) return false;
+
         if (pass == GamePass::CameraVelocity)
         {
             recordVelocity(context);
@@ -1467,13 +1577,16 @@ bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         auto& redirected = postDraw.redirected;
         if (pass == GamePass::Copy)
         {
-            // The two copies into a render-size target in every recorded frame: the depth of field's
-            // copy of the scene, before DLSS, and the half-size layer (lens flares) drawn over it after.
+            // The copies into a render-size target in every recorded frame: the depth of field's copy
+            // of the scene, before DLSS, then over it the half-size layer (lens flares) and, with motion
+            // blur on, the blur's half-size result, which the add-on's surface holds instead.
             ComPtr<ID3D11ShaderResourceView> source;
             context->PSGetShaderResources(0, 1, source.GetAddressOf());
             if (ui_redirect::renderSized(source.Get())) return false;
 
-            redirected.emplace(context, Scene, Inputs{});
+            if (isBlurResult(source.Get())) redirected.emplace(context, Scene, Inputs{{0, blurChain.surface}});
+            else redirected.emplace(context, Scene, Inputs{});
+            blurChain = {};
         }
         else
         {
@@ -1501,6 +1614,8 @@ bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
 
 void afterPostDraw(ID3D11DeviceContext* context) noexcept
 {
+    if (postDraw.gameInput) context->PSSetShaderResources(0, 1, postDraw.gameInput.GetAddressOf());
+
     const auto graded = std::move(postDraw.graded);
     postDraw.clear();
     if (!graded) return;
@@ -1581,13 +1696,17 @@ void bufferUnmapped(ID3D11Resource* buffer) noexcept
 {
     if (!mappedScene || buffer != mappedScene) return;
 
-    auto* data = mappedSceneData;
+    auto& scene = *static_cast<game_constants::SceneConstants*>(mappedSceneData);
     mappedScene = nullptr;
     mappedSceneData = nullptr;
 
     try
     {
-        sceneWritten(*static_cast<game_constants::SceneConstants*>(data));
+        const auto kind = camera::classify(scene);
+        if (kind == camera::SceneView::Other) return;
+
+        std::lock_guard lock(recordMutex);
+        frames.sceneWritten(scene, kind, {.gameFrame = game_loop::currentFrame(), .canJitter = replacing.load(), .jitterPhases = jitterPhases.load()});
     }
     catch (...)
     {
@@ -1617,7 +1736,7 @@ void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
 
         {
             std::lock_guard recordLock(recordMutex);
-            executedSinceFrameStart = true;
+            frames.executed();
         }
 
         auto entry = recordedLists.take(list);
@@ -1642,9 +1761,11 @@ void present() noexcept
 {
     std::lock_guard lock(executionMutex);
     pendingHudless.reset();
-    // A frame DLSS did not run on (menus, loading screens, a fallback) leaves the next one unjittered,
-    // so a 3D view without FXAA never shakes.
-    if (lastEvaluatedPresent != presents) jitterNext = false;
+    {
+        std::lock_guard recordLock(recordMutex);
+        frames.presented(lastEvaluatedPresent == presents);
+    }
+
     ++presents;
     uiTargetFilled = false;
     presented = {};

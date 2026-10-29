@@ -42,6 +42,10 @@ std::vector<std::size_t> immediatesOf(const std::uint8_t* code, const Instructio
 // target clamps what is written to it. Nullopt when the code is not shader bytecode or a write
 // cannot be saturated.
 std::optional<std::vector<std::uint8_t>> saturateOutput(const void* code, std::size_t size);
+// A copy of a game pixel shader whose 8x8 colour dither, its `inMesh` texture, reads the texture's
+// average in every pixel: a half in red, a quarter in alpha. The dither then adds what it adds on
+// average. Nullopt when the shader has no such texture or never samples it.
+std::optional<std::vector<std::uint8_t>> withoutDither(const void* code, std::size_t size);
 // The game's shaders keep their source path in their debug data. True for a path ...\Draw2D*<suffix>,
 // such as "_vs.hlsl": the 2D pass's. Other shaders mention Draw2D only through shared headers.
 bool draw2DSource(std::string_view code, std::string_view suffix);

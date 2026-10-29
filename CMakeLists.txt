@@ -195,14 +195,14 @@ set(PHANTOM_FX_FEATURES src/features/upscaling/settings.cpp src/features/frame_g
     src/features/motion_blur/settings.cpp)
 
 # The add-on uses ReShade's ImGui through the overlay function table, so none is linked.
-add_library(phantom_fx SHARED src/addon.cpp src/core.cpp src/modules.cpp src/features/upscaling/upscaler.cpp src/menu.cpp src/menu_budget.cpp src/fxui/fxui.cpp src/phantom_fx_settings.cpp ${PHANTOM_FX_FEATURES} src/camera.cpp src/constant_capture.cpp
+add_library(phantom_fx SHARED src/addon.cpp src/core.cpp src/modules.cpp src/features/upscaling/upscaler.cpp src/features/upscaling/render_size_plan.cpp src/features/upscaling/frames.cpp src/menu.cpp src/menu_budget.cpp src/fxui/fxui.cpp src/phantom_fx_settings.cpp ${PHANTOM_FX_FEATURES} src/camera.cpp src/constant_capture.cpp
     src/device_check.cpp src/features/motion_blur/motion_blur.cpp src/features/upscaling/fxaa.cpp src/features/frame_rate/frame_rate.cpp src/render_scale.cpp src/ui_redirect.cpp src/frame_log.cpp src/resource_dump.cpp
-    src/log.cpp src/shader_bytecode.cpp src/game_shaders.cpp src/features/frame_generation/presenter.cpp src/features/frame_generation/frame_generation.cpp src/game_loop.cpp src/passes/contact_shadow_trace.cpp src/passes/sun_light_pass.cpp src/features/sun_contact_shadows/sun_contact_shadows.cpp
+    src/log.cpp src/shader_bytecode.cpp src/game_shaders.cpp src/game_dither.cpp src/features/frame_generation/presenter.cpp src/features/frame_generation/frame_generation.cpp src/game_loop.cpp src/passes/contact_shadow_trace.cpp src/passes/sun_light_pass.cpp src/features/sun_contact_shadows/sun_contact_shadows.cpp
     src/passes/local_light_pass.cpp src/features/lamp_contact_shadows/lamp_contact_shadows.cpp src/features/lamp_soft_shadows/lamp_soft_shadows.cpp
     src/passes/indirect_light_pass.cpp src/passes/visibility_bitmask.cpp src/features/ambient_occlusion/gtvbao.cpp
     src/features/indirect_light/ssilvb.cpp src/features/global_illumination/light_combine.cpp src/features/photo_mode/photo_mode.cpp src/features/photo_mode/focus.cpp src/features/hdr/hdr.cpp src/weather.cpp src/character.cpp src/game_lua.cpp src/travel.cpp src/features/volumetric_fog/atmosphere.cpp src/sun_movement.cpp
     src/fidelityfx.cpp src/features/upscaling/fsr_upscaler.cpp src/features/frame_generation/fsr_frame_generation.cpp src/performance.cpp src/performance_menu.cpp
-    src/passes/ray_tracing/ray_tracing.cpp src/passes/ray_tracing/engine_scene.cpp src/passes/ray_tracing/scene_description.cpp src/passes/ray_tracing/engine_brush.cpp src/passes/ray_tracing/gi_inputs.cpp src/features/ray_traced_lights/local_lights.cpp src/features/ray_traced_lights/light_shadow_rays.cpp src/passes/ray_tracing/gi_renderer.cpp src/passes/ray_tracing/gi_scene.cpp src/passes/ray_tracing/scene_contents.cpp src/passes/ray_tracing/gi_textures.cpp src/features/global_illumination/gi_light.cpp src/features/global_illumination/gi_denoiser.cpp src/features/global_illumination/gi_lighting.cpp src/features/ray_traced_shadows/gi_shadow.cpp
+    src/passes/ray_tracing/ray_tracing.cpp src/passes/ray_tracing/engine_scene.cpp src/passes/ray_tracing/scene_description.cpp src/passes/ray_tracing/engine_brush.cpp src/passes/ray_tracing/gi_inputs.cpp src/features/ray_traced_lights/local_lights.cpp src/features/ray_traced_lights/light_choice.cpp src/features/ray_traced_lights/light_shadow_rays.cpp src/passes/ray_tracing/gi_renderer.cpp src/passes/ray_tracing/gi_scene.cpp src/passes/ray_tracing/scene_contents.cpp src/passes/ray_tracing/gi_textures.cpp src/features/global_illumination/gi_light.cpp src/features/global_illumination/gi_denoiser.cpp src/features/global_illumination/gi_lighting.cpp src/features/ray_traced_shadows/gi_shadow.cpp
     "${CMAKE_BINARY_DIR}/version.rc")
 add_dependencies(phantom_fx gi_kernels)
 target_include_directories(phantom_fx PRIVATE src "${GI_SHADER_DIR}")
@@ -245,7 +245,7 @@ install(FILES licenses/AMD-FidelityFX-LICENSE.txt licenses/Bend-Studio-SSS-LICEN
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(upscaler_tests tests/upscaler_tests.cpp src/phantom_fx_settings.cpp ${PHANTOM_FX_FEATURES} src/camera.cpp src/constant_capture.cpp
+    add_executable(upscaler_tests tests/upscaler_tests.cpp src/features/upscaling/render_size_plan.cpp src/features/upscaling/frames.cpp src/phantom_fx_settings.cpp ${PHANTOM_FX_FEATURES} src/camera.cpp src/constant_capture.cpp
         src/log.cpp src/shader_bytecode.cpp src/features/global_illumination/gi_lighting.cpp)
     target_include_directories(upscaler_tests PRIVATE src)
     target_link_libraries(upscaler_tests PRIVATE d3d11 d3dcompiler)
@@ -267,6 +267,13 @@ if(BUILD_TESTING)
     target_compile_options(scene_contents_tests PRIVATE /W4 /WX /permissive- /utf-8)
     add_test(NAME scene_contents COMMAND scene_contents_tests)
 
+    add_executable(light_choice_tests tests/light_choice_tests.cpp src/features/ray_traced_lights/light_choice.cpp)
+    target_include_directories(light_choice_tests PRIVATE src)
+    target_compile_features(light_choice_tests PRIVATE cxx_std_20)
+    target_compile_definitions(light_choice_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(light_choice_tests PRIVATE /W4 /WX /permissive- /utf-8)
+    add_test(NAME light_choice COMMAND light_choice_tests)
+
     add_executable(game_shaders_tests tests/game_shaders_tests.cpp src/game_shaders.cpp src/log.cpp src/shader_bytecode.cpp)
     target_include_directories(game_shaders_tests PRIVATE src)
     target_link_libraries(game_shaders_tests PRIVATE d3d11 d3dcompiler)
@@ -274,6 +281,14 @@ if(BUILD_TESTING)
     target_compile_definitions(game_shaders_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(game_shaders_tests PRIVATE /W4 /WX /permissive- /utf-8)
     add_test(NAME game_shaders COMMAND game_shaders_tests)
+
+    add_executable(shader_bytecode_tests tests/shader_bytecode_tests.cpp src/shader_bytecode.cpp)
+    target_include_directories(shader_bytecode_tests PRIVATE src)
+    target_link_libraries(shader_bytecode_tests PRIVATE d3d11 d3dcompiler)
+    target_compile_features(shader_bytecode_tests PRIVATE cxx_std_20)
+    target_compile_definitions(shader_bytecode_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(shader_bytecode_tests PRIVATE /W4 /WX /permissive- /utf-8)
+    add_test(NAME shader_bytecode COMMAND shader_bytecode_tests)
 
     add_executable(command_list_notes_tests tests/command_list_notes_tests.cpp)
     target_include_directories(command_list_notes_tests PRIVATE src)

@@ -6,6 +6,7 @@
 #include "log.hpp"
 #include "render_scale.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -38,7 +39,13 @@ struct Texture
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<ID3D11RenderTargetView> target;
     ComPtr<ID3D11ShaderResourceView> view;
+    unsigned width{}, height{};
 };
+
+bool isBlurSurface(Surface surface)
+{
+    return surface == Surface::Blur || surface == Surface::BlurTwin;
+}
 
 struct Targets
 {
@@ -61,6 +68,16 @@ struct Targets
     const Texture& operator[](Surface surface) const { return surfaces[static_cast<std::size_t>(surface)]; }
 };
 
+// The motion blur's pair, made apart from the set above: with HDR at native resolution the blur goes
+// through these alone, and the set's full-size surfaces would sit unused.
+struct BlurTargets
+{
+    unsigned width{}, height{}; // The output size they were made for
+    Texture surfaces[2];        // Blur, BlurTwin
+
+    const Texture& operator[](Surface surface) const { return surfaces[surface == Surface::Blur ? 0 : 1]; }
+};
+
 // Whether each recording context has a 2D pass vertex shader bound, by the context ReShade reports
 // with each binding.
 struct BoundShader
@@ -78,10 +95,11 @@ std::atomic<bool> loggedDraw{};
 std::mutex mutex;
 ComPtr<ID3D11Device> device;
 std::shared_ptr<const Targets> targets;
+std::shared_ptr<const BlurTargets> blurTargets;
 // The render-size scene target the 2D pass last meant, and a view to stretch it from.
 ComPtr<ID3D11Resource> scene;
 ComPtr<ID3D11ShaderResourceView> sceneView;
-bool creationFailed{};
+bool creationFailed{}, blurCreationFailed{};
 
 bool belowOutput(render_scale::Size render)
 {
@@ -100,12 +118,22 @@ bool sceneTarget(const D3D11_TEXTURE2D_DESC& texture)
     return texture.Format == hdr::sceneFormat() && renderSized(texture);
 }
 
-std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
+bool makeSurface(Texture& surface, const D3D11_TEXTURE2D_DESC& desc, DXGI_FORMAT viewFormat)
 {
-    auto created = std::make_shared<Targets>();
-    created->width = width;
-    created->height = height;
+    const D3D11_RENDER_TARGET_VIEW_DESC targetDesc{viewFormat, D3D11_RTV_DIMENSION_TEXTURE2D};
+    D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{viewFormat, D3D11_SRV_DIMENSION_TEXTURE2D};
+    viewDesc.Texture2D.MipLevels = 1;
+    surface.width = desc.Width;
+    surface.height = desc.Height;
 
+    return SUCCEEDED(device->CreateTexture2D(&desc, nullptr, surface.texture.GetAddressOf()))
+        && SUCCEEDED(device->CreateRenderTargetView(surface.texture.Get(), &targetDesc, surface.target.GetAddressOf()))
+        && SUCCEEDED(device->CreateShaderResourceView(surface.texture.Get(), &viewDesc, surface.view.GetAddressOf()));
+}
+
+// A surface in the scene's format.
+D3D11_TEXTURE2D_DESC surfaceDesc(unsigned width, unsigned height)
+{
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width = width;
     desc.Height = height;
@@ -115,14 +143,19 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    D3D11_RENDER_TARGET_VIEW_DESC targetDesc{drawFormat(), D3D11_RTV_DIMENSION_TEXTURE2D};
-    D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{drawFormat(), D3D11_SRV_DIMENSION_TEXTURE2D};
-    viewDesc.Texture2D.MipLevels = 1;
-    for (auto& surface : created->surfaces)
-        if (FAILED(device->CreateTexture2D(&desc, nullptr, surface.texture.GetAddressOf()))
-            || FAILED(device->CreateRenderTargetView(surface.texture.Get(), &targetDesc, surface.target.GetAddressOf()))
-            || FAILED(device->CreateShaderResourceView(surface.texture.Get(), &viewDesc, surface.view.GetAddressOf())))
-            return nullptr;
+
+    return desc;
+}
+
+std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
+{
+    auto created = std::make_shared<Targets>();
+    created->width = width;
+    created->height = height;
+
+    auto desc = surfaceDesc(width, height);
+    auto& [outputScene, outputCopy] = created->surfaces;
+    if (!makeSurface(outputScene, desc, drawFormat()) || !makeSurface(outputCopy, desc, drawFormat())) return nullptr;
 
     const float system[16]{0, 0, 0, 0, static_cast<float>(width), static_cast<float>(height), 0, 0, static_cast<float>(width),
         static_cast<float>(height), 1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height)};
@@ -141,14 +174,30 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
         || FAILED(device->CreateBuffer(&viewportDesc, &viewportData, created->viewportSize.GetAddressOf())))
         return nullptr;
 
-    viewDesc.Format = gammaFormat();
+    D3D11_SHADER_RESOURCE_VIEW_DESC srgbDesc{gammaFormat(), D3D11_SRV_DIMENSION_TEXTURE2D};
+    srgbDesc.Texture2D.MipLevels = 1;
     desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
     desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
     ComPtr<ID3D11Texture2D> depth;
-    if (FAILED(device->CreateShaderResourceView((*created)[Surface::Scene].texture.Get(), &viewDesc, created->srgbView.GetAddressOf()))
+    if (FAILED(device->CreateShaderResourceView(outputScene.texture.Get(), &srgbDesc, created->srgbView.GetAddressOf()))
         || FAILED(device->CreateTexture2D(&desc, nullptr, depth.GetAddressOf()))
         || FAILED(device->CreateDepthStencilView(depth.Get(), nullptr, created->depth.GetAddressOf())))
         return nullptr;
+
+    return created;
+}
+
+// The motion blur's pair at half the size of the scene it blends over, as the game makes its own, but
+// in the scene's format: the game's are 8-bit, which clips HDR highlights while the camera moves.
+std::shared_ptr<const BlurTargets> createBlurTargets(unsigned width, unsigned height)
+{
+    auto created = std::make_shared<BlurTargets>();
+    created->width = width;
+    created->height = height;
+
+    const auto desc = surfaceDesc(std::max(width / 2, 1u), std::max(height / 2, 1u));
+    for (auto& surface : created->surfaces)
+        if (!makeSurface(surface, desc, drawFormat())) return nullptr;
 
     return created;
 }
@@ -168,6 +217,45 @@ std::shared_ptr<const Targets> currentTargets()
 
     return targets;
 }
+
+// The blur's pair, made when first needed and again when the output size changes.
+std::shared_ptr<const BlurTargets> currentBlurTargets()
+{
+    const unsigned width = outputWidth, height = outputHeight;
+    std::lock_guard lock(mutex);
+    if (blurTargets && blurTargets->width == width && blurTargets->height == height) return blurTargets;
+    if (!device || !width || !height || blurCreationFailed) return nullptr;
+
+    blurTargets = createBlurTargets(width, height);
+    blurCreationFailed = !blurTargets;
+    log(blurTargets ? "Created the motion blur's targets at " + std::to_string(blurTargets->surfaces[0].width) + "x"
+                          + std::to_string(blurTargets->surfaces[0].height) + "."
+                    : std::string("Could not create the motion blur's targets; the game's blur stays its own."));
+
+    return blurTargets;
+}
+
+// The sets one call's surfaces belong to, each made only when one of its surfaces is asked for.
+struct SurfaceSets
+{
+    std::shared_ptr<const Targets> output;
+    std::shared_ptr<const BlurTargets> blur;
+
+    // Null when the surface's set could not be made.
+    const Texture* texture(Surface surface)
+    {
+        if (isBlurSurface(surface))
+        {
+            if (!blur) blur = currentBlurTargets();
+
+            return blur ? &(*blur)[surface] : nullptr;
+        }
+
+        if (!output) output = currentTargets();
+
+        return output ? &(*output)[surface] : nullptr;
+    }
+};
 
 void rememberScene(ID3D11View* view)
 {
@@ -293,7 +381,7 @@ void attach(ID3D11Device* gameDevice) noexcept
 {
     std::lock_guard lock(mutex);
     device = gameDevice;
-    creationFailed = false;
+    creationFailed = blurCreationFailed = false;
 }
 
 void detach() noexcept
@@ -301,6 +389,7 @@ void detach() noexcept
     {
         std::lock_guard lock(mutex);
         targets.reset();
+        blurTargets.reset();
         sceneView.Reset();
         scene.Reset();
         device.Reset();
@@ -309,8 +398,13 @@ void detach() noexcept
 
 void setOutputSize(unsigned width, unsigned height) noexcept
 {
+    if (width == outputWidth && height == outputHeight) return;
+
     outputWidth = width;
     outputHeight = height;
+    // A set that could not be made at the old size may fit at the new one.
+    std::lock_guard lock(mutex);
+    creationFailed = blurCreationFailed = false;
 }
 
 bool draw2D(ID3D11DeviceContext* context, const DrawCall& call) noexcept
@@ -437,8 +531,12 @@ OutputSizeDraw::OutputSizeDraw(ID3D11DeviceContext* drawing, Surface target, std
 {
     try
     {
-        const auto output = currentTargets();
-        if (!output || inputs.size() > MaxInputs) return;
+        SurfaceSets sets;
+        const auto* surface = sets.texture(target);
+        if (!surface || inputs.size() > MaxInputs) return;
+
+        for (const auto& input : inputs)
+            if (!sets.texture(input.surface)) return;
 
         ID3D11RenderTargetView* bound[std::size(targets)]{};
         drawing->OMGetRenderTargets(static_cast<UINT>(std::size(bound)), bound, depth.GetAddressOf());
@@ -458,7 +556,7 @@ OutputSizeDraw::OutputSizeDraw(ID3D11DeviceContext* drawing, Surface target, std
             ++inputCount;
         }
 
-        const double scaleX = static_cast<double>(output->width) / gameTarget.Width, scaleY = static_cast<double>(output->height) / gameTarget.Height;
+        const double scaleX = static_cast<double>(surface->width) / gameTarget.Width, scaleY = static_cast<double>(surface->height) / gameTarget.Height;
         D3D11_VIEWPORT scaledViewports[std::size(viewports)]{};
         D3D11_RECT scaledRects[std::size(rects)]{};
         scale(viewports, scaledViewports, viewportCount, scaleX, scaleY);
@@ -466,10 +564,10 @@ OutputSizeDraw::OutputSizeDraw(ID3D11DeviceContext* drawing, Surface target, std
         if (target == Surface::Scene) rememberScene(targets[0].Get());
 
         context = drawing;
-        if (copySystem(drawing, *output, system.Get())) drawing->PSSetConstantBuffers(0, 1, output->postSystemConstants.GetAddressOf());
-        for (const auto& input : inputs) drawing->PSSetShaderResources(input.slot, 1, (*output)[input.surface].view.GetAddressOf());
-        drawing->OMSetRenderTargetsAndUnorderedAccessViews(1, (*output)[target].target.GetAddressOf(), nullptr, 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
-            nullptr, nullptr);
+        if (!isBlurSurface(target) && copySystem(drawing, *sets.output, system.Get()))
+            drawing->PSSetConstantBuffers(0, 1, sets.output->postSystemConstants.GetAddressOf());
+        for (const auto& input : inputs) drawing->PSSetShaderResources(input.slot, 1, sets.texture(input.surface)->view.GetAddressOf());
+        drawing->OMSetRenderTargetsAndUnorderedAccessViews(1, surface->target.GetAddressOf(), nullptr, 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
         drawing->RSSetViewports(viewportCount, scaledViewports);
         drawing->RSSetScissorRects(rectCount, scaledRects);
     }
@@ -494,7 +592,23 @@ OutputSizeDraw::~OutputSizeDraw()
 
 void copySurface(ID3D11DeviceContext* context, Surface to, Surface from) noexcept
 {
-    if (const auto output = currentTargets()) context->CopyResource((*output)[to].texture.Get(), (*output)[from].texture.Get());
+    SurfaceSets sets;
+    const auto *toTexture = sets.texture(to), *fromTexture = sets.texture(from);
+    if (toTexture && fromTexture) context->CopyResource(toTexture->texture.Get(), fromTexture->texture.Get());
+}
+
+SurfaceViews surfaceViews(Surface surface) noexcept
+{
+    SurfaceSets sets;
+    const auto* texture = sets.texture(surface);
+    if (!texture) return {};
+
+    return {texture->target, texture->view, texture->width, texture->height};
+}
+
+bool isUpscaling() noexcept
+{
+    return belowOutput(render_scale::current());
 }
 
 bool renderSized(ID3D11View* view) noexcept

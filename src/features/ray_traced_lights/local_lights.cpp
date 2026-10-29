@@ -18,10 +18,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <bit>
 #include <cmath>
 #include <fstream>
-#include <limits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -36,6 +34,7 @@ using Microsoft::WRL::ComPtr;
 using namespace game_lights;
 using game_shaders::GamePass, game_shaders::GameShader, game_shaders::GameShaders;
 using game_constants::LampLightConstants, game_constants::LampMaterialConstants, game_constants::SceneConstants;
+using light_choice::Bounds, light_choice::DrawnLight, light_choice::LocalLight;
 
 // Diagnostics: which lights are drawn over all their reach, shadowed by the rays alone, rather than
 // within the volume the game bounds each by: none, those the game gives a shadow map, or every one.
@@ -51,14 +50,6 @@ constexpr UINT VolumeBytes = 4096, VolumeVertexStart = 1024;
 
 // The game's lights with specular have a scale of 1; it is 0 for those without, as its flashlights.
 constexpr float AddedSpecular = 1.0f;
-// A light sits inside its lamp's model: a ray ends this far short of it, or the light's size if larger.
-constexpr float LightClearance = 0.1f;
-// The radius a light's shadow rays spread over where the game gives it no size, or shadows it with a
-// shadow map, whose four-sample filter is sharp whatever its size (which only widens its specular): a
-// bulb's, so its shadows soften with distance as a real lamp's do.
-constexpr float BulbRadius = 0.03f;
-// GILocalLight::axis.w of a point light: below any cosine, so every way is in its "cone".
-constexpr float PointCone = -2.0f;
 // 1 / the penumbra (penumbraScale) from which a shadow-mapped spot is a beam the game shines in from
 // outside through an opening (isBeam). The cells' moonlight has 100000; every other light in 13
 // captures had at most 66 (2026-10-24).
@@ -184,8 +175,6 @@ struct BoundsConstants
 // later, by light (keyOf): the global illumination's bounce and the rays' picks keep it within them, as
 // the game does. The game's lights hold still, so the last frame's bounds are this frame's.
 constexpr std::uint32_t BoundsReadbacks = 3;
-// The bounds a light's volume had: lowest, then highest corner.
-using Bounds = std::array<float, 6>;
 
 // A light's volume as its draws had it bound (a box, for a spot its cone within one), copied: the game
 // lights only within it (docs/DEVELOPMENT.md, "Ray-traced lights", "Within the game's volume").
@@ -201,14 +190,10 @@ struct Volume
 // A light's lighting draw as recorded, with what drawing it again on the immediate context needs.
 struct Light
 {
-    const GameLight* game{};
-    SceneConstants scene{};
-    LampLightConstants light{};
-    LampMaterialConstants material{};
+    DrawnLight drawn;
     std::array<ComPtr<ID3D11ShaderResourceView>, ResourceSlots> resources;
     std::array<ComPtr<ID3D11SamplerState>, SamplerCount> samplers;
     std::array<ComPtr<ID3D11RenderTargetView>, 2> targets;
-    D3D11_VIEWPORT viewport{};
     Volume volume; // None when it could not be copied: drawn over all its reach
     bool traced{}; // Given to the rays at the frame's kick: the share holds its shadow
 };
@@ -277,14 +262,15 @@ std::array<std::vector<std::uint64_t>, BoundsReadbacks> readbackLights;
 std::vector<std::uint64_t> frameBoundsLights;
 std::uint32_t boundsFrame{};
 
-// The bounds read back, by light; taken at the kick.
+// The bounds read back, by light; taken at the kick. Kept until detach: the ten-second log counts them,
+// as a light whose key changes every frame would add one each frame.
 std::mutex boundsMutex;
 std::unordered_map<std::uint64_t, Bounds> volumeBounds;
 
 // Diagnostics, logged every ten seconds: lights drawn with their shadow and without it (recorded after
 // the kick, or the shadow not traced), those of them drawn without their volume, left to the next frame's
 // camera or over the mask's bits at the kick, and lost (a frame ended without a draw point after them).
-std::atomic<std::uint64_t> drawnShadowed{}, drawnUnshadowed{}, drawnWithoutVolume{}, otherFrame{}, overLimit{}, lost{};
+std::atomic<std::uint64_t> drawnShadowed{}, drawnUnshadowed{}, drawnWithoutVolume{}, otherFrame{}, overCap{}, lost{};
 // Diagnostics: contexts' or lists' notes never handed over (CommandListNotes::present).
 std::atomic<std::uint64_t> expiredNotes{};
 
@@ -407,7 +393,7 @@ std::optional<Light> noteOf(ID3D11DeviceContext* context, const GameLight* game)
         if (buffer) buffer->Release();
     if (!scene || !light || !material) return std::nullopt;
 
-    Light noted{.game = game, .scene = *scene, .light = *light, .material = *material};
+    Light noted{.drawn = {.game = game, .scene = *scene, .light = *light, .material = *material}};
     std::array<ID3D11ShaderResourceView*, ResourceSlots> resources{};
     context->PSGetShaderResources(0, ResourceSlots, resources.data());
     for (UINT i = 0; i < ResourceSlots; ++i) noted.resources[i].Attach(resources[i]);
@@ -421,7 +407,7 @@ std::optional<Light> noteOf(ID3D11DeviceContext* context, const GameLight* game)
     for (std::size_t i = 0; i < targets.size(); ++i) noted.targets[i].Attach(targets[i]);
 
     UINT viewports = 1;
-    context->RSGetViewports(&viewports, &noted.viewport);
+    context->RSGetViewports(&viewports, &noted.drawn.viewport);
     if (!viewports || !noted.targets[0] || !noted.targets[1]) return std::nullopt;
 
     // A brighter flashlight: its colour times the brightness, and its falloff's d^16 factor over the
@@ -429,8 +415,8 @@ std::optional<Light> noteOf(ID3D11DeviceContext* context, const GameLight* game)
     if (game->flashlight)
     {
         const float brightness = flashlightBrightness.load(std::memory_order_relaxed);
-        for (auto& channel : noted.light.color) channel *= brightness;
-        noted.light.falloff[2] /= std::pow(brightness, 8.0f);
+        for (auto& channel : noted.drawn.light.color) channel *= brightness;
+        noted.drawn.light.falloff[2] /= std::pow(brightness, 8.0f);
     }
 
     return noted;
@@ -525,133 +511,16 @@ Volume volumeOf(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call)
     }
 }
 
-std::array<float, 3> normalized(std::array<float, 3> v)
-{
-    const float length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    if (length > 0)
-        for (auto& value : v) value /= length;
-
-    return v;
-}
-
-// How far along a shadow-mapped spot's axis the game's shadow map starts: where shadowProjection gives
-// the map's near depth, 1 (its depth is reversed: cleared to 0, tested greater-equal). Nothing nearer the
-// light is in the map, so the game's shadows never see the recess its lamp sits in; the corridor's lamps
-// in the prologue's hospital sit 13 cm above its ceiling, in a box the rays met 0.3 to 0.6 m short of
-// them (the lamp probe, 2026-10-26). 0 without a shadow map, or where the projection gives none within
-// the light's reach.
-float shadowMapStart(const Light& light)
-{
-    if (!light.game->shadowMap || light.game->shape != Shape::Spot) return 0;
-
-    const float* depthRow = light.scene.shadowProjection[2];
-    const float* wRow = light.scene.shadowProjection[3];
-    const float* position = light.light.position;
-    const auto axis = normalized({light.light.axis[0], light.light.axis[1], light.light.axis[2]});
-    const auto atLight = [&](const float* row) { return row[0] * position[0] + row[1] * position[1] + row[2] * position[2] + row[3]; };
-    const auto alongAxis = [&](const float* row) { return row[0] * axis[0] + row[1] * axis[1] + row[2] * axis[2]; };
-    const float start = (atLight(wRow) - atLight(depthRow)) / (alongAxis(depthRow) - alongAxis(wRow));
-
-    return std::isfinite(start) && start > 0 && start < rangeOf(light.light, *light.game) ? start : 0;
-}
-
-// A light the same from frame to frame: its kind, where it is in the world to the centimetre, and its colour.
-std::uint64_t keyOf(const Light& light)
-{
-    const auto at = game_constants::toWorld(light.scene, light.light.position, 1);
-    std::uint64_t key = reinterpret_cast<std::uintptr_t>(light.game);
-    const auto mix = [&](std::uint64_t value) { key = (key ^ value) * 0x100000001B3ull; };
-    for (const float coordinate : at) mix(static_cast<std::uint64_t>(std::llround(coordinate * 100)));
-    for (const float channel : light.light.color) mix(std::bit_cast<std::uint32_t>(channel));
-
-    return key;
-}
-
 // The bounds of the light's volume as read back, if they have come back yet. A flashlight's moves with it.
-std::optional<Bounds> volumeBoundsOf(const Light& light)
+std::optional<Bounds> volumeBoundsOf(const DrawnLight& light)
 {
     if (light.game->flashlight) return std::nullopt;
 
     std::lock_guard lock(boundsMutex);
-    const auto found = volumeBounds.find(keyOf(light));
+    const auto found = volumeBounds.find(light_choice::keyOf(light));
     if (found == volumeBounds.end()) return std::nullopt;
 
     return found->second;
-}
-
-gi_renderer::LocalLight forRays(const Light& light)
-{
-    const bool spot = light.game->shape == Shape::Spot;
-    const bool sixteenth = light.game->falloff == Falloff::Sixteenth;
-    const auto& constants = light.light;
-    const auto& falloff = constants.falloff;
-
-    gi_renderer::LocalLight rays{.position = game_constants::toWorld(light.scene, constants.position, 1),
-        .axis = spot ? normalized(game_constants::toWorld(light.scene, constants.axis, 0)) : std::array<float, 3>{0, 1, 0},
-        .range = rangeOf(constants, *light.game),
-        .cosOuter = spot ? constants.cutOffCosine : PointCone,
-        .clearance = std::max(LightClearance, constants.size),
-        .penumbraScale = spot ? constants.penumbraScale : 0,
-        .coneExponent = spot ? constants.coneExponent : 0,
-        .maxFalloff = spot ? light.material.maxFalloff : std::numeric_limits<float>::max(),
-        .color = {constants.color[0], constants.color[1], constants.color[2]},
-        .sixteenth = sixteenth,
-        .factor = sixteenth ? falloff[2] : falloff[3],
-        .addedDistance = spot ? 0 : falloff[0],
-        .leastDistance = spot ? 0 : light.material.leastDistance,
-        .radius = !light.game->shadowMap && constants.size > 0 ? constants.size : BulbRadius,
-        .shadowStart = shadowMapStart(light)};
-    if (const auto bounds = volumeBoundsOf(light))
-    {
-        rays.volumeLowest = {(*bounds)[0], (*bounds)[1], (*bounds)[2]};
-        rays.volumeHighest = {(*bounds)[3], (*bounds)[4], (*bounds)[5]};
-        rays.volumeKnown = true;
-    }
-
-    return rays;
-}
-
-// Drawn for the frame `camera` draws: the same eye, within a millimetre. Lists recorded before the kick
-// are this frame's, unless one was left from an earlier frame or the next frame's recording started early.
-bool sameFrame(const Light& light, const SceneConstants& camera)
-{
-    for (int i = 0; i < 3; ++i)
-        if (std::abs(light.scene.eye[i] - camera.eye[i]) > 1e-3f) return false;
-
-    return true;
-}
-
-// The pixels of the viewport the light can reach: its sphere, or for a spot the bounding sphere of its
-// cone, on screen (sphereOnScreen). The whole viewport when the camera plane cuts the sphere; none when it
-// is behind or off screen.
-std::optional<D3D11_RECT> reachOf(const Light& light)
-{
-    const float range = rangeOf(light.light, *light.game);
-    const float* position = light.light.position;
-    std::array<float, 3> centre{position[0], position[1], position[2]};
-    float radius = range;
-
-    // Up to a 60 degree cone, the sphere through its apex and the rim of its end holds it all.
-    const float cosine = light.light.cutOffCosine;
-    if (light.game->shape == Shape::Spot && cosine >= 0.5f)
-    {
-        const auto axis = normalized({light.light.axis[0], light.light.axis[1], light.light.axis[2]});
-        radius = range / (2 * cosine);
-        for (int i = 0; i < 3; ++i) centre[i] += axis[i] * radius;
-    }
-
-    const auto& viewport = light.viewport;
-    const LONG left = static_cast<LONG>(viewport.TopLeftX), top = static_cast<LONG>(viewport.TopLeftY);
-    const std::array<float, 2> size{viewport.Width, viewport.Height};
-    const D3D11_RECT whole{left, top, left + static_cast<LONG>(size[0]), top + static_cast<LONG>(size[1])};
-    const float z = centre[2];
-    if (z + radius <= 0) return std::nullopt;
-    if (z - radius <= 0) return whole;
-
-    const auto rect = sphereOnScreen(light.scene, centre, radius, size);
-    if (!rect) return std::nullopt;
-
-    return D3D11_RECT{left + rect->min[0], top + rect->min[1], left + rect->max[0], top + rect->max[1]};
 }
 
 // The light once more, within the game's volume for it: on the volume's far faces its shadow into the
@@ -660,7 +529,8 @@ std::optional<D3D11_RECT> reachOf(const Light& light)
 // its reach. Call with resourceMutex held, the pipeline made.
 void drawAgain(const Light& light)
 {
-    const auto reach = reachOf(light);
+    const auto& drawn = light.drawn;
+    const auto reach = light_choice::reachOf(drawn);
     if (!reach) return;
 
     const auto [width, height] = sizeOf(light.targets[0].Get());
@@ -673,17 +543,17 @@ void drawAgain(const Light& light)
     if (!volume.view) ++drawnWithoutVolume;
 
     const auto beyond = beyondVolumes.load(std::memory_order_relaxed);
-    const bool withinVolume = volume.view && beyond != BeyondVolumes::All && !(beyond == BeyondVolumes::ShadowMapped && light.game->shadowMap);
-    const auto& viewport = light.viewport;
+    const bool withinVolume = volume.view && beyond != BeyondVolumes::All && !(beyond == BeyondVolumes::ShadowMapped && drawn.game->shadowMap);
+    const auto& viewport = drawn.viewport;
     const PassConstants pass{{viewport.Width / static_cast<float>(width), viewport.Height / static_cast<float>(height),
                                  viewport.TopLeftX / static_cast<float>(width), viewport.TopLeftY / static_cast<float>(height)},
         {0, share ? 1u : 0u, 0, 0}, {volume.wideIndices ? 1u : 0u, volume.stride, VolumeVertexStart, 0}};
-    auto constants = light.light;
-    if (!light.game->specular) constants.specularScale = AddedSpecular;
+    auto constants = drawn.light;
+    if (!drawn.game->specular) constants.specularScale = AddedSpecular;
     check(write(immediate, passBuffer.Get(), pass), "Writing the lights' constants");
-    check(write(immediate, sceneBuffer.Get(), light.scene), "Writing the lights' constants");
+    check(write(immediate, sceneBuffer.Get(), drawn.scene), "Writing the lights' constants");
     check(write(immediate, lightBuffer.Get(), constants), "Writing the lights' constants");
-    check(write(immediate, materialBuffer.Get(), light.material), "Writing the lights' constants");
+    check(write(immediate, materialBuffer.Get(), drawn.material), "Writing the lights' constants");
 
     ID3D11RenderTargetView* targets[]{light.targets[0].Get(), light.targets[1].Get()};
     immediate->OMSetRenderTargets(2, targets, nullptr);
@@ -719,7 +589,7 @@ void drawAgain(const Light& light)
     std::array<ID3D11SamplerState*, SamplerCount> samplers{};
     for (UINT i = 0; i < SamplerCount; ++i) samplers[i] = light.samplers[i].Get();
     ID3D11Buffer* lightConstants[]{sceneBuffer.Get(), lightBuffer.Get(), materialBuffer.Get()}; // b2 to b4
-    immediate->PSSetShader(twinOf(light.game->twin), nullptr, 0);
+    immediate->PSSetShader(twinOf(drawn.game->twin), nullptr, 0);
     immediate->PSSetShaderResources(0, ResourceSlots, resources.data());
     immediate->PSSetSamplers(FirstSampler, SamplerCount, samplers.data());
     immediate->PSSetConstantBuffers(SceneConstants::Slot, 3, lightConstants);
@@ -735,10 +605,10 @@ void measureVolumes()
     for (const auto& light : frameLights)
     {
         const auto& volume = light.volume;
-        if (!volume.view || light.game->flashlight || frameBoundsLights.size() >= GI_MAX_LOCAL_LIGHTS) continue;
+        if (!volume.view || light.drawn.game->flashlight || frameBoundsLights.size() >= GI_MAX_LOCAL_LIGHTS) continue;
 
         camera::Matrix projectionView{};
-        for (std::size_t i = 0; i < projectionView.size(); ++i) projectionView[i] = light.scene.projectionView[i / 4][i % 4];
+        for (std::size_t i = 0; i < projectionView.size(); ++i) projectionView[i] = light.drawn.scene.projectionView[i / 4][i % 4];
         const auto clipToWorld = camera::inverse(projectionView);
         BoundsConstants constants{{}, {volume.wideIndices ? 1u : 0u, volume.stride, VolumeVertexStart, volume.count},
             {static_cast<std::uint32_t>(frameBoundsLights.size()), 0, 0, 0}};
@@ -754,7 +624,7 @@ void measureVolumes()
 
         immediate->CSSetShaderResources(0, 1, volume.view.GetAddressOf());
         immediate->Dispatch(1, 1, 1);
-        frameBoundsLights.push_back(keyOf(light));
+        frameBoundsLights.push_back(light_choice::keyOf(light.drawn));
     }
 
     if (!bound) return;
@@ -835,16 +705,19 @@ void saveForRecord(const std::filesystem::path& folder, int batch, const char* w
     std::ofstream list(folder / (prefix + "lights.txt"), std::ios::trunc);
     for (const auto& light : frameLights)
     {
-        const auto at = game_constants::toWorld(light.scene, light.light.position, 1);
-        const auto way = game_constants::toWorld(light.scene, light.light.axis, 0);
-        list << checksumOf(light.game) << (light.traced ? " traced" : " untraced") << (light.volume.view ? " volume " : " no volume ")
+        const auto& drawn = light.drawn;
+        const auto bounds = volumeBoundsOf(drawn);
+        const auto rays = light_choice::forRays(drawn, bounds);
+        const auto at = game_constants::toWorld(drawn.scene, drawn.light.position, 1);
+        const auto way = game_constants::toWorld(drawn.scene, drawn.light.axis, 0);
+        list << checksumOf(drawn.game) << (light.traced ? " traced" : " untraced") << (light.volume.view ? " volume " : " no volume ")
              << light.volume.count << " at " << at[0] << ' ' << at[1] << ' ' << at[2] << " way " << way[0] << ' ' << way[1] << ' ' << way[2]
-             << " colour " << light.light.color[0] << ' ' << light.light.color[1] << ' ' << light.light.color[2] << " range "
-             << rangeOf(light.light, *light.game) << " shadow map from " << shadowMapStart(light);
-        if (const auto bounds = volumeBoundsOf(light))
+             << " colour " << drawn.light.color[0] << ' ' << drawn.light.color[1] << ' ' << drawn.light.color[2] << " range " << rays.range
+             << " shadow map from " << rays.shadowStart;
+        if (bounds)
             list << " volume from " << (*bounds)[0] << ' ' << (*bounds)[1] << ' ' << (*bounds)[2] << " to " << (*bounds)[3] << ' ' << (*bounds)[4] << ' '
                  << (*bounds)[5];
-        list << " eye " << light.scene.eye[0] << ' ' << light.scene.eye[1] << ' ' << light.scene.eye[2] << '\n';
+        list << " eye " << drawn.scene.eye[0] << ' ' << drawn.scene.eye[1] << ' ' << drawn.scene.eye[2] << '\n';
     }
 }
 
@@ -914,15 +787,22 @@ void logLights()
     lastLog = now;
     const auto shadowedCount = drawnShadowed.exchange(0), unshadowedCount = drawnUnshadowed.exchange(0);
     const auto withoutVolumeCount = drawnWithoutVolume.exchange(0);
-    const auto otherCount = otherFrame.exchange(0), overCount = overLimit.exchange(0), lostCount = lost.exchange(0);
+    const auto otherCount = otherFrame.exchange(0), overCount = overCap.exchange(0), lostCount = lost.exchange(0);
     const auto expiredCount = expiredNotes.exchange(0);
     if (shadowedCount + unshadowedCount + otherCount + overCount + lostCount + expiredCount == 0) return;
+
+    std::size_t boundsCount{};
+    {
+        std::lock_guard lock(boundsMutex);
+        boundsCount = volumeBounds.size();
+    }
 
     log("Lights in ten seconds: " + std::to_string(shadowedCount) + " drawn with their ray-traced shadow, " + std::to_string(unshadowedCount)
         + " without (recorded after the kick, or not traced), " + std::to_string(withoutVolumeCount)
         + " of all drawn without the game's volume; at the kicks " + std::to_string(otherCount) + " left for another frame's camera, "
         + std::to_string(overCount) + " over the " + std::to_string(GI_MAX_LOCAL_LIGHTS) + " the rays take; " + std::to_string(lostCount)
-        + " lost (no draw point after them); " + std::to_string(expiredCount) + " contexts' or lists' notes expired.");
+        + " lost (no draw point after them); " + std::to_string(expiredCount) + " contexts' or lists' notes expired; "
+        + std::to_string(boundsCount) + " lights' volume bounds kept.");
 }
 }
 
@@ -1076,54 +956,32 @@ void forget(std::uint64_t contextOrList) noexcept
     notes.forget(contextOrList);
 }
 
-std::vector<gi_renderer::LocalLight> takeForTrace(const SceneConstants& camera) noexcept
+std::vector<LocalLight> takeForTrace(const SceneConstants& camera) noexcept
 {
-    std::vector<gi_renderer::LocalLight> lights;
+    std::vector<LocalLight> lights;
     if (!active.load(std::memory_order_relaxed)) return lights;
 
     try
     {
-        // The frame's lights by the pixels they can reach, most first, then the nearest: past what the rays can
-        // take the smallest go without, the same ones frame after frame. Lights that reach none are never drawn again.
-        struct Reaching
-        {
-            LONG pixels;
-            float distance;
-            Light* light;
-        };
-
         notes.withWaiting([&](auto&& waiting) {
-            std::vector<Reaching> reaching;
+            std::vector<Light*> untraced;
+            std::vector<const DrawnLight*> drawn;
             for (auto& noted : waiting)
                 for (auto& light : noted.lights)
-                {
-                    if (light.traced) continue;
-                    if (!sameFrame(light, camera))
+                    if (!light.traced)
                     {
-                        ++otherFrame;
-                        continue;
+                        untraced.push_back(&light);
+                        drawn.push_back(&light.drawn);
                     }
 
-                    const auto reach = reachOf(light);
-                    if (!reach) continue;
-
-                    const float* position = light.light.position;
-                    reaching.push_back({(reach->right - reach->left) * (reach->bottom - reach->top),
-                        std::sqrt(position[0] * position[0] + position[1] * position[1] + position[2] * position[2]), &light});
-                }
-
-            std::sort(reaching.begin(), reaching.end(),
-                [](const Reaching& a, const Reaching& b) { return a.pixels != b.pixels ? a.pixels > b.pixels : a.distance < b.distance; });
-            if (reaching.size() > GI_MAX_LOCAL_LIGHTS)
+            const auto choice = light_choice::choose(drawn, camera);
+            otherFrame += choice.otherFrame;
+            overCap += choice.overCap;
+            for (const auto index : choice.taken)
             {
-                overLimit += reaching.size() - GI_MAX_LOCAL_LIGHTS;
-                reaching.resize(GI_MAX_LOCAL_LIGHTS);
-            }
-
-            for (const auto& each : reaching)
-            {
-                each.light->traced = true;
-                lights.push_back(forRays(*each.light));
+                auto& light = *untraced[index];
+                light.traced = true;
+                lights.push_back(light_choice::forRays(light.drawn, volumeBoundsOf(light.drawn)));
             }
         });
     }

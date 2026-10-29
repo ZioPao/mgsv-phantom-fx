@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- **The contact shadow sliders sit below both of their toggles.** Contrast, reach, thickness and fade
+  belong to the sun's contact shadows and the lamps' alike, so they now end the Shadows page, after
+  the lamps' toggle, instead of sitting inside the sun's.
+- **Lamp contact shadows count a caster within their own 5 mm, not Contact shadow thickness.** That
+  setting is a share of the depth left to the far plane, which grows with the distance: past 1% it
+  reaches the bound a caster may sit in and leaves no window at all, so the term silently died for
+  receivers past 10 m, and below that raising it narrowed the march where it widens the sun's trace.
+  The lamps now use `renodx-mgsv`'s fixed 5 mm, as its spot lights do, and the setting shapes the
+  sun's contact shadows alone.
+- **Lamp contact shadows read the depth buffer four texels at a time.** The march took one depth a
+  step, forty of them a pixel; a gather returns the four texels inside a two-pixel square for one
+  instruction, which is the ground two steps cover, so the same span now takes half the requests and
+  makes twice the comparisons. The caster window is compared in the buffer's own depth (`A + B / z`)
+  rather than per-texel view depth, so the two conversions a pair costs are shared by its four
+  samples. The image is the same span of shadow, sampled more finely.
+- **Lamp contact shadows skip what the light cannot light.** The march ran over every pixel a lamp's
+  volume covers, including the ones whose surface faces away from the light: the game clamps
+  `dot(normal, light)` at zero and scales both its diffuse and its specular by it, so those pixels get
+  no light and the shadow written for them is never read. They now return after one read of the
+  G-buffer's normal, and a lamp whose reach cannot touch the screen keeps the game's draws.
+- **Lamp contact shadows draw only the far faces of a light's volume.** The shadow draw drew both
+  faces of a closed volume and threw one result away. It now draws the far faces, as the game's
+  lighting draw does, so it covers the pixels that read the shadow at half the cost. The image is
+  unchanged.
+- **Lamp contact shadows cost a fraction of what they did.** Each lamp traced Bend Studio's
+  screen-space shadows in a compute pass over its whole screen rectangle, 120 samples a pixel, and
+  then drew its volume a second time to put the result in the light targets. The lamps now march the
+  depth buffer inside that draw, the shape `renodx-mgsv`'s term has: about 40 steps a pixel crowded
+  near the surface, a caster counted only within a quarter of a metre of the ray, and pixels the
+  light cannot reach left without a step. A lamp wholly past the contact shadows' fade keeps the
+  game's draws. The sun keeps Bend's trace, which costs one to eight dispatches for each recording of
+  the depth it reads.
+- Fix a fine grid pattern over dark areas, worst at night and in fog with upscaling: the game added a
+  fixed 8x8 dither to its sky, its foggy scene and its glass before DLSS, which enlarged it with the
+  image. The dither is taken out of those shaders, and out of the physical sky. In SDR, smooth fog
+  can now show slight banding (#54); HDR has none.
 - Add **Contact shadow contrast**, **reach**, **thickness** and **fade** settings, under the shadows:
   how dark and how hard the trace is (0.5 to 4, 1 by default), how far along the screen it marches
   (8 to 120 pixels, 80 by default), how deep a surface counts as a contact (0.2% to 2.5% of its depth
@@ -17,6 +53,11 @@
   of `SSLighting2_Point` and `SSLighting2_Spot`.
 - Foliage (grass, bushes, tree leaves) casts screen-space contact shadows: the trace no longer
   skips the foliage material, so clumps shade themselves as they do in `renodx-mgsv`.
+- Fix the game's motion blur looking pixelated while upscaling. It blurred a small copy of the image
+  from before DLSS (a third of the screen's width at Quality) and stretched it over the screen. It
+  now blurs DLSS's image at half the screen's size, as it does without upscaling.
+- With HDR, motion blur keeps highlights bright while the camera moves, at every upscaler setting:
+  the game blurred through an 8-bit copy, which clipped them at white.
 
 ## 1.8.0
 

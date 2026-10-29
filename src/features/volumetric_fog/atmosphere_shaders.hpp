@@ -880,8 +880,8 @@ void main(uint3 id : SV_DispatchThreadID)
 // The physical look's sky, in place of the game's sky draws (Sky_Draw_TppBaked, Sky_Draw_Tpp,
 // Sky_Draw_TppNoSky), with their vertex shaders and bindings: the sky's light from the sky-view
 // table and the game's cloud deck, the game's sun or moon sprite (MOON 1), the height fog in front of
-// it from the fog's last slice, the game's dither, and the game's TppTonemap and encoding, or the
-// encoding alone with HDR (HDR 1), which takes TppTonemap out of the scene.
+// it from the fog's last slice, and the game's TppTonemap and encoding, or the encoding alone with HDR
+// (HDR 1), which takes TppTonemap out of the scene. Without the game's dither, as its own sky draws.
 inline constexpr char SkyDraw[] = "#define LINEAR_CLAMP_SAMPLER s11\n" PHANTOM_FX_ATMOSPHERE R"(
 cbuffer cPSSystem : register(b0)
 {
@@ -899,9 +899,7 @@ cbuffer cPSMaterial : register(b4)
 };
 
 SamplerState MoonSampler : register(s0);
-SamplerState PointWrap : register(s8);
 Texture2D<float4> MoonTexture : register(t0);
-Texture2D<float4> Dither : register(t8);
 Texture2D<float4> GameFog : register(t12);
 
 float3 TppTonemap(float3 color, float3 curve)
@@ -935,7 +933,6 @@ float4 main(float4 position : SV_Position, float3 ray : TEXCOORD0, float4 moonPl
     float4 fog = GameFog.SampleLevel(LinearClamp, clip * float2(0.014648, 0.123047) + float2(0.015625, 0.125) + float2(0.96875, 0.75), 0);
     color = fog.rgb * m_scene[25].y + color * fog.a;
 
-    color += (Dither.Sample(PointWrap, frac(pixel * 0.125)).x - 0.5) / 128;
 #if HDR
     // Clamped to 1 as the game's sky draws stay with HDR (hdr.cpp): above it the sun's sprite shows as
     // a ring around a dimmer centre instead of a disc. One unit is paper white.
