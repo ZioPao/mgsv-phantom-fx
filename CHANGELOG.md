@@ -2,10 +2,6 @@
 
 ## Unreleased
 
-- **DLSS no longer pulses on thin lines.** Thin bright edges, such as stair rails, slowly brightened
-  and dimmed even with the camera still, worst at Ultra Performance. DLSS now cycles through 8
-  sub-pixel positions in every mode instead of up to 72, which halves the flicker without losing
-  sharpness.
 - **Ray-traced shadows: no lit halo around sunlit characters.** A character in the sun in front of a
   shaded wall left a lit band on the wall along their outline, wider the lower the render scale. The
   shadow denoiser no longer mixes a pixel's shadow with what lies in front of or behind it.
