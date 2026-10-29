@@ -53,7 +53,7 @@ void applyJitter(game_constants::SceneConstants& scene, std::array<float, 2> ndc
 std::array<float, 2> jitterNdc(std::array<float, 2> pixels, float width, float height);
 // Halton(2, 3) offsets in [-0.5, 0.5) pixels; `frame` counts up by one per rendered frame.
 std::array<float, 2> jitterPixels(std::uint64_t frame, int phases);
-// FSR asks for 8 x (output / render)^2 phases; native size gets 8. DLSS gets 8 at every size (upscaler.cpp).
+// DLSS asks for 8 x (output / render)^2 phases; DLAA renders at output size.
 int jitterPhases(float renderScale);
 
 // The Halton sequence in `base`, from 0 to 1; index 0 gives 0.
