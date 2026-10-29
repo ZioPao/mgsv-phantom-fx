@@ -1,5 +1,14 @@
 # Phantom FX changelog
 
+## Unreleased
+
+- **Ray-traced shadows: no lit halo around sunlit characters.** A character in the sun in front of a
+  shaded wall left a lit band on the wall along their outline, wider the lower the render scale. The
+  shadow denoiser no longer mixes a pixel's shadow with what lies in front of or behind it.
+- **Ray-traced shadows no longer flicker along edges.** With DLSS or FSR jittering the frame, the
+  shadow denoiser often dropped a pixel's history along object edges and showed the raw, noisy rays
+  there. It now keeps the history from the last frame's pixels on the same surface.
+
 ## 1.9.0
 
 This release focuses on shadows, with a lot of it built by ZioPao.
