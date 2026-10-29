@@ -232,6 +232,11 @@ Matrix previousFromCurrent(const View& previous, const View& current)
     return multiply(previous.projectionView, inverse(current.projectionView));
 }
 
+Matrix previousFromCurrentByParts(const View& previous, const View& current)
+{
+    return multiply(previous.projection, multiply(multiply(previous.view, inverse(current.view)), inverse(current.projection)));
+}
+
 bool cameraCut(const View& previous, const View& current)
 {
     float distance = 0, cosine = 0;

@@ -429,6 +429,26 @@ void reprojection()
         "Depth and the two matrices find where a point was in the previous frame.");
 }
 
+// The global illumination's motion: a still camera far from the world's origin has none from its
+// projections and views apart, whatever the jitter the game's float matrices were written with.
+void stillCameraHasNoMotionByParts()
+{
+    auto previous = DumpedMainView, current = DumpedMainView;
+    camera::applyJitter(previous, camera::jitterNdc({0.4375f, -0.2407f}, 2560, 1440));
+    camera::applyJitter(current, camera::jitterNdc({-0.0625f, 0.3148f}, 2560, 1440));
+    const auto unjittered = [](const game_constants::SceneConstants& scene) {
+        auto view = camera::viewOf(scene);
+        view.projection[2] -= scene.cameraCenterOffset[0];
+        view.projection[6] -= scene.cameraCenterOffset[1];
+        return view;
+    };
+
+    const auto still = camera::previousFromCurrentByParts(unjittered(previous), unjittered(current));
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column)
+            expect(close(still[row * 4 + column], row == column ? 1 : 0, 1e-9), "A still camera has no motion from its projections and views.");
+}
+
 void cuts()
 {
     constexpr float eye[3]{93.75f, 314.25f, 244.15f};
@@ -1255,6 +1275,7 @@ int main()
         sunPassDirectionPointsToTheSun();
         jitterShiftsTheImage();
         reprojection();
+        stillCameraHasNoMotionByParts();
         cuts();
         streamlineCamera();
         modeMaths();

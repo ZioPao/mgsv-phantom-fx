@@ -1,8 +1,8 @@
 // The global illumination's indirect light (docs/DEVELOPMENT.md, "Global illumination"), as path tracers
 // with a radiance cache work it out:
 // - Rays from each pixel of a grid half the render size each way (1, 2 or 4, the ray quality, twice on
-//   foliage), from one render pixel of its 2 x 2 chosen by depth (RenderPixelOf), cosine-weighted from the
-//   surface the depth buffer gives (TraceLight).
+//   foliage), from one render pixel of its 2 x 2 chosen by depth and kept on its surface (PickOf),
+//   cosine-weighted from the surface the depth buffer gives (TraceLight).
 // - Where it hits, the hit is lit afresh every frame: a shadow ray to a point of the sun's disc, and
 //   one to a point or spot light picked in proportion to its light there (weighted reservoir
 //   sampling). Its bounce ray takes the sky's light where it gets away, and otherwise the light of the
@@ -36,6 +36,8 @@
 RWTexture2D<float> g_Light_ViewZ : register(u7);            // The denoiser's guides: NRD's IN_VIEWZ,
 RWTexture2D<float4> g_Light_NormalRoughness : register(u8); // IN_NORMAL_ROUGHNESS,
 RWTexture2D<float> g_Light_LastViewZ : register(u30);       // g_Light_ViewZ as the last frame wrote it (PrepareGuides)
+RWTexture2D<uint> g_Light_Pick : register(u35);             // Which render pixel of its 2 x 2 each light pixel's sample is from (PickOf)
+RWTexture2D<float4> g_Light_Validation : register(u36);     // NRD's validation layer (OUT_VALIDATION), with its debug view
 RWTexture2D<float4> g_Light_Motion : register(u9);          // IN_MV: the last frame's uv minus this one's, and view z's change
 RWTexture2D<float4> g_Light_Noisy[2] : register(u10);       // u10, u11: NRD's IN_DIFF_SH0 and SH1
 RWTexture2D<float4> g_Light_Denoised[2] : register(u12);    // u12, u13: NRD's OUT_DIFF_SH0 and SH1
@@ -93,12 +95,12 @@ uint2 LightSize()
     return g_Frame.lightLayout.xy;
 }
 
-// The render pixel of its 2 x 2 a light pixel takes its sample from: the nearest of the four on light
-// pixels of one checkerboard colour, the farthest on the other, as half-resolution effects downsample
-// depth. With the top left, a wire, a fence or a grass blade under a pixel wide had it one frame and what
-// lay behind the next as the upscaler's jitter moved them, and the denoiser started their light over
-// every frame, the camera still (2026-10-25).
-uint2 RenderPixelOf(uint2 lightPixel)
+// A light pixel's depth pick of its 2 x 2: the nearest of the four on light pixels of one checkerboard
+// colour, the farthest on the other, as half-resolution effects downsample depth. With the top left, a
+// wire, a fence or a grass blade under a pixel wide had it one frame and what lay behind the next as the
+// upscaler's jitter moved them, and the denoiser started their light over every frame, the camera still
+// (2026-10-25).
+uint2 DepthPickOf(uint2 lightPixel)
 {
     uint2 corner = min(lightPixel * 2, g_BufferDimensions - 1);
     bool nearest = ((lightPixel.x + lightPixel.y) & 1u) == 0u;
@@ -117,6 +119,18 @@ uint2 RenderPixelOf(uint2 lightPixel)
     }
 
     return chosen;
+}
+
+// Render pixel `index` (x + 2 y) of a light pixel's 2 x 2.
+uint2 RenderPixelAt(uint2 lightPixel, uint index)
+{
+    return min(lightPixel * 2 + uint2(index & 1u, index >> 1), g_BufferDimensions - 1);
+}
+
+// The render pixel a light pixel's sample is from this frame, as PrepareGuides chose it (PickOf).
+uint2 RenderPixelOf(uint2 lightPixel)
+{
+    return RenderPixelAt(lightPixel, g_Light_Pick[lightPixel]);
 }
 
 float3 RemoveNaNs(float3 color)
@@ -520,6 +534,69 @@ float2 JitterUv(float2 ndc)
     return float2(0.5f, -0.5f) * ndc;
 }
 
+// A render pixel's camera motion (the last frame's uv minus this one's, without the jitter) and its view
+// depth last frame: its unjittered clip position through the one matrix built in double from the
+// projections and views apart (gi_renderer.cpp), as the upscaler's motion vectors. Through its world
+// position and the game's float projection-views the motion was off by up to 0.19 render pixels near the
+// camera on a still frame, changing with each jitter: their translation holds the camera's place in the
+// world, rounded differently for each (2026-10-29).
+void CameraMotionOf(uint2 pixel, float depth, out float2 motion, out float previousViewZ)
+{
+    float2 uv = (pixel + 0.5f) / g_BufferDimensions;
+    float4 unjittered = float4(float2(2.0f * uv.x - 1.0f, 1.0f - 2.0f * uv.y) - g_Frame.jitter.xy, depth, 1.0f);
+    float4 last = mul(g_Frame.previousFromCurrent, unjittered);
+    motion = (float2(0.5f, -0.5f) * last.xy / last.w + 0.5f) - (float2(0.5f, -0.5f) * unjittered.xy + 0.5f);
+    previousViewZ = last.w / dot(g_Frame.clipToViewW, unjittered);
+}
+
+// How far a still render pixel's surface lies from what the light grid held where it was last frame, in
+// relative view depth; 1 where that cannot be told (the sky, a moving mesh, off screen last frame).
+float LastFrameMismatch(uint2 pixel)
+{
+    float depth = g_Depth.Load(int3(pixel, 0));
+    float3 encoded = g_Normal.Load(int3(pixel, 0)).xyz;
+    float2 moved;
+    if (depth <= 0.0f || dot(encoded, encoded) == 0.0f || ObjectMotion(int2(pixel), moved)) return 1.0f;
+
+    float2 motion;
+    float previousViewZ;
+    CameraMotionOf(pixel, depth, motion, previousViewZ);
+    float2 lastUv = (pixel + 0.5f) / g_BufferDimensions + motion;
+    if (any(lastUv <= 0.0f) || any(lastUv >= 1.0f)) return 1.0f;
+
+    float lastViewZ = g_Light_LastViewZ[min(uint2(lastUv * LightSize()), LightSize() - 1)];
+    return abs(lastViewZ - previousViewZ) / max(previousViewZ, 1e-4f);
+}
+
+// Which render pixel of its 2 x 2 (RenderPixelAt) a light pixel takes its sample from: the depth pick,
+// unless its surface is not the one the light grid held there last frame; then the one whose surface is,
+// if one is. As the upscaler's jitter moved an edge across a 2 x 2, the depth pick went from one side of
+// it to the other, and the denoiser started the light over there every frame, the camera still: about
+// five times the young history in grass (2026-10-29). 3% passes slopes across a 2 x 2 and catches an
+// edge's foreground against its background. Against the 2 x 2 light pixels around where it was, as NRD's
+// own test takes them, it looked worse in game. A moving mesh keeps the depth pick.
+uint PickOf(uint2 lightPixel)
+{
+    const float threshold = 0.03f;
+    uint2 depthPick = DepthPickOf(lightPixel);
+    uint pick = (depthPick.x > lightPixel.x * 2 ? 1u : 0u) + (depthPick.y > lightPixel.y * 2 ? 2u : 0u);
+    float2 moved;
+    if (ObjectMotion(int2(depthPick), moved) || LastFrameMismatch(depthPick) < threshold) return pick;
+
+    float best = threshold;
+    for (uint i = 0; i < 4; ++i)
+    {
+        float mismatch = LastFrameMismatch(RenderPixelAt(lightPixel, i));
+        if (mismatch < best)
+        {
+            best = mismatch;
+            pick = i;
+        }
+    }
+
+    return pick;
+}
+
 // The denoiser's guides for each light pixel: its view depth (the sky's beyond the denoising range), its
 // normal and material (foliage's or not), and where it was on screen last frame, without the upscaler's
 // jitter: the camera's motion, or a moving mesh's from the game's velocity, with the view depth's change by
@@ -529,7 +606,9 @@ void PrepareGuides(uint2 did : SV_DispatchThreadID)
 {
     if (any(did >= LightSize())) return;
 
-    uint2 pixel = RenderPixelOf(did);
+    uint pick = PickOf(did);
+    g_Light_Pick[did] = pick;
+    uint2 pixel = RenderPixelAt(did, pick);
     float depth = g_Depth.Load(int3(pixel, 0));
     float4 packedNormal = g_Normal.Load(int3(pixel, 0));
     float3 encoded = packedNormal.xyz;
@@ -542,24 +621,21 @@ void PrepareGuides(uint2 did : SV_DispatchThreadID)
     }
 
     float viewZ = toLinearDepth(depth, g_NearFar);
-    float2 uv = (pixel + 0.5f) / g_BufferDimensions;
-    float4 previous = mul(g_PreviousViewProjection, float4(DepthPosition(pixel, depth), 1.0f));
-    float2 previousUv = float2(0.5f, -0.5f) * previous.xy / previous.w + 0.5f;
+    float2 motion;
+    float previousViewZ;
+    CameraMotionOf(pixel, depth, motion, previousViewZ);
+
+    // NRD takes the motion without the jitter, as its projections (denoiserCamera in gi_renderer.cpp); the
+    // game's velocity runs from this frame's jittered place to the last frame's unjittered one.
     float2 moved;
     bool movingMesh = ObjectMotion(int2(pixel), moved);
-    if (movingMesh) previousUv = uv - moved / g_BufferDimensions;
-
-    // NRD takes the motion without the jitter, as its projections (denoiserCamera in gi_renderer.cpp). The
-    // camera's motion here holds the jitter's change between the frames; the game's velocity runs from this
-    // frame's jittered place to the last frame's unjittered one.
-    float2 motion = previousUv - uv;
-    motion += movingMesh ? JitterUv(g_Frame.jitter.xy) : JitterUv(g_Frame.jitter.xy - g_Frame.jitter.zw);
+    if (movingMesh) motion = JitterUv(g_Frame.jitter.xy) - moved / g_BufferDimensions;
 
     // A moving mesh's view depth last frame: the last frame's where it was, when that lies within 10% of its own
     // now; else as if it stood still, which takes it as new where it was something else. As if it stood still
     // always, the change was off by the camera's movement where the camera follows it, as it does the player:
     // a few percent a frame, past NRD's 1%, and the player's light started over every frame (2026-10-25).
-    float depthChange = previous.w - viewZ;
+    float depthChange = previousViewZ - viewZ;
     if (movingMesh)
     {
         float2 lastUv = (did + 0.5f) / LightSize() + motion;
@@ -1008,8 +1084,9 @@ float3 DenoisedLight(uint2 lightPixel, float3 normal, float3 ownNormal)
     return own > 1e-6f ? color * clamp(here / own, 0.5f, 2.0f) : color;
 }
 
-// Diagnostics: the denoiser's history at each render pixel, blended over the image by its alpha
-// (LightHistoryView, phantom_fx_settings.hpp): red where it started the light over within three frames, yellow under ten.
+// Diagnostics, blended over the image by its alpha: the denoiser's history at each render pixel
+// (LightHistoryView, phantom_fx_settings.hpp), red where it started the light over within three frames,
+// yellow under ten; or NRD's validation layer (LightDenoiserView).
 RWTexture2D<float4> g_LightDebug : register(u79);
 
 float4 HistoryColor(float frames)
@@ -1017,6 +1094,12 @@ float4 HistoryColor(float frames)
     if (frames < 3.0f) return float4(1.0f, 0.1f, 0.1f, 0.75f);
     if (frames < 10.0f) return float4(1.0f, 0.85f, 0.1f, 0.5f);
     return 0.0f;
+}
+
+void WriteLightDebug(uint2 pixel, float4 history)
+{
+    if (g_Frame.lightDiagnostics.z == GI_LIGHT_DEBUG_DENOISER) g_LightDebug[pixel] = g_Light_Validation[min(pixel / 2, LightSize() - 1)];
+    else if (g_Frame.lightDiagnostics.z == GI_LIGHT_DEBUG_HISTORY) g_LightDebug[pixel] = history;
 }
 
 // The light at every render pixel, irradiance over pi times the exposure: from the four light pixels
@@ -1031,7 +1114,7 @@ void CompositeLight(uint2 did : SV_DispatchThreadID)
     if (depth <= 0.0f || dot(encoded, encoded) == 0.0f)
     {
         g_Output[did] = float4(0.0f, 0.0f, 0.0f, 1.0f);
-        if (g_Frame.lightDiagnostics.z != 0u) g_LightDebug[did] = 0.0f;
+        WriteLightDebug(did, 0.0f);
         return;
     }
 
@@ -1071,7 +1154,7 @@ void CompositeLight(uint2 did : SV_DispatchThreadID)
 
     // No light pixel of the same surface around (a thin edge): the one nearest in depth.
     float3 light = weight > 1e-4f ? total / weight : nearest;
-    if (g_Frame.lightDiagnostics.z != 0u) g_LightDebug[did] = HistoryColor(nearestHistory);
+    WriteLightDebug(did, HistoryColor(nearestHistory));
     MaxDiagnostic(GI_COUNTER_MAX_OUTPUT, light);
     g_Output[did] = float4(light * g_Frame.nearFar.w, 1.0f);
 }

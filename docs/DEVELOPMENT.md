@@ -371,8 +371,9 @@ reads state; the frame renders unchanged. Its files go into that folder:
   whether traced and its volume's index count).
 
 The overlay's Diagnostics section has, for everyone: debug views of the motion vectors, of
-where the engine's object velocity was used and of the global illumination denoiser's history (red
-where it started a pixel's light over within three frames, yellow under ten), jitter off, the game's FXAA for comparison (DLSS stays
+where the engine's object velocity was used, of the global illumination denoiser's history (red
+where it started a pixel's light over within three frames, yellow under ten) and of NRD's validation
+layer for that denoiser (see "Global illumination", "Denoiser"), jitter off, the game's FXAA for comparison (DLSS stays
 ready), and the frame, fallback and reset counts. All are off by default and not saved. Every 1800
 frames with DLSS on, `PhantomFX.log` gets a status line with the same counts.
 
@@ -1804,10 +1805,17 @@ Now, each frame:
 - **Rays** (`TraceLight`). 1, 2 or 4 (the global illumination's ray quality; Medium, 2, by default) from
   each pixel of a grid half the render size each way, cosine-weighted from the depth buffer's surface,
   past copies of it. A ray that gets away takes the sky's light (`SkyRadiance`). A light pixel samples one
-  render pixel of its 2 x 2, by depth (`RenderPixelOf`): the nearest on one checkerboard colour, the
+  render pixel of its 2 x 2, by depth (`DepthPickOf`): the nearest on one checkerboard colour, the
   farthest on the other, as half-resolution effects downsample depth. With the top left, as first built,
   a wire, a fence or a grass blade under a pixel wide had it one frame and what lay behind the next as the
   jitter moved them, and the denoiser started their light over every frame with the camera still. The
+  depth pick holds where its surface is the one the light grid held there last frame (`PickOf`: within 3%
+  of the view depth, through the camera's motion); elsewhere the render pixel of the 2 x 2 whose surface is
+  takes its place, if one is, so a light pixel stays on its surface as the jitter moves an edge across its
+  2 x 2. With the depth pick alone the denoiser started the light over along edges every frame, about five
+  times the young history in grass (2026-10-29, NRD's validation layer). The choice goes to `g_Light_Pick`
+  for the frame's later passes (`RenderPixelOf`). Checked against the 2 x 2 light pixels around where it
+  was, as NRD's own test takes them, it looked worse in game. The
   first ray's bounce feeds the cache and reads it after its update; the others read their cell as it
   stands, a frame old (the cache's buffers hold a hit a light pixel). Their light is averaged; their
   directions, weighed by it, go to the denoiser's spherical harmonics, shorter than 1 where they spread.
@@ -1847,8 +1855,13 @@ Now, each frame:
   pool entry, each texture's state tracked between its dispatches. Its guides (`PrepareGuides`): the view
   depth (the sky's beyond the denoising range), the normal (`NRD_FrontEnd_PackNormalAndRoughness`,
   R10G10B10A2) with material 1 on the game's foliage (the specular target's material 43, which the
-  G-buffer pack puts in the normals' alpha), and 2.5D motion: the camera's, or a moving mesh's from the
-  game's velocity where it drew one, and the view depth's change: the camera's, and a moving mesh's from
+  G-buffer pack puts in the normals' alpha), and 2.5D motion: the camera's (`CameraMotionOf`: the pixel's
+  unjittered clip position through the last frame's clip from this one's, built in double from the
+  projections and views apart, `camera::previousFromCurrentByParts`; through its world position and the
+  game's float projection-views it was off by up to 0.19 render pixels near the camera on a still frame,
+  changing with each jitter, their translation holding the camera's place in the world, 2026-10-29), or a
+  moving mesh's from the game's velocity where it drew one, and the view depth's change: the camera's, and
+  a moving mesh's from
   the last frame's view depth where it was when that lies within 10% of its own (as if it stood still,
   the change was off by the camera's movement where the camera follows it, and the player's light
   started over every frame). The camera goes in with the engine's x
@@ -1861,12 +1874,21 @@ Now, each frame:
   tenth of a second that the long one is clamped to, three frames rebuilt after a reset, anti-firefly on;
   a camera cut (`camera::cameraCut`) restarts it. Tried on 2026-10-25 and left out: REBLUR in place of
   RELAX (blurrier), a wider disocclusion threshold, and the render pixels' light without their own normal
-  (neither steadier).
+  (neither steadier). The light goes in in the game's units over 1024 (`LightScale`), about 0.001 on
+  screen by day, far under the 0 to 250 NRD's README asks for. Scaled into that range (x256) it blotched
+  in the shade (2026-10-29): at x1, RELAX's fixed floor of 1e-4 on its a-trous luminance sigma
+  (`RELAX_Atrous.cs.hlsl`) takes over in the dark and blurs more there, and a looser
+  `diffusePhiLuminance` (4 or 8) at x256 did not make up for it. Kept at x1. NRD's validation layer
+  (`OUT_VALIDATION`, its checks of the guides and motion and the frames of history) is the **Global
+  illumination denoiser (NRD)** debug view; its texture is always made, at the light's size.
 - **The render size** (`CompositeLight`). The four light pixels around each render pixel, weighed as a
   bilinear filter would times how alike their view depth (within 5%) and normal (cosine to the 8th) are,
   else the one nearest in depth; each resolved against the render pixel's normal
   (`NRD_SH_ResolveDiffuse`), scaled to keep the light it has at its own normal. Irradiance over pi times
-  the exposure, as before.
+  the exposure, as before. NRD's own resolves in its place (2026-10-29; its spherical harmonics upsampled
+  to the render pixel, then `NRD_SH_ResolveDiffuse` or `NRD_SG_ResolveDiffuse`, with and without
+  `NRD_SG_ReJitter`): more of the normal maps' detail (+15 to +53%), the light 10 to 20% brighter or
+  darker by the scene, harsh on faces; left out for the smoother look.
 - **Albedo learning** (`LearnAlbedo`): one light pixel of each 16 x 16 a frame.
 
 ReSTIR GI's spatial reuse was tried on 2026-10-24 (each light pixel resampling its own ray's light and

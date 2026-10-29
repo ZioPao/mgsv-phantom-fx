@@ -58,6 +58,7 @@ struct Options
     bool shadowStarts{}; // Diagnostics: the debug view shows where the shadow rays leave each pixel
     bool twoSidedShadows{}; // Diagnostics: every surface blocks rays towards lights from both sides, as until 2026-10-26
     bool debugHistory{};      // Diagnostics: the light's denoiser history over the image (lightDebug)
+    bool debugDenoiser{};     // Diagnostics: NRD's validation layer for the light's denoiser over the image (lightDebug)
 
     bool logOften{};         // Diagnostics: the light's statistics logged every few frames (as each readback returns), not every ten seconds
     // A cost measurement leaves the light passes out (the output keeps its last light).
@@ -497,7 +498,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
         std::lock_guard lock(lightMutex);
         resizeShared(output, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the light");
         light = output.texture.Get();
-        if (options.enabled && options.debugHistory)
+        if (options.enabled && (options.debugHistory || options.debugDenoiser))
         {
             if (resizeShared(lightDebugOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the light's debug view"))
                 lightDebugWritten = false;
@@ -612,6 +613,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     frame.debugShadows = shadowDebug != nullptr;
     frame.shadowStarts = options.shadowStarts;
     frame.twoSidedShadows = options.twoSidedShadows;
+    frame.debugDenoiser = options.debugDenoiser;
     frame.lightRays = static_cast<std::uint32_t>(std::clamp(options.lightPixelRays, 1, 4));
     // The lights' colours in the sun's units for the hits (gi_light.hlsl, LocalLightAt).
     for (auto& localLight : localLightsToTrace)
@@ -728,6 +730,7 @@ void configure(const Configuration& configuration) noexcept
         .shadowStarts = diagnostics.debugView == ShadowStartsView,
         .twoSidedShadows = diagnostics.twoSidedShadows,
         .debugHistory = diagnostics.debugView == LightHistoryView,
+        .debugDenoiser = diagnostics.debugView == LightDenoiserView,
         .logOften = diagnostics.logGlobalIlluminationOften,
         .light = !configuration.leftOut.globalLight,
     };

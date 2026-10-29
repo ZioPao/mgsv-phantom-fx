@@ -91,6 +91,10 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 // The denoiser's material for the game's foliage (the other pixels' is 0), which it takes as strands
 // (gi_denoiser.cpp).
 #define GI_LIGHT_FOLIAGE_MATERIAL 1.0f
+// The light's debug views into g_LightDebug (GIFrameConstants::lightDiagnostics.z): the denoiser's history,
+// or NRD's validation layer.
+#define GI_LIGHT_DEBUG_HISTORY  1u
+#define GI_LIGHT_DEBUG_DENOISER 2u
 
 // Slots of the indirect dispatch argument buffer.
 #define GI_DISPATCH_SLOTS 16u
@@ -125,6 +129,11 @@ struct GIFrameConstants
     GI_ROW_MAJOR float4x4 viewProjection; // World to clip, jittered as the depth was drawn
     GI_ROW_MAJOR float4x4 viewProjectionInverse;
     GI_ROW_MAJOR float4x4 previousViewProjection;
+    // The light's motion (CameraMotionOf in gi_light.hlsl): the last frame's clip position from this frame's,
+    // both unjittered, built in double from the projections and views apart (camera::previousFromCurrentByParts);
+    // and the w row of this frame's unjittered clip to view.
+    GI_ROW_MAJOR float4x4 previousFromCurrent;
+    float4 clipToViewW;
     float4 eye;          // xyz: the camera in the world
     float4 sunDirection; // xyz: towards the sun, world space
     float4 sunColor;     // rgb: the sun's diffuse light at normal incidence, in the game's units
@@ -148,7 +157,7 @@ struct GIFrameConstants
     float4 shadowParams; // x: tangent of the sun's angular radius (SunSample); y: how much sun an alpha-tested mesh blocks; z: ray length; w: 1 on a fresh start
     uint4 objectMotion;  // x: 1 when g_ObjectVelocity (gi_common.hlsli) holds this frame's velocity of the game's moving meshes
     uint4 shadowDiagnostics; // x: 1 for every surface casting from both sides (ShadowRayTowards); y: 1 for the debug view of where the shadow rays leave (ShadowStartColor)
-    uint4 lightDiagnostics;  // z: 1 for the denoiser's history into g_LightDebug (CompositeLight)
+    uint4 lightDiagnostics;  // z: the light's debug view into g_LightDebug (CompositeLight), GI_LIGHT_DEBUG_*
     // The game's terrain (TerrainGrid in gi_scene.hlsl): a world point is (u, height, v) x scale +
     // offset, u and v its virtual heightmap coordinates; the page table's converter (the terrain
     // shaders' b4 c0 and c1).

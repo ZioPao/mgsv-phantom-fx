@@ -1050,8 +1050,9 @@ void runComposite(ID3D11RenderTargetView* destination, ID3D11ShaderResourceView*
     const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(outputTarget.width), static_cast<float>(outputTarget.height), 0, 1};
     auto* shadowRays = options.debugView == ShadowRaysView || options.debugView == ShadowStartsView
                            ? ray_tracing::shadowDebug(colorTarget.width, colorTarget.height)
-                       : options.debugView == LightHistoryView ? ray_tracing::lightDebug(colorTarget.width, colorTarget.height)
-                                                               : nullptr;
+                       : options.debugView == LightHistoryView || options.debugView == LightDenoiserView
+                           ? ray_tracing::lightDebug(colorTarget.width, colorTarget.height)
+                           : nullptr;
     ID3D11ShaderResourceView* inputs[]{outputTarget.view.Get(), motionTarget.view.Get(), objectVelocity, shadowRays};
     immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     immediate->VSSetShader(ensureStretch()->vertex.Get(), nullptr, 0);

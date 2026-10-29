@@ -439,7 +439,8 @@ void drawDiagnostics(const upscaler::Status& state)
     if (const fxui::Item item({.id = "debugView", .name = "Debug view", .keywords = "motion vectors object motion shadow rays probe"}); item)
     {
         constexpr Choice<int> views[]{{0, "Final image"}, {1, "Motion vectors"}, {2, "Object motion (red)"}, {ShadowRaysView, "Ray-traced shadow rays"},
-            {LightHistoryView, "Global illumination history"}, {ShadowStartsView, "Shadow ray starts"}};
+            {LightHistoryView, "Global illumination history"}, {LightDenoiserView, "Global illumination denoiser (NRD)"},
+            {ShadowStartsView, "Shadow ray starts"}};
         changed |= fxui::combo("Debug view", options.debugView, views,
             "Ray-traced shadow rays: with ray-traced shadows and an upscaler on, what blocks each pixel's ray to the sun's centre, over the image. The "
             "cross is the probe: its sun ray and, with ray-traced lights on, sun or none, the strongest lamps' rays and what blocks each. Its "
@@ -447,6 +448,11 @@ void drawDiagnostics(const upscaler::Status& state)
         if (options.debugView == LightHistoryView)
             fxui::note(Tone::Dim, "With global illumination and an upscaler on: red where the denoiser started a pixel's light over this frame or "
                                   "the last two, yellow where it holds under ten frames. Clear: a full history.");
+        if (options.debugView == LightDenoiserView)
+            fxui::note(Tone::Dim, "With global illumination and an upscaler on, NRD's own checks of the denoiser's inputs, in a 4 x 4 grid. Top "
+                                  "row: world grid, roughness, view depth (red: past the denoising range), motion against a still scene (black "
+                                  "where right, magenta where it holds the jitter). Second row: normals. Third row, left: frames of history "
+                                  "(red: started over).");
         if (options.debugView == ShadowStartsView)
             fxui::note(Tone::Dim, "With ray-traced shadows on, where each pixel's shadow rays leave, against what the game drew. Grey: from the depth, "
                                   "the scene having no surface there. Blue: the scene's surface faces another way. Red: it lies nearer than the "

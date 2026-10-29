@@ -61,6 +61,10 @@ double halton(std::uint64_t index, unsigned base);
 
 // Maps this frame's unjittered NDC and depth to the previous frame's clip position.
 Matrix previousFromCurrent(const View& previous, const View& current);
+// The same from the projections and views apart, the projections unjittered: the views' change is the
+// camera's movement alone, so its place in the world cancels before anything rounds. A projection-view
+// the game wrote in float holds that place in its translation, rounded differently for each jitter.
+Matrix previousFromCurrentByParts(const View& previous, const View& current);
 
 // A cut (cutscenes, menus into the game) moves or turns the camera further than gameplay does in
 // one frame, or changes the field of view at once; DLSS then drops its history.

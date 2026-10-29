@@ -93,6 +93,7 @@ struct Frame
     bool debugShadows{};
     bool shadowStarts{};     // The debug view: where the shadow rays leave each pixel (ShadowStartColor)
     bool twoSidedShadows{};  // Diagnostics: rays towards lights blocked by every surface from both sides, as until 2026-10-26
+    bool debugDenoiser{};    // Diagnostics: NRD's validation layer into textures.lightDebug, in place of the denoiser's history
     std::uint32_t lightRays{2}; // The light's rays a light pixel, 1 to 4 (TraceLight)
     // The point and spot lights whose shadows go into textures.localLightShadow, at most GI_MAX_LOCAL_LIGHTS,
     // and the rays a pixel they take.

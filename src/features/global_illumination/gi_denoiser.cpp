@@ -229,6 +229,7 @@ void Denoiser::record(ID3D12GraphicsCommandList4& list, const Camera& camera, co
     common.strandMaterialID = GI_LIGHT_FOLIAGE_MATERIAL;
     common.strandThickness = 0.01f; // A grass blade's width; NRD's is a hair's
     common.frameIndex = frameIndex;
+    common.enableValidation = textures.validation != nullptr;
     common.accumulationMode = frameIndex == 0 ? nrd::AccumulationMode::CLEAR_AND_RESTART
         : camera.restart                      ? nrd::AccumulationMode::RESTART
                                               : nrd::AccumulationMode::CONTINUE;
@@ -262,6 +263,7 @@ void Denoiser::record(ID3D12GraphicsCommandList4& list, const Camera& camera, co
         case nrd::ResourceType::IN_DIFF_SH1: return textures.light1;
         case nrd::ResourceType::OUT_DIFF_SH0: return textures.denoised0;
         case nrd::ResourceType::OUT_DIFF_SH1: return textures.denoised1;
+        case nrd::ResourceType::OUT_VALIDATION: return textures.validation;
         default: throw std::runtime_error(std::string("The denoiser asked for ") + nrd::GetResourceTypeString(type) + ", which it is not given.");
         }
     };

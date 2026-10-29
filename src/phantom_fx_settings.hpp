@@ -120,12 +120,15 @@ constexpr int ShadowRaysView = 3;
 constexpr int LightHistoryView = 4;
 // The debug view that blends where each pixel's shadow rays leave over the image, with the shadows' probe.
 constexpr int ShadowStartsView = 5;
+// The debug view that blends NRD's validation layer for the global illumination's denoiser over the image.
+constexpr int LightDenoiserView = 6;
 
 // The diagnostic views and switches. Not saved.
 struct Diagnostics
 {
     int debugView{}; // 0 final image, 1 motion vectors, 2 where the engine's velocity was used, 3 the ray-traced shadows' rays (ShadowRaysView),
-                     // 4 the global illumination's denoiser history (LightHistoryView), 5 where the shadow rays leave (ShadowStartsView)
+                     // 4 the global illumination's denoiser history (LightHistoryView), 5 where the shadow rays leave (ShadowStartsView),
+                     // 6 NRD's validation layer for the global illumination's denoiser (LightDenoiserView)
     bool noJitter{};
     bool gameFxaa{}; // Comparison: leave the frame to the game's FXAA, keeping DLSS ready
     bool onlyScreenSpaceShadows{}; // The sun shadowed by the screen-space shadows alone
