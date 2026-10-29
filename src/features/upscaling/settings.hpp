@@ -13,6 +13,10 @@ enum class Upscaler : std::uint8_t { Dlss, Fsr, Count };
 enum class Mode : std::uint8_t { Off, Dlaa, Quality, Balanced, Performance, UltraPerformance, Custom, Count };
 // Values match NVSDK_NGX_DLSS_Hint_Render_Preset; Default lets the DLSS DLL choose.
 enum class Preset : std::uint8_t { Default = 0, J = 10, K = 11, L = 12, M = 13 };
+// Where the motion blur's gathers and bake run: half the output size, as the game runs its own, where
+// a moving edge steps by two output pixels, or the output size itself, where it steps by one for four
+// times the gathers' fill.
+enum class BlurSize : std::uint8_t { Half, Output, Count };
 
 std::string_view label(Upscaler upscaler);
 std::string_view label(Mode mode, Upscaler upscaler);
@@ -39,6 +43,9 @@ struct Upscaling
     float sharpness{0.33f};
     float customRenderScale{0.75f};
     float textureBiasOffset{};
+    // The motion blur's gathers at the output size instead of half of it: one output pixel a gather
+    // pixel, so a moving edge steps by the output's pixels; four times their fill.
+    upscaler::BlurSize motionBlurSize{upscaler::BlurSize::Half};
 
     bool operator==(const Upscaling&) const = default;
 };

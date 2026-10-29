@@ -47,6 +47,7 @@ struct Texture
 struct Targets
 {
     unsigned width{}, height{};
+    bool blurAtOutputSize{};
     Texture surfaces[5]; // Scene, Copy, Blur, BlurTwin, Bake
     ComPtr<ID3D11ShaderResourceView> srgbView;
     // The 2D pass masks with stencil; it does not test depth.
@@ -74,6 +75,8 @@ struct BoundShader
 };
 
 std::atomic<unsigned> outputWidth{}, outputHeight{};
+// The motion blur's gathers at the output size, from the upscaler's setting.
+std::atomic<bool> blurAtOutputSize{};
 
 // The game has 24 deferred contexts and the immediate one.
 std::array<BoundShader, 64> boundShaders;
@@ -117,11 +120,12 @@ bool makeSurface(Texture& surface, const D3D11_TEXTURE2D_DESC& desc, DXGI_FORMAT
         && SUCCEEDED(device->CreateShaderResourceView(surface.texture.Get(), &viewDesc, surface.view.GetAddressOf()));
 }
 
-std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
+std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height, bool fullBlur)
 {
     auto created = std::make_shared<Targets>();
     created->width = width;
     created->height = height;
+    created->blurAtOutputSize = fullBlur;
 
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width = width;
@@ -135,9 +139,13 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
 
     // The motion blur's pair at half the size of the scene it blends over, as the game makes its own,
     // but in the scene's format: the game's are 8-bit, which clips HDR highlights while the camera moves.
+    // At the output size when the upscaler's setting asks, so a moving edge steps by one output pixel.
     auto blurDesc = desc;
-    blurDesc.Width = std::max(width / 2, 1u);
-    blurDesc.Height = std::max(height / 2, 1u);
+    if (!fullBlur)
+    {
+        blurDesc.Width = std::max(width / 2, 1u);
+        blurDesc.Height = std::max(height / 2, 1u);
+    }
 
     auto& [outputScene, outputCopy, blur, blurTwin, bake] = created->surfaces;
     if (!makeSurface(outputScene, desc, drawFormat()) || !makeSurface(outputCopy, desc, drawFormat()) || !makeSurface(blur, blurDesc, drawFormat())
@@ -174,17 +182,20 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
     return created;
 }
 
-// The output-size targets, made when first needed and again when the output size changes.
+// The output-size targets, made when first needed and again when the output size or the motion blur's
+// size changes.
 std::shared_ptr<const Targets> currentTargets()
 {
     const unsigned width = outputWidth, height = outputHeight;
+    const bool fullBlur = blurAtOutputSize;
     std::lock_guard lock(mutex);
-    if (targets && targets->width == width && targets->height == height) return targets;
+    if (targets && targets->width == width && targets->height == height && targets->blurAtOutputSize == fullBlur) return targets;
     if (!device || !width || !height || creationFailed) return nullptr;
 
-    targets = createTargets(width, height);
+    targets = createTargets(width, height, fullBlur);
     creationFailed = !targets;
-    log(targets ? "Created the UI target at " + std::to_string(width) + "x" + std::to_string(height) + "."
+    log(targets ? "Created the UI target at " + std::to_string(width) + "x" + std::to_string(height)
+                + (fullBlur ? ", the motion blur's at the output size." : ", the motion blur's at half of it.")
                 : std::string("Could not create the UI target; the UI renders at the render size."));
 
     return targets;
@@ -332,6 +343,21 @@ void setOutputSize(unsigned width, unsigned height) noexcept
 {
     outputWidth = width;
     outputHeight = height;
+}
+
+// The motion blur's gathers and bake at the output size, or at half of it. The next draw that reaches
+// the output-size surfaces makes them again, as a resolution change does.
+void setBlurAtOutputSize(bool full) noexcept
+{
+    if (blurAtOutputSize.exchange(full) == full) return;
+
+    try
+    {
+        log(full ? "The motion blur's gathers run at the output size." : "The motion blur's gathers run at half the output size.");
+    }
+    catch (...)
+    {
+    }
 }
 
 bool draw2D(ID3D11DeviceContext* context, const DrawCall& call) noexcept

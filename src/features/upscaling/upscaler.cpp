@@ -980,7 +980,8 @@ void bindForNextDraw(ID3D11DeviceContext* context, ID3D11ShaderResourceView* vie
 const ID3D11Resource* bakeTargetOf(std::uint64_t recorded);
 
 // The game's two McGuire gathers through the add-on's targets: at half the output size while
-// upscaling, at half the render size otherwise. The first pass halves the scene into the add-on's
+// upscaling, or at the output size when the upscaler's setting asks (four times their fill), and at
+// half the render size without upscaling. The first pass halves the scene into the add-on's
 // first target and the second reads that, so neither clips what the scene keeps; the composite then
 // reads the last one (beforePostDraw). The game's constants stay: they place the samples in texture
 // coordinates, so the blur reaches as far on screen.
@@ -1063,9 +1064,10 @@ const ID3D11Resource* bakeTargetOf(std::uint64_t recorded)
 }
 
 // The game's bake of the gathers' velocity, depth and coverage, at half the render size, drawn as a
-// full-screen triangle over its whole target and read back by texture coordinate. At half the output
-// size instead it lands on the gathers' own pixels: at half the render size its depth edge and its
-// coverage stepped six output pixels wide at Ultra Performance, and three at Quality.
+// full-screen triangle over its whole target and read back by texture coordinate. The add-on writes it
+// where the gathers run: at half the output size, or at the output size with the upscaler's setting.
+// At half the render size its depth edge and its coverage stepped six output pixels wide at Ultra
+// Performance, and three at Quality.
 //
 // Its constants stay the game's. The bake reads its inputs at TEXCOORD times m_renderInfo over
 // m_renderBuffer, which is the unit square at any target size, and the tiles it reaches by are the
@@ -1511,6 +1513,8 @@ void configure(const Configuration& configuration) noexcept
 
     configured = {upscaling, configuration.diagnostics, configuration.supportedBuild, configuration.leftOut.upscaler, configuration.leftOut.sharpening};
     updateReplacing();
+    // Half the output size is half the render size at native resolution, where the game's blur runs as it is.
+    ui_redirect::setBlurAtOutputSize(upscaling.motionBlurSize == BlurSize::Output && upscaler::upscales(upscaling.mode));
 }
 
 bool replaces() noexcept

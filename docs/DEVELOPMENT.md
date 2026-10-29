@@ -1239,31 +1239,35 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
   - The motion blur gathers at half the output size from DLSS's image while upscaling, and at half
     the render size without it (frame 141835, 1920x1080 to 3840x2160, before this: it gathered at
     960x540 from the jittered scene before DLSS, and its composite stretched that four times over the
-    output, pixelated). Two more targets at half the output size stand in for the game's two, in the
-    scene's format: the game's are 8-bit, which clipped HDR highlights while the camera moved. The
-    add-on's gathers run while upscaling whatever the output, and with HDR at native resolution too
-    (DLAA, FXAA): there the game's 8-bit layer clips the sun's disc while the scene behind keeps it
-    beyond 1, and the composite toggles the disc between the two as the jitter moves its coverage.
-    Before the first `MotionBlurMcGuire` pass, the scene is halved bilinearly into the first target:
-    the upscaler's image at the output size while upscaling, the game's own scene target at the render
-    size otherwise (as the game's copy of it read it that frame), with the alpha of the game's own
-    halved scene (the composite's alpha, which the blur would take for its own). Each pass then reads
-    the add-on's target in place of the game's, writes the other, and keeps the game's `cPSSystem`, so
-    the samples land as far away on screen; the composite reads the last one. The game's targets are
-    matched by address on the recording thread, within the frame being recorded. While upscaling the
-    composite is the add-on's, on the output target; at native resolution the game's own composite
-    draws, with the add-on's layer bound in place of its 8-bit one, and the game's binding returns
-    before its next draw.
-  - **Open: the bake still runs at half the render size, so its depth and coverage step at a
-    character's silhouette.** Measured 2026-10-28 on two crops of the same slide at 3840x2160 output,
-    counting the horizontal jump between the staircase's treads: 5-6 px wide at Ultra Performance
-    (render 1280, bake 640) and 2-3 px at Quality (render 2560, bake 1280) — the bake's width over the
-    output's, six times and three times. DLAA bakes at 1920, two pixels per step, and shows none.
-    Only the two gathers were moved to half the output; `MotionBlurTile`, `TileNeighbour` and
-    `MotionBlurBakeVelocityDepth` still write half the render size, and the gathers read their
-    velocity, depth and coverage there, so the edge of the depth test and of the alpha taken from the
-    game's halved scene is a six-times staircase. Only the character shows it because it is the only
-    edge in that shot.
+    output, pixelated). Three more targets at half the output size stand in for the game's two and
+    its bake, in the scene's format: the game's are 8-bit, which clipped HDR highlights while the
+    camera moved. The add-on's gathers run while upscaling whatever the output, and with HDR at native
+    resolution too (DLAA, FXAA): there the game's 8-bit layer clips the sun's disc while the scene
+    behind keeps it beyond 1, and the composite toggles the disc between the two as the jitter moves
+    its coverage. Before the first `MotionBlurMcGuire` pass, the scene is halved bilinearly into the
+    first target: the upscaler's image at the output size while upscaling, the game's own scene target
+    at the render size otherwise (as the game's copy of it read it that frame), with the alpha of the
+    game's own halved scene (the composite's alpha, which the blur would take for its own). Each pass
+    then reads the add-on's target in place of the game's, writes the other, and keeps the game's
+    `cPSSystem`, so the samples land as far away on screen; the composite reads the last one. The
+    game's targets are matched by address on the recording thread, within the frame being recorded.
+    While upscaling the composite is the add-on's, on the output target; at native resolution the
+    game's own composite draws, with the add-on's layer bound in place of its 8-bit one, and the
+    game's binding returns before its next draw.
+  - **The bake at half the output size, and at the output size when asked.** The gathers read their
+    velocity, depth and coverage from `MotionBlurBakeVelocityDepth`, which the game bakes at half the
+    render size (640x360 at Ultra Performance over 3840x2160, 1280x720 at Quality). Measured
+    2026-10-28 on two crops of the same slide, counting the horizontal jump between a silhouette's
+    staircase treads: 5-6 px wide at Ultra Performance and 2-3 px at Quality — the bake's width over
+    the output's, six times and three times. The bake is now recognised by its checksum and drawn into
+    the add-on's third target instead, as the gathers are; its own constants need no change, since it
+    draws a full-screen triangle whose texture coordinates run 0 to 1 over the target and reads its
+    inputs at those coordinates. The tile ladder it reaches by stays at the render size, which is what
+    the engine wrote its guards (`cPSObject` `c11.zw`) for. At half the output size a silhouette
+    steps by two output pixels, as at DLAA; **Motion blur at the output size**, in Upscaling, makes
+    the gathers, the bake and the layer one output pixel each at four times the gathers' fill, and
+    steps by one. Measured 2026-10-29 at 3840x2160: the layer's own edge stepped 1-2 px at 1920 and
+    2-4 px in the output, which is what set off the setting.
   - `Tonemap` (the grading): the output target is copied into the second target on the context, and
     the grading reads it (slot 0) and writes the output target. The graded image is then stretched
     back into the render-size scene target, which the game copies next for its 2D filters
@@ -1349,8 +1353,9 @@ Not handled:
   read the render-size copy, so while one is on, the image under it has the render size.
 - Bloom and the lens flares start from the scene before DLSS, jitter included; at a quarter of its
   size it averages out.
-- The motion blur's velocity stays at the render size: its tiles and `MotionBlurBakeVelocityDepth`
-  are left at half the render size, and the gather reads them by texture coordinate.
+- The motion blur's velocity stays at the render size: the tiles are left at render scale, and the
+  velocity the bake reads comes from the engine's render-size target. At the output size the bake
+  and the gathers resample it, so a moving edge still steps with the render size, not the output's.
 
 ## Frame generation
 

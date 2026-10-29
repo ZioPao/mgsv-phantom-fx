@@ -98,6 +98,8 @@ void attach(ID3D11Device* device) noexcept;
 void detach() noexcept;
 // The swap chain's size.
 void setOutputSize(unsigned width, unsigned height) noexcept;
+// The motion blur's gathers at the output size instead of half of it.
+void setBlurAtOutputSize(bool full) noexcept;
 
 // The 2D pass is recognised by its vertex shaders (game_shaders::VertexShader::Draw2D), bound on the
 // context that records it.

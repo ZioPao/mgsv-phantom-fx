@@ -7,6 +7,7 @@ namespace phantom_fx
 {
 namespace
 {
+using upscaler::BlurSize;
 using upscaler::Mode;
 using upscaler::Preset;
 using upscaler::Upscaler;
@@ -47,6 +48,11 @@ constexpr SettingChoice Presets[]{
     {static_cast<int>(Preset::J), "J (transformer, less ghosting)"},
     {static_cast<int>(Preset::M), "M (Performance model)"},
     {static_cast<int>(Preset::L), "L (Ultra Performance model)"},
+};
+
+constexpr SettingChoice BlurSizes[]{
+    {static_cast<int>(BlurSize::Half), "Half the output size", "half"},
+    {static_cast<int>(BlurSize::Output), "The output size", "output"},
 };
 
 std::span<const SettingChoice> modesFor(Upscaler upscaler)
@@ -117,6 +123,15 @@ void describe(Upscaling& upscaling, SettingVisitor& visit)
             .tip = "Added to the automatic texture LOD bias for the render size. Lower is sharper but can shimmer. Applies when released.",
             .hint = "Lower is sharper but can shimmer. Applies when released.",
             .enabled = on});
+    visit.choice(upscaling.motionBlurSize,
+        {.iniKey = "motion_blur_size",
+            .label = "Motion blur size",
+            .choices = BlurSizes,
+            .control = ChoiceControl::Dropdown,
+            .tip = "Where the motion blur gathers and bakes. Half the output size, as the game does: a character's moving silhouette steps by "
+                   "two output pixels. The output size: one output pixel a step, as at DLAA, for four times the gathers' fill.",
+            // At native resolution half the render size is half the output, and the game's blur runs unchanged.
+            .visible = upscaler::upscales(upscaling.mode)});
 }
 
 namespace upscaler

@@ -25,6 +25,12 @@
   layer clipped them at white while the scene kept them, and its composite toggled between the two
   as the jitter moved. The blur now runs through the add-on's float targets there too, and the
   game's composite reads that layer in place of its own.
+- Fix a character's moving silhouette stepping in wide stairs while upscaling: the blur read its
+  velocity and depth from a bake the game ran at half the render size, 640 pixels wide at Ultra
+  Performance over 3840, so its edge stepped by five or six pixels. The bake now runs with the
+  gathers at half the output size, and **Motion blur size**, under Upscaling, can put both at the
+  output size itself, where the silhouette steps by one pixel as it does at DLAA, for four times the
+  gathers' fill.
 
 ## 1.8.0
 
