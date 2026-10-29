@@ -976,6 +976,9 @@ void bindForNextDraw(ID3D11DeviceContext* context, ID3D11ShaderResourceView* vie
     deferredBinding = {context, std::move(game)};
 }
 
+// The game's bake, when the add-on wrote it this frame (redirectBake below).
+const ID3D11Resource* bakeTargetOf(std::uint64_t recorded);
+
 // The game's two McGuire gathers through the add-on's targets: at half the output size while
 // upscaling, at half the render size otherwise. The first pass halves the scene into the add-on's
 // first target and the second reads that, so neither clips what the scene keeps; the composite then
@@ -1015,15 +1018,88 @@ bool gatherBlurInFloat(ID3D11DeviceContext* context)
 
     const auto input = isFirstPass ? Blur : blurChain.surface;
     const auto output = input == Blur ? BlurTwin : Blur;
-    postDraw.redirected.emplace(context, output, Inputs{{0, input}});
+
+    // The bake, as the add-on wrote it this frame: the game's target would be stale where the gather
+    // reads it. The bake and the gathers are not always recorded on the same thread, so the two agree
+    // on the frame, not on a thread.
+    const auto recorded = currentRecordingFrame();
+    ComPtr<ID3D11ShaderResourceView> baked;
+    context->PSGetShaderResources(5, 1, baked.GetAddressOf());
+    const bool readsBake = baked && resourceOf(baked.Get()).Get() == bakeTargetOf(recorded);
+    if (readsBake)
+        postDraw.redirected.emplace(context, output, Inputs{{0, input}, {5, Bake}});
+    else
+        postDraw.redirected.emplace(context, output, Inputs{{0, input}});
+
+    if (upscaling) logOnce(readsBake ? "The motion blur's gathers read the add-on's bake." : "The motion blur's gathers read the game's bake, unredirected.");
     if (!*postDraw.redirected)
     {
         postDraw.clear();
         return false;
     }
 
-    blurChain = {currentRecordingFrame(), resourceOf(target.Get()).Get(), output};
+    blurChain = {recorded, resourceOf(target.Get()).Get(), output};
     recordUiTargetUse(context);
+
+    return true;
+}
+
+// The game's bake on one frame: the game's target, by address only, which the gathers read at t5.
+std::mutex bakeMutex;
+std::uint64_t bakeFrame{};
+const ID3D11Resource* bakeTarget{};
+
+void recordBake(const ID3D11Resource* target, std::uint64_t at)
+{
+    std::lock_guard lock(bakeMutex);
+    bakeFrame = at;
+    bakeTarget = target;
+}
+
+const ID3D11Resource* bakeTargetOf(std::uint64_t recorded)
+{
+    std::lock_guard lock(bakeMutex);
+    return bakeFrame == recorded ? bakeTarget : nullptr;
+}
+
+// The game's bake of the gathers' velocity, depth and coverage, at half the render size, drawn as a
+// full-screen triangle over its whole target and read back by texture coordinate. At half the output
+// size instead it lands on the gathers' own pixels: at half the render size its depth edge and its
+// coverage stepped six output pixels wide at Ultra Performance, and three at Quality.
+//
+// Its constants stay the game's. The bake reads its inputs at TEXCOORD times m_renderInfo over
+// m_renderBuffer, which is the unit square at any target size, and the tiles it reaches by are the
+// game's, still at the render size, which is what the engine wrote its guards (cPSObject c11.zw) for.
+bool redirectBake(ID3D11DeviceContext* context)
+{
+    if (!ui_redirect::isUpscaling()) return false;
+
+    ComPtr<ID3D11RenderTargetView> target;
+    context->OMGetRenderTargets(1, target.GetAddressOf(), nullptr);
+    if (!target) return false;
+
+    const auto render = render_scale::current();
+    const auto desc = textureDesc(target.Get());
+    if (desc.Width != render.width / 2 || desc.Height != render.height / 2)
+    {
+        logOnce("The motion blur's bake draws into " + std::to_string(desc.Width) + "x" + std::to_string(desc.Height) + " with the engine rendering at "
+            + std::to_string(render.width) + "x" + std::to_string(render.height) + "; it stays the game's.");
+        return false;
+    }
+
+    postDraw.redirected.emplace(context, ui_redirect::Surface::Bake, Inputs{});
+    if (!*postDraw.redirected)
+    {
+        postDraw.clear();
+        return false;
+    }
+
+    recordBake(resourceOf(target.Get()).Get(), currentRecordingFrame());
+    recordUiTargetUse(context);
+
+    const auto bake = ui_redirect::surfaceViews(ui_redirect::Surface::Bake);
+    logOnce("The motion blur's bake at " + std::to_string(bake.width) + "x" + std::to_string(bake.height)
+        + ": with the gathers, at half the output size instead of half the render size.");
 
     return true;
 }
@@ -1637,6 +1713,7 @@ bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         // CopyRenderBuffer is a plain copy the game makes anywhere; the layer's composite shares its
         // list with the LUT build.
         if (pass == GamePass::MotionBlur) return gatherBlurInFloat(context);
+        if (pass == GamePass::BlurBake) return redirectBake(context);
 
         // At native resolution the game makes the blur's composite itself, over the scene: it reads the
         // add-on's surface in place of its 8-bit layer, which the gathers no longer write, and the

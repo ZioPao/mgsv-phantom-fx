@@ -113,6 +113,18 @@ void identifiesSunByChecksum(const Gpu& gpu)
     forget();
 }
 
+void identifiesBlurBakeByChecksum(const Gpu& gpu)
+{
+    const auto& bake = rowNamed("MotionBlurBakeVelocityDepth");
+    const auto shader = pixelShader(gpu, 1);
+    createdFrom(bake, shader.Get());
+    gpu.context->PSSetShader(shader.Get(), nullptr, 0);
+    DrawnShader drawn(gpu.context.Get());
+    expect(drawn.row() == &bake && bake.pass == GamePass::BlurBake, "The motion blur's bake is known by its checksum.");
+    expect(drawn.object() == shader.Get(), "The draw keeps the game's shader, to bind it again.");
+    forget();
+}
+
 void unknownShaderHasNoRow(const Gpu& gpu)
 {
     const auto code = compiled("float4 main() : SV_Target { return 2; }", "ps_5_0");
@@ -227,6 +239,7 @@ int main()
     try
     {
         const auto gpu = warp();
+        identifiesBlurBakeByChecksum(gpu);
         identifiesSunByChecksum(gpu);
         unknownShaderHasNoRow(gpu);
         nothingBound(gpu);

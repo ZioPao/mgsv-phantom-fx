@@ -36,6 +36,7 @@ enum class GamePass : std::uint8_t
     Copy,            // A plain copy the game makes anywhere
     DofComposite,    // The depth of field over its copy of the scene
     MotionBlur,      // The motion blur's gather, twice at half size; a copy then blends it over the scene
+    BlurBake,        // The motion blur's bake: the gathers' velocity, depth and coverage, at half size
     LutBuild,        // The grading's colour LUT
     Grade,           // The grading: bloom and the colour LUT
     Fxaa,
@@ -115,6 +116,7 @@ inline constexpr GameShader GameShaders[]{
     {GamePass::Copy, "CopyRenderBuffer", "9f93a957f1e21656e0d86bf112b71d6d"},
     {GamePass::DofComposite, "DOF_ScatterCompositeFinal", "d1462a415f8e79dba14db617c576407d"},
     {GamePass::MotionBlur, "MotionBlurMcGuire", "475283f0d10c84d3c1b47e2ba153c916"},
+    {GamePass::BlurBake, "MotionBlurBakeVelocityDepth", "d89d8bcef5a286dee3f697d3aae068fa"},
     {GamePass::LutBuild, "ColorCorrection_BlndLut_Tex_Gen", "82a954d0fe3755bb0a79aaaded5cce74"},
     {GamePass::Grade, "Tonemap", "422ba739df267d9f92d4d62b0d2b4e09"},
     {GamePass::Fxaa, "Fxaa", "deef1a5e3462ab091b5612a37662d15d"},

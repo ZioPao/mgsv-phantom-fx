@@ -38,6 +38,7 @@ enum class Surface : std::uint8_t
     Copy,     // In place of the scene target's copy that the grading reads
     Blur,     // Half the output size: in place of the motion blur's two half-size targets
     BlurTwin,
+    Bake,     // Half the output size: in place of the bake the gathers read at t5
 };
 
 // One draw of the game's at the output size, on a recording context: `target` in place of its render

@@ -45,7 +45,7 @@ struct Texture
 struct Targets
 {
     unsigned width{}, height{};
-    Texture surfaces[4]; // Scene, Copy, Blur, BlurTwin
+    Texture surfaces[5]; // Scene, Copy, Blur, BlurTwin, Bake
     ComPtr<ID3D11ShaderResourceView> srgbView;
     // The 2D pass masks with stencil; it does not test depth.
     ComPtr<ID3D11DepthStencilView> depth;
@@ -137,9 +137,9 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
     blurDesc.Width = std::max(width / 2, 1u);
     blurDesc.Height = std::max(height / 2, 1u);
 
-    auto& [outputScene, outputCopy, blur, blurTwin] = created->surfaces;
+    auto& [outputScene, outputCopy, blur, blurTwin, bake] = created->surfaces;
     if (!makeSurface(outputScene, desc, drawFormat()) || !makeSurface(outputCopy, desc, drawFormat()) || !makeSurface(blur, blurDesc, drawFormat())
-        || !makeSurface(blurTwin, blurDesc, drawFormat()))
+        || !makeSurface(blurTwin, blurDesc, drawFormat()) || !makeSurface(bake, blurDesc, drawFormat()))
         return nullptr;
 
     const float system[16]{0, 0, 0, 0, static_cast<float>(width), static_cast<float>(height), 0, 0, static_cast<float>(width),
@@ -486,7 +486,7 @@ OutputSizeDraw::OutputSizeDraw(ID3D11DeviceContext* drawing, Surface target, std
         if (target == Surface::Scene) rememberScene(targets[0].Get());
 
         context = drawing;
-        const bool isBlur = target == Surface::Blur || target == Surface::BlurTwin;
+        const bool isBlur = target == Surface::Blur || target == Surface::BlurTwin || target == Surface::Bake;
         if (!isBlur && copySystem(drawing, *output, system.Get())) drawing->PSSetConstantBuffers(0, 1, output->postSystemConstants.GetAddressOf());
         for (const auto& input : inputs) drawing->PSSetShaderResources(input.slot, 1, (*output)[input.surface].view.GetAddressOf());
         drawing->OMSetRenderTargetsAndUnorderedAccessViews(1, (*output)[target].target.GetAddressOf(), nullptr, 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
