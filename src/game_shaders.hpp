@@ -35,6 +35,7 @@ enum class GamePass : std::uint8_t
     Reduce,          // The scene's quarter-size copy that bloom and the lens flares start from
     Copy,            // A plain copy the game makes anywhere
     DofComposite,    // The depth of field over its copy of the scene
+    MotionBlurBake,  // The velocity and depth the motion blur's gathers read, baked at half size
     MotionBlur,      // The motion blur's gather, twice at half size; a copy then blends it over the scene
     LutBuild,        // The grading's colour LUT
     Grade,           // The grading: bloom and the colour LUT
@@ -114,6 +115,7 @@ inline constexpr GameShader GameShaders[]{
     {GamePass::Reduce, "CopyReductionX4", "e5b80b0a4d737e50533f9a058ffdca42"},
     {GamePass::Copy, "CopyRenderBuffer", "9f93a957f1e21656e0d86bf112b71d6d"},
     {GamePass::DofComposite, "DOF_ScatterCompositeFinal", "d1462a415f8e79dba14db617c576407d"},
+    {GamePass::MotionBlurBake, "MotionBlurBakeVelocityDepth", "d89d8bcef5a286dee3f697d3aae068fa"},
     {GamePass::MotionBlur, "MotionBlurMcGuire", "475283f0d10c84d3c1b47e2ba153c916"},
     {GamePass::LutBuild, "ColorCorrection_BlndLut_Tex_Gen", "82a954d0fe3755bb0a79aaaded5cce74"},
     {GamePass::Grade, "Tonemap", "422ba739df267d9f92d4d62b0d2b4e09"},
