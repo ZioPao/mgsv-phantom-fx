@@ -78,15 +78,21 @@ void main(uint2 pixel : SV_DispatchThreadID)
 inline constexpr char Composite[] = PHANTOM_FX_HDR_COMMON R"(
 cbuffer CompositeParameters : register(b0)
 {
-    uint DebugView; // 1 motion vectors, 2 where the engine's velocity was used; 3, 4 and 5 a debug view over the image (ShadowRays)
+    // In place of the image: the motion vectors, or red where the engine's velocity was used.
+    uint ShowMotion;
+    uint ShowObjectMotion;
+    uint ShowProbe; // The probes' cross over the image
     float Sharpness;
     uint ObjectMotion;
     uint Linear; // The upscaler made linear colour, sharpened through x / (1 + x) and encoded here
+    uint2 Padding;
 };
 Texture2D<float4> Upscaled : register(t0);
 Texture2D<float2> Motion : register(t1);
 Texture2D<float4> Velocity : register(t2);
-Texture2D<float4> ShadowRays : register(t3); // At the render size, by its alpha (ray_tracing::shadowDebug or lightDebug)
+// A debug view over the image, at the render size, by its alpha (ray_tracing::shadowDebug or lightDebug);
+// unbound while none shows.
+Texture2D<float4> ShadowRays : register(t3);
 
 float3 Load(int2 pixel)
 {
@@ -113,12 +119,12 @@ float4 main(float4 position : SV_Position) : SV_Target
 {
     int2 pixel = int2(position.xy);
     float3 color = Load(pixel);
-    if (DebugView == 1)
+    if (ShowMotion)
     {
         float2 motion = Motion.Load(int3(pixel, 0));
         color = float3(saturate(0.5 + motion * 0.05), saturate(length(motion) * 0.05));
     }
-    else if (DebugView == 2)
+    else if (ShowObjectMotion)
     {
         bool used = ObjectMotion && Velocity.Load(int3(pixel, 0)).r > 0.5;
         color = lerp(color * 0.5, float3(1, 0, 0), used ? 0.6 : 0);
@@ -126,24 +132,24 @@ float4 main(float4 position : SV_Position) : SV_Target
     else if (Sharpness > 0)
         color = Rcas(Load(pixel + int2(0, -1)), Load(pixel + int2(-1, 0)), color, Load(pixel + int2(1, 0)), Load(pixel + int2(0, 1)));
 
-    if (Linear && (DebugView == 0 || DebugView >= 3)) color = LinearToSrgb(color / max(1 - color, 1.0 / HalfMax));
+    if (Linear && !ShowMotion && !ShowObjectMotion) color = LinearToSrgb(color / max(1 - color, 1.0 / HalfMax));
 
-    if (DebugView >= 3)
+    uint width, height, raysWidth, raysHeight;
+    Upscaled.GetDimensions(width, height);
+    ShadowRays.GetDimensions(raysWidth, raysHeight);
+    if (raysWidth)
     {
-        uint width, height, raysWidth, raysHeight;
-        Upscaled.GetDimensions(width, height);
-        ShadowRays.GetDimensions(raysWidth, raysHeight);
-        if (raysWidth)
-        {
-            float4 rays = ShadowRays.Load(int3(position.xy * float2(raysWidth, raysHeight) / float2(width, height), 0));
-            color = lerp(color, rays.rgb, rays.a);
-        }
+        float4 rays = ShadowRays.Load(int3(position.xy * float2(raysWidth, raysHeight) / float2(width, height), 0));
+        color = lerp(color, rays.rgb, rays.a);
+    }
 
+    if (ShowProbe)
+    {
         // The probes' pixel, the screen's centre, sun or none: indoors only the lamps' probe runs, and
         // without a sun the rays' view stays empty.
         int2 fromCentre = int2(position.xy) - int2(uint2(width, height) / 2);
         bool onCross = (abs(fromCentre.x) <= 1 && abs(fromCentre.y) <= 18) || (abs(fromCentre.y) <= 1 && abs(fromCentre.x) <= 18);
-        if ((DebugView == 3 || DebugView == 5) && onCross) color = 1;
+        if (onCross) color = 1;
     }
 
     return float4(color, 0);
