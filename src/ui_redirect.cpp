@@ -48,7 +48,7 @@ struct Targets
 {
     unsigned width{}, height{};
     bool blurAtOutputSize{};
-    Texture surfaces[5]; // Scene, Copy, Blur, BlurTwin, Bake
+    Texture surfaces[7]; // Scene, Copy, Blur, BlurTwin, Bake, Velocity, Depth
     ComPtr<ID3D11ShaderResourceView> srgbView;
     // The 2D pass masks with stencil; it does not test depth.
     ComPtr<ID3D11DepthStencilView> depth;
@@ -89,6 +89,8 @@ std::shared_ptr<const Targets> targets;
 ComPtr<ID3D11Resource> scene;
 ComPtr<ID3D11ShaderResourceView> sceneView;
 bool creationFailed{};
+unsigned failedWidth{}, failedHeight{};
+bool failedFullBlur{};
 
 bool belowOutput(render_scale::Size render)
 {
@@ -107,7 +109,7 @@ bool sceneTarget(const D3D11_TEXTURE2D_DESC& texture)
     return texture.Format == hdr::sceneFormat() && renderSized(texture);
 }
 
-bool makeSurface(Texture& surface, const D3D11_TEXTURE2D_DESC& desc, DXGI_FORMAT viewFormat)
+HRESULT makeSurface(Texture& surface, const D3D11_TEXTURE2D_DESC& desc, DXGI_FORMAT viewFormat)
 {
     const D3D11_RENDER_TARGET_VIEW_DESC targetDesc{viewFormat, D3D11_RTV_DIMENSION_TEXTURE2D};
     D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{viewFormat, D3D11_SRV_DIMENSION_TEXTURE2D};
@@ -115,13 +117,23 @@ bool makeSurface(Texture& surface, const D3D11_TEXTURE2D_DESC& desc, DXGI_FORMAT
     surface.width = desc.Width;
     surface.height = desc.Height;
 
-    return SUCCEEDED(device->CreateTexture2D(&desc, nullptr, surface.texture.GetAddressOf()))
-        && SUCCEEDED(device->CreateRenderTargetView(surface.texture.Get(), &targetDesc, surface.target.GetAddressOf()))
-        && SUCCEEDED(device->CreateShaderResourceView(surface.texture.Get(), &viewDesc, surface.view.GetAddressOf()));
+    HRESULT result = device->CreateTexture2D(&desc, nullptr, surface.texture.GetAddressOf());
+    if (SUCCEEDED(result)) result = device->CreateRenderTargetView(surface.texture.Get(), &targetDesc, surface.target.GetAddressOf());
+    if (SUCCEEDED(result)) result = device->CreateShaderResourceView(surface.texture.Get(), &viewDesc, surface.view.GetAddressOf());
+
+    return result;
 }
 
 std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height, bool fullBlur)
 {
+    // Each step that can fail says so in the log, with its result: a target that is not ready costs
+    // every frame of upscaling until the size or the setting changes.
+    const auto failed = [](const char* step, HRESULT result)
+    {
+        log(std::string("Could not create the UI target: ") + step + " failed (0x" + std::to_string(static_cast<unsigned>(result)) + ").");
+        return std::shared_ptr<const Targets>{};
+    };
+
     auto created = std::make_shared<Targets>();
     created->width = width;
     created->height = height;
@@ -147,56 +159,76 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height, bo
         blurDesc.Height = std::max(height / 2, 1u);
     }
 
-    auto& [outputScene, outputCopy, blur, blurTwin, bake] = created->surfaces;
-    if (!makeSurface(outputScene, desc, drawFormat()) || !makeSurface(outputCopy, desc, drawFormat()) || !makeSurface(blur, blurDesc, drawFormat())
-        || !makeSurface(blurTwin, blurDesc, drawFormat()) || !makeSurface(bake, blurDesc, drawFormat()))
-        return nullptr;
+    auto& [outputScene, outputCopy, blur, blurTwin, bake, velocity, depth16] = created->surfaces;
+    HRESULT result = makeSurface(outputScene, desc, drawFormat());
+    if (SUCCEEDED(result)) result = makeSurface(outputCopy, desc, drawFormat());
+    if (FAILED(result)) return failed("a scene target", result);
+    for (auto* surface : {&blur, &blurTwin, &bake})
+    {
+        result = makeSurface(*surface, blurDesc, drawFormat());
+        if (FAILED(result)) return failed("a motion blur target", result);
+    }
+
+    // The engine's velocity holds encoded values, so it keeps their format rather than the scene's; the
+    // depth keeps its own precision.
+    auto velocityDesc = blurDesc;
+    velocityDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    result = makeSurface(velocity, velocityDesc, DXGI_FORMAT_B8G8R8A8_UNORM);
+    if (FAILED(result)) return failed("the velocity target", result);
+    auto depthDesc = blurDesc;
+    depthDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    result = makeSurface(depth16, depthDesc, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    if (FAILED(result)) return failed("the depth target", result);
 
     const float system[16]{0, 0, 0, 0, static_cast<float>(width), static_cast<float>(height), 0, 0, static_cast<float>(width),
         static_cast<float>(height), 1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height)};
     const D3D11_BUFFER_DESC systemDesc{sizeof(system), D3D11_USAGE_IMMUTABLE, D3D11_BIND_CONSTANT_BUFFER};
     const D3D11_SUBRESOURCE_DATA systemData{system};
     const D3D11_BUFFER_DESC postSystemDesc{sizeof(system), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
-    if (FAILED(device->CreateBuffer(&systemDesc, &systemData, created->systemConstants.GetAddressOf()))
-        || FAILED(device->CreateBuffer(&postSystemDesc, nullptr, created->postSystemConstants.GetAddressOf())))
-        return nullptr;
+    result = device->CreateBuffer(&systemDesc, &systemData, created->systemConstants.GetAddressOf());
+    if (SUCCEEDED(result)) result = device->CreateBuffer(&postSystemDesc, nullptr, created->postSystemConstants.GetAddressOf());
+    if (FAILED(result)) return failed("the system constants", result);
 
     const D3D11_BUFFER_DESC sceneDesc{sizeof(game_constants::SceneConstants), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
     const float viewport[4]{static_cast<float>(width), static_cast<float>(height)};
     const D3D11_BUFFER_DESC viewportDesc{sizeof(viewport), D3D11_USAGE_IMMUTABLE, D3D11_BIND_CONSTANT_BUFFER};
     const D3D11_SUBRESOURCE_DATA viewportData{viewport};
-    if (FAILED(device->CreateBuffer(&sceneDesc, nullptr, created->sceneConstants.GetAddressOf()))
-        || FAILED(device->CreateBuffer(&viewportDesc, &viewportData, created->viewportSize.GetAddressOf())))
-        return nullptr;
+    result = device->CreateBuffer(&sceneDesc, nullptr, created->sceneConstants.GetAddressOf());
+    if (SUCCEEDED(result)) result = device->CreateBuffer(&viewportDesc, &viewportData, created->viewportSize.GetAddressOf());
+    if (FAILED(result)) return failed("the scene constants", result);
 
     D3D11_SHADER_RESOURCE_VIEW_DESC srgbDesc{gammaFormat(), D3D11_SRV_DIMENSION_TEXTURE2D};
     srgbDesc.Texture2D.MipLevels = 1;
     desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
     desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
     ComPtr<ID3D11Texture2D> depth;
-    if (FAILED(device->CreateShaderResourceView(outputScene.texture.Get(), &srgbDesc, created->srgbView.GetAddressOf()))
-        || FAILED(device->CreateTexture2D(&desc, nullptr, depth.GetAddressOf()))
-        || FAILED(device->CreateDepthStencilView(depth.Get(), nullptr, created->depth.GetAddressOf())))
-        return nullptr;
+    result = device->CreateShaderResourceView(outputScene.texture.Get(), &srgbDesc, created->srgbView.GetAddressOf());
+    if (SUCCEEDED(result)) result = device->CreateTexture2D(&desc, nullptr, depth.GetAddressOf());
+    if (SUCCEEDED(result)) result = device->CreateDepthStencilView(depth.Get(), nullptr, created->depth.GetAddressOf());
+    if (FAILED(result)) return failed("the depth-stencil", result);
 
     return created;
 }
 
 // The output-size targets, made when first needed and again when the output size or the motion blur's
-// size changes.
+// size changes. A size that could not be made is not tried again until one of them changes.
 std::shared_ptr<const Targets> currentTargets()
 {
     const unsigned width = outputWidth, height = outputHeight;
     const bool fullBlur = blurAtOutputSize;
     std::lock_guard lock(mutex);
     if (targets && targets->width == width && targets->height == height && targets->blurAtOutputSize == fullBlur) return targets;
-    if (!device || !width || !height || creationFailed) return nullptr;
+    if (!device || !width || !height) return nullptr;
+    if (creationFailed && failedWidth == width && failedHeight == height && failedFullBlur == fullBlur) return nullptr;
 
     targets = createTargets(width, height, fullBlur);
     creationFailed = !targets;
+    failedWidth = width;
+    failedHeight = height;
+    failedFullBlur = fullBlur;
     log(targets ? "Created the UI target at " + std::to_string(width) + "x" + std::to_string(height)
                 + (fullBlur ? ", the motion blur's at the output size." : ", the motion blur's at half of it.")
-                : std::string("Could not create the UI target; the UI renders at the render size."));
+                : std::string("The UI renders at the render size until the output size or the motion blur's changes."));
 
     return targets;
 }
@@ -571,7 +603,7 @@ void saveSurfaces(ID3D11DeviceContext* context) noexcept
         const auto output = currentTargets();
         if (directory.empty() || !output || !context) return;
 
-        static constexpr const char* names[]{"scene", "copy", "blur", "blur-twin", "bake"};
+        static constexpr const char* names[]{"scene", "copy", "blur", "blur-twin", "bake", "velocity", "depth"};
         for (std::size_t i = 0; i < std::size(names); ++i)
             saveTexture(context, (*output)[static_cast<Surface>(i)].texture.Get(), DXGI_FORMAT_UNKNOWN,
                 directory / ("ui-" + std::string(names[i]) + ".dds"));

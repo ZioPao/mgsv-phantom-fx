@@ -39,6 +39,8 @@ enum class Surface : std::uint8_t
     Blur,     // Half the output size: in place of the motion blur's two half-size targets
     BlurTwin,
     Bake,     // Half the output size: in place of the bake the gathers read at t5
+    Velocity, // Half the output size: the engine's velocity, upsampled, in place of the bake's t2
+    Depth,    // Half the output size: the engine's depth, upsampled, in place of the bake's t3
 };
 
 // One draw of the game's at the output size, on a recording context: `target` in place of its render

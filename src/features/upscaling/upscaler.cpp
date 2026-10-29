@@ -1089,7 +1089,29 @@ bool redirectBake(ID3D11DeviceContext* context)
         return false;
     }
 
-    postDraw.redirected.emplace(context, ui_redirect::Surface::Bake, Inputs{});
+    // The engine's velocity and depth are at the render size, and the blur's weight follows both: a
+    // moving edge's mask steps by the render size. Upsampled into the layer's size with the stretch's
+    // linear filter, both ramp across those pixels instead, and the bake reads them in t2's and t3's
+    // place.
+    ComPtr<ID3D11ShaderResourceView> engineVelocity, engineDepth;
+    context->PSGetShaderResources(2, 1, engineVelocity.GetAddressOf());
+    context->PSGetShaderResources(3, 1, engineDepth.GetAddressOf());
+    const auto upsampledVelocity = ui_redirect::surfaceViews(ui_redirect::Surface::Velocity);
+    const auto upsampledDepth = ui_redirect::surfaceViews(ui_redirect::Surface::Depth);
+    const auto stretch = ensureStretch();
+    const bool smooth = engineVelocity && engineDepth && upsampledVelocity.target && upsampledDepth.target && stretch;
+    if (smooth)
+    {
+        const SavedStretchState saved(context);
+        drawStretch(context, *stretch, stretch->pixel.Get(), {engineVelocity.Get()}, upsampledVelocity.target.Get());
+        drawStretch(context, *stretch, stretch->pixel.Get(), {engineDepth.Get()}, upsampledDepth.target.Get());
+    }
+
+    using enum ui_redirect::Surface;
+    if (smooth)
+        postDraw.redirected.emplace(context, Bake, Inputs{{2, Velocity}, {3, Depth}});
+    else
+        postDraw.redirected.emplace(context, Bake, Inputs{});
     if (!*postDraw.redirected)
     {
         postDraw.clear();
@@ -1101,7 +1123,7 @@ bool redirectBake(ID3D11DeviceContext* context)
 
     const auto bake = ui_redirect::surfaceViews(ui_redirect::Surface::Bake);
     logOnce("The motion blur's bake at " + std::to_string(bake.width) + "x" + std::to_string(bake.height)
-        + ": with the gathers, at half the output size instead of half the render size.");
+        + ", its velocity and depth upsampled from the engine's render size.");
 
     return true;
 }
