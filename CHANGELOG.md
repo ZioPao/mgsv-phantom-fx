@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Global illumination: steadier light along edges and in grass.** With DLSS or FSR jittering the
+  frame, the global illumination's denoiser started the light over along object edges every frame,
+  most in grass and bushes. Its half-resolution samples now stay on the surface they had the frame
+  before.
+- **Global illumination: the denoiser follows the camera exactly.** Its idea of where each pixel was
+  in the last frame was off by up to a fifth of a pixel near the camera, a little differently with
+  every frame's jitter. It is now worked out relative to the camera, in double precision.
+- **Diagnostics: the denoiser's own checks as a debug view.** **Global illumination denoiser (NRD)**
+  shows NVIDIA's validation layer for the global illumination's denoiser: its view depth, normals,
+  motion against a still scene and frames of history.
+
 - **Ray-traced shadows: no lit halo around sunlit characters.** A character in the sun in front of a
   shaded wall left a lit band on the wall along their outline, wider the lower the render scale. The
   shadow denoiser no longer mixes a pixel's shadow with what lies in front of or behind it.
