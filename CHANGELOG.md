@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **HDR: the sun is a disc again, not a ring.** With HDR on, the sky's sun was drawn as a bright
+  ring around a dimmer centre. The game's sky and the physical sky now keep the game's limit of 1,
+  so the sun stays a solid disc.
 - **The contact shadow sliders sit below both of their toggles.** Contrast, reach, thickness and fade
   belong to the sun's contact shadows and the lamps' alike, so they now end the Shadows page, after
   the lamps' toggle, instead of sitting inside the sun's.

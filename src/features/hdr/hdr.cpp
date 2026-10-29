@@ -47,10 +47,7 @@ constexpr UINT MaterialSlot = 4, CurveSlot = 8, OutputSlot = 2, DofSceneSlot = 1
 // below the knee, the div is -1 / (a (x - b + c)), and the third mul weighs the curve's part.
 constexpr std::uint32_t TonemapBlock[]{0x1D, 0x37, 0x38, 0x36, 0x00, 0x00, 0x36, 0x00, 0x38, 0x0E, 0x00, 0x00, 0x38, 0x00};
 constexpr std::size_t MaskStep = 1, DivideStep = 9, CurveStep = 12;
-constexpr std::uint32_t AndOpcode = 0x01, MinOpcode = 0x33, OpcodeMask = 0x7FF;
-// The sky draws clamp to 1 within these many instructions after the block.
-constexpr std::size_t ClampReach = 8;
-constexpr float HalfMax = 65504;
+constexpr std::uint32_t AndOpcode = 0x01, OpcodeMask = 0x7FF;
 
 struct OutputParameters
 {
@@ -205,8 +202,9 @@ float floatAt(const std::uint8_t* bytes, std::size_t offset)
 // The scene in light rather than through TppTonemap: in each TppTonemap block the mask that keeps
 // the linear part below the knee takes its linear value whatever the comparison, and the curve's part
 // is ANDed with the zero left beside it, as a multiply by zero would keep the curve's pole as NaN.
-// The sky draws' clamp to 1 that follows is lifted to the half-float maximum. Nullopt when the
-// shader has no TppTonemap.
+// The sky draws' clamp to 1 that follows stays: above it, the sun's sprite shows its own profile, a
+// ring around a dimmer centre, instead of the disc the clamp makes. Nullopt when the shader has no
+// TppTonemap.
 std::optional<std::vector<std::uint8_t>> withoutTonemap(const void* code, std::size_t size)
 {
     std::vector<std::uint8_t> patched(static_cast<const std::uint8_t*>(code), static_cast<const std::uint8_t*>(code) + size);
@@ -242,17 +240,6 @@ std::optional<std::vector<std::uint8_t>> withoutTonemap(const void* code, std::s
         token = (token & ~OpcodeMask) | AndOpcode;
         std::memcpy(bytes + curve, &token, 4);
         found = true;
-
-        for (std::size_t after = first + std::size(TonemapBlock); after < std::min(steps.size(), first + std::size(TonemapBlock) + ClampReach); ++after)
-        {
-            if (steps[after].opcode != MinOpcode) continue;
-
-            for (const auto literal : immediatesOf(bytes, steps[after]))
-                for (std::size_t component = 0; component < 4; ++component)
-                    if (floatAt(bytes, literal + 4 * component) == 1) std::memcpy(bytes + literal + 4 * component, &HalfMax, 4);
-
-            break;
-        }
     }
 
     if (!found) return std::nullopt;

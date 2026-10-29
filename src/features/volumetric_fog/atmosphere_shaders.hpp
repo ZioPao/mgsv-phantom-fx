@@ -934,7 +934,9 @@ float4 main(float4 position : SV_Position, float3 ray : TEXCOORD0, float4 moonPl
     color = fog.rgb * m_scene[25].y + color * fog.a;
 
 #if HDR
-    return float4(Encode(max(color, 0)), 0);
+    // Clamped to 1 as the game's sky draws stay with HDR (hdr.cpp): above it the sun's sprite shows as
+    // a ring around a dimmer centre instead of a disc. One unit is paper white.
+    return float4(Encode(min(max(color, 0), 1)), 0);
 #else
     return float4(Encode(saturate(TppTonemap(color, m_materials[1].xyz))), 0);
 #endif
