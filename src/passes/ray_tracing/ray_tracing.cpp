@@ -725,12 +725,12 @@ void configure(const Configuration& configuration) noexcept
         .sunSize = settings.sun.diameterDegrees,
         .lightPixelRays = settings.globalIllumination.raysPerLightPixel,
         .showScene = diagnostics.showTracedScene,
-        .debugShadows = diagnostics.debugView == ShadowRaysView || diagnostics.debugView == ShadowStartsView,
-        .shadowStarts = diagnostics.debugView == ShadowStartsView,
+        .debugShadows = diagnostics.debugView == DebugView::ShadowRays || diagnostics.debugView == DebugView::ShadowStarts,
+        .shadowStarts = diagnostics.debugView == DebugView::ShadowStarts,
         .twoSidedShadows = diagnostics.twoSidedShadows,
-        .lightDebugView = diagnostics.debugView == LightHistoryView        ? gi_renderer::LightDebugView::History
-                          : diagnostics.debugView == LightValidationView ? gi_renderer::LightDebugView::Validation
-                                                                         : gi_renderer::LightDebugView::None,
+        .lightDebugView = diagnostics.debugView == DebugView::LightHistory      ? gi_renderer::LightDebugView::History
+                          : diagnostics.debugView == DebugView::LightValidation ? gi_renderer::LightDebugView::Validation
+                                                                                : gi_renderer::LightDebugView::None,
         .logOften = diagnostics.logGlobalIlluminationOften,
         .light = !configuration.leftOut.globalLight,
     };

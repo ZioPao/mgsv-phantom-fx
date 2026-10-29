@@ -1081,8 +1081,8 @@ float3 DenoisedLight(uint2 lightPixel, float3 normal, float3 ownNormal)
 }
 
 // Diagnostics, blended over the image by its alpha: the denoiser's history at each render pixel
-// (LightHistoryView, phantom_fx_settings.hpp), red where it started the light over within three frames,
-// yellow under ten; or NRD's validation layer (LightValidationView).
+// (DebugView::LightHistory, phantom_fx_settings.hpp), red where it started the light over within three
+// frames, yellow under ten; or NRD's validation layer (DebugView::LightValidation).
 RWTexture2D<float4> g_LightDebug : register(u79);
 
 float4 HistoryColor(float frames)
