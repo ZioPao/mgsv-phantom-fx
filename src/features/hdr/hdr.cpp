@@ -47,10 +47,7 @@ constexpr UINT MaterialSlot = 4, CurveSlot = 8, OutputSlot = 2, DofSceneSlot = 1
 // below the knee, the div is -1 / (a (x - b + c)), and the third mul weighs the curve's part.
 constexpr std::uint32_t TonemapBlock[]{0x1D, 0x37, 0x38, 0x36, 0x00, 0x00, 0x36, 0x00, 0x38, 0x0E, 0x00, 0x00, 0x38, 0x00};
 constexpr std::size_t MaskStep = 1, DivideStep = 9, CurveStep = 12;
-constexpr std::uint32_t AndOpcode = 0x01, MinOpcode = 0x33, OpcodeMask = 0x7FF;
-// The sky draws clamp to 1 within these many instructions after the block.
-constexpr std::size_t ClampReach = 8;
-constexpr float HalfMax = 65504;
+constexpr std::uint32_t AndOpcode = 0x01, OpcodeMask = 0x7FF;
 
 struct OutputParameters
 {
@@ -205,9 +202,10 @@ float floatAt(const std::uint8_t* bytes, std::size_t offset)
 // The scene in light rather than through TppTonemap: in each TppTonemap block the mask that keeps
 // the linear part below the knee takes its linear value whatever the comparison, and the curve's part
 // is ANDed with the zero left beside it, as a multiply by zero would keep the curve's pole as NaN.
-// The clamp to 1 that follows is lifted to the display's peak, except for the sky (no liftClamp).
-// Nullopt when the shader has no TppTonemap.
-std::optional<std::vector<std::uint8_t>> withoutTonemap(const void* code, std::size_t size, bool liftClamp)
+// The sky draws' clamp to 1 that follows stays: above it, the sun's sprite shows its own profile, a
+// ring around a dimmer centre, instead of the disc the clamp makes. Nullopt when the shader has no
+// TppTonemap.
+std::optional<std::vector<std::uint8_t>> withoutTonemap(const void* code, std::size_t size)
 {
     std::vector<std::uint8_t> patched(static_cast<const std::uint8_t*>(code), static_cast<const std::uint8_t*>(code) + size);
     auto* bytes = patched.data();
@@ -242,23 +240,6 @@ std::optional<std::vector<std::uint8_t>> withoutTonemap(const void* code, std::s
         token = (token & ~OpcodeMask) | AndOpcode;
         std::memcpy(bytes + curve, &token, 4);
         found = true;
-
-        for (std::size_t after = first + std::size(TonemapBlock); after < std::min(steps.size(), first + std::size(TonemapBlock) + ClampReach); ++after)
-        {
-            if (steps[after].opcode != MinOpcode) continue;
-            if (!liftClamp) break;
-
-            for (const auto literal : immediatesOf(bytes, steps[after]))
-                for (std::size_t component = 0; component < 4; ++component)
-                {
-                    if (floatAt(bytes, literal + 4 * component) != 1) continue;
-
-                    const float clamp = sceneClamp();
-                    std::memcpy(bytes + literal + 4 * component, &clamp, 4);
-                }
-
-            break;
-        }
     }
 
     if (!found) return std::nullopt;
@@ -352,19 +333,6 @@ float peakNitsFor(float chosen) noexcept
 {
     const float reported = displayPeak;
     return chosen > 0 ? chosen : reported > 0 ? reported : FallbackPeakNits;
-}
-
-// What HDR lifts the game's clamp to: the display's peak, in the scene's encoded units (one unit is
-// paper white, and the targets hold sRGB-encoded light).
-float sceneClamp() noexcept
-{
-    const float paperWhite = paperWhiteNits.load(std::memory_order_relaxed);
-    const float nits = peakNitsFor(peakNits.load(std::memory_order_relaxed));
-    if (!(paperWhite > 0) || !(nits > 0)) return 1;
-
-    const float linear = std::max(nits / paperWhite, 1.0f);
-
-    return 1.055f * std::pow(linear, 1 / 2.4f) - 0.055f;
 }
 
 void attach(ID3D11Device* gameDevice) noexcept
@@ -586,14 +554,8 @@ const std::vector<std::uint8_t>* patchedShader(const void* code, std::size_t siz
         std::unique_lock lock(mutex);
         if (const auto found = patchedShaders.find(*hash); found != patchedShaders.end()) return &found->second.code;
 
-        // The sky keeps the game's clamp at 1: above it, the sprite it draws for the sun shows its own
-        // profile, a ring around a dimmer centre, instead of the disc the clamp makes.
-        const auto hashText = toHex(*hash);
-        const bool sky = std::ranges::any_of(game_shaders::GameShaders,
-            [&](const game_shaders::GameShader& row) { return row.pass == GamePass::Sky && hashText == row.checksum; });
-
         const bool draw2D = draw2DSource(std::string_view(static_cast<const char*>(code), size), "_ps.hlsl");
-        const auto patched = draw2D ? saturateOutput(code, size) : withoutTonemap(code, size, !sky);
+        const auto patched = draw2D ? saturateOutput(code, size) : withoutTonemap(code, size);
         if (!patched)
         {
             if (draw2D) logOnce("HDR: the 2D pass shader " + toHex(*hash) + " keeps its writes unclamped.");
@@ -638,7 +600,6 @@ bool beforeDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call,
 
     try
     {
-
         // The resolves with TppTonemap give its curve; CopyRenderBuffer copies the scene into the depth of
         // field's copy, and DOF_ScatterCompositeFinal draws the depth of field over it.
         if (const auto* row = shader.row())

@@ -1462,9 +1462,10 @@ grading, as RenoDX's mods do, and the grading and output follow RenoDX's and Lum
   compiled it unoptimised (14 instructions: `ge, movc, mul, mov, add, add, mov, add, mul, div, add,
   add, mul, add`, the movc's literals 1/0 and 0, the div's -1), is patched: the movc's second literal
   takes the first's, so the linear part is always kept, and the curve's multiply becomes an `and`
-  with the zero beside it (a multiply would keep the curve's pole as NaN). The three sky draws'
-  clamp to 1 within 8 instructions after it (`min` with a literal of ones) becomes 65504. 27 shaders:
-  the 4 resolves and the 23 forward ones. The patched code gets its checksum again (`resign`), and
+  with the zero beside it (a multiply would keep the curve's pole as NaN). The three sky draws keep
+  their clamp to 1 after it (`min` with a literal of ones; no other shader has one): above it the
+  sun's sprite shows as a ring around a dimmer centre (issue #47), and the physical sky clamps the
+  same way for the sprite it draws. 27 shaders: the 4 resolves and the 23 forward ones. The patched code gets its checksum again (`resign`), and
   Direct3D must take it before the game does, or the game keeps its own. `init_pipeline` hands every
   part of the add-on the game's own code, so shaders are still known by their checksum.
 - **What expects TppTonemap's image.** `CopyReductionX4` from the scene, the quarter-size copy bloom

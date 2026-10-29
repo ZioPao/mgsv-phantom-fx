@@ -45,8 +45,6 @@ bool active() noexcept;
 Output output() noexcept;
 // The peak brightness HDR maps to for a chosen one, in nits: 0 takes what the display reports.
 float peakNitsFor(float chosen) noexcept;
-// What HDR lifts the game's clamp to: the display's peak, in the scene's encoded units.
-float sceneClamp() noexcept;
 // Checks the device can run HDR; it stays off for the session when it cannot.
 void attach(ID3D11Device* device) noexcept;
 // Releases everything; only when no Direct3D work can run (device teardown, unload).
