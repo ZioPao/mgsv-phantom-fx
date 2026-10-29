@@ -2,9 +2,11 @@
 
 #include "d3d11_helpers.hpp"
 #include "features/hdr/hdr.hpp"
+#include "frame_log.hpp"
 #include "game_constants.hpp"
 #include "log.hpp"
 #include "render_scale.hpp"
+#include "resource_dump.hpp"
 
 #include <algorithm>
 #include <array>
@@ -531,6 +533,26 @@ SurfaceViews surfaceViews(Surface surface) noexcept
 bool isUpscaling() noexcept
 {
     return belowOutput(render_scale::current());
+}
+
+// The output-size surfaces into an F10 record's folder, so a frame's blur can be looked at by hand:
+// what the gathers wrote and what the game's bake held. Development only, one write per recorded frame.
+void saveSurfaces(ID3D11DeviceContext* context) noexcept
+{
+    try
+    {
+        const auto directory = frame_log::recordingDirectory();
+        const auto output = currentTargets();
+        if (directory.empty() || !output || !context) return;
+
+        static constexpr const char* names[]{"scene", "copy", "blur", "blur-twin", "bake"};
+        for (std::size_t i = 0; i < std::size(names); ++i)
+            saveTexture(context, (*output)[static_cast<Surface>(i)].texture.Get(), DXGI_FORMAT_UNKNOWN,
+                directory / ("ui-" + std::string(names[i]) + ".dds"));
+    }
+    catch (...)
+    {
+    }
 }
 
 bool renderSized(ID3D11View* view) noexcept

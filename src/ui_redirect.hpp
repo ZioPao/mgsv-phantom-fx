@@ -89,6 +89,8 @@ struct SurfaceViews
 SurfaceViews surfaceViews(Surface surface) noexcept;
 // The engine renders below the output size.
 bool isUpscaling() noexcept;
+// The output-size surfaces into an F10 record's folder (development builds).
+void saveSurfaces(ID3D11DeviceContext* context) noexcept;
 // The view's texture has the render size, while the engine renders below the output size.
 bool renderSized(ID3D11View* view) noexcept;
 

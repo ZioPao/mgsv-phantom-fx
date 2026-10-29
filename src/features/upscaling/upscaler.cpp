@@ -1948,6 +1948,8 @@ void present() noexcept
             log("Status: " + std::to_string(evaluations) + " upscaled frames, " + std::to_string(fallbacks) + " without, "
                 + std::to_string(resets) + " history resets (" + std::to_string(cameraCuts) + " at camera cuts); last fallback: "
                 + (lastFallback.empty() ? "none" : lastFallback) + "; " + std::to_string(expiredNotes) + " contexts' or lists' notes expired.");
+
+        ui_redirect::saveSurfaces(immediate.Get());
     }
 }
 

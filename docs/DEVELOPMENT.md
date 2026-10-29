@@ -352,6 +352,9 @@ reads state; the frame renders unchanged. Its files go into that folder:
   of those in front of the eye; and `<call>-streams.txt`: every other bound vertex buffer slot from
   its offset, an element a line as floats (an instanced draw's per-instance data, such as the clone
   shaders' matrix rows).
+- While a record runs, the add-on's own output-size surfaces go into the same folder as
+  `ui-scene.dds`, `ui-copy.dds`, `ui-blur.dds`, `ui-blur-twin.dds` and `ui-bake.dds`: what the
+  motion blur's gathers wrote and the bake they read, their alpha included.
 - With Ray-traced lights on, a dev build's redraw of the lights saves what it draws from into the same
   folder, for each batch it draws: `lights-<n>-before-diffuse.dds` and `-specular` (the light targets),
   `-after-` the same once drawn, `-share.dds` (the rays' share, R16), `-depth.dds` (64 bits a pixel, the
