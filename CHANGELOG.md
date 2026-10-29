@@ -13,6 +13,11 @@
   outline, 2-3 px wide at Quality and 5-6 px at Ultra Performance in 4K. The blur's velocity and depth
   are now prepared at the same size the blur draws at, so the steps match native resolution's, except
   at Ultra Performance, where they halve to the render pixel.
+- **Motion blur: the Strength slider works.** It never changed the blur. It now scales how far the
+  blur reaches, from none at 0% to the game's own at 100%; above 100% it reaches further up to the
+  game's limit.
+- **Motion blur is halved while frame generation runs**, as NVIDIA recommends: each frame shown covers
+  half the motion.
 
 ## 1.9.0
 
