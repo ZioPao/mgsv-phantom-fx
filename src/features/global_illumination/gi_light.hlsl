@@ -37,7 +37,7 @@ RWTexture2D<float> g_Light_ViewZ : register(u7);            // The denoiser's gu
 RWTexture2D<float4> g_Light_NormalRoughness : register(u8); // IN_NORMAL_ROUGHNESS,
 RWTexture2D<float> g_Light_LastViewZ : register(u30);       // g_Light_ViewZ as the last frame wrote it (PrepareGuides)
 RWTexture2D<uint> g_Light_Pick : register(u35);             // Which render pixel of its 2 x 2 each light pixel's sample is from (PickOf)
-RWTexture2D<float4> g_Light_Validation : register(u36);     // NRD's validation layer (OUT_VALIDATION), with its debug view
+RWTexture2D<unorm float4> g_Light_Validation : register(u36); // NRD's validation layer (OUT_VALIDATION), with its debug view (unorm: read as a UAV)
 RWTexture2D<float4> g_Light_Motion : register(u9);          // IN_MV: the last frame's uv minus this one's, and view z's change
 RWTexture2D<float4> g_Light_Noisy[2] : register(u10);       // u10, u11: NRD's IN_DIFF_SH0 and SH1
 RWTexture2D<float4> g_Light_Denoised[2] : register(u12);    // u12, u13: NRD's OUT_DIFF_SH0 and SH1
