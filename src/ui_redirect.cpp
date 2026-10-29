@@ -80,6 +80,9 @@ struct BlurTargets
         return surfaces[static_cast<std::size_t>(surface) - static_cast<std::size_t>(Surface::Blur)];
     }
 };
+static_assert(static_cast<int>(Surface::BlurTwin) == static_cast<int>(Surface::Blur) + 1
+        && static_cast<int>(Surface::BlurBake) == static_cast<int>(Surface::Blur) + 2,
+    "BlurTargets counts the blur's surfaces from Blur, in Surface's order.");
 
 // Whether each recording context has a 2D pass vertex shader bound, by the context ReShade reports
 // with each binding.
@@ -225,7 +228,7 @@ std::shared_ptr<const Targets> currentTargets()
     return targets;
 }
 
-// The blur's pair, made when first needed and again when the output size changes.
+// The blur's surfaces, made when first needed and again when the output size changes.
 std::shared_ptr<const BlurTargets> currentBlurTargets()
 {
     const unsigned width = outputWidth, height = outputHeight;

@@ -1407,7 +1407,8 @@ Not handled:
   size it averages out.
 - The motion blur's velocity and depth exist only at the render size, and its bake point-samples
   them. A moving silhouette therefore still steps by a render pixel where that is wider than the
-  gather's two output pixels: at Ultra Performance, 3 px over 3840x2160. Sampling them bilinearly
+  gather's two output pixels: at Ultra Performance over 3840x2160, by 2 and 4 px in turn, as the
+  gather's 2 px pixels fall on the render's 3 px ones (3 px on average). Sampling them bilinearly
   would not help: it would blend a character's depth and velocity with the background's into values
   that belong to neither.
 

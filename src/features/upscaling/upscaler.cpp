@@ -854,51 +854,57 @@ void drawGradedScene(ID3D11DeviceContext* context, ID3D11RenderTargetView* scene
     drawStretch(context, *stretch, stretch->pixel.Get(), {output.view.Get()}, scene);
 }
 
-// The game's motion blur on one recording thread: the frame, the game's half-size target its last
-// gather pass wrote, by address only, and the surface at half the output size that holds that pass's
-// result.
-struct BlurChain
-{
-    std::uint64_t frame{};
-    const ID3D11Resource* gameTarget{};
-    ui_redirect::Surface surface{};
-};
-thread_local BlurChain blurChain;
-
 std::uint64_t currentRecordingFrame()
 {
     std::lock_guard lock(recordMutex);
     return frames.recordingFrame();
 }
 
-// Whether `source` is the result of this frame's last gather pass on this thread. Without the frame, a
-// frame that missed its composite would leave the next frame's first pass taken for its second.
+// A game target one of the motion blur's draws wrote on a recording thread, by address only, and the
+// frame being recorded then. The game draws into the same targets every frame, so the address alone
+// would match an earlier frame's draw.
+struct DrawnGameTarget
+{
+    std::uint64_t frame{};
+    const ID3D11Resource* target{};
+
+    bool isReadBy(ID3D11ShaderResourceView* view) const
+    {
+        return target && frame == currentRecordingFrame() && resourceOf(view).Get() == target;
+    }
+};
+
+// The game's motion blur on one recording thread: the game's half-size target its last gather pass
+// wrote, and the surface at half the output size that holds that pass's result.
+struct BlurChain
+{
+    DrawnGameTarget gameTarget;
+    ui_redirect::Surface surface{};
+};
+thread_local BlurChain blurChain;
+
+// Whether `source` is the result of the last gather pass on this thread, in the frame being recorded.
+// Without the frame, a frame that missed its composite would leave the next frame's first pass taken
+// for its second.
 bool isBlurResult(ID3D11ShaderResourceView* source)
 {
-    return blurChain.gameTarget && blurChain.frame == currentRecordingFrame() && resourceOf(source).Get() == blurChain.gameTarget;
+    return blurChain.gameTarget.isReadBy(source);
 }
 
 // The motion blur's gathers read its velocity and depth bake here.
 constexpr UINT BlurBakeSlot = 5;
 
-// The frame and the game's target, by address only, of the last bake the add-on also made at half the
-// output size on this recording thread.
-struct OutputSizeBake
-{
-    std::uint64_t frame{};
-    const ID3D11Resource* gameTarget{};
-};
-thread_local OutputSizeBake outputSizeBake;
+// The game's bake target on this recording thread, where the add-on last baked beside it at half the
+// output size.
+thread_local DrawnGameTarget gameBake;
 
-// Whether the gather on `context` reads this frame's bake, which the add-on's surface holds at half the
-// output size as well.
+// Whether the gather on `context` reads the game's bake that the add-on also made at half the output
+// size.
 bool hasOutputSizeBake(ID3D11DeviceContext* context)
 {
     ComPtr<ID3D11ShaderResourceView> bake;
     context->PSGetShaderResources(BlurBakeSlot, 1, bake.GetAddressOf());
-
-    return outputSizeBake.gameTarget && outputSizeBake.frame == currentRecordingFrame()
-        && resourceOf(bake.Get()).Get() == outputSizeBake.gameTarget;
+    return gameBake.isReadBy(bake.Get());
 }
 
 // The game's last copy on this thread: its target, by address only, and what it copied. Without
@@ -952,7 +958,7 @@ void bakeBlur(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call)
     if (!redirected) return;
 
     context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
-    outputSizeBake = {currentRecordingFrame(), resourceOf(target.Get()).Get()};
+    gameBake = {currentRecordingFrame(), resourceOf(target.Get()).Get()};
 }
 
 // While upscaling, the game's motion blur gathers at half the output size from DLSS's image, as it
@@ -993,7 +999,7 @@ bool gatherBlur(ID3D11DeviceContext* context)
         return false;
     }
 
-    blurChain = {currentRecordingFrame(), resourceOf(target.Get()).Get(), output};
+    blurChain = {{currentRecordingFrame(), resourceOf(target.Get()).Get()}, output};
     if (ui_redirect::isUpscaling()) recordUiTargetUse(context);
 
     return true;
