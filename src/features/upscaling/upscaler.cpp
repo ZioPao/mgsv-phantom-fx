@@ -170,6 +170,9 @@ std::atomic<bool> replacing{};
 std::atomic<bool> frameGeneration{};
 // The current plan's jitter phases and texture LOD bias.
 std::atomic<int> jitterPhases{8};
+// DLSS cycles through 8 phases at every scale, not the 8 x (output / render)^2 of NVIDIA's guide: with
+// the longer cycle its output on thin lines pulsed with it (docs/DEVELOPMENT.md, "Plan").
+constexpr int DlssJitterPhases = 8;
 std::atomic<float> targetMipBias{};
 
 // Frame generation's hudless texture, made at a present for the output size; GammaControl's
@@ -1343,7 +1346,7 @@ void updatePlan()
     }
 
     const float scale = static_cast<float>(plan->render.width) / static_cast<float>(plan->output.width);
-    jitterPhases = camera::jitterPhases(scale);
+    jitterPhases = wanted.upscaler == Upscaler::Dlss ? DlssJitterPhases : camera::jitterPhases(scale);
     targetMipBias = mipBias(scale, wanted.textureBiasOffset);
     render_scale::request(plan->render, plan->output);
 }

@@ -1211,8 +1211,9 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
   `c22.xy`, `c28 = 0`. Those uploads get `c4.z += jx`, `c5.z += jy`, and `c28.xy = (jx, jy)` in NDC.
   Where `c0-c3` is P x (something affine), `c0 += jx·c3` and `c1 += jy·c3` as well (motion blur's
   pass keeps other matrices in `c8-c11` and is still jittered). Shadow views are orthographic and
-  untouched. Halton(2, 3), 8 phases at DLAA; DLSS gets (jx, jy) in render pixels, x right, y down,
-  confirmed with 4x jitter (only that sign is sharp). The upload whose `c0-c3` is `P x V` with `V`
+  untouched. Halton(2, 3), 8 phases with DLSS (see "Plan"); DLSS gets (jx, jy) in render pixels, x
+  right, y down, confirmed with 4x jitter (only that sign is sharp) and again on 2026-10-29: telling
+  DLSS any flipped sign made its output flicker more and blurrier. The upload whose `c0-c3` is `P x V` with `V`
   in `c8-c11` and the largest viewport (`c22.xy`) is the frame's camera, captured before the jitter;
   the first one with ties. Until 2026-10-26 the first won, and DLSS never ran in the intro: its mirror's
   reflection is a camera of its own, drawn first at 1080x608 ("the camera's viewport is not the FXAA
@@ -1261,7 +1262,13 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
   the mode, the custom scale and the output size make a new plan; the overlay applies the custom
   scale and the texture bias when their sliders are released, so a drag does not rebuild the
   targets every frame. The feature is created for render -> output with the mode's quality value.
-  Jitter phases follow the ratio, `ceil(8 x (output / render)^2)` (32 at Performance).
+  Jitter phases: 8 with DLSS at every mode; FSR follows the ratio, `ceil(8 x (output / render)^2)`
+  (32 at Performance), as AMD's guide asks. NVIDIA's guide asks the same ratio for DLSS, but with it
+  DLSS's output on thin lines pulsed with the cycle (Mother Base stair rails, 2026-10-29, still camera,
+  48 frames recorded per variant): the output repeated each cycle, 18 frames at Quality and 72 at
+  Ultra Performance. With 8 phases the flicker (99th percentile of each output pixel's deviation over
+  the frames) fell from 0.0082 to 0.0042 at Quality and from 0.0178 to 0.0069 at Ultra Performance,
+  at the same sharpness (mean gradient on edges of the averaged output).
 - **The UI at the output size** (`ui_redirect.cpp`). While the engine's targets are smaller than
   the swap chain, the add-on keeps a target in the scene's format (`B8G8R8A8_TYPELESS`, float with
   HDR) at the output size, a second one for copies, and a `D24_UNORM_S8_UINT` depth-stencil:
