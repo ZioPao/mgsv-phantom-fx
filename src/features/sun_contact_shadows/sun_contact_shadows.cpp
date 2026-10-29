@@ -62,7 +62,7 @@ ID3D11ShaderResourceView* trace(ID3D11DeviceContext* context, ID3D11ShaderResour
     const performance::Timed timed(context, performance::Pass::SunTrace);
     const auto& direction = light.direction;
     const auto lightProjection = contact_shadow_trace::project(scene, {direction[0], direction[1], direction[2], 0});
-    const auto dispatched = contact_shadow_trace::trace(context, depth, scene, lightProjection, {}, shadow);
+    const auto dispatched = contact_shadow_trace::trace(context, depth, scene, lightProjection, shadow);
     if (!dispatched) return nullptr;
 
     noteTraced(context, depth);

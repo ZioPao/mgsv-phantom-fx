@@ -155,7 +155,7 @@ what draws it, when that is the feature's own.
 | `sun/` | Settings only: the sun size the soft and ray-traced shadows and the global illumination share |
 | `soft_shadows/` | Settings only: a mode of the sun light pass's shaders (`passes/sun_light_pass.*`) |
 | `sun_contact_shadows/` | `sun_contact_shadows.*`: the sun's screen-space shadow, traced once per depth a command list records |
-| `lamp_contact_shadows/` | `lamp_contact_shadows.*`: every point and spot light's screen-space shadow, drawn into the light targets' alpha between its two draws. `lamp_contact_shadows_shaders.hpp`: that draw |
+| `lamp_contact_shadows/` | `lamp_contact_shadows.*`: a shadow-mapped point or spot light's screen-space shadow, drawn into the light targets' alpha between its two draws. `lamp_contact_shadows_shaders.hpp`: that draw |
 | `lamp_soft_shadows/` | `lamp_soft_shadows.*`: the replacement shaders a point or spot light with a shadow map lights with, and their options. `lamp_soft_shadows_shaders.hpp`: the game's `SSLighting2_Point` and `SSLighting2_Spot` rebuilt, with the light's shadow map filtered by contact-hardening soft shadows |
 | `contact_shadow_shape/` | Settings only: the contrast, reach, thickness and fade of the contact shadow trace (`passes/contact_shadow_trace.*`), which the sun's and the lamps' share |
 | `ray_traced_shadows/` | `gi_shadow.*`: the sun's shadow rays and the FidelityFX Shadow Denoiser on Direct3D 12. `gi_shadow.hlsl`, `gi_shadow_filter.hlsl`: the rays, the denoiser's temporal pass and filters |
@@ -1628,10 +1628,11 @@ shadows (`bend_sss_gpu.h` and `bend_sss_cpu.h` from "Inside Bend: Screen Space S
 License 2.0): contact shadows traced through the depth buffer, which the shadow map is too coarse
 to give. The game has no shadow mask to multiply (see "Sun light and shadows"), so the sun pass
 draws with replacement shaders. With soft shadows off too, the game's own shaders draw; the add-on
-then only checks a flag on each full-screen draw. **Lamp contact shadows** trace the same way for
-every point and spot light (`drawMarking` in `src/features/lamp_contact_shadows/lamp_contact_shadows.cpp`, from the local light pass), one trace per light, so they
-are a toggle of their own: the sun's is one trace a frame, the lamps' grows with the lights on
-screen.
+then only checks a flag on each full-screen draw. **Lamp contact shadows** give every point and spot
+light a short shadow of its own, marched through the depth buffer inside the light's own draw
+(`drawMarking` in `src/features/lamp_contact_shadows/lamp_contact_shadows.cpp`, from the local light
+pass), so they are a toggle of their own: the sun's is one Bend trace a frame, the lamps' a march per
+light, in the light's own volume draw.
 
 - **Replacement shaders** (`src/passes/sun_light_pass_shaders.hpp`). `SunLight_DL_CS_ES` and
   `SunLight_DL_ES`, and their rain pair without the sky reflection (`SKY_REFLECTION 0`),
@@ -1667,34 +1668,69 @@ screen.
   add-on, and the game's shader, `t7` and `b6` restored. The options apply from the frame after
   the next present, so both parts of a frame's sun pass see the same. A sun pass without its depth or constants, or an error, keeps
   the game's draw and logs the reason once.
-- **Lamps trace only what they reach.** A light's range comes from its falloff in `cPSLight` `c6`
-  (from the disassembly, `d` the distance plus `c6.x` for points): `SSLighting2_*` light
-  `1 / d^2 - d^2 c6.w`, zero at `c6.w^(-1/4)`; `Lighting_*_NA` light `(1 - d^16 c6.z) / d^2`, zero
-  at `c6.z^(-1/16)`. The range's sphere around `c3` gives a screen rectangle (the planes through the
-  eye that touch it, per axis) for `BuildDispatchList`'s bounds, and a depth range for Bend's
-  early-out, so a lamp costs its share of the screen, not all of it. The lamp's trace is not
-  cleared; its shadow draw reads the trace's constants (`b6`) and the depth (`t2`) and takes pixels
-  outside both bounds as lit. A sphere behind the camera or off screen keeps the game's draws; one
-  through the camera plane, or an unknown range, traces the whole screen.
+- **The lamps march instead.** Bend's compute shader costs a dispatch over the light's whole screen
+  rectangle at the render size, 120 samples a pixel, and a second draw of the light's volume to put
+  the result in the light targets' alpha: ten lamps in a night base turn that into a frame-rate drop.
+  The lamps' marking draw now marches the depth buffer itself, the shape `renodx-mgsv`'s screen-space
+  term has (`src/features/lamp_contact_shadows/lamp_contact_shadows_shaders.hpp`): the ray leaves the
+  surface the pixel shows, steps towards the light, and counts the depth reads with a nearer surface
+  in front of it. The reach is `Contact shadow reach` in pixels of the render size, capped at 6 m
+  and at the light (`min(reach, 6 m, light distance)`: nothing past a light shadows it), with a step
+  every two pixels and the steps crowded near the receiver; a caster
+  counts within `max(0.25 m, 1 cm a metre of depth)` of the ray, which keeps layered gear and
+  overlapping terrain patches from reading as a wall in front of their own surface, and the march
+  stops once the shadow is as dark as `Contact shadow contrast` allows. A pixel outside the light's
+  reach (one depth read and a distance) or past the fade is lit without marching, and a lamp wholly
+  past the fade keeps the game's draws. The sun keeps Bend's trace, which costs one to eight dispatches
+  for each recording of the depth it reads, and its look is the reference the lamps' march was matched
+  to.
+- **Far faces only.** The game's marking draw culls none and its lighting draw culls front faces
+  (frame logs, 2026-10-29: every one of 1,166 lights). The shadow draw drew with culling off too, so a
+  closed volume ran the march on both faces and threw one result away; the game's own marking state
+  would do the same. It draws the far faces instead, as the lighting draw does: it covers the pixels
+  that read the alpha, with the camera inside the volume too, at half the pixels.
+- **Four texels a gather.** The march took one depth a step. A `Gather` returns the four texels inside
+  a two-pixel square for one instruction - the ground two steps cover - so a pair of steps is one
+  request and four comparisons: half the memory instructions, twice the samples. The window a caster
+  may sit in is compared in the buffer's own depth, `A + B / z` from `cPSScene` `c21`, so the two
+  conversions a pair costs are shared by its four texels instead of one a texel. The sampler it reads
+  through is the add-on's, bound at `s0` for the draw and put back after.
+- **Pixels the light cannot light are not marched.** A surface facing away from a lamp takes none of
+  it: the game's shaders clamp `dot(normal, light)` at zero and scale both the diffuse and the
+  specular by it, so the light adds nothing there and the alpha the march writes is never read. The
+  march returns after one read of the G-buffer's normals (`t0`, decoded as `lamp_soft_shadows_shaders.hpp`
+  decodes it) when that dot is zero or less. Where the marking draw leaves `t0` unbound the shader
+  marches as before, and the options say which it is. A lamp whose reach cannot touch the screen - its
+  sphere off it, or wholly behind the camera - keeps the game's draws, which is `reachesScreen` in
+  `lamp_contact_shadows.cpp`.
+- **A lamp's reach comes from its falloff** in `cPSLight` `c6` (from the disassembly, `d` the distance
+  plus `c6.x` for points): `SSLighting2_*` light `1 / d^2 - d^2 c6.w`, zero at `c6.w^(-1/4)`;
+  `Lighting_*_NA` light `(1 - d^16 c6.z) / d^2`, zero at `c6.z^(-1/16)`. The march takes it as the
+  distance past which a pixel is lit without a step.
 - **Diagnostics.** "Sun contact shadows only" draws both parts with the far shader: the sun is then
   shadowed by the trace alone.
 
 Checked in game at 3840x2160 with DLAA and frame generation, in Afghanistan at dusk and in
-daylight: the shaders compiled and both sun shaders were identified at start-up, the trace ran
-every frame (one dispatch with the sun off screen), the lit image looked as before, and contact
-shadows showed under Snake's boots, in grass and around rocks. With the trace alone, characters
-close to the camera keep only the shadow near their feet.
+daylight: the shaders compiled and both sun shaders were identified at start-up, the trace ran for
+each frame's recording (a single dispatch, with the sun off screen), the lit image looked as before,
+and contact shadows showed under Snake's boots, in grass and around rocks. With the trace alone,
+characters close to the camera keep only the shadow near their feet.
 
-- **Contrast and reach.** Two settings shape both traces, under **Contact shadows** with their
+- **Contrast and reach.** Two settings shape both, under **Contact shadows** with their
   switches: **Contact shadow contrast** (0.5 to 4, 1 by default) scales the trace's distance-to-shadow
   window, so higher is darker and harder and lower is a soft grey wash, 1 being the trace itself;
-  and **Contact shadow reach** (8 to 120 pixels of the render size, 80 by default) is how far along the ray the march runs. The reach costs one depth read group when the
+  and **Contact shadow reach** (8 to 120 pixels of the render size, 80 by default) is how far along the ray the march runs. The sun's reach costs one depth read group when the
   shader's `SAMPLE_COUNT` went from 60 to 120, and the march stops at the setting, so a shorter reach
-  is cheap; the last eight samples of it fade out as Bend's last eight do. It is in pixels, so at 4K
+  is cheap; the last eight samples of it fade out as Bend's last eight do. The lamps take the reach as
+  their march's step count, a step every two pixels. It is in pixels, so at 4K
   the same reach covers half the world distance it does at 1080p.
 - **Thickness.** Bend's 0.5% window was a constant. It is a setting now (`SurfaceThickness`, 0.2% to
   2.5% of the depth between a sample and the far plane): how deep a surface may sit behind the
-  receiver and still count as a contact. RenoDX exposes the same dial per light type.
+  receiver and still count as a contact. RenoDX exposes the same dial per light type for the sun. The
+  lamps' march keeps RenoDX's own, a fixed 5 mm (`ThicknessMetres` in `lamp_contact_shadows.cpp`): the
+  share grows with the distance until, past 1%, it reaches the bound a caster may sit in and leaves no
+  window at all, so the term died silently for receivers past 10 m, and below that raising it narrowed
+  the march where it widens the sun's trace. The setting now shapes the sun's contact shadows alone.
 - **Distance fade.** Bend's shader has no fade, so a contact shadow at 100 m was as sharp as one
   underfoot. The trace now fades its result with view depth (B and A from `cPSScene` c21 give the view
   Z from the depth it already reads), full strength out to 60% of the setting and nothing past it.
