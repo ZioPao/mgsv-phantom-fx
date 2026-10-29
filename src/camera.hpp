@@ -48,6 +48,8 @@ View viewOf(const game_constants::SceneConstants& scene);
 // cameraCenterOffset, which the engine's screen-space passes subtract before reconstructing positions
 // from depth.
 void applyJitter(game_constants::SceneConstants& scene, std::array<float, 2> ndc);
+// A projection without the jitter applyJitter gave it (`ndc`): its third column in its first two rows.
+Matrix unjitteredProjection(Matrix projection, std::array<float, 2> ndc);
 
 // DLSS takes the jitter in render pixels, x right and y down; the projection takes it in NDC, y up.
 std::array<float, 2> jitterNdc(std::array<float, 2> pixels, float width, float height);

@@ -93,8 +93,8 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 #define GI_LIGHT_FOLIAGE_MATERIAL 1.0f
 // The light's debug views into g_LightDebug (GIFrameConstants::lightDiagnostics.z): the denoiser's history,
 // or NRD's validation layer.
-#define GI_LIGHT_DEBUG_HISTORY  1u
-#define GI_LIGHT_DEBUG_DENOISER 2u
+#define GI_LIGHT_DEBUG_HISTORY    1u
+#define GI_LIGHT_DEBUG_VALIDATION 2u
 
 // Slots of the indirect dispatch argument buffer.
 #define GI_DISPATCH_SLOTS 16u

@@ -1861,10 +1861,9 @@ Now, each frame:
   game's float projection-views it was off by up to 0.19 render pixels near the camera on a still frame,
   changing with each jitter, their translation holding the camera's place in the world, 2026-10-29), or a
   moving mesh's from the game's velocity where it drew one, and the view depth's change: the camera's, and
-  a moving mesh's from
-  the last frame's view depth where it was when that lies within 10% of its own (as if it stood still,
-  the change was off by the camera's movement where the camera follows it, and the player's light
-  started over every frame). The camera goes in with the engine's x
+  a moving mesh's from the last frame's view depth where it was when that lies within 10% of its own (as
+  if it stood still, the change was off by the camera's movement where the camera follows it, and the
+  player's light started over every frame). The camera goes in with the engine's x
   mirror moved from the projection into the view (as for Streamline), and, as NRD requires, without the
   upscaler's jitter (c28 taken out of the projections, the motion without the jitter's change, the jitter
   apart as `cameraJitter`): with it in, grass and fine detail shimmered as the jitter moved them, most

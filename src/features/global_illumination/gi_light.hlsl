@@ -72,7 +72,6 @@ RWStructuredBuffer<uint> g_HashGridCache_LightBuffer : register(u29); // Hits to
 #define g_Eye g_Frame.eye.xyz
 #define g_NearFar g_Frame.nearFar.xy
 #define g_ViewProjection g_Frame.viewProjection
-#define g_PreviousViewProjection g_Frame.previousViewProjection
 #define HASH_CELL_SIZE g_Frame.cellSizes.y
 #define HASH_MIN_CELL_SIZE g_Frame.cellSizes.z
 #define HASH_NUM_BUCKETS g_Frame.hashCounts.x
@@ -95,36 +94,34 @@ uint2 LightSize()
     return g_Frame.lightLayout.xy;
 }
 
-// A light pixel's depth pick of its 2 x 2: the nearest of the four on light pixels of one checkerboard
-// colour, the farthest on the other, as half-resolution effects downsample depth. With the top left, a
-// wire, a fence or a grass blade under a pixel wide had it one frame and what lay behind the next as the
-// upscaler's jitter moved them, and the denoiser started their light over every frame, the camera still
-// (2026-10-25).
-uint2 DepthPickOf(uint2 lightPixel)
+// Render pixel `index` (x + 2 y) of a light pixel's 2 x 2.
+uint2 RenderPixelAt(uint2 lightPixel, uint index)
 {
-    uint2 corner = min(lightPixel * 2, g_BufferDimensions - 1);
+    return min(lightPixel * 2 + uint2(index & 1u, index >> 1), g_BufferDimensions - 1);
+}
+
+// A light pixel's depth pick of its 2 x 2 (RenderPixelAt): the nearest of the four on light pixels of one
+// checkerboard colour, the farthest on the other, as half-resolution effects downsample depth. With the top
+// left, a wire, a fence or a grass blade under a pixel wide had it one frame and what lay behind the next as
+// the upscaler's jitter moved them, and the denoiser started their light over every frame, the camera still
+// (2026-10-25).
+uint DepthPickOf(uint2 lightPixel)
+{
     bool nearest = ((lightPixel.x + lightPixel.y) & 1u) == 0u;
-    uint2 chosen = corner;
-    float chosenDepth = g_Depth.Load(int3(corner, 0));
+    uint chosen = 0;
+    float chosenDepth = g_Depth.Load(int3(RenderPixelAt(lightPixel, 0), 0));
     for (uint i = 1; i < 4; ++i)
     {
-        uint2 pixel = min(lightPixel * 2 + uint2(i & 1u, i >> 1), g_BufferDimensions - 1);
-        float depth = g_Depth.Load(int3(pixel, 0));
+        float depth = g_Depth.Load(int3(RenderPixelAt(lightPixel, i), 0));
         // Reversed Z: the nearer, the greater.
         if (nearest ? depth > chosenDepth : depth < chosenDepth)
         {
-            chosen = pixel;
+            chosen = i;
             chosenDepth = depth;
         }
     }
 
     return chosen;
-}
-
-// Render pixel `index` (x + 2 y) of a light pixel's 2 x 2.
-uint2 RenderPixelAt(uint2 lightPixel, uint index)
-{
-    return min(lightPixel * 2 + uint2(index & 1u, index >> 1), g_BufferDimensions - 1);
 }
 
 // The render pixel a light pixel's sample is from this frame, as PrepareGuides chose it (PickOf).
@@ -536,10 +533,9 @@ float2 JitterUv(float2 ndc)
 
 // A render pixel's camera motion (the last frame's uv minus this one's, without the jitter) and its view
 // depth last frame: its unjittered clip position through the one matrix built in double from the
-// projections and views apart (gi_renderer.cpp), as the upscaler's motion vectors. Through its world
-// position and the game's float projection-views the motion was off by up to 0.19 render pixels near the
-// camera on a still frame, changing with each jitter: their translation holds the camera's place in the
-// world, rounded differently for each (2026-10-29).
+// projections and views apart (camera::previousFromCurrentByParts), as the upscaler's motion vectors.
+// Through its world position and the game's float projection-views the motion was off by up to 0.19 render
+// pixels near the camera on a still frame, changing with each jitter (2026-10-29).
 void CameraMotionOf(uint2 pixel, float depth, out float2 motion, out float previousViewZ)
 {
     float2 uv = (pixel + 0.5f) / g_BufferDimensions;
@@ -578,8 +574,8 @@ float LastFrameMismatch(uint2 pixel)
 uint PickOf(uint2 lightPixel)
 {
     const float threshold = 0.03f;
-    uint2 depthPick = DepthPickOf(lightPixel);
-    uint pick = (depthPick.x > lightPixel.x * 2 ? 1u : 0u) + (depthPick.y > lightPixel.y * 2 ? 2u : 0u);
+    uint pick = DepthPickOf(lightPixel);
+    uint2 depthPick = RenderPixelAt(lightPixel, pick);
     float2 moved;
     if (ObjectMotion(int2(depthPick), moved) || LastFrameMismatch(depthPick) < threshold) return pick;
 
@@ -1086,7 +1082,7 @@ float3 DenoisedLight(uint2 lightPixel, float3 normal, float3 ownNormal)
 
 // Diagnostics, blended over the image by its alpha: the denoiser's history at each render pixel
 // (LightHistoryView, phantom_fx_settings.hpp), red where it started the light over within three frames,
-// yellow under ten; or NRD's validation layer (LightDenoiserView).
+// yellow under ten; or NRD's validation layer (LightValidationView).
 RWTexture2D<float4> g_LightDebug : register(u79);
 
 float4 HistoryColor(float frames)
@@ -1098,7 +1094,7 @@ float4 HistoryColor(float frames)
 
 void WriteLightDebug(uint2 pixel, float4 history)
 {
-    if (g_Frame.lightDiagnostics.z == GI_LIGHT_DEBUG_DENOISER) g_LightDebug[pixel] = g_Light_Validation[min(pixel / 2, LightSize() - 1)];
+    if (g_Frame.lightDiagnostics.z == GI_LIGHT_DEBUG_VALIDATION) g_LightDebug[pixel] = g_Light_Validation[min(pixel / 2, LightSize() - 1)];
     else if (g_Frame.lightDiagnostics.z == GI_LIGHT_DEBUG_HISTORY) g_LightDebug[pixel] = history;
 }
 
