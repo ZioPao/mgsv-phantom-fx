@@ -532,6 +532,16 @@ are stable. Pass names are the shaders' source files.
    SRC_ALPHA / INV_SRC_ALPHA). `MotionBlurMcGuire` places its samples in texture coordinates: the
    step is the velocity times `cPSObject` c11.w times `cPSSystem`'s `m_renderBuffer.zw`, and the
    result's alpha is scaled by its input's alpha.
+   - `MotionBlurTile` keeps the longest velocity of each 2x2, halving from the render size to tiles
+     of 32 render pixels (five passes, 1280x720 to 40x23 in frame 6607); `MotionBlurTileNeighbour`
+     keeps the longest of each tile's 3x3.
+   - `MotionBlurBakeVelocityDepth` writes at half the render size each pixel's speed, depth and the
+     longer of its own velocity and its tile's (`t4`, bilinear). It point-samples the velocity and
+     depth at the render size by texture coordinate, makes that coordinate from the clip position,
+     and reads no size of its own target.
+   - `MotionBlurMcGuire` reads only the scene (`t0`) and the bake (`t5`). It point-samples the bake at
+     its own pixel and at each of its six taps for its depth and velocity tests, which set the weights
+     and the result's alpha.
 10. Colour grading: `ColorCorrection_BlndLut_Tex_Gen` builds a 256x16 LUT; the scene target is
     copied to its twin; `Tonemap` applies the LUT from the copy into the scene target.
 11. **FXAA:** the scene target is copied to its twin again; `Fxaa` reads the copy and writes the
@@ -1291,14 +1301,25 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
     of the game's, writes the other, and keeps the game's `cPSSystem`, so the samples land as far
     away on screen; the composite reads the last one. The game's targets are matched by address on
     the recording thread, within the frame being recorded.
+  - The blur's velocity and depth (`MotionBlurBakeVelocityDepth`) are baked at half the output size
+    too, into a third surface in the game's 8-bit format, and both passes read it at `t5` in place of
+    the game's. With the game's bake at half the render size, each gather pixel took its depth and
+    velocity tests from a bake pixel up to three times its width, and a moving character's
+    silhouette stepped by it: 5-6 px at Ultra Performance and 2-3 px at Quality over 3840x2160, none
+    at DLAA, where the two sizes match (issue #48). The bake reads no size of its own target (see
+    "How Fox Engine renders", step 9), so it is drawn again with the game's constants, only its
+    target, viewport and scissor changed. The tiles it reads stay at the render size: they are 32
+    render pixels wide and read bilinearly by texture coordinate. The game's own bake still draws, so
+    the passes fall back to it whenever the add-on's is missing.
   - With HDR the blur takes the same route without upscaling too (DLAA, or the upscaler off), as
     the game's two targets are 8-bit. They are the game's shared half-size scratch targets, which
     its SSAO draws into earlier in the frame (frame 141835, #491 to #496), so they are not made
     float where the game creates them. The first pass halves the scene the game's own halving
     `CopyRenderBuffer` read (the last copy on the thread whose target the pass reads), and the
     composite stays on the scene, reading the add-on's result at t0; the game's input goes back
-    after the draw. The blur's two targets are made apart from the other output-size targets, so
-    this route makes only them: 33 MB at 4K, where the full set would add 166 MB unused.
+    after the draw. The bake keeps the game's: it already has the gathers' size. The blur's surfaces
+    are made apart from the other output-size targets, so this route makes only them: 41 MB at 4K
+    (8 MB of it the bake's, unused here), where the full set would add 166 MB unused.
   - `Tonemap` (the grading): the output target is copied into the second target on the context, and
     the grading reads it (slot 0) and writes the output target. The graded image is then stretched
     back into the render-size scene target, which the game copies next for its 2D filters
@@ -1384,8 +1405,12 @@ Not handled:
   read the render-size copy, so while one is on, the image under it has the render size.
 - Bloom and the lens flares start from the scene before DLSS, jitter included; at a quarter of its
   size it averages out.
-- The motion blur's velocity stays at the render size: its tiles and `MotionBlurBakeVelocityDepth`
-  are left at half the render size, and the gather reads them by texture coordinate.
+- The motion blur's velocity and depth exist only at the render size, and its bake point-samples
+  them. A moving silhouette therefore still steps by a render pixel where that is wider than the
+  gather's two output pixels: at Ultra Performance over 3840x2160, by 2 and 4 px in turn, as the
+  gather's 2 px pixels fall on the render's 3 px ones (3 px on average). Sampling them bilinearly
+  would not help: it would blend a character's depth and velocity with the background's into values
+  that belong to neither.
 
 ## Frame generation
 

@@ -8,6 +8,11 @@
 - **Ray-traced shadows no longer flicker along edges.** With DLSS or FSR jittering the frame, the
   shadow denoiser often dropped a pixel's history along object edges and showed the raw, noisy rays
   there. It now keeps the history from the last frame's pixels on the same surface.
+- **Motion blur: a moving character's outline no longer steps with upscaling.** With the game's motion
+  blur on and DLSS or FSR upscaling, a character walking past showed staircase steps along their
+  outline, 2-3 px wide at Quality and 5-6 px at Ultra Performance in 4K. The blur's velocity and depth
+  are now prepared at the same size the blur draws at, so the steps match native resolution's, except
+  at Ultra Performance, where they halve to the render pixel.
 
 ## 1.9.0
 
