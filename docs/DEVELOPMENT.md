@@ -2227,7 +2227,21 @@ traced here (see "Ray-traced lights").
   served, which gave moving characters' shadows a lag; the velocity passes run while an upscaler
   replaces FXAA or with the game's motion blur on, and without them the camera's motion serves; no 16-bit
   types; the depth similarity's sigma is 1 m plus 5% of the depth instead of 1 m, as sloping ground
-  kilometres away is metres deep per pixel.
+  kilometres away is metres deep per pixel; the temporal pass is AMD's but in `gi_shadow.hlsl`, its
+  17x17 local neighbourhood (which clamps the history and sets the variance the filters go by)
+  counting only pixels on the pixel's own surface, each within 5% of the pixel's distance from the
+  other's plane. AMD's counts every pixel within 8 whatever lies there: Snake in the sun in front of
+  a shaded wall in Mother Base (2026-10-29) lit a band of the wall along his outline, 8 render pixels
+  wide at any render scale, while the shadow rays debug view showed the wall blocked up to him. The
+  neighbourhood's spread has the most its mean can be off by chance added (`0.25 / n`, `n` the rays
+  it is worth): the few rays on a thin edge's surface often agree, and a spread of 0 threw the history
+  away. The history and moments come bilinearly from the last frame's 2x2 pixels around where the
+  pixel was, among those that pass AMD's depth test each. AMD's tests the one pixel the point falls
+  in, which with the upscaler's jitter often lay across an edge: the history started over along every
+  edge each frame and the raw rays flickered there (2026-10-29: a throwaway view of the history's age
+  showed young history along every depth edge, with AMD's neighbourhood too; gone with **Jitter
+  off**, and with the 2x2 test). Correcting the game's velocity for the last frame's jitter (it runs
+  from the unjittered position) made no visible difference and was left out.
 - **Sun pass** (`src/passes/sun_light_pass.cpp`, `sun_light_pass_shaders.hpp`). The shared R16_FLOAT shadow goes to
   `t6` of the replacement sun shaders, with `g_rayTraced` in `b6`. By default (2026-10-23) the rays
   alone shadow the sun: the far shader lights everything, with the rays' shadow. With **Show vanilla
