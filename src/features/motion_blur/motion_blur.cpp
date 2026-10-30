@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <mutex>
 
 namespace phantom_fx::motion_blur
 {
@@ -44,10 +45,14 @@ using PluginStep = void (*)(void* plugin, std::uint8_t* context, void* view);
 PluginStep originalPreExec{}, originalExec{};
 std::atomic<bool> velocityOnly{}, enabled{true}, frameGeneration{};
 std::atomic<float> strength{1};
-// The game's own amount, relearned when it writes it, so the strength multiplies the game's radius.
-std::atomic<float> gameAmount{1};
-std::atomic<float> writtenAmount{std::numeric_limits<float>::quiet_NaN()};
 std::atomic<LONGLONG> lastStrengthLog{};
+
+// The game's own amount, relearned when it writes it, so the strength multiplies the game's radius, and
+// the amount last written. The recording threads read, work out and write the amount one at a time: in
+// between, one thread's write would look like the game's own to another.
+std::mutex amountMutex;
+float gameAmount{1};
+float writtenAmount{std::numeric_limits<float>::quiet_NaN()};
 
 // The player's motion blur setting, as PreExec reads it.
 bool gameWantsBlur() noexcept
@@ -73,6 +78,7 @@ float exposureOf(const std::uint8_t* plugin, const std::uint8_t* view, float min
 }
 
 // Every ten seconds: what the blur was given, so a strength that seems to do nothing can be checked.
+// Under amountMutex.
 void logStrength(float exposure, float amount) noexcept
 {
     const auto now = clock::ticksNow();
@@ -80,8 +86,8 @@ void logStrength(float exposure, float amount) noexcept
 
     lastStrengthLog = now;
     const auto number = [](float value) { return std::to_string(value); };
-    log("Motion blur: frame rate x shutter " + number(exposure) + ", the game's amount " + number(gameAmount.load(std::memory_order_relaxed))
-        + ", its shutter ratio " + number(std::min(exposure * gameAmount.load(std::memory_order_relaxed), 1.0f)) + ", given "
+    log("Motion blur: frame rate x shutter " + number(exposure) + ", the game's amount " + number(gameAmount)
+        + ", its shutter ratio " + number(std::min(exposure * gameAmount, 1.0f)) + ", given "
         + number(std::min(exposure * amount, 1.0f)) + " (strength " + number(strength.load(std::memory_order_relaxed))
         + (frameGeneration.load(std::memory_order_relaxed) ? ", halved for frame generation)." : ")."));
 }
@@ -93,17 +99,17 @@ void applyStrength(const std::uint8_t* plugin, const std::uint8_t* view) noexcep
 {
     if (!enabled.load(std::memory_order_relaxed)) return;
 
+    std::lock_guard lock(amountMutex);
     const auto base = reinterpret_cast<std::uintptr_t>(game_code::image());
     const auto amount = game_memory::read<float>(base + AmountRva);
     const auto minimumShutter = game_memory::read<float>(base + MinimumShutterRva);
     if (!amount || !minimumShutter) return;
 
-    const auto written = writtenAmount.load(std::memory_order_relaxed);
-    if (!(std::fabs(*amount - written) <= 1e-4f)) gameAmount = *amount;
+    if (!(std::fabs(*amount - writtenAmount) <= 1e-4f)) gameAmount = *amount;
 
     const float exposure = exposureOf(plugin, view, *minimumShutter);
     const float scale = strength.load(std::memory_order_relaxed) * (frameGeneration.load(std::memory_order_relaxed) ? 0.5f : 1.0f);
-    const auto wanted = scaledAmount(exposure, gameAmount.load(std::memory_order_relaxed), scale);
+    const auto wanted = scaledAmount(exposure, gameAmount, scale);
     if (!wanted) return;
 
     if (!(std::fabs(*wanted - *amount) <= 1e-4f)) game_memory::write(base + AmountRva, *wanted);

@@ -500,7 +500,7 @@ void onPresent(command_queue* queue, swapchain*, const rect*, const rect*, uint3
 
     const bool generating = presenter::active();
     upscaler::setFrameGeneration(generating);
-    motion_blur::setFrameGeneration(generating);
+    motion_blur::setFrameGeneration(presenter::presentedPerFrame() > 1);
 
     if (generating)
     {
