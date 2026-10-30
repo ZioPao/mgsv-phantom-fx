@@ -1578,8 +1578,11 @@ otherwise DLSS runs, and the upscaler's status line says why.
   (`cPSLight` `c2.z`, 0.21 on Mother Base's deck, 0 in the helicopter; the frame before's), times half of
   1 minus the roughness. The game's materials are tuned to that weighting: with a physical one (NVIDIA's
   `EnvBRDFApprox2`), Snake's red arm (an 11% white specular of roughness 0.59) reflected 3 to 4 times as
-  much and the sky's light turned it grey. Where the sky is: no normal or roughness, albedo 0.5, no
-  specular albedo. The sun pass's `t9` and `t10` give the tables (`indirect_light_pass::materialTables`).
+  much and the sky's light turned it grey. The game then scales its sky reflection by `max(shadow, c2.x)`
+  times `c2.y`, which the guide leaves out: `c2.x` was 1, and `c2.y` (0.36 to 0.49) drifts with the time
+  of day, a scale for the sky map rather than for the material. Where the sky is: no normal or roughness,
+  albedo 0.5, no specular albedo. The sun pass's `t9` and `t10` give the tables
+  (`indirect_light_pass::materialTables`).
 - **Noisy light for it** (`gi_renderer::Frame::forReconstruction`, `GIFrameConstants::reconstruction`).
   Ray Reconstruction asks for samples apart at every render pixel, without other denoisers. While it
   denoised the frame before (the upscaler counts its frames, `ray_tracing::reconstructed`), the kick
@@ -1608,8 +1611,9 @@ ray-traced shadows.
   from Ray Reconstruction's normal guide), lit where it hits as the global illumination's rays light theirs
   (the sun and a light afresh, its bounce from the sky or the light cache); the sky's light where it gets
   away, without the sun's disc, which stays the sun's specular. Its light times the specular albedo guide
-  and the exposure goes to the resolve, which adds it to the game's specular light times the menu's
-  **Reflections** strength (`path_traced_reflections`, 1 by default; `path_tracing::addReflections`), and its hit distance to Ray Reconstruction (`pInSpecularHitDistance`,
+  and the exposure goes to the resolve, which scales it by the menu's **Reflections** strength
+  (`path_traced_reflections`, 1 by default) and adds it to the game's specular light
+  (`path_tracing::addReflections`), and its hit distance to Ray Reconstruction (`pInSpecularHitDistance`,
   65504 where it got away), which moves the reflections with what they reflect. The game's reflections
   make way: the sun pass leaves its sky reflection out (`SKY_REFLECTION 0`), indoors the sky's specular
   pass (`SunLight_ES`) is skipped, and the screen-space reflections' blend (`LocalReflectionAddBuffer`,

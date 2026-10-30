@@ -6,8 +6,8 @@
   global illumination on: reflections are traced on every surface, sharp on smooth ones and spread on
   rough ones, in place of the game's screen-space and sky reflections (water and glass keep the game's),
   and the sun and every lamp and flashlight light the scene from the path tracer, each light with its own
-  soft shadow where lights overlap. Each surface reflects as strongly as the game made it reflect, and a
-  **Reflections** slider makes them stronger or weaker.
+  soft shadow where lights overlap. Each surface reflects with the strength the game gives its material,
+  and a **Reflections** slider makes them stronger or weaker.
 - **DLSS Ray Reconstruction.** A new **Ray Reconstruction** switch under the upscaler, for NVIDIA RTX GPUs:
   NVIDIA's model cleans up the ray-traced global illumination, shadows and lights and upscales in one
   step, in place of DLSS and the add-on's own denoisers. It runs while a ray-traced effect is on; the

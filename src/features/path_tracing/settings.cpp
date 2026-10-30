@@ -27,6 +27,6 @@ void describe(PathTracing& pathTracing, SettingVisitor& visit)
             .label = "Reflections",
             .max = 4,
             .standard = Defaults.reflections,
-            .tip = "How strongly surfaces reflect. 1 is physically based; higher makes the reflections stronger, 0 leaves them out."});
+            .tip = "How strongly surfaces reflect. 1 is the strength the game gives each material; higher makes the reflections stronger, 0 leaves them out."});
 }
 }
