@@ -486,15 +486,15 @@ float3 SampledLocalLightReaching(float3 world, float3 normal, float3 origin, flo
         GILocalLight candidate = g_Frame.localLights[i];
         float3 toLight;
         float lightDistance;
-        float3 candidateLight = LocalLightAt(candidate, world, normal, toLight, lightDistance);
-        float weight = luminance(candidateLight);
+        float3 reaching = LocalLightReaching(candidate, world, toLight, lightDistance);
+        float weight = luminance(reaching) * dot(normal, toLight);
         if (!(weight > 0.0f)) continue;
 
         total += weight;
         if (random.rand() * total < weight)
         {
             chosenWeight = weight;
-            chosenLight = candidateLight;
+            chosenLight = reaching;
             chosenDirection = toLight;
             chosenDistance = lightDistance;
             chosenClearance = ClearanceTowards(candidate, toLight);
@@ -506,7 +506,7 @@ float3 SampledLocalLightReaching(float3 world, float3 normal, float3 origin, flo
     towardsLight = chosenDirection;
     float rayLength = chosenDistance - chosenClearance;
     float visibility = rayLength > 0.0f ? VisibilityFromSurface(origin, normal, tolerance, chosenDirection, rayLength, ShadowRayTowards(RayTowardsLamp)) : 1.0f;
-    return chosenLight * (total / (chosenWeight * dot(normal, chosenDirection)) * visibility);
+    return chosenLight * (total / chosenWeight * visibility);
 }
 
 // The same with the cosine: the diffuse light at the hit.
