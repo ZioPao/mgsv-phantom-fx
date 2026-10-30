@@ -162,7 +162,7 @@ what draws it, when that is the feature's own.
 | `ray_traced_lights/` | `local_lights.*`: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights"). `light_choice.*`: which lights a kick gives the rays (each light's reach, the light cap) and each light as the rays take it. `light_shadow_rays.*`, `light_shadows.hlsl`: the lights' shadow rays and filter on Direct3D 12 |
 | `global_illumination/` | `gi_light.*`, `gi_light.hlsl`: the light on Direct3D 12, its rays, their hits' light, the hash grid cache, the denoiser's inputs and the render size (see "Global illumination"). `gi_denoiser.*`: NVIDIA NRD's RELAX denoiser without NRI. `gi_lighting.*`: the game's sky and sun in the light's terms. `light_combine.*`: the traced light in place of the game's probe light at the resolve |
 | `ambient_occlusion/` | `gtvbao.*`: GTVBAO's occlusion multiplied into the indirect light at the upscale. `gtvbao_shaders.hpp`: that multiply |
-| `indirect_light/` | `ssgi.*`: SSGI's bounce, added to the diffuse light the resolve reads. `ssgi_shaders.hpp`: the gather, the temporal accumulation, the a-trous denoiser and the resolve |
+| `indirect_light/` | `ssgi.*`: VB-SSGI's bounce, added to the diffuse light the resolve reads. `ssgi_shaders.hpp`: the gather (with its per-tap visibility test), the temporal accumulation, the a-trous denoiser and the resolve |
 | `volumetric_fog/` | `atmosphere.*`: the larger fog texture, the game's fog pass over all of it, the shadowed fill before the resolve. `atmosphere_shaders.hpp`: the game's fog formula per froxel with the sun shadowed; Hillaire's atmosphere tables, the physical fog and sky (Epic Games' reference, MIT) |
 | `photo_mode/` | `photo_mode.*`: photo mode (F2), the game's pause, a free camera through the camera selector, the game's input held back; hiding the UI (F3). `focus.*`: its autofocus |
 | `hdr/` | `hdr.*`: HDR10 output, the swap chain, the float scene targets and their sRGB views, the shader patches, the grading and output passes (see "HDR"). `hdr_shaders.hpp`: the encode and decode of the float scene, bloom's reduction, the grading, the output to PQ |
@@ -178,7 +178,7 @@ what draws it, when that is the feature's own.
 | `src/passes/contact_shadow_trace.*` | Bend Studio's screen-space shadow trace, for the sun's and the lamps' contact shadows. `contact_shadow_trace_shaders.hpp`: Bend's trace ported to FXC |
 | `third_party/bend_sss/bend_sss_cpu.h` | Bend Studio's dispatch layout, unchanged (Apache License 2.0) |
 | `src/passes/indirect_light_pass.*` | The game's sky light, upscale and resolve: the G-buffer notes, the resolve's white occlusion and diffuse light, the diagnostics views, the ray-traced scene's notes. `indirect_light_pass_shaders.hpp`: the diagnostics views |
-| `src/passes/visibility_bitmask.*` | The visibility bitmask march GTVBAO uses: the depth prefilter, the march, the denoiser; SSGI takes the prefilter's distance mips for its per-tap occlusion test (`prefilterDistances`). `visibility_bitmask_shaders.hpp`: the march (GTVBAO from three-gtvbao; its `LIGHT` 1 branch, which gathered light as SSRT3 does, is unused since the SSGI port), XeGTAO's noise and denoiser |
+| `src/passes/visibility_bitmask.*` | The visibility bitmask march GTVBAO uses: the depth prefilter, the march, the denoiser; VB-SSGI takes the prefilter's distance mips for its per-tap occlusion test (`prefilterDistances`). `visibility_bitmask_shaders.hpp`: the march (GTVBAO from three-gtvbao; its `LIGHT` 1 branch, which gathered light as SSRT3 does, is unused since the VB-SSGI port), XeGTAO's noise and denoiser |
 | `src/passes/ray_tracing/ray_tracing.*` | The ray-traced scene's frame on Direct3D 11: the kick, the waits, the shared textures the global illumination and the ray-traced shadows hand back |
 | `src/passes/ray_tracing/gi_renderer.*` | The Direct3D 12 side: the device, the scene's frame (the scene contents' update, then the recording), each feature's passes recorded in turn, the probes |
 | `src/passes/ray_tracing/scene_contents.*` | The scene contents: the game's models, their variants, characters, terrain rings and textures the ray-traced scene holds, made as the scene memory has room and let go after a while unplaced; each frame's instances of them; their diagnostics (status, the probes' hits, F10's `models.txt`) (see "Ray-traced scene") |
@@ -407,7 +407,7 @@ made.
   game's SSAO out, the physical look the game's sky. **Measure the real cost** times the GPU frame
   with everything on, then leaves out, one more at a time and only where running: the volumetric
   fog, the ray-traced shadows, the ray-traced lights, the global illumination (its light passes,
-  then the rest), SSGI, GTVBAO, the lamp and the sun contact shadows, the soft shadows, the
+  then the rest), VB-SSGI, GTVBAO, the lamp and the sun contact shadows, the soft shadows, the
   sharpening and last the upscaler (the game's FXAA at the same render size, as the Diagnostics
   comparison). The lighting effects go in `Effect`'s order, and what runs is the effect plan's
   (`planEffects`, `src/phantom_fx_settings.hpp`): a replaced effect stays off while its replacer is left out,
@@ -1337,10 +1337,10 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
   with its motion blur on. `motion_blur.cpp`
   checks the build and the first bytes of PreExec (`80 79 68 00 49 8B 80 70 05 00 00`) and Exec
   (`48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20`) and detours both with MinHook at `AddonInit`.
-  While DLSS replaces FXAA (any DLSS mode, not the FXAA comparison) or **SSGI** runs, PreExec runs
+  While DLSS replaces FXAA (any DLSS mode, not the FXAA comparison) or **VB-SSGI** runs, PreExec runs
   the game's code and then sets the velocity bit, and Exec draws the blur only when the game's
   setting asks for it and the add-on's **Motion blur** toggle is on. So the velocity passes run
-  every frame whatever the game's setting — SSGI's temporal accumulation reprojects with the
+  every frame whatever the game's setting — VB-SSGI's temporal accumulation reprojects with the
   buffer they draw. Off and the comparison give both back to the game's setting from the next frame.
   When a check fails nothing is hooked and the game's setting stays in charge. `AddonUninit` removes
   all engine hooks with `MH_Uninitialize`. The blur runs after DLSS, at half the output size while
@@ -2526,9 +2526,10 @@ Not handled:
 - Forward and transparent objects, drawn after the lighting, get no occlusion, as with the game's
   SSAO.
 
-## SSGI
+## VB-SSGI
 
-With **Indirect lighting (SSGI)** on, screen-space global illumination adds one bounce of light
+With **Indirect lighting (VB-SSGI)** on, screen-space global illumination with a visibility test
+adds one bounce of light
 between the surfaces on screen. The chain is ported from the RenoDX MGSV add-on's indirect lighting
 (`renodx-mgsv` `src/games/mgsv/il`), which reads better than the visibility-bitmask gather SSILVB
 used. Off, the add-on only checks a flag on each full-screen draw.
@@ -2540,7 +2541,7 @@ used. Off, the add-on only checks a flag on each full-screen draw.
 - **Velocity.** The temporal accumulation reprojects with the game's velocity buffer (camera and
   object motion in `.ba`), which `MotionBlurCameraVelocity` draws right after the G-buffer. The
   indirect light pass notes that draw's render target and makes a view of it; the engine draws the
-  velocity passes only with motion blur or an upscaler, so while SSGI runs the add-on forces them on
+  velocity passes only with motion blur or an upscaler, so while VB-SSGI runs the add-on forces them on
   (`motion_blur::wantVelocityPasses`). Without the buffer the history blend collapses to zero and
   the raw gather shows. Measured in the RenoDX add-on: the TAA jitter cancels inside the buffer (the
   velocity pass runs with the jittered projection), so no jitter term is subtracted.
@@ -2575,7 +2576,7 @@ used. Off, the add-on only checks a flag on each full-screen draw.
   rest of the light.
 - **Options** apply from the frame after the next present. A resolve without normals, with sizes
   that differ or without `cPSScene` keeps the game's diffuse light and logs the reason once.
-- **Diagnostics.** "SSGI only" writes the light without the game's diffuse light and draws the
+- **Diagnostics.** "VB-SSGI only" writes the light without the game's diffuse light and draws the
   resolve with `shaders::Show`: the bounce alone, as light before the albedo. The **Debug view**
   setting shows the gather alone, the history delta, the history length, the reprojection offset or
   the measured variance, and it draws through `shaders::Show` too: the game's resolve would multiply
@@ -2587,7 +2588,7 @@ Not handled:
 
 - One bounce, from what is on screen: light from off-screen or hidden surfaces is missing, and the
   bounce fades towards the screen's edges.
-- The probe lighting may already hold some bounce from static scenery, which SSGI adds again.
+- The probe lighting may already hold some bounce from static scenery, which VB-SSGI adds again.
 - Forward and transparent objects neither give nor receive the bounce.
 - The gather's plane test rejects samples on the receiver's own surface, which starves flat ground
   of valid samples (26-73% of them); the denoiser fills the holes, so the ground reads slightly
