@@ -168,6 +168,11 @@ struct ShadowSurface
 // drawn as a normal map, glowed from their own facets (2026-10-30).
 static const float SceneSurfaceNormalCosine = 0.5f;
 
+// How far off the depth's point the scene's triangle may lie and still be the surface the game drew
+// there. Recessed facets (a dimple the game draws as a normal map, another level of detail) pass the
+// depth's tolerance but let the ray out from behind the surface, lit where the game has shade.
+static const float SceneSurfacePointDistance = 0.01f;
+
 ShadowSurface ShadowSurfaceAt(float3 position, float3 gbufferNormal)
 {
     ShadowSurface surface;
@@ -199,9 +204,16 @@ ShadowSurface ShadowSurfaceAt(float3 position, float3 gbufferNormal)
     float3 facing = dot(normal, direction) > 0.0f ? -normal : normal;
     if (dot(facing, gbufferNormal) < SceneSurfaceNormalCosine) return surface;
 
+    // The ray leaves the triangle's own point only where that point is the depth's, as on a character's
+    // folds (the fold fix of 2026-10-24 rests on it). A triangle off it is a facet recessed in the surface
+    // the game drew — a dimple's wall, another level of detail — and its ray left from behind that
+    // surface, lit where the game has shade (2026-10-30). It keeps the triangle's normal, and the ray
+    // leaves the depth's point, skipping copies as where the scene lacks the surface.
+    float3 trianglePoint = TrianglePoint(t, hit.barycentrics);
+    bool onDepthPoint = distance(trianglePoint, position) <= SceneSurfacePointDistance;
+    surface.position = onDepthPoint ? trianglePoint : position;
     surface.normal = facing;
-    surface.position = TrianglePoint(t, hit.barycentrics);
-    surface.exact = true;
+    surface.exact = onDepthPoint;
     surface.hit = hit;
     return surface;
 }

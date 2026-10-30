@@ -7,6 +7,12 @@
   the shadow ray off its own normal, and a facet turned towards a distant opening's sun came back lit where
   the game has shade, so the dimples' rims glowed on a shadowed wall. A surface now also has to face within
   60 degrees of the G-buffer's normal to be where the rays leave (the shadow ray starts view's blue).
+- **Ray-traced shadows leave from the depth's point when the scene's triangle lies off it.** A recessed
+  facet — a dimple the game draws as a normal map, another level of detail — could pass the depth's
+  tolerance and the normal check, and its ray left from behind the wall the camera sees, lit where the
+  game has shade. The ray now leaves the depth's point (skipping copies, as where the scene lacks the
+  surface) whenever the triangle lies more than a centimetre off it; a triangle on the same plane, as a
+  character's folds are, keeps its own point.
 - **Ray-traced shadows start on the camera's side of the surface.** Where a surface's light is behind it,
   the shadow ray start was offset 2 cm along the light's side — behind the wall — and the sun's rays passed
   the wall's back face, lighting dents whose normals turned towards the sun. The offset now goes towards
