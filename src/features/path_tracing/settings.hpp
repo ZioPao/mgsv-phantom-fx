@@ -8,6 +8,7 @@ namespace phantom_fx
 struct PathTracing
 {
     bool on{};
+    float reflections{1};
 
     bool operator==(const PathTracing&) const = default;
 };

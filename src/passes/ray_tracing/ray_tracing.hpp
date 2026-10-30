@@ -85,7 +85,7 @@ struct ReconstructionGuides
 {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> normalRoughness; // R16G16B16A16_FLOAT: the world-space normal, the roughness in w
     Microsoft::WRL::ComPtr<ID3D11Texture2D> diffuseAlbedo;   // R8G8B8A8_UNORM, linear
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> specularAlbedo;  // R8G8B8A8_UNORM, linear
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> specularAlbedo;  // R16G16B16A16_FLOAT: a few hundredths, too small for 8 bits
 };
 // None until a kick made them at this size, or when the last kick did not make them.
 std::optional<ReconstructionGuides> reconstructionGuides(UINT width, UINT height) noexcept;

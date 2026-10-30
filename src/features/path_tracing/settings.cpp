@@ -2,6 +2,11 @@
 
 namespace phantom_fx
 {
+namespace
+{
+constexpr PathTracing Defaults{};
+}
+
 void describe(PathTracing& pathTracing, SettingVisitor& visit)
 {
     visit.feature(pathTracing.on,
@@ -17,5 +22,11 @@ void describe(PathTracing& pathTracing, SettingVisitor& visit)
             .summary = "Traced reflections on every surface, in place of the game's screen-space and sky reflections.",
             .keywords = "PT path tracing reflections ray reconstruction",
             .needsSupportedBuild = true});
+    visit.slider(pathTracing.reflections,
+        {.iniKey = "path_traced_reflections",
+            .label = "Reflections",
+            .max = 4,
+            .standard = Defaults.reflections,
+            .tip = "How strongly surfaces reflect. 1 is physically based; higher makes the reflections stronger, 0 leaves them out."});
 }
 }

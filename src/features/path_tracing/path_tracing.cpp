@@ -29,11 +29,19 @@ constexpr ComputeSlots PassSlots{.buffers = 1, .views = 2, .accesses = 1};
 
 struct Parameters
 {
-    std::uint32_t width, height, padding[2];
+    std::uint32_t width, height;
+    float reflections, padding;
 };
 
-// Path tracing is asked for, with the global illumination whose cache it reads.
-FrameLatch<bool> latch;
+// Path tracing is asked for, with the global illumination whose cache it reads, and how strongly the
+// reflections are added.
+struct Wanted
+{
+    bool on{};
+    float reflections{};
+};
+
+FrameLatch<Wanted> latch;
 std::atomic<bool> wanted{}, pipelineFailed{};
 
 // The scene's depth each context's reflection mask read, for the blend it records next.
@@ -72,7 +80,7 @@ bool ensurePipeline()
 
 bool runs()
 {
-    return wanted.load(std::memory_order_relaxed) && latch.frame() && ray_tracing::pathTracingRuns();
+    return wanted.load(std::memory_order_relaxed) && latch.frame().on && ray_tracing::pathTracingRuns();
 }
 }
 
@@ -101,8 +109,9 @@ void detach() noexcept
 
 void configure(const Configuration& configuration) noexcept
 {
-    const bool on = configuration.settings.pathTracing.on && configuration.effects.runs(Effect::GlobalIllumination);
-    latch.set(on);
+    const auto& settings = configuration.settings.pathTracing;
+    const bool on = settings.on && configuration.effects.runs(Effect::GlobalIllumination);
+    latch.set({on, settings.reflections});
     wanted = on;
     if (!on) return;
 
@@ -131,7 +140,7 @@ ID3D11ShaderResourceView* addReflections(ID3D11DeviceContext* context, ID3D11Sha
         if (specularWithReflections.width != width || specularWithReflections.height != height)
             specularWithReflections = makeComputeTexture(device.Get(), width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the specular light with reflections");
 
-        check(write(context, parameterBuffer.Get(), Parameters{width, height}), "Writing the reflections' constants");
+        check(write(context, parameterBuffer.Get(), Parameters{width, height, latch.frame().reflections}), "Writing the reflections' constants");
         const performance::Timed timed(context, performance::Pass::GiCombine);
         const SavedComputeState saved(context, PassSlots);
         ID3D11ShaderResourceView* inputs[]{specular, reflection};

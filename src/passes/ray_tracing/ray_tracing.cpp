@@ -119,9 +119,13 @@ struct PackParameters
 
 // DLSS Ray Reconstruction's guides from the G-buffer, as its integration guide asks for them: the
 // world-space normal with the roughness in w, the diffuse albedo, and the specular albedo, the share of
-// light the surface reflects towards the eye, from the game's specular colour (the material table's,
-// times the specular target's intensity, at normal incidence through the game's Fresnel table) by
-// NVIDIA's EnvBRDFApprox2. Where the sky is: no normal and roughness, albedo 0.5, no specular albedo.
+// light the surface reflects towards the eye. That share is the game's for its sky reflection
+// (SKY_REFLECTION in sun_light_pass_shaders.hpp): its specular colour (the material table's, times the
+// specular target's intensity) through its Fresnel table at the eye's angle, from at least the sun pass's
+// least F0 (cPSLight c2.z), times half the smoothness. The game's materials are tuned to it: with a
+// physical one (NVIDIA's EnvBRDFApprox2), Snake's red arm, an 11% white specular of roughness 0.59,
+// reflected 3 to 4 times as much and the sky's light turned it grey. Where the sky is: no normal and
+// roughness, albedo 0.5, no specular albedo.
 constexpr char GuideSource[] = R"(
 Texture2D<float> g_Depth : register(t0);
 Texture2D<float4> g_Normal : register(t1);
@@ -144,24 +148,8 @@ cbuffer Parameters : register(b0)
     uint g_HasAlbedo;
     uint g_HasSpecular;
     uint g_HasTables;
-    uint g_Padding;
+    float g_SkyReflectionFloor; // The sun pass's cPSLight c2.z, the frame before
 };
-
-// NVIDIA's DLSS-RR Integration Guide, appendix (from Ray Tracing Gems, chapter 32).
-float3 EnvBRDFApprox2(float3 specularColor, float alpha, float NoV)
-{
-    NoV = abs(NoV);
-    float4 X = float4(1, NoV, NoV * NoV, NoV * NoV * NoV);
-    float4 Y = float4(1, alpha, alpha * alpha, alpha * alpha * alpha);
-    float2x2 M1 = float2x2(0.99044, -1.28514, 1.29678, -0.755907);
-    float3x3 M2 = float3x3(1, 2.92338, 59.4188, 20.3225, -27.0302, 222.592, 121.563, 626.13, 316.627);
-    float2x2 M3 = float2x2(0.0365463, 3.32707, 9.0632, -9.04756);
-    float3x3 M4 = float3x3(1, 3.59685, -1.36772, 9.04401, -16.3174, 9.22949, 5.56589, 19.7886, -20.2123);
-    float bias = dot(mul(M1, X.xy), Y.xy) * rcp(dot(mul(M2, X.xyw), Y.xyw));
-    float scale = dot(mul(M3, X.xy), Y.xy) * rcp(dot(mul(M4, X.xzw), Y.xyw));
-    bias *= saturate(specularColor.g * 50);
-    return mad(specularColor, max(0, scale), max(0, bias));
-}
 
 // The texel a point sampler takes at (u, v), as the sun pass reads the material table.
 float4 PointAt(Texture2D<float4> table, float u, float v)
@@ -171,15 +159,18 @@ float4 PointAt(Texture2D<float4> table, float u, float v)
     return table.Load(int3(min(uint2(float2(u, v) * float2(width, height)), uint2(width, height) - 1), 0));
 }
 
-// The Fresnel table at normal incidence (its last column), between rows as a linear sampler takes them.
-float FresnelAtNormal(float F0)
+// The Fresnel table at (cosine, F0), as a linear clamped sampler takes it.
+float FresnelAt(float cosine, float F0)
 {
     uint width, height;
     g_Fresnel.GetDimensions(width, height);
-    float row = clamp(F0 * height - 0.5, 0, height - 1);
-    float above = g_Fresnel.Load(int3(width - 1, uint(row), 0)).x;
-    float below = g_Fresnel.Load(int3(width - 1, min(uint(row) + 1, height - 1), 0)).x;
-    return lerp(above, below, frac(row));
+    float2 texel = clamp(float2(cosine * width, F0 * height) - 0.5, 0, float2(width, height) - 1);
+    uint2 low = uint2(texel);
+    uint2 high = min(low + 1, uint2(width, height) - 1);
+    float2 t = frac(texel);
+    float above = lerp(g_Fresnel.Load(int3(low.x, low.y, 0)).x, g_Fresnel.Load(int3(high.x, low.y, 0)).x, t.x);
+    float below = lerp(g_Fresnel.Load(int3(low.x, high.y, 0)).x, g_Fresnel.Load(int3(high.x, high.y, 0)).x, t.x);
+    return lerp(above, below, t.y);
 }
 
 [numthreads(8, 8, 1)]
@@ -213,19 +204,22 @@ void main(uint2 id : SV_DispatchThreadID)
 
     float4 specular = g_HasSpecular ? g_Specular.Load(int3(id, 0)) : float4(1, 0, 0, 0);
     float roughness = specular.x;
+    float toEyeN = saturate(-dot(normal, eye));
     float3 specularColor = specular.y * 0.04;
+    float3 reflected = specular.y * max(0.04, g_SkyReflectionFloor);
     float translucencyScale = 0; // The material's (its table's row 0.25, w)
     if (g_HasTables)
     {
         float4 color = PointAt(g_Materials, specular.z, 0.25);
         float F0 = PointAt(g_Materials, specular.z, 0.75).x;
-        specularColor = specular.y * color.rgb * FresnelAtNormal(F0);
+        specularColor = specular.y * color.rgb * FresnelAt(1, F0);
+        reflected = specular.y * color.rgb * FresnelAt(toEyeN, max(F0, g_SkyReflectionFloor));
         translucencyScale = color.w;
     }
 
     g_NormalRoughness[id] = float4(world, roughness);
     g_DiffuseAlbedo[id] = float4(g_HasAlbedo ? g_Albedo.Load(int3(id, 0)).rgb : 0.5, 1);
-    g_SpecularAlbedo[id] = float4(saturate(EnvBRDFApprox2(specularColor, roughness * roughness, dot(normal, eye))), 1);
+    g_SpecularAlbedo[id] = float4(saturate(reflected * ((1 - roughness) * 0.5)), 1);
     g_Material[id] = float4(saturate(specularColor), specular.w);
     g_Wrap[id] = saturate(specular.w * translucencyScale);
 }
@@ -263,7 +257,8 @@ struct GuideParameters
     float view[3][4];
     float projectionParam[4];
     float jitter[2];
-    std::uint32_t width, height, hasAlbedo, hasSpecular, hasTables, padding;
+    std::uint32_t width, height, hasAlbedo, hasSpecular, hasTables;
+    float skyReflectionFloor;
 };
 
 // The light the global illumination keeps in its caches is the game's before exposure, scaled by
@@ -285,6 +280,7 @@ struct Sun
 {
     std::array<float, 3> direction{}, color{};
     float exposure{};
+    float skyReflectionFloor{}; // cPSLight c2.z
 };
 
 // What a deferred context, then its command list, recorded that the kick and the wait need.
@@ -484,7 +480,7 @@ void pack(ID3D11ShaderResourceView* depth, const SceneConstants& scene)
 
 // DLSS Ray Reconstruction's guides from the G-buffer, at the depth's size; on the immediate context, call
 // with executionMutex held.
-void makeGuides(ID3D11ShaderResourceView* depth, const SceneConstants& scene)
+void makeGuides(ID3D11ShaderResourceView* depth, const SceneConstants& scene, float skyReflectionFloor)
 {
     const auto [width, height] = sizeOf(depth);
     if (guideNormals.width != width || guideNormals.height != height)
@@ -492,7 +488,7 @@ void makeGuides(ID3D11ShaderResourceView* depth, const SceneConstants& scene)
         // Ray Reconstruction reads them on Direct3D 12 (ray_reconstruction.hpp).
         guideNormals = makeShared(device.Get(), width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the Ray Reconstruction normals");
         guideDiffuse = makeShared(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the Ray Reconstruction diffuse albedo");
-        guideSpecular = makeShared(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the Ray Reconstruction specular albedo");
+        guideSpecular = makeShared(device.Get(), width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the Ray Reconstruction specular albedo");
         guideMaterial = makeShared(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating path tracing's material guide");
         guideWrap = makeShared(device.Get(), width, height, DXGI_FORMAT_R8_UNORM, "Creating path tracing's translucency guide");
     }
@@ -510,6 +506,7 @@ void makeGuides(ID3D11ShaderResourceView* depth, const SceneConstants& scene)
     parameters.hasAlbedo = hasAlbedo;
     parameters.hasSpecular = specular != nullptr;
     parameters.hasTables = tables.fresnel && tables.materials;
+    parameters.skyReflectionFloor = skyReflectionFloor;
     check(write(immediate.Get(), guideParameters.Get(), parameters), "Writing the Ray Reconstruction guides' constants");
 
     ID3D11ShaderResourceView* inputs[]{depth, normals.Get(), hasAlbedo ? albedo.Get() : nullptr, specular.Get(), tables.fresnel.Get(), tables.materials.Get()};
@@ -744,7 +741,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     }
 
     pack(depth, *sceneCamera);
-    if (options.reconstructionGuides) makeGuides(depth, *sceneCamera);
+    if (options.reconstructionGuides) makeGuides(depth, *sceneCamera, sun ? sun->skyReflectionFloor : 0);
     ID3D11Texture2D* light{};
     ID3D11Texture2D* shadow{};
     ID3D11Texture2D* shadowDebug{};
@@ -1192,6 +1189,7 @@ void noteSun(ID3D11DeviceContext* context, bool shadowMapped) noexcept
 
         noted.color = {light->color[0], light->color[1], light->color[2]};
         noted.exposure = scene->exposure;
+        noted.skyReflectionFloor = light->skyReflectionFloor;
         notes.note(keyOf(context), [&](Notes& contextNotes) {
             contextNotes.sun = noted;
             // The range as SunShadow reads it (sun_light_pass_shaders.hpp).

@@ -1571,12 +1571,15 @@ otherwise DLSS runs, and the upscaler's status line says why.
   NVIDIA's release `nvngx_dlssd.dll` beside the add-on.
 - **Guides** (`GuideSource` in `ray_tracing.cpp`, at the kick, from the G-buffer at the render size): the
   world-space normal with the roughness (the specular target's `x`) in `w`, `R16G16B16A16_FLOAT`, NGX's
-  packed roughness; the diffuse albedo, linear, `R8G8B8A8_UNORM`; the specular albedo, NVIDIA's
-  `EnvBRDFApprox2` of the game's specular colour at normal incidence (the material table's colour,
-  `g_MaterialTexture` row 0.25, times the specular target's intensity `y`, times the Fresnel table `g_lut1`
-  at a cosine of 1 for the material's F0, row 0.75), the roughness squared and the view angle, as the sun
-  pass works the angle out. Where the sky is: no normal or roughness, albedo 0.5, no specular albedo. The
-  sun pass's `t9` and `t10` give the tables (`indirect_light_pass::materialTables`).
+  packed roughness; the diffuse albedo, linear, `R8G8B8A8_UNORM`; the specular albedo, `R16G16B16A16_FLOAT`
+  (a few hundredths, too small for 8 bits), as the game weights its sky reflection (`SKY_REFLECTION`): the
+  material table's colour (`g_MaterialTexture` row 0.25) times the specular target's intensity `y`, times
+  the Fresnel table `g_lut1` at the view angle for the material's F0 (row 0.75) or the sun pass's least F0
+  (`cPSLight` `c2.z`, 0.21 on Mother Base's deck, 0 in the helicopter; the frame before's), times half of
+  1 minus the roughness. The game's materials are tuned to that weighting: with a physical one (NVIDIA's
+  `EnvBRDFApprox2`), Snake's red arm (an 11% white specular of roughness 0.59) reflected 3 to 4 times as
+  much and the sky's light turned it grey. Where the sky is: no normal or roughness, albedo 0.5, no
+  specular albedo. The sun pass's `t9` and `t10` give the tables (`indirect_light_pass::materialTables`).
 - **Noisy light for it** (`gi_renderer::Frame::forReconstruction`, `GIFrameConstants::reconstruction`).
   Ray Reconstruction asks for samples apart at every render pixel, without other denoisers. While it
   denoised the frame before (the upscaler counts its frames, `ray_tracing::reconstructed`), the kick
@@ -1605,8 +1608,8 @@ ray-traced shadows.
   from Ray Reconstruction's normal guide), lit where it hits as the global illumination's rays light theirs
   (the sun and a light afresh, its bounce from the sky or the light cache); the sky's light where it gets
   away, without the sun's disc, which stays the sun's specular. Its light times the specular albedo guide
-  and the exposure goes to the resolve, which adds it to the game's specular light
-  (`path_tracing::addReflections`), and its hit distance to Ray Reconstruction (`pInSpecularHitDistance`,
+  and the exposure goes to the resolve, which adds it to the game's specular light times the menu's
+  **Reflections** strength (`path_traced_reflections`, 1 by default; `path_tracing::addReflections`), and its hit distance to Ray Reconstruction (`pInSpecularHitDistance`,
   65504 where it got away), which moves the reflections with what they reflect. The game's reflections
   make way: the sun pass leaves its sky reflection out (`SKY_REFLECTION 0`), indoors the sky's specular
   pass (`SunLight_ES`) is skipped, and the screen-space reflections' blend (`LocalReflectionAddBuffer`,

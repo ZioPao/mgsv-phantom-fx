@@ -1114,7 +1114,7 @@ Result render(const Frame& frame)
         if (traceReflections)
         {
             descriptors.texture(18, guideNormals, DXGI_FORMAT_R16G16B16A16_FLOAT);
-            descriptors.texture(19, guideSpecular, DXGI_FORMAT_R8G8B8A8_UNORM);
+            descriptors.texture(19, guideSpecular, DXGI_FORMAT_R16G16B16A16_FLOAT);
             descriptors.outputTexture(93, reflection, DXGI_FORMAT_R16G16B16A16_FLOAT);
             descriptors.outputTexture(94, reflectionDistance, DXGI_FORMAT_R16_FLOAT);
         }
