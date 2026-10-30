@@ -26,6 +26,6 @@ void describe(MotionBlur& blur, SettingVisitor& visit)
             .format = "%.0f%%",
             .readoutScale = 100,
             .tip = "How far each pixel's motion smears, against what the game's graphics setting asks for: 100% the game's own, 0% none, 200% "
-                   "twice as far."});
+                   "up to twice as far, within the game's limit. Halved while frame generation runs."});
 }
 }

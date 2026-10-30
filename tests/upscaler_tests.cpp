@@ -2,6 +2,7 @@
 #include "constant_capture.hpp"
 #include "features/global_illumination/gi_lighting.hpp"
 #include "features/lamp_contact_shadows/lamp_contact_shadows_shaders.hpp"
+#include "features/motion_blur/motion_blur.hpp"
 #include "features/upscaling/frames.hpp"
 #include "features/upscaling/render_size_plan.hpp"
 #include "frame_latch.hpp"
@@ -594,6 +595,19 @@ void planKeptForOtherSettings()
     scaled.customRenderScale = 0.7f;
     expect(!plan.isFor(fsr, Output) && !plan.isFor(quality, Output) && !plan.isFor(scaled, Output) && !plan.isFor(wanted, {1920, 1080}),
         "Another upscaler, mode, custom scale or output size makes a new plan.");
+}
+
+void motionBlurStrength()
+{
+    // The game's plugin gives its blur min(exposure x amount, 1).
+    const auto shutterRatio = [](float exposure, std::optional<float> amount) { return std::min(exposure * amount.value_or(-1.0f), 1.0f); };
+
+    expect(shutterRatio(2, motion_blur::scaledAmount(2, 1, 0.5f)) == 0.5f,
+        "Half strength halves the blur even where the game's own amount passes the plugin's cap.");
+    expect(shutterRatio(0.5f, motion_blur::scaledAmount(0.5f, 1, 2)) == 1.0f && shutterRatio(0.5f, motion_blur::scaledAmount(0.5f, 1, 3)) == 1.0f,
+        "Above full strength the blur grows up to the plugin's cap.");
+    expect(!motion_blur::scaledAmount(0, 1, 1) && !motion_blur::scaledAmount(std::numeric_limits<float>::infinity(), 1, 1),
+        "Without a frame rate and shutter the amount is left alone.");
 }
 
 void jitterSequence()
@@ -1264,6 +1278,7 @@ int main()
         renderSizeNeverAboveOutput();
         customQualityFollowsScale();
         planKeptForOtherSettings();
+        motionBlurStrength();
         jitterSequence();
         frameStartsAfterAnExecute();
         passesAfterAnExecuteBelongToTheNextFrame();

@@ -1,8 +1,10 @@
 #include "features/motion_blur/motion_blur.hpp"
 
+#include "clock.hpp"
 #include "device_check.hpp"
 #include "game_code.hpp"
 #include "game_memory.hpp"
+#include "log.hpp"
 
 #include <Windows.h>
 #include <MinHook.h>
@@ -12,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <mutex>
 
 namespace phantom_fx::motion_blur
 {
@@ -28,16 +31,28 @@ constexpr unsigned char PreExecStart[]{0x80, 0x79, 0x68, 0x00, 0x49, 0x8B, 0x80,
 constexpr unsigned char ExecStart[]{0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20};
 constexpr std::size_t FrameFlags = 0xD0;
 constexpr std::uint64_t VelocityPasses = 1;
-// Motion blur on and its amount, as PreExec and Exec read them (docs/DEVELOPMENT.md, "Engine addresses").
-constexpr std::uintptr_t MotionBlurOnRva = 0x2B75AC4, AmountRva = 0x2B75ACC;
+// Motion blur on, its minimum shutter and its amount, as PreExec and Exec read them (docs/DEVELOPMENT.md,
+// "Engine addresses").
+constexpr std::uintptr_t MotionBlurOnRva = 0x2B75AC4, MinimumShutterRva = 0x2B75AC8, AmountRva = 0x2B75ACC;
+// What Exec takes its shutter ratio from besides the amount: the view's camera, with its shutter and
+// frame time, and the plugin's own shutter, used in the camera's place when its flag is set. With bit 0
+// of the plugin's flags, Exec takes 60 frames a second in place of the frame time.
+constexpr std::size_t ViewCamera = 0x570, CameraShutter = 0x128, CameraFrameTime = 0x130;
+constexpr std::size_t PluginHasShutter = 0x68, PluginShutter = 0x6C, PluginFlags = 0x78;
+constexpr float FixedFrameRate = 60;
 
 using PluginStep = void (*)(void* plugin, std::uint8_t* context, void* view);
 PluginStep originalPreExec{}, originalExec{};
-std::atomic<bool> velocityOnly{}, hooked{}, enabled{true};
+std::atomic<bool> velocityOnly{}, enabled{true}, frameGeneration{};
 std::atomic<float> strength{1};
-// The game's own amount, relearned when it writes it, so the strength multiplies the game's radius.
-std::atomic<float> gameAmount{1};
-std::atomic<float> writtenAmount{std::numeric_limits<float>::quiet_NaN()};
+std::atomic<LONGLONG> lastStrengthLog{};
+
+// The game's own amount, relearned when it writes it, so the strength multiplies the game's radius, and
+// the amount last written. The recording threads read, work out and write the amount one at a time: in
+// between, one thread's write would look like the game's own to another.
+std::mutex amountMutex;
+float gameAmount{1};
+float writtenAmount{std::numeric_limits<float>::quiet_NaN()};
 
 // The player's motion blur setting, as PreExec reads it.
 bool gameWantsBlur() noexcept
@@ -47,20 +62,60 @@ bool gameWantsBlur() noexcept
     return on && *on != 0;
 }
 
-// The add-on's strength in the game's amount, written after PreExec has read it, so this frame's
-// blur draws use it. The toggle is the add-on's own, in exec().
-void applyStrength() noexcept
+// The frame rate times the shutter, as Exec takes them for `view`: its shutter ratio per unit of the
+// amount. PreExec has just read the same camera.
+float exposureOf(const std::uint8_t* plugin, const std::uint8_t* view, float minimumShutter) noexcept
 {
-    if (!hooked.load(std::memory_order_relaxed) || !enabled.load(std::memory_order_relaxed)) return;
+    const auto* camera = *reinterpret_cast<const std::uint8_t* const*>(view + ViewCamera);
+    const float cameraShutter = *reinterpret_cast<const float*>(camera + CameraShutter);
+    const double frameTime = *reinterpret_cast<const double*>(camera + CameraFrameTime);
+    const float pluginShutter = *reinterpret_cast<const float*>(plugin + PluginShutter);
+
+    const float shutter = std::max(plugin[PluginHasShutter] ? pluginShutter : cameraShutter, minimumShutter);
+    const float rate = (plugin[PluginFlags] & 1) ? FixedFrameRate : static_cast<float>(1.0 / frameTime);
+
+    return rate * shutter;
+}
+
+// Every ten seconds: what the blur was given, so a strength that seems to do nothing can be checked.
+// Under amountMutex.
+void logStrength(float exposure, float amount) noexcept
+{
+    const auto now = clock::ticksNow();
+    if (clock::millisecondsOf(now - lastStrengthLog.load(std::memory_order_relaxed)) < 10000) return;
+
+    lastStrengthLog = now;
+    const auto number = [](float value) { return std::to_string(value); };
+    log("Motion blur: frame rate x shutter " + number(exposure) + ", the game's amount " + number(gameAmount)
+        + ", its shutter ratio " + number(std::min(exposure * gameAmount, 1.0f)) + ", given "
+        + number(std::min(exposure * amount, 1.0f)) + " (strength " + number(strength.load(std::memory_order_relaxed))
+        + (frameGeneration.load(std::memory_order_relaxed) ? ", halved for frame generation)." : ")."));
+}
+
+// The amount that gives Exec's shutter ratio the game's own times the strength, halved while frame
+// generation runs, written after PreExec has read it, so this frame's blur draws use it. The toggle is
+// the add-on's own, in exec().
+void applyStrength(const std::uint8_t* plugin, const std::uint8_t* view) noexcept
+{
+    if (!enabled.load(std::memory_order_relaxed)) return;
+
+    std::lock_guard lock(amountMutex);
     const auto base = reinterpret_cast<std::uintptr_t>(game_code::image());
     const auto amount = game_memory::read<float>(base + AmountRva);
-    if (!amount) return;
+    const auto minimumShutter = game_memory::read<float>(base + MinimumShutterRva);
+    if (!amount || !minimumShutter) return;
 
-    const auto written = writtenAmount.load(std::memory_order_relaxed);
-    if (!(std::fabs(*amount - written) <= 1e-4f)) gameAmount = *amount;
-    const float wanted = std::clamp(gameAmount.load(std::memory_order_relaxed) * strength.load(std::memory_order_relaxed), 0.0f, 1.0f);
-    if (!(std::fabs(wanted - *amount) <= 1e-4f)) game_memory::write(base + AmountRva, wanted);
-    writtenAmount = wanted;
+    if (!(std::fabs(*amount - writtenAmount) <= 1e-4f)) gameAmount = *amount;
+
+    const float exposure = exposureOf(plugin, view, *minimumShutter);
+    const float scale = strength.load(std::memory_order_relaxed) * (frameGeneration.load(std::memory_order_relaxed) ? 0.5f : 1.0f);
+    const auto wanted = scaledAmount(exposure, gameAmount, scale);
+    if (!wanted) return;
+
+    if (!(std::fabs(*wanted - *amount) <= 1e-4f)) game_memory::write(base + AmountRva, *wanted);
+    writtenAmount = *wanted;
+
+    if constexpr (DiagnosticLog) logStrength(exposure, *wanted);
 }
 
 void preExec(void* plugin, std::uint8_t* context, void* view)
@@ -70,7 +125,7 @@ void preExec(void* plugin, std::uint8_t* context, void* view)
     auto* flags = *reinterpret_cast<std::uint64_t**>(context + FrameFlags);
     if (velocityOnly.load(std::memory_order_relaxed) && flags) *flags |= VelocityPasses;
 
-    applyStrength();
+    applyStrength(static_cast<const std::uint8_t*>(plugin), static_cast<const std::uint8_t*>(view));
 }
 
 void exec(void* plugin, std::uint8_t* context, void* view)
@@ -108,6 +163,11 @@ std::string hook() noexcept
 void setVelocityOnly(bool on) noexcept
 {
     velocityOnly = on;
+}
+
+void setFrameGeneration(bool on) noexcept
+{
+    frameGeneration = on;
 }
 
 void configure(const Configuration& configuration) noexcept

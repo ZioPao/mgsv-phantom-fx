@@ -692,11 +692,16 @@ What decides whether the velocity passes run, traced statically in this build:
 - `PluginDeferredGeometry::PostExec` (`0x1C54D0`, GPU marker `MakeVelocityBuffer`) tests that bit
   (`test byte [rcx], 1` at `0x1C558F`) and only then draws the two velocity lists (`[plugin+0x70]`
   and `[plugin+0x78]`, created unconditionally at `0x1C5050`) and `MotionBlurCameraVelocity`.
-- Exec repeats the test and draws the blur through three renderer calls (vtable `+0x468`, `+0x470`,
-  `+0x478`): tiles, neighbours, bake, the McGuire passes and the composite. It does nothing else.
+- Exec repeats the test, then sets the blur's shutter ratio at `[plugin+0x70]`: shutter x amount
+  times the frame rate (1 over the double at `[[view+0x570]+0x130]`, or 60 when bit 0 of
+  `[plugin+0x78]` is set), capped at 1 and doubled. It draws the blur through three renderer calls
+  (vtable `+0x468`, which takes `plugin+0x6C`, `+0x470`, `+0x478`): tiles, neighbours, bake, the
+  McGuire passes and the composite. The cap is reached whenever frame rate x shutter x amount passes
+  1, so a scale on the amount alone does not shorten the blur there.
 - The flag is cleared every frame: when the add-on stops setting it, the next frame has no
   velocity passes. The three globals have no RIP-relative writers; they are written through
-  pointers, presumably from the graphics settings. The add-on does not touch them.
+  pointers, presumably from the graphics settings. The add-on writes the amount (see "What the add-on
+  changes", "Motion blur").
 
 Leads not needed in the end: the graphics settings object is the singleton at `[0x2B74910]`
 (0x1E0 bytes; the current settings at `+0x38`, the next at `+0x108`, 0xD0 bytes each: video out
@@ -1364,8 +1369,13 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
   game's setting. Off and the comparison give both back to the game's setting from the next frame.
   When a check fails nothing is hooked and the game's setting stays in charge. `AddonUninit` removes
   all engine hooks with `MH_Uninitialize`. The blur runs after DLSS, at half the output size while
-  upscaling (see "The UI at the output size"). Checked with F10 records (the DLSS rows before the
-  blur came back with the toggle):
+  upscaling (see "The UI at the output size").
+  After PreExec, the add-on writes the amount that gives Exec's shutter ratio (see "Velocity without
+  motion blur") the game's own times the **Strength**, from the same view's frame rate and shutter
+  (`motion_blur::scaledAmount`). Above 100% it grows only up to Exec's cap. While frame generation
+  runs the ratio is halved as well, as NVIDIA's DLSS-G guide asks: frame generation gets the blurred
+  image, and each frame it shows covers half the motion. Checked with F10 records (the DLSS rows
+  before the blur came back with the toggle):
 
   | Motion blur | Add-on | Velocity passes | Blur passes |
   | --- | --- | --- | --- |
