@@ -40,6 +40,9 @@
 - **Diagnostics: the denoiser's own checks as a debug view.** **Global illumination denoiser (NRD)**
   shows NVIDIA's validation layer for the global illumination's denoiser: its view depth, normals,
   motion against a still scene and frames of history.
+- **Ray tracing: the helicopter's cabin has its walls.** Between missions the rays passed through the cabin's
+  walls, as it is held apart from the rest of the game's models: sunlight flooded in, and with path tracing the
+  cabin was about four times as bright as the game's own. It is now dark inside, with daylight through its windows.
 - **Ray-traced shadows: no lit halo around sunlit characters.** A character in the sun in front of a
   shaded wall left a lit band on the wall along their outline, wider the lower the render scale. The
   shadow denoiser no longer mixes a pixel's shadow with what lies in front of or behind it.
