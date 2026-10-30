@@ -161,7 +161,7 @@ what draws it, when that is the feature's own.
 | `ray_traced_shadows/` | `gi_shadow.*`: the sun's shadow rays and the FidelityFX Shadow Denoiser on Direct3D 12. `gi_shadow.hlsl`, `gi_shadow_filter.hlsl`: the rays, the denoiser's temporal pass and filters |
 | `ray_traced_lights/` | `local_lights.*`: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights"). `light_choice.*`: which lights a kick gives the rays (each light's reach, the light cap) and each light as the rays take it. `light_shadow_rays.*`, `light_shadows.hlsl`: the lights' shadow rays and filter on Direct3D 12 |
 | `global_illumination/` | `gi_light.*`, `gi_light.hlsl`: the light on Direct3D 12, its rays, the denoiser's inputs and the render size (see "Global illumination"); their hits' light and the hash grid cache in `passes/ray_tracing/shaders/gi_hit_light.hlsli`. `gi_denoiser.*`: NVIDIA NRD's RELAX denoiser without NRI. `gi_lighting.*`: the game's sky and sun in the light's terms. `light_combine.*`: the traced light in place of the game's probe light at the resolve |
-| `path_tracing/` | `path_tracing.*`: path tracing on Direct3D 11: the traced reflections added at the resolve, the screen-space reflections kept on water and glass, the lamps' light added at the draw point, the masks' atlas (see "Path tracing"). `path_tracing_shaders.hpp`: those draws. `path_tracing_rays.*`: its passes on Direct3D 12, the lamps' ReSTIR reservoirs and light history. `reflections.hlsl`, `direct_light.hlsl`: the reflections and the point and spot lights |
+| `path_tracing/` | `path_tracing.*`: path tracing on Direct3D 11: the traced reflections added at the resolve, the screen-space reflections kept on water and glass, the lamps' light added at the draw point, the masks' atlas (see "Path tracing"). `path_tracing_shaders.hpp`: those draws. `path_tracing_rays.*`: its passes on Direct3D 12. `reflections.hlsl`, `direct_light.hlsl`: the reflections and the point and spot lights |
 | `ambient_occlusion/` | `gtvbao.*`: GTVBAO's occlusion multiplied into the indirect light at the upscale. `gtvbao_shaders.hpp`: that multiply |
 | `indirect_light/` | `ssilvb.*`: SSILVB's light, brought to the render size and added to the diffuse light the resolve reads. `ssilvb_shaders.hpp`: the upsample |
 | `volumetric_fog/` | `atmosphere.*`: the larger fog texture, the game's fog pass over all of it, the shadowed fill before the resolve. `atmosphere_shaders.hpp`: the game's fog formula per froxel with the sun shadowed; Hillaire's atmosphere tables, the physical fog and sky (Epic Games' reference, MIT) |
@@ -1653,28 +1653,23 @@ lights) is left alone until it runs.
   table at a cosine of 1), in place of the game's lookup tables, its specular shadow floor and its sky
   reflection. The sun's rays are traced while path tracing runs, whether or not the ray-traced shadows are
   on.
-- **Point and spot lights** (`SampleLamps`, `ShadeLamps`, `direct_light.hlsl`), in place of the game's light
-  shaders: each light's light as they work it out (`LocalLightReaching`: its falloff, a spot's cone, the
-  game's volume for it; a masked spot's mask; the light through leaves, the game's `LN_trans`; its diffuse
-  and specular scales, `cPSLight` `c8.y` and `c8.x`, 1 for the latter where its shader has none, as the
-  ray-traced lights draw them), times the exposure as theirs (`falloff x c4 x m_exposure.z`), with
-  GGX's specular. The light a pixel takes is picked by ReSTIR DI (Bitterli et al., SIGGRAPH 2020), by its
-  light there without shadows (the target): `SampleLamps` takes 8 lights at random (every light when there
-  are no more) into a reservoir of one (resampled importance sampling), traces a shadow ray to it (a
-  blocked one weighs nothing, the paper's visibility reuse), and joins the pixel's reservoir of the last
-  frame where it was (the camera's motion or the game's velocity, as the light's denoiser guides take it;
-  on a surface within 10% in depth and 25 degrees in normal; standing for at most 20 samples); `ShadeLamps`
-  joins 4 neighbours' within 24 pixels on such a surface and traces a shadow ray to the light picked, to a
-  point on its disc, as the ray-traced lights' rays leave (hair's share, the faces that cast). Joins weigh
-  each reservoir by its samples (the paper's biased 1/M weights). The light it found blocked goes on to the
-  next frame with nothing. The last frame's lights are found in this one's by their key (`light_choice::keyOf`),
-  a light the game moves (a flashlight) as the nearest of its colour within a metre
-  (`path_tracing_rays::Rays::fill`, `GIFrameConstants::lampHistory`); a camera cut or a frame without them
-  starts over. At the draw point (`path_tracing::addLampLight`, from `local_lights.cpp`) one full-screen
-  draw adds their diffuse and specular light to the light targets, so the skin filter, the resolve and the
-  exposure see it, in place of each light the kick traced drawn again. Path tracing takes the lights'
-  records whether or not the ray-traced lights are on; on its own it takes the game's lights only while it
-  runs.
+- **Point and spot lights** (`TraceLampLight`, `direct_light.hlsl`), in place of the game's light shaders:
+  each light's light as they work it out (`LocalLightReaching`: its falloff, a spot's cone, the game's
+  volume for it; a masked spot's mask; the light through leaves, the game's `LN_trans`; its diffuse and
+  specular scales, `cPSLight` `c8.y` and `c8.x`, 1 for the latter where its shader has none, as the
+  ray-traced lights draw them), times the exposure as theirs (`falloff x c4 x m_exposure.z`), with GGX's
+  specular. A pixel picks two lights in proportion to their light there without shadows (weighted
+  reservoir sampling over all the frame's lights, white noise) and traces a shadow ray to a point on each
+  one's disc, as the ray-traced lights' rays leave (hair's share, the faces that cast); every light is
+  shadowed in full, as the ray-traced lights shadow them. At the draw point (`path_tracing::addLampLight`,
+  from `local_lights.cpp`) one full-screen draw adds their diffuse and specular light to the light
+  targets, so the skin filter, the resolve and the exposure see it, in place of each light the kick traced
+  drawn again. Path tracing takes the lights' records whether or not the ray-traced lights are on; on its
+  own it takes the game's lights only while it runs.
+- **ReSTIR DI**, tried on 2026-10-30 (Bitterli et al. 2020: 8 random candidates, a visibility ray, the last
+  frame's reservoir where the pixel was, 4 neighbours, the biased 1/M weights): shadows lagged in game. A
+  light its ray found blocked went on to the next frames with no weight but up to 20 samples, so where a
+  blocker moved away its light came back over about 20 frames. Removed.
 - **What it does not trace.** Beams stay the game's, drawn with their shadow map (see "Ray-traced lights",
   "Beams"). A light the kick did not take (recorded after it, left for another frame's camera, or past the
   128 the rays take) is drawn again as before, unshadowed: in the sessions of 2026-10-30, 195 ten-second
@@ -1692,7 +1687,7 @@ lights) is left alone until it runs.
   glass, rivers and liquids, decals, forward models, the terrain's self-shadow), and the volumetric fog the
   sun's for its light shafts. Its screen-space reflections' march, for water and glass. Its probe light in
   the diffuse light target, which its exposure measures.
-- **Cost** (2026-10-30, 2228x1254 rendered for 3840x2160, before ReSTIR): the light's line in the log,
+- **Cost** (2026-10-30, 2228x1254 rendered for 3840x2160): the light's line in the log,
   which holds the reflections and the lights, 4 to 5.7 ms, against about 2.4 ms with Ray Reconstruction
   alone. The budget has its own line: the reflections, the lights and adding their light.
 

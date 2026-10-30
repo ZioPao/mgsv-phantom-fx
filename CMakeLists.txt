@@ -193,7 +193,7 @@ add_gi_kernels(features/ray_traced_shadows/gi_shadow.hlsl TraceSunShadows Classi
 add_gi_kernels(features/ray_traced_shadows/gi_shadow_filter.hlsl FilterShadows)
 add_gi_kernels(features/ray_traced_lights/light_shadows.hlsl TraceLocalLightShadows FilterLocalLightShadows ProbeLocalLights)
 add_gi_kernels(features/path_tracing/reflections.hlsl TraceReflections)
-add_gi_kernels(features/path_tracing/direct_light.hlsl SampleLamps ShadeLamps)
+add_gi_kernels(features/path_tracing/direct_light.hlsl TraceLampLight)
 add_custom_target(gi_kernels DEPENDS ${GI_SHADER_HEADERS})
 
 # GGX's specular, one file for path tracing's kernels and the sun pass's shaders, which compile at run time:

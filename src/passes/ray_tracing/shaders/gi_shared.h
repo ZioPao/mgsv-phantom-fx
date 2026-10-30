@@ -185,13 +185,9 @@ struct GIFrameConstants
     // The upscaler's jitter in NDC as the depth was drawn (cPSScene c28, m_cameraCenterOffset): xy this
     // frame's, zw the last frame's.
     float4 jitter;
-    // The point and spot lights' shadows (TraceLocalLightShadows): x the frame's lights, y rays a pixel; z 1 while
-    // path tracing's lamps have the last frame's reservoirs (direct_light.hlsl).
+    // The point and spot lights' shadows (TraceLocalLightShadows): x the frame's lights, y rays a pixel.
     uint4 localLightCount;
     GILocalLight localLights[GI_MAX_LOCAL_LIGHTS];
-    // Path tracing's light history (CurrentLampOf in direct_light.hlsl): each of the last frame's lights' place
-    // in localLights, four a row; GI_MAX_LOCAL_LIGHTS for one that went.
-    uint4 lampHistory[GI_MAX_LOCAL_LIGHTS / 4];
 };
 
 // One mesh of a character posed this frame (Skin in gi_scene.hlsl): its bind pose (16 bytes a vertex:

@@ -50,10 +50,9 @@
 #include "ProbeShadows.h"
 #include "PurgeTiles.h"
 #include "ResolveLight.h"
-#include "SampleLamps.h"
-#include "ShadeLamps.h"
 #include "Skin.h"
 #include "TerrainGrid.h"
+#include "TraceLampLight.h"
 #include "TraceLight.h"
 #include "TraceLocalLightShadows.h"
 #include "TraceReflections.h"
@@ -92,8 +91,7 @@ constexpr std::uint32_t MaxMarks = 32;
 constexpr std::span<const unsigned char> Bytecode[]{GI_ClearNewGeometries, GI_DebugScene, GI_TerrainGrid, GI_Skin,
     GI_ClearCounters, GI_GenerateDispatch, GI_PrepareGuides, GI_TraceLight, GI_LearnAlbedo, GI_PurgeTiles, GI_PopulateMultibounceCells,
     GI_PopulateCells, GI_UpdateTiles, GI_UpdateMultibounceCells, GI_ResolveLight, GI_UpdateFoliageMemory, GI_CompositeLight, GI_TraceSunShadows, GI_ClassifyShadowTiles,
-    GI_FilterShadows, GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows, GI_ProbeLocalLights, GI_TraceReflections, GI_SampleLamps,
-    GI_ShadeLamps};
+    GI_FilterShadows, GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows, GI_ProbeLocalLights, GI_TraceReflections, GI_TraceLampLight};
 static_assert(std::size(Bytecode) == static_cast<std::size_t>(Kernel::Count));
 
 using Shared = OpenedTexture;
@@ -131,7 +129,6 @@ struct State
 
     std::unique_ptr<gi_light::Light> light;
     std::unique_ptr<gi_shadow::Shadows> shadows;
-    std::unique_ptr<path_tracing_rays::Rays> pathTracing;
     // The point and spot lights' shadows before and between the filter's passes (TraceLocalLightShadows,
     // FilterLocalLightShadows), R16G16_FLOAT at the render size.
     ComPtr<ID3D12Resource> localShadowRays, localShadowFirst;
@@ -950,28 +947,15 @@ Result render(const Frame& frame)
         s.shadows.reset();
     }
 
-    if (frame.isPathTraced && (!s.pathTracing || s.pathTracing->width() != frame.width || s.pathTracing->height() != frame.height))
-    {
-        waitForAll();
-        s.pathTracing.reset();
-        s.pathTracing = std::make_unique<path_tracing_rays::Rays>(s.device.Get(), frame.width, frame.height);
-        log("Path tracing at " + std::to_string(frame.width) + "x" + std::to_string(frame.height) + ".");
-    }
-    else if (!frame.isPathTraced && s.pathTracing)
-    {
-        waitForAll();
-        s.pathTracing.reset();
-    }
-
     const bool traceLight = frame.traceLight && s.light;
     const bool traceShadows = frame.traceShadows && s.shadows && frame.textures.shadow;
     const bool debugShadows = traceShadows && frame.debugShadows && frame.textures.shadowDebug;
     const bool traceLocalLights = !frame.localLights.empty() && frame.textures.localLightShadow;
     // Path tracing lights the point and spot lights itself (direct_light.hlsl), with Ray Reconstruction's guides.
-    const bool traceLamps = frame.isPathTraced && s.pathTracing && !frame.localLights.empty() && frame.textures.lampDiffuse && frame.textures.lampSpecular
+    const bool traceLamps = frame.isPathTraced && !frame.localLights.empty() && frame.textures.lampDiffuse && frame.textures.lampSpecular
         && frame.textures.guideNormals && frame.textures.guideMaterial && frame.textures.guideTranslucency;
     // The reflections read the light's cache.
-    const bool traceReflections = frame.isPathTraced && s.pathTracing && traceLight && !frame.showScene && frame.textures.reflection
+    const bool traceReflections = frame.isPathTraced && traceLight && !frame.showScene && frame.textures.reflection
         && frame.textures.reflectionDistance && frame.textures.guideNormals && frame.textures.guideSpecular;
     if (traceLocalLights && (s.localShadowWidth != frame.width || s.localShadowHeight != frame.height))
     {
@@ -1088,7 +1072,6 @@ Result render(const Frame& frame)
         }
         if (traceLight) s.light->fill(constants, frame.verticalFov, parity);
         if (traceShadows) s.shadows->fill(constants);
-        if (s.pathTracing) s.pathTracing->fill(constants, frame.localLights, traceLamps, frame.cameraCut);
         constants.objectMotion = {velocity ? 1u : 0u, 0, 0, 0};
         constants.shadowDiagnostics = {frame.twoSidedShadows ? 1u : 0u, frame.shadowStarts ? 1u : 0u, 0, 0};
         constants.lightDiagnostics = {0, 0, lightDebug ? static_cast<std::uint32_t>(frame.lightDebugView) : 0u, 0};
@@ -1126,7 +1109,7 @@ Result render(const Frame& frame)
             descriptors.outputTexture(78, shadowDebug, DXGI_FORMAT_R8G8B8A8_UNORM);
         }
         if (lightDebug) descriptors.outputTexture(79, lightDebug, DXGI_FORMAT_R8G8B8A8_UNORM);
-        if (traceReflections || traceLamps) s.pathTracing->describe(descriptors, traced);
+        if (traceReflections || traceLamps) path_tracing_rays::describe(descriptors, traced);
         if (traceLight) s.light->describe(descriptors, parity);
         if (traceShadows) s.shadows->describe(descriptors, parity, shadow);
         if (traceLocalLights)
@@ -1215,7 +1198,7 @@ Result render(const Frame& frame)
                 s.probedLights[slot] = frame.localLights;
             }
         }
-        if (traceLamps) s.pathTracing->recordLamps(recorder);
+        if (traceLamps) path_tracing_rays::recordLamps(recorder, frame.width, frame.height);
         if (traceShadows) s.shadows->record(recorder, frame.forReconstruction);
         if (debugShadows)
         {
@@ -1235,7 +1218,7 @@ Result render(const Frame& frame)
         }
         else if (traceLight) s.light->record(recorder, parity, denoiserCamera(frame), slot, lightDebug && frame.lightDebugView == LightDebugView::Validation);
 
-        if (traceReflections) s.pathTracing->recordReflections(recorder);
+        if (traceReflections) path_tracing_rays::recordReflections(recorder, frame.width, frame.height);
 
         if constexpr (DiagnosticLog)
         {
