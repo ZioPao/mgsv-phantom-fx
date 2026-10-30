@@ -234,7 +234,7 @@ A new lighting effect takes:
 
 1. Its folder in `src/features/`: `settings.cpp` and `settings.hpp` with its settings and
    `describe()`, which gives their `PhantomFX.ini` keys, ranges, controls and menu text, and what
-   the effect replaces or builds on (`needs`: it runs only while that one runs); and what draws it. The settings file goes in `PHANTOM_FX_FEATURES` and the
+   the effect replaces or builds on (`needs`, `needsRayReconstruction`: it runs only while that runs); and what draws it. The settings file goes in `PHANTOM_FX_FEATURES` and the
    renderer's in `add_library` (`CMakeLists.txt`), its settings in `Settings` and `forEachFeature`
    (`src/phantom_fx_settings.hpp`), and its switch in the presets where it belongs.
 2. Its `Effect`, at its place in the cost measurement's order (`src/effects.hpp`).
@@ -1605,13 +1605,20 @@ otherwise DLSS runs, and the upscaler's status line says why.
 With **Path tracing** (`path_tracing=1`, under lighting) the reflections, the sun's light and every point
 and spot light's light come from the ray-traced scene, while DLSS Ray Reconstruction denoises (see "Ray
 Reconstruction") and the global illumination runs. It is a lighting effect of its own
-(`Effect::PathTracing`), which builds on the global illumination (`FeatureInfo::needs`: without it the
-plan has it `Lacking`, and its budget line says what it needs) and waits for Ray Reconstruction: the
-frames it denoised before take it (`gi_renderer::Frame::isPathTraced`, `ray_tracing::isPathTracing`), and
-the budget line says when it waits. Primary visibility stays the G-buffer, as in Cyberpunk 2077's path
-tracing. Without Ray Reconstruction the hybrid stays: the game's reflections and light shaders, with the
-ray-traced shadows and lights where they are on; what path tracing would take (the sun's rays, the game's
-lights) is left alone until it runs.
+(`Effect::PathTracing`), which builds on the global illumination and Ray Reconstruction
+(`FeatureInfo::needs`, `needsRayReconstruction`: without them the plan has it `Lacking`, and its budget
+line says what it needs) and waits for Ray Reconstruction to denoise: the frames it denoised before take
+it (`gi_renderer::Frame::isPathTraced`, `ray_tracing::isPathTracing`), and the budget line says when it
+waits. Primary visibility stays the G-buffer, as in Cyberpunk 2077's path tracing.
+
+It does what the ray-traced shadows and lights do, with rays of its own, so it replaces them in the plan
+while its switch, the global illumination's and Ray Reconstruction's are on, and with them what they
+replace (soft shadows, sun contact shadows, the lamps' contact and soft shadows): replacers chain, and the
+farthest along that is on takes the place (`EffectPlan::replacers`). The sun size and the flashlight
+brightness show in its item too. Without those switches the hybrid stays: the game's reflections and light
+shaders, with the ray-traced shadows and lights where they are on. Where Ray Reconstruction is asked for but
+cannot start, path tracing waits and the effects it replaces stay off; what it would take (the sun's rays,
+the game's lights) is left alone until it runs.
 
 - **Reflections** (`TraceReflections`, `src/features/path_tracing/reflections.hlsl`): a ray a render pixel
   along a reflection the surface's roughness spreads (GGX's visible normals, Heitz 2018, roughness squared,

@@ -157,13 +157,14 @@ struct LeftOut
     bool globalLight{};
 };
 
-// What an effect is: the first of these that applies. Lacking: the effect it builds on
-// (FeatureInfo::needs) does not run.
+// What an effect is: the first of these that applies. Lacking: what it builds on (FeatureInfo::needs,
+// needsRayReconstruction) does not run, or is not asked for.
 enum class EffectState : std::uint8_t { Off, Unsupported, Held, Replaced, LeftOut, Lacking, Running };
 
 struct EffectPlan
 {
     ByEffect<EffectState> states;
+    ByEffect<std::optional<Effect>> replacers; // The effect that takes a Replaced one's place
 
     EffectState operator[](Effect effect) const;
     bool runs(Effect effect) const;
@@ -179,8 +180,9 @@ struct EffectConditions
     LeftOut leftOut;
 };
 
-// A replaced effect stays off while its replacer's setting is on, even when the replacer is left out
-// or cannot run.
+// A replaced effect stays off while a replacer's setting is on, with what that one needs, even when the
+// replacer is left out or waits. Replacers chain (soft shadows by the ray-traced shadows, those by path
+// tracing): the farthest along that is on takes the place.
 EffectPlan planEffects(const Settings& settings, const EffectConditions& conditions);
 
 // What each module configures itself from (its configure): core.cpp passes it to them all whenever any

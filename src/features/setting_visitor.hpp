@@ -30,6 +30,7 @@ struct FeatureInfo
     std::optional<Effect> effect;
     std::optional<Effect> replacedBy;
     std::optional<Effect> needs; // The effect it builds on: it runs only while that one runs
+    bool needsRayReconstruction{}; // And DLSS Ray Reconstruction asked for, its only denoiser
     bool needsSupportedBuild{};
 };
 
