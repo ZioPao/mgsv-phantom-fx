@@ -6,6 +6,11 @@
   hit on a normal-mapped surface was lit as if it were flat: its bounce and the reflections read as coming
   from the wrong side of the bump. Where the camera sees the hit, the light now uses the G-buffer's normal,
   normal map and all; elsewhere, and where that normal faces away, the triangle's as before.
+- **The global illumination no longer bends the light twice on a bump.** Its rays left around the G-buffer's
+  normal, which carries the normal map, and the render pixel's light was resolved against that normal too: a
+  bump on a wall no light reached lit itself from its own tilted hemisphere, so holes and dents in a shaded
+  wall glowed in the direction they faced. The rays now leave the traced scene's own surface (the triangle's
+  normal, as the shadow rays do), and the normal map turns the resolved light alone, once.
 - **Path tracing's sun shadow reaches the sun pass.** With path tracing on, the sun was still shadowed
   by the game's shadow map: the traced shadow was drawn but the sun pass was not handed it, because the
   handover was gated on the ray-traced shadows that path tracing replaces. The sun now takes the traced

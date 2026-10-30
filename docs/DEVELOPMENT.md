@@ -2020,7 +2020,11 @@ Now, each frame:
 
 - **Rays** (`TraceLight`). 1, 2 or 4 (the global illumination's ray quality; Medium, 2, by default) from
   each pixel of a grid half the render size each way, cosine-weighted from the depth buffer's surface,
-  past copies of it. A ray that gets away takes the sky's light (`SkyRadiance`). A light pixel samples one
+  past copies of it. The surface's normal for the rays is the traced scene's own, from a ray from the eye
+  at the depth's point (`RayNormal`, the trace `ShadowSurfaceAt` makes for the shadow rays), and the
+  G-buffer's only where the scene lacks it: the G-buffer's normal carries the normal map, which the
+  render pixel's light is resolved against (`CompositeLight`), and sampling around it too bent the light
+  twice — a bump on a wall no light reached lit itself, in the direction it faced (2026-10-30). A ray that gets away takes the sky's light (`SkyRadiance`). A light pixel samples one
   render pixel of its 2 x 2, by depth (`DepthPickOf`): the nearest on one checkerboard colour, the
   farthest on the other, as half-resolution effects downsample depth. With the top left, as first built,
   a wire, a fence or a grass blade under a pixel wide had it one frame and what lay behind the next as the
