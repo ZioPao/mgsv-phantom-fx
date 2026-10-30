@@ -39,6 +39,7 @@ struct ToggleInfo
     const char* tip{};
     bool visible{true};
     bool enabled{true};
+    bool needsRayTracing{}; // Does something only while a ray-traced effect is on; the menu hides it otherwise
 };
 
 struct SliderInfo
@@ -78,6 +79,7 @@ struct ChoiceInfo
     const char* tip{};
     bool visible{true};
     bool enabled{true};
+    bool needsRayTracing{}; // As a toggle's
 };
 
 class SettingVisitor

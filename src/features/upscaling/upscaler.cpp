@@ -85,6 +85,8 @@ struct Recorded
     // Holds the FXAA pass, the end of the grading; the hudless colour is copied after it.
     bool fxaa{};
     std::optional<ObjectVelocity> velocity;
+    // Holds the depth of field's composite for this frame (Ray Reconstruction's depth of field guide).
+    std::optional<std::uint64_t> dofFrame;
     // Draws on the UI target, which must be filled before the list runs.
     bool drawsOnUiTarget{};
     // Draws GammaControl into this hudless texture.
@@ -95,6 +97,7 @@ struct Recorded
         grading = grading || later.grading;
         fxaa = fxaa || later.fxaa;
         if (later.velocity) velocity = std::move(later.velocity);
+        if (later.dofFrame) dofFrame = later.dofFrame;
         drawsOnUiTarget = drawsOnUiTarget || later.drawsOnUiTarget;
         if (later.hudless) hudless = std::move(later.hudless);
     }
@@ -114,7 +117,7 @@ struct InputConstants
     float previousFromCurrent[4][4];
     float jitterNdc[2];
     std::uint32_t renderSize[2];
-    std::uint32_t objectMotion, linear, padding[2];
+    std::uint32_t objectMotion, linear, dofGuide, padding;
 };
 
 struct CompositeConstants
@@ -171,11 +174,11 @@ std::atomic<bool> replacing{};
 std::atomic<bool> frameGeneration{};
 // The current plan's jitter phases and texture LOD bias.
 std::atomic<int> jitterPhases{8};
-// The last DLSS frame was Ray Reconstruction's; Ray Reconstruction could not start on this PC, and why.
-std::atomic<bool> reconstructing{};
-bool reconstructionFailed{};
-std::string reconstructionFailure;
 std::atomic<float> targetMipBias{};
+// The last DLSS frame was Ray Reconstruction's; why Ray Reconstruction failed, after which DLSS runs
+// for the session.
+std::atomic<bool> reconstructing{};
+std::optional<std::string> reconstructionFailure;
 
 // Frame generation's hudless texture, made at a present for the output size; GammaControl's
 // recording threads read it.
@@ -227,6 +230,7 @@ ComPtr<ID3D11PixelShader> compositeShader;
 ComPtr<ID3D11Buffer> inputConstants, compositeConstants;
 ComPtr<ID3D11Texture2D> exposureTexture; // 1x1, the constant 1 DLSS is told as the exposure
 Target colorTarget, depthTarget, motionTarget, outputTarget;
+Target dofGuideTarget; // Ray Reconstruction's depth of field guide
 ComPtr<ID3D11Resource> depthResource, sceneResource;
 ComPtr<ID3D11ShaderResourceView> depthView, sceneView;
 Ngx ngx;
@@ -246,6 +250,8 @@ struct PendingHudless
 };
 std::optional<PendingHudless> pendingHudless;
 std::optional<ObjectVelocity> velocity;
+// The frame the depth of field's composite last drew for.
+std::optional<std::uint64_t> dofFrame;
 std::optional<Frame> lastEvaluated;
 LONGLONG lastEvaluation{};
 
@@ -333,6 +339,17 @@ void recordVelocity(ID3D11DeviceContext* context)
     }
 
     recordedLists.note(keyOf(context), [&](Recorded& notes) { notes.velocity = std::move(found); });
+}
+
+void recordDofComposite(ID3D11DeviceContext* context)
+{
+    std::uint64_t frame{};
+    {
+        std::lock_guard lock(recordMutex);
+        frame = frames.recordingFrame();
+    }
+
+    recordedLists.note(keyOf(context), [&](Recorded& notes) { notes.dofFrame = frame; });
 }
 
 void recordUiTargetUse(ID3D11DeviceContext* context)
@@ -635,7 +652,7 @@ void releaseUnused(const Upscaling& wanted)
 // on keeps DLSS for the session.
 std::optional<ray_tracing::ReconstructionGuides> reconstructionGuides(const Upscaling& wanted, UINT width, UINT height)
 {
-    if (wanted.upscaler != Upscaler::Dlss || !wanted.rayReconstruction || reconstructionFailed) return std::nullopt;
+    if (wanted.upscaler != Upscaler::Dlss || !wanted.rayReconstruction || reconstructionFailure) return std::nullopt;
 
     auto guides = ray_tracing::reconstructionGuides(width, height);
     if (!guides || ray_reconstruction::started()) return guides;
@@ -646,9 +663,8 @@ std::optional<ray_tracing::ReconstructionGuides> reconstructionGuides(const Upsc
     }
     catch (const std::exception& error)
     {
-        reconstructionFailed = true;
         reconstructionFailure = error.what();
-        log("Ray Reconstruction is unavailable; DLSS runs instead: " + reconstructionFailure);
+        log("Ray Reconstruction is unavailable; DLSS runs instead: " + *reconstructionFailure);
         return std::nullopt;
     }
 
@@ -1105,7 +1121,9 @@ template<class Work> void inOwnState(Work&& work)
     restore();
 }
 
-void runInputs(const Frame& current, const camera::Matrix& previousFromCurrent, ID3D11ShaderResourceView* objectVelocity, bool linear)
+// `sceneBeforeDof`, when given, also makes Ray Reconstruction's depth of field guide (dofGuideTarget).
+void runInputs(const Frame& current, const camera::Matrix& previousFromCurrent, ID3D11ShaderResourceView* objectVelocity, bool linear,
+    ID3D11ShaderResourceView* sceneBeforeDof)
 {
     InputConstants constants{};
     for (int i = 0; i < 16; ++i) constants.previousFromCurrent[i / 4][i % 4] = static_cast<float>(previousFromCurrent[i]);
@@ -1116,10 +1134,12 @@ void runInputs(const Frame& current, const camera::Matrix& previousFromCurrent, 
     constants.renderSize[1] = colorTarget.height;
     constants.objectMotion = objectVelocity != nullptr;
     constants.linear = linear;
+    constants.dofGuide = sceneBeforeDof != nullptr;
     immediate->UpdateSubresource(inputConstants.Get(), 0, nullptr, &constants, 0, 0);
 
-    ID3D11ShaderResourceView* inputs[]{sceneView.Get(), depthView.Get(), objectVelocity};
-    ID3D11UnorderedAccessView* outputs[]{colorTarget.access.Get(), depthTarget.access.Get(), motionTarget.access.Get()};
+    ID3D11ShaderResourceView* inputs[]{sceneView.Get(), depthView.Get(), objectVelocity, sceneBeforeDof};
+    ID3D11UnorderedAccessView* outputs[]{colorTarget.access.Get(), depthTarget.access.Get(), motionTarget.access.Get(),
+        sceneBeforeDof ? dofGuideTarget.access.Get() : nullptr};
     immediate->CSSetShader(inputShader.Get(), nullptr, 0);
     immediate->CSSetConstantBuffers(0, 1, inputConstants.GetAddressOf());
     immediate->CSSetShaderResources(0, static_cast<UINT>(std::size(inputs)), inputs);
@@ -1269,10 +1289,20 @@ bool upscale(const FxaaPass& pass, const Frame& current)
             || destinationDesc.Format != hdr::sceneFormat()))
         hudlessSource.reset();
 
+    // The game's depth of field drew this frame: Ray Reconstruction gets its guide, which preset D cannot take.
+    ComPtr<ID3D11ShaderResourceView> sceneBeforeDof;
+    if (guides && dofFrame == current.index && wanted.reconstructionPreset != upscaler::ReconstructionPreset::D)
+        sceneBeforeDof = hdr::sceneBeforeDof(width, height);
+
+    if (sceneBeforeDof) ensureTarget(dofGuideTarget, width, height, DXGI_FORMAT_R16_FLOAT, "Creating Ray Reconstruction's depth of field guide", true);
+
+    // Ray Reconstruction and DLSS each keep their own history: the one the other left the frame before
+    // starts over.
+    bool reconstructed{};
     inOwnState([&]
     {
         performance::Timed timed(immediate.Get(), performance::Pass::UpscalerInputs);
-        runInputs(current, reprojection, objectVelocity, linear);
+        runInputs(current, reprojection, objectVelocity, linear, sceneBeforeDof.Get());
         timed.next(performance::Pass::Upscaler);
         if (guides)
         {
@@ -1285,28 +1315,32 @@ bool upscale(const FxaaPass& pass, const Frame& current)
             inputs.normalRoughness = guides->normalRoughness.Get();
             inputs.diffuseAlbedo = guides->diffuseAlbedo.Get();
             inputs.specularAlbedo = guides->specularAlbedo.Get();
+            inputs.dofGuide = sceneBeforeDof ? dofGuideTarget.texture.Get() : nullptr;
             inputs.worldToView = camera.worldToView;
             inputs.viewToClip = camera.viewToClip;
             inputs.jitter[0] = current.jitter[0];
             inputs.jitter[1] = current.jitter[1];
             inputs.frameTime = frameTime;
             inputs.quality = static_cast<int>(planned.quality);
+            inputs.preset = wanted.reconstructionPreset;
             inputs.hdr = true;
-            inputs.reset = reset;
+            inputs.reset = reset || !reconstructing;
             try
             {
                 reset = ray_reconstruction::evaluate(inputs) || reset;
                 ray_tracing::reconstructed();
+                reconstructed = true;
             }
             catch (const std::exception& error)
             {
-                // Upscaling stops (fail); chosen again, it runs DLSS.
-                reconstructionFailed = true;
+                // DLSS runs in its place, from this frame for the session.
                 reconstructionFailure = error.what();
-                throw;
+                log("Ray Reconstruction failed; DLSS runs instead: " + *reconstructionFailure);
+                ray_reconstruction::release();
             }
         }
-        else if (fsr)
+
+        if (fsr)
         {
             fsr_upscaler::Inputs inputs;
             inputs.color = colorTarget.texture.Get();
@@ -1323,7 +1357,7 @@ bool upscale(const FxaaPass& pass, const Frame& current)
             inputs.reset = reset;
             reset = fsr_upscaler::evaluate(inputs) || reset;
         }
-        else
+        else if (!reconstructed)
         {
             ensureExposure();
             reset = ensureFeature(planned, wanted) || reset;
@@ -1337,7 +1371,7 @@ bool upscale(const FxaaPass& pass, const Frame& current)
             evaluation.InJitterOffsetX = current.jitter[0];
             evaluation.InJitterOffsetY = current.jitter[1];
             evaluation.InRenderSubrectDimensions = {width, height};
-            evaluation.InReset = reset ? 1 : 0;
+            evaluation.InReset = reset || reconstructing ? 1 : 0;
             evaluation.InMVScaleX = 1;
             evaluation.InMVScaleY = 1;
             evaluation.InFrameTimeDeltaInMsec = frameTime;
@@ -1349,7 +1383,7 @@ bool upscale(const FxaaPass& pass, const Frame& current)
         timed.next(performance::Pass::UpscalerOutput);
         runComposite(destination.Get(), objectVelocity, options, wanted.sharpness, linear);
     });
-    reconstructing = guides.has_value();
+    reconstructing = reconstructed;
     focus::depthReady(immediate.Get(), depthTarget.texture.Get(), *current.view);
     pendingHudless.reset();
     if (hudlessSource) pendingHudless = PendingHudless{hudlessSource, resourceOf(destination.Get())};
@@ -1452,7 +1486,7 @@ void updatePlan()
     const auto setup = currentConfiguration();
     const auto& wanted = setup.upscaling;
     // Ray Reconstruction asks for many more jitter positions than DLSS: at least 32.
-    const int leastPhases = wanted.upscaler == Upscaler::Dlss && wanted.rayReconstruction ? 32 : 0;
+    const int leastPhases = wanted.upscaler == Upscaler::Dlss && wanted.rayReconstruction && !reconstructionFailure ? 32 : 0;
     if (!setup.supportedBuild || failed || !upscales(wanted.mode) || !render_scale::hooked() || !outputSize[0] || !outputSize[1])
     {
         plan.reset();
@@ -1565,6 +1599,7 @@ void detach() noexcept
     ui_redirect::detach();
     pendingHudless.reset();
     velocity.reset();
+    dofFrame.reset();
     lastEvaluated.reset();
     presented = {};
     plan.reset();
@@ -1578,7 +1613,7 @@ void detach() noexcept
         hudlessFailed = false;
     }
 
-    colorTarget = depthTarget = motionTarget = outputTarget = {};
+    colorTarget = depthTarget = motionTarget = outputTarget = dofGuideTarget = {};
     exposureTexture.Reset();
     depthResource.Reset();
     depthView.Reset();
@@ -1698,6 +1733,12 @@ bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& c
         if (pass == GamePass::CameraVelocity)
         {
             recordVelocity(context);
+            return false;
+        }
+
+        if (pass == GamePass::DofComposite)
+        {
+            recordDofComposite(context);
             return false;
         }
 
@@ -1880,6 +1921,7 @@ void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
         if (!entry) return;
 
         if (entry->velocity) velocity = std::move(entry->velocity);
+        if (entry->dofFrame) dofFrame = entry->dofFrame;
         // The hudless colour was copied before this list, so its GammaControl draws this frame's.
         if (entry->hudless && entry->hudless == presented.hudless) presented.hudlessDrawn = true;
         if (entry->grading) upscaleBeforeGrading();
@@ -1951,7 +1993,7 @@ Status status()
     std::lock_guard lock(executionMutex);
     const auto setup = currentConfiguration();
     result.supportedBuild = setup.supportedBuild;
-    result.reconstructionAvailable = !reconstructionFailed;
+    result.reconstructionAvailable = !reconstructionFailure;
     result.rayReconstruction = setup.upscaling.upscaler == Upscaler::Dlss && reconstructing;
     result.upscalerName = setup.upscaling.upscaler == Upscaler::Fsr ? fsr_upscaler::name()
                           : result.rayReconstruction                 ? "DLSS Ray Reconstruction"

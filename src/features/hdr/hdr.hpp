@@ -123,4 +123,7 @@ private:
 
 // The format the scene target has this session.
 DXGI_FORMAT sceneFormat() noexcept;
+// The scene as the depth of field's composite last found it: its float copy, sRGB-encoded as the scene.
+// None unless it is `width` x `height`.
+Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sceneBeforeDof(UINT width, UINT height) noexcept;
 }

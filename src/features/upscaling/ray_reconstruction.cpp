@@ -32,6 +32,7 @@ struct FeatureKey
 {
     UINT renderWidth{}, renderHeight{}, outputWidth{}, outputHeight{};
     int quality{};
+    upscaler::ReconstructionPreset preset{};
     bool hdr{};
 
     bool operator==(const FeatureKey&) const = default;
@@ -56,7 +57,7 @@ struct State
     NVSDK_NGX_Parameter* parameters{};
     NVSDK_NGX_Handle* feature{};
     FeatureKey key;
-    OpenedTexture color, depth, motion, output, normalRoughness, diffuseAlbedo, specularAlbedo;
+    OpenedTexture color, depth, motion, output, normalRoughness, diffuseAlbedo, specularAlbedo, dofGuide;
 };
 std::unique_ptr<State> state;
 
@@ -134,6 +135,11 @@ bool ensureFeature(State& s, const FeatureKey& key)
     if (s.feature && s.key == key) return false;
 
     releaseFeature(s);
+    for (const char* hint : {NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_DLAA, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Quality,
+             NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Balanced, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Performance,
+             NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraPerformance, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraQuality})
+        NVSDK_NGX_Parameter_SetUI(s.parameters, hint, static_cast<unsigned>(key.preset));
+
     NVSDK_NGX_DLSSD_Create_Params create{};
     create.InDenoiseMode = NVSDK_NGX_DLSS_Denoise_Mode_DLUnified;
     create.InRoughnessMode = NVSDK_NGX_DLSS_Roughness_Mode_Packed;
@@ -155,7 +161,7 @@ bool ensureFeature(State& s, const FeatureKey& key)
 
     s.key = key;
     log("Created DLSS Ray Reconstruction on Direct3D 12: " + std::to_string(key.renderWidth) + "x" + std::to_string(key.renderHeight) + " -> "
-        + std::to_string(key.outputWidth) + "x" + std::to_string(key.outputHeight) + ", default preset.");
+        + std::to_string(key.outputWidth) + "x" + std::to_string(key.outputHeight) + ", preset " + std::string(upscaler::label(key.preset)) + ".");
 
     return true;
 }
@@ -242,19 +248,21 @@ bool evaluate(const Inputs& inputs)
     bool created{};
     try
     {
-        created = ensureFeature(s, {color.Width, color.Height, output.Width, output.Height, inputs.quality, inputs.hdr});
+        created = ensureFeature(s, {color.Width, color.Height, output.Width, output.Height, inputs.quality, inputs.preset, inputs.hdr});
         ID3D12Resource* reads[]{open(s, s.color, inputs.color, "Opening the Ray Reconstruction colour"),
             open(s, s.depth, inputs.depth, "Opening the Ray Reconstruction depth"), open(s, s.motion, inputs.motion, "Opening the Ray Reconstruction motion"),
             open(s, s.normalRoughness, inputs.normalRoughness, "Opening the Ray Reconstruction normals"),
             open(s, s.diffuseAlbedo, inputs.diffuseAlbedo, "Opening the Ray Reconstruction diffuse albedo"),
             open(s, s.specularAlbedo, inputs.specularAlbedo, "Opening the Ray Reconstruction specular albedo")};
+        auto* dofGuide = inputs.dofGuide ? open(s, s.dofGuide, inputs.dofGuide, "Opening the Ray Reconstruction depth of field guide") : nullptr;
         auto* written = open(s, s.output, inputs.output, "Opening the Ray Reconstruction output");
-        std::array<D3D12_RESOURCE_BARRIER, std::size(reads) + 1> barriers{};
-        for (std::size_t i = 0; i < std::size(reads); ++i)
-            barriers[i] = transition(reads[i], D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        std::array<D3D12_RESOURCE_BARRIER, std::size(reads) + 2> barriers{};
+        UINT barrierCount{};
+        for (auto* read : reads) barriers[barrierCount++] = transition(read, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-        barriers.back() = transition(written, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        s.list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        if (dofGuide) barriers[barrierCount++] = transition(dofGuide, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        barriers[barrierCount++] = transition(written, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        s.list->ResourceBarrier(barrierCount, barriers.data());
 
         // NGX keeps the matrices' pointers only for the call.
         auto worldToView = inputs.worldToView;
@@ -266,6 +274,7 @@ bool evaluate(const Inputs& inputs)
         evaluation.pInNormals = reads[3];
         evaluation.pInDiffuseAlbedo = reads[4];
         evaluation.pInSpecularAlbedo = reads[5];
+        evaluation.pInDepthOfFieldGuide = dofGuide;
         evaluation.pInOutput = written;
         evaluation.InJitterOffsetX = inputs.jitter[0];
         evaluation.InJitterOffsetY = inputs.jitter[1];
@@ -279,8 +288,8 @@ bool evaluate(const Inputs& inputs)
         const auto result = NGX_D3D12_EVALUATE_DLSSD_EXT(s.list.Get(), s.feature, s.parameters, &evaluation);
         if (NVSDK_NGX_FAILED(result)) throw std::runtime_error("Ray Reconstruction failed (" + hex(static_cast<std::uint32_t>(result)) + ").");
 
-        for (auto& barrier : barriers) std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-        s.list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        for (UINT i = 0; i < barrierCount; ++i) std::swap(barriers[i].Transition.StateBefore, barriers[i].Transition.StateAfter);
+        s.list->ResourceBarrier(barrierCount, barriers.data());
     }
     catch (...)
     {

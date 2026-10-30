@@ -44,8 +44,11 @@ void TraceLocalLightShadows(uint2 did : SV_DispatchThreadID)
             float spacing = total / float(rays);
             // Neighbouring pixels start their picks and their points on the lights far apart (interleaved
             // gradient noise), and a pixel's rays cover each light's disc evenly (the R2 sequence from that
-            // start), so the filter averages unlike samples; white noise clumped them.
-            float2 start = float2(InterleavedGradientNoise(did, g_Frame.dimensions.z), InterleavedGradientNoise(did + uint2(47, 17), g_Frame.dimensions.z));
+            // start), so the filter averages unlike samples; white noise clumped them. DLSS Ray Reconstruction
+            // takes the rays without the filter and asks for white noise: no pattern across the screen.
+            float2 start = g_Frame.reconstruction.x != 0u
+                ? random.rand2()
+                : float2(InterleavedGradientNoise(did, g_Frame.dimensions.z), InterleavedGradientNoise(did + uint2(47, 17), g_Frame.dimensions.z));
             float threshold = start.x * spacing;
             float running = 0.0f, penumbra = 0.0f, visible = 0.0f, shaded = 0.0f;
             uint traced = 0;

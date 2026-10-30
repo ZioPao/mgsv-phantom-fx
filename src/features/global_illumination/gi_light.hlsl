@@ -17,7 +17,7 @@
 //   are and resolved against the render pixel's own normal (CompositeLight).
 // - With DLSS Ray Reconstruction, which denoises the image itself and asks for samples apart at every
 //   render pixel, the grid is the render size, a ray a pixel, and the light goes out as the rays found it,
-//   without the denoiser (PerRenderPixel).
+//   without the denoiser or the foliage memory (PerRenderPixel).
 //
 // Where it deviates from a path tracer, and why:
 // - A hit's albedo is the G-buffer's where the hit is on screen; otherwise the game's albedo texture
@@ -1074,13 +1074,16 @@ void ResolveLight(uint2 did : SV_DispatchThreadID)
         radiance += unpackHalf4(path.zw).rgb * (HashGridCache_FilteredDirect(path.x) + HashGridCache_FilteredIndirect(path.x));
 
     MaxDiagnostic(GI_COUNTER_MAX_TRACED, radiance);
-    radiance = RememberFoliageLight(did, radiance);
-    // Ray Reconstruction takes the light as it is.
+    // Ray Reconstruction takes the light as the pixel's own rays found it. The foliage memory would mix
+    // in other pixels' and other frames' light, and Ray Reconstruction assumes samples apart (NVIDIA's
+    // guide, "Sampling and Noise").
     if (PerRenderPixel())
     {
         g_Light_Noisy[0][did] = float4(radiance, partial.w);
         return;
     }
+
+    radiance = RememberFoliageLight(did, radiance);
 
     // The rays' direction, at most 1 long (TraceLight).
     float3 direction = unpackNormal(path.y);
