@@ -34,6 +34,10 @@ constexpr std::size_t MaxModelParts = 4096;
 constexpr float TerrainCellSize = 1.0f;
 constexpr std::uint32_t TerrainRefreshFrames = 120;
 constexpr std::uint32_t TerrainRingVertices = GI_TERRAIN_CELLS * GI_TERRAIN_CELLS * 6;
+// The sea's plane: a square two units across, its four vertices and six indices, under an instance that
+// stretches it 100 km across under the eye, past the horizon from a helicopter.
+constexpr std::uint64_t SeaVertexBytes = 4 * 16, SeaBytes = SeaVertexBytes + 16;
+constexpr float SeaHalfWidth = 50'000;
 
 template<class Record> auto findVariant(Record& record, std::uint64_t hiddenGroups)
 {
@@ -110,6 +114,7 @@ Update SceneContents::update(const GameScene& frame)
     updateModels(frame, update);
     updateCharacters(frame, update);
     if (frame.terrainEye) planTerrain(*frame.terrainEye, frame.frameIndex, update);
+    if (frame.seaCentre) makeSea();
 
     memory.planBuilds();
     addInstances(frame, update);
@@ -550,8 +555,26 @@ void SceneContents::planTerrain(const std::array<float, 3>& eye, std::uint32_t f
     }
 }
 
+// The sea's plane, once: its corners as TerrainGrid lays its cells out, clockwise seen from above, so its front
+// faces up. Without room it waits for a later frame.
+void SceneContents::makeSea()
+{
+    if (sea) return;
+
+    const auto offset = memory.allocate(SeaBytes);
+    if (!offset) return;
+
+    const float vertices[16]{-1, 0, -1, 1, -1, 0, 1, 1, 1, 0, -1, 1, 1, 0, 1, 1};
+    const std::uint16_t indices[8]{0, 1, 2, 2, 1, 3};
+    std::vector<std::uint8_t> bytes(SeaBytes);
+    std::memcpy(bytes.data(), vertices, sizeof(vertices));
+    std::memcpy(bytes.data() + SeaVertexBytes, indices, sizeof(indices));
+    if (memory.upload(*offset, bytes)) sea = memory.createBlas(Use::Static, {{*offset, 4, *offset + SeaVertexBytes, 6}});
+    if (!sea) memory.release(*offset, SeaBytes);
+}
+
 // The frame's instances: the game's models where the game has them (on screen or not), its characters,
-// its terrain.
+// its terrain and the sea.
 void SceneContents::addInstances(const GameScene& frame, Update& update)
 {
     modelInstanceCount = 0;
@@ -638,6 +661,15 @@ void SceneContents::addInstances(const GameScene& frame, Update& update)
         update.triangles += TerrainRingVertices / 3;
         ++terrainRings;
     }
+
+    isSeaTraced = false;
+    if (frame.seaCentre && sea)
+    {
+        const auto& [x, y, z] = *frame.seaCentre;
+        const float transform[12]{SeaHalfWidth, 0, 0, x, 0, 1, 0, y, 0, 0, SeaHalfWidth, z};
+        isSeaTraced = memory.addInstance(*sea, transform, GI_INSTANCE_SEA).has_value();
+        if (isSeaTraced) update.triangles += 2;
+    }
 }
 
 std::string SceneContents::status() const
@@ -650,7 +682,8 @@ std::string SceneContents::status() const
         + std::to_string(charactersTraced) + " traced (" + std::to_string(characterVertices / 1000) + "k vertices posed, "
         + std::to_string(characterTriangles / 1000) + "k triangles), " + std::to_string(charactersWaiting) + " waiting; terrain rings "
         + std::to_string(terrainRings) + " of " + std::to_string(GI_TERRAIN_RINGS) + "; past the instance cap: " + std::to_string(modelsPastCap)
-        + " models, " + std::to_string(charactersPastCap) + " characters, " + std::to_string(ringsPastCap) + " terrain rings";
+        + " models, " + std::to_string(charactersPastCap) + " characters, " + std::to_string(ringsPastCap) + " terrain rings"
+        + (isSeaTraced ? "; the sea's plane traced" : "");
 }
 
 // The character `id`'s shown mesh `shownIndex` (a geometry of its structure) as its model file has it.
@@ -714,7 +747,7 @@ std::string SceneContents::describeHit(std::span<const InstancedModel> instanced
     if (!hit.x) return "nothing";
 
     const auto instance = hit.x - 1, geometry = hit.y & 0x7FFFFFFFu, kind = hit.z;
-    std::string what = "the terrain";
+    std::string what = (kind & GI_INSTANCE_SEA) ? "the sea" : "the terrain";
     if (kind & GI_INSTANCE_MODEL)
     {
         const auto placed = instancedAt(instanced, instance);

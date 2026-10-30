@@ -102,6 +102,7 @@ struct Frame
     bool modelInstancesUpdated{};
     std::vector<SceneTexture> newTextures; // Copied, or copied again as the game streamed more of it in, since the last frame
     std::optional<Terrain> terrain; // Absent until the game's terrain draws give its inputs
+    std::optional<float> seaLevel;  // The sea's (sea::level); absent in a frame without the add-on's sea
     std::uint32_t frameIndex{};
     bool showScene{}; // The output shows the traced scene instead of the light
     bool logOften{};  // Diagnostics: the light's statistics logged every few frames (as each readback returns), not every ten seconds

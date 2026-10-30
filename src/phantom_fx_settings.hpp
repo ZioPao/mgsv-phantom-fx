@@ -15,6 +15,7 @@
 #include "features/photo_mode/settings.hpp"
 #include "features/ray_traced_lights/settings.hpp"
 #include "features/ray_traced_shadows/settings.hpp"
+#include "features/sea/settings.hpp"
 #include "features/setting_visitor.hpp"
 #include "features/soft_shadows/settings.hpp"
 #include "features/sun/settings.hpp"
@@ -47,6 +48,7 @@ struct Settings
     AmbientOcclusion ambientOcclusion;
     IndirectLight indirectLight;
     VolumetricFog volumetricFog;
+    Sea sea;
     PhotoMode photoMode;
     Hdr hdr;
     FrameRate frameRate;
@@ -73,6 +75,7 @@ template<class Visit> void forEachFeature(Settings& settings, Visit&& visit)
     visit(settings.ambientOcclusion);
     visit(settings.indirectLight);
     visit(settings.volumetricFog);
+    visit(settings.sea);
     visit(settings.photoMode);
     visit(settings.hdr);
     visit(settings.frameRate);

@@ -184,11 +184,11 @@ void effectPlan()
     all.rayTracedShadows.on = all.softShadows.on = all.sunContactShadows.on = true;
     all.rayTracedLights.on = all.lampContactShadows.on = all.lampSoftShadows.on = true;
     all.globalIllumination.on = all.ambientOcclusion.on = all.indirectLight.on = true;
-    all.volumetricFog.on = true;
+    all.volumetricFog.on = all.sea.on = true;
 
     const auto plan = planEffects(all, {});
     expect(plan.runs(Effect::RayTracedShadows) && plan.runs(Effect::RayTracedLights) && plan.runs(Effect::GlobalIllumination)
-            && plan.runs(Effect::VolumetricFog),
+            && plan.runs(Effect::VolumetricFog) && plan.runs(Effect::Sea),
         "The effects nothing replaces run.");
 
     for (const auto effect : {Effect::SoftShadows, Effect::SunContactShadows, Effect::LampContactShadows, Effect::LampSoftShadows, Effect::AmbientOcclusion,

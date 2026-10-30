@@ -21,6 +21,7 @@
 #include "features/path_tracing/path_tracing.hpp"
 #include "features/photo_mode/photo_mode.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
+#include "features/sea/sea.hpp"
 #include "features/sun_contact_shadows/sun_contact_shadows.hpp"
 #include "features/upscaling/fxaa.hpp"
 #include "features/upscaling/upscaler.hpp"
@@ -228,6 +229,7 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
     atmosphere::note(context, call, shader);
     indirect_light_pass::note(context, call, shader);
     path_tracing::note(context, call, shader);
+    sea::note(context, call, shader);
 
     // 2. While upscaling, the game's grading draws at the output size, whoever draws it.
     if (upscaler::beforePostDraw(context, call, shader))
@@ -241,8 +243,8 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
     // 3. The owners. Each takes game passes of its own (the upscaler also the 2D pass), so their order
     // does not matter.
     const bool drawn = atmosphere::draw(context, call, shader) || indirect_light_pass::draw(context, call, shader)
-        || sun_light_pass::draw(context, call, shader) || path_tracing::draw(context, call, shader) || hdr::draw(context, call, shader)
-        || upscaler::draw(context, call, shader);
+        || sun_light_pass::draw(context, call, shader) || path_tracing::draw(context, call, shader) || sea::draw(context, call, shader)
+        || hdr::draw(context, call, shader) || upscaler::draw(context, call, shader);
     if (!encode) return drawn;
 
     if (!drawn) context->DrawInstanced(vertices, instances, first, firstInstance);
@@ -257,10 +259,11 @@ bool onDrawIndexed(command_list* list, uint32_t indices, uint32_t instances, uin
     auto* context = native(list);
     game_shaders::DrawnShader shader(context);
     ray_tracing::note(context, call, shader);
+    sea::note(context, call, shader);
     // The one order among the owners that matters: a point or spot light's draws have two, and the
     // ray-traced lights come first, so the local light pass never draws a light the rays shadow.
     return hiddenUi(list) || local_lights::draw(context, call, shader) || local_light_pass::draw(context, call, shader)
-        || upscaler::draw(context, call, shader);
+        || sea::draw(context, call, shader) || upscaler::draw(context, call, shader);
 }
 
 bool onClearRenderTarget(command_list* list, resource_view view, const float color[4], uint32_t rects, const rect*)
@@ -277,6 +280,12 @@ bool onClearDepthStencil(command_list* list, resource_view view, const float* de
             stencil ? *stencil : 0);
 
     return false;
+}
+
+void onBindRenderTargets(command_list* list, uint32_t count, const resource_view* targets, resource_view depth)
+{
+    sea::targetsBound(native(list), count, reinterpret_cast<ID3D11RenderTargetView* const*>(targets),
+        reinterpret_cast<ID3D11DepthStencilView*>(depth.handle));
 }
 
 void onBindPipeline(command_list* list, pipeline_stage stages, pipeline pipeline)
@@ -602,6 +611,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     reshade::register_event<reshade::addon_event::clear_depth_stencil_view>(onClearDepthStencil);
     reshade::register_event<reshade::addon_event::push_descriptors>(onPushDescriptors);
     reshade::register_event<reshade::addon_event::bind_pipeline>(onBindPipeline);
+    reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(onBindRenderTargets);
     reshade::register_event<reshade::addon_event::init_swapchain>(onInitSwapchain);
     reshade::register_event<reshade::addon_event::map_buffer_region>(onMapBuffer);
     reshade::register_event<reshade::addon_event::unmap_buffer_region>(onUnmapBuffer);
