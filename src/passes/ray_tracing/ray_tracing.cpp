@@ -776,10 +776,12 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     ID3D11Texture2D* localLightShadow{};
     ID3D11Texture2D* lampDiffuse{};
     ID3D11Texture2D* lampSpecular{};
+    // The lamps' specular reads the game's tables, which the first sun pass gives; until then its shaders draw them.
+    const bool tracesLamps = isPathTraced && indirect_light_pass::materialTables().lobe;
     {
         std::lock_guard lock(lightMutex);
         localLightWritten = false;
-        if (!localLightsToTrace.empty() && isPathTraced)
+        if (!localLightsToTrace.empty() && tracesLamps)
         {
             resizeShared(lampDiffuseOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the lamps' diffuse light");
             resizeShared(lampSpecularOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the lamps' specular light");

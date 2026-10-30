@@ -1744,7 +1744,9 @@ the game's lights) is left alone until it runs.
   volume for it; a masked spot's mask; the light through leaves, the game's `LN_trans`; its diffuse and
   specular scales, `cPSLight` `c8.y` and `c8.x`, 1 for the latter where its shader has none, as the
   ray-traced lights draw them), times the exposure as theirs (`falloff x c4 x m_exposure.z`), with their
-  specular as the sun's: the game's tables, towards the light as a disc of its size (`c4.w`). A pixel picks two lights in proportion to their light there without shadows (weighted
+  specular as the sun's: the game's tables, towards the light as a disc of its size (`c4.w`). Until the first sun
+  pass has given those tables, the game's shaders draw the lights, as a session can start where no sun shines. A
+  pixel picks two lights in proportion to their light there without shadows (weighted
   reservoir sampling over all the frame's lights, white noise) and traces a shadow ray to a point on each
   one's disc, as the ray-traced lights' rays leave (hair's share, the faces that cast); every light is
   shadowed in full, as the ray-traced lights shadow them. At the draw point (`path_tracing::addLampLight`,
