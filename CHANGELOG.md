@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Indirect lighting is now SSGI**, ported from the RenoDX MGSV add-on's indirect lighting
+  (`renodx-mgsv` `src/games/mgsv/il`), in place of SSILVB's visibility-bitmask gather: a golden-angle
+  gather of the neighbouring surfaces' light, temporal accumulation against the game's velocity
+  buffer (the velocity passes are forced on while it runs), an a-trous denoiser and a joint-bilateral
+  resolve. New settings: **Samples**, **Resolution** (full/half/quarter), **Denoise passes**,
+  **History** and a **Debug view**; **Radius** is now a share of the screen's height (was metres, so
+  saved values clamp). The `indirect_light` switch and the radius/strength keys are unchanged.
 - Fix a fine grid pattern over dark areas, worst at night and in fog with upscaling: the game added a
   fixed 8x8 dither to its sky, its foggy scene and its glass before DLSS, which enlarged it with the
   image. The dither is taken out of those shaders, and out of the physical sky. In SDR, smooth fog

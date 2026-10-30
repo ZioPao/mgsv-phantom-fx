@@ -37,6 +37,7 @@ enum class Pass : std::size_t
     SunTrace, SunLight, LampTraces, LampShadows, LampSoftLight,
     OcclusionPrefilter, OcclusionMarch, OcclusionDenoise, OcclusionApply,
     LightPrefilter, LightMarch, LightDenoise, LightUpsample,
+    SsgiGather, SsgiAccumulate, SsgiFilter, SsgiResolve,
     FogPass, SkyTables, FogShadow, FogScattering, FogIntegration, Sky,
     GiInputs, GiProbeLight, GiCombine, GiWait, LocalLights,
 

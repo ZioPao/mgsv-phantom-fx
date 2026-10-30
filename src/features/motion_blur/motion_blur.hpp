@@ -15,6 +15,10 @@ namespace phantom_fx::motion_blur
 std::string hook() noexcept;
 // While on, the engine draws its velocity passes every frame; its blur follows the game's setting.
 void setVelocityOnly(bool on) noexcept;
+// Another effect's (SSGI's temporal accumulation) asking for the velocity passes too: while on,
+// the engine draws them every frame, whatever the upscaler asks. The blur still follows the game's
+// setting and the add-on's toggle.
+void wantVelocityPasses(bool on) noexcept;
 // Its setting off keeps the engine's blur out even with the upscaler on; the strength multiplies the
 // radius the game's setting asks for, 1 being the game's own.
 void configure(const Configuration& configuration) noexcept;

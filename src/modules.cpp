@@ -3,7 +3,7 @@
 #include "features/ambient_occlusion/gtvbao.hpp"
 #include "features/frame_rate/frame_rate.hpp"
 #include "features/global_illumination/light_combine.hpp"
-#include "features/indirect_light/ssilvb.hpp"
+#include "features/indirect_light/ssgi.hpp"
 #include "features/lamp_contact_shadows/lamp_contact_shadows.hpp"
 #include "features/lamp_soft_shadows/lamp_soft_shadows.hpp"
 #include "features/motion_blur/motion_blur.hpp"
@@ -51,7 +51,7 @@ constexpr Module Modules[]{
     {.attach = withDevice<indirect_light_pass::attach>, .configure = indirect_light_pass::configure, .present = indirect_light_pass::present,
         .detach = indirect_light_pass::detach},
     {.attach = withDevice<gtvbao::attach>, .configure = gtvbao::configure, .present = gtvbao::present, .detach = gtvbao::detach},
-    {.attach = withDevice<ssilvb::attach>, .configure = ssilvb::configure, .present = ssilvb::present, .detach = ssilvb::detach},
+    {.attach = withDevice<ssgi::attach>, .configure = ssgi::configure, .present = ssgi::present, .detach = ssgi::detach},
     {.attach = withDevice<light_combine::attach>, .configure = light_combine::configure, .present = light_combine::present, .detach = light_combine::detach},
     {.attach = withDevice<visibility_bitmask::attach>, .configure = visibility_bitmask::configure, .detach = visibility_bitmask::detach},
 

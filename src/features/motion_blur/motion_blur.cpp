@@ -33,7 +33,7 @@ constexpr std::uintptr_t MotionBlurOnRva = 0x2B75AC4, AmountRva = 0x2B75ACC;
 
 using PluginStep = void (*)(void* plugin, std::uint8_t* context, void* view);
 PluginStep originalPreExec{}, originalExec{};
-std::atomic<bool> velocityOnly{}, hooked{}, enabled{true};
+std::atomic<bool> velocityOnly{}, extraVelocityPasses{}, hooked{}, enabled{true};
 std::atomic<float> strength{1};
 // The game's own amount, relearned when it writes it, so the strength multiplies the game's radius.
 std::atomic<float> gameAmount{1};
@@ -68,7 +68,7 @@ void preExec(void* plugin, std::uint8_t* context, void* view)
     originalPreExec(plugin, context, view);
 
     auto* flags = *reinterpret_cast<std::uint64_t**>(context + FrameFlags);
-    if (velocityOnly.load(std::memory_order_relaxed) && flags) *flags |= VelocityPasses;
+    if ((velocityOnly.load(std::memory_order_relaxed) || extraVelocityPasses.load(std::memory_order_relaxed)) && flags) *flags |= VelocityPasses;
 
     applyStrength();
 }
@@ -108,6 +108,11 @@ std::string hook() noexcept
 void setVelocityOnly(bool on) noexcept
 {
     velocityOnly = on;
+}
+
+void wantVelocityPasses(bool on) noexcept
+{
+    extraVelocityPasses = on;
 }
 
 void configure(const Configuration& configuration) noexcept
