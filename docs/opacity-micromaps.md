@@ -5,10 +5,13 @@ take in this add-on, and what blocks it today.
 
 **Short answer:** the shader side fits this codebase almost line for line, but the *runtime* does
 not: OMM with inline `RayQuery` (the only kind of tracing this project does) needs the Agility SDK
-1.619 runtime, and an add-on cannot select that runtime for a game it did not build. Two unblocking
-routes exist and neither is proven yet (`NVAPI`, and patching the game's exports in memory). Bake
-against 0.5 mip-free alpha would also change how distant foliage shadows look, because today the
-alpha test picks a mip from the ray cone and OMM cannot.
+1.619 runtime, and an add-on cannot select that runtime for a game it did not build. Measured
+2026-10-30: the inbox `D3D12Core.dll` (616) reports raytracing tier 1.2 yet caps at shader model 6.8
+and rejects `cs_6_9` outright; a probe executable carrying Agility 1.619.6 builds the same shader
+fine. **Decision: capability-gated only** — build the DX12 path, ship it dormant, let it turn itself
+on when the OS runtime reaches 619 (section 4). Bake against 0.5 mip-free alpha would also change how
+distant foliage shadows look, because today the alpha test picks a mip from the ray cone and OMM
+cannot.
 
 ## 1. What OMM is
 
@@ -78,54 +81,65 @@ Windows SDK 10.0.26100 headers.
 
 ## 4. The blocker: which D3D12 runtime runs
 
-Measured on this machine (2026-10-30), with a 40-line D3D12 probe:
+Measured on this machine (2026-10-30) with a standalone probe: a compute PSO built from a `cs_6_9`
+DXIL blob that declares `RayQuery<RAY_FLAG_NONE, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS>`, compiled
+by DXC 1.9.2609, run twice — once on the inbox loader, once with the probe exe exporting
+`D3D12SDKVersion = 619` and an app-local `D3D12\D3D12Core.dll` (Agility SDK 1.619.6).
 
-| | |
-| --- | --- |
-| GPU / driver | GeForce RTX 3090, 617.42 |
-| OS | Windows 11 25H2, build 26200 |
-| `D3D12Core.dll` loaded by the inbox loader | **616** (System32) |
-| `OPTIONS5.RaytracingTier` | **12** (`D3D12_RAYTRACING_TIER_1_2`) |
-| Windows SDK DXC | 1.8.2502 — **rejects `-T cs_6_9`** |
-| `d3d12.h` in SDK 26100 | pre-retail OMM shape (`ALLOW_OMM_UPDATE`, separate OMM postbuild info), no `RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS` |
+| | inbox | Agility 1.619.6 |
+| --- | --- | --- |
+| `D3D12Core.dll` | 616 (System32) | 619 (app-local `D3D12\`) |
+| GPU / driver | RTX 3090, 617.42 | same |
+| OS | Windows 11 25H2, build 26200 | same |
+| `OPTIONS5.RaytracingTier` | 12 | 12 |
+| `SHADER_MODEL` highest | **6.8** | **6.9** |
+| OMM array prebuild info | works (640 B result, 896 B scratch for one level-4 4-state block) | works, same |
+| PSO from `cs_6_9` + RayQuery OMM | **fails, `0x80070057`** | **builds** |
 
-The inbox 1.616 runtime has OMM for `TraceRay` (the 2025 release) but **not** OMM with inline
-`RayQuery`; that landed in Agility SDK 1.619 (Feb 2026) together with retail SM 6.9. So the tier
-check alone over-promises: a device can report tier 1.2 and still not support what this project
-needs.
+The failure is not subtle: the inbox runtime rejects the shader outright, *"Shader must be cs_6_8,
+cs_6_7, ... Shader version provided: cs_6_9"* (debug layer, `ID3D12Device::CreateComputeShader`).
+So the inbox 616 runtime has OMM for `TraceRay` (the 2025 release) but not SM 6.9 at all, and the
+tier check alone over-promises: a device can report tier 1.2 and still refuse every shader that
+could use an OMM with inline tracing.
+
+Also measured: the Windows SDK's DXC (1.8.2502) rejects `-T cs_6_9`, and `d3d12.h` in SDK 26100 is
+the pre-retail OMM shape (`ALLOW_OMM_UPDATE`, separate OMM postbuild info), with no
+`RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS`. DXC 1.9.2609 from the GitHub release compiles the shader
+fine, and the 619 runtime accepted the 26100 `D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC` in the
+prebuild probe, so the old headers can drive the new runtime.
 
 Selecting 1.619 is the hard part. The Agility SDK runtime is chosen only through `D3D12SDKVersion` /
 `D3D12SDKPath` **exported from the process's main .exe**, or by `ID3D12SDKConfiguration::SetSDKVersion`
-(Developer Mode only). The game is `mgsvtpp.exe`; an add-on cannot add exports to it, and asking
-players for Developer Mode is not an option. This is not a GPU limitation: the RTX 3090 (and every
-RTX card) reports OMM support, Ada accelerates it in hardware and pre-Ada resolves it in software
-("lightweight ... may still produce a speedup").
+(Developer Mode only; this machine has Developer Mode off). The game is `mgsvtpp.exe`; an add-on
+cannot add exports to it, and asking players for Developer Mode is not an option. This is not a GPU
+limitation: the RTX 3090 (and every RTX card) reports OMM support, Ada accelerates it in hardware and
+pre-Ada resolves it in software ("lightweight ... may still produce a speedup").
 
-### Unblocking routes
+**Decision (2026-10-30): capability-gated only.** Ship the DX12 path behind a runtime gate and let it
+turn itself on when the OS's inbox `D3D12Core.dll` reaches 619, rather than shipping a runtime or
+patching the game. For development and validation, build a *separate probe executable* that exports
+the two Agility symbols and carries `D3D12\D3D12Core.dll` next to it; the add-on itself does not, so
+the feature stays dormant until the OS catches up. The routes below are kept for the record.
+
+### Routes considered
 
 1. **NVAPI (`NvAPI_D3D12_BuildRaytracingOpacityMicromapArray` and friends, R520+).** Same OMM data,
    built and linked through `NvAPI_D3D12_*` instead of the DXR 1.2 entry points, so it runs on the
-   inbox 1.616 runtime. NVIDIA ships this as the pre-DXR-1.2 route for path tracers. Open question:
-   whether NVAPI OMMs work with **inline `RayQuery`** on 1.616 or only with `TraceRay` pipelines;
-   the NVAPI reference documents the build/copy/emit/prebuild calls, not the ray-level opt-in.
-   *This is the cheapest experiment and the one to run first.*
+   inbox 1.616 runtime. Untested whether NVAPI OMMs work with **inline `RayQuery`** on 1.616 or only
+   with `TraceRay` pipelines. *Not taken: NVIDIA-only, and the DX12 path is the one worth owning.*
 2. **Ship Agility 1.619 and patch the game's exports in memory.** `D3D12` reads the exe's export
    directory when `D3D12CreateDevice` is called; nothing says the bytes have to come from the file.
-   Add `D3D12SDKVersion`/`D3D12SDKPath` entries to the in-memory export table (VirtualProtect, the
-   same PE edit `D3D12SDKVersionPatcher` does on disk), ship `D3D12Core.dll` in a `D3D12` folder,
-   then create the device. Precedent exists in overlay/injection tooling, MGSV has no anti-cheat, and
-   the add-on already owns the process (MinHook). Cost: a PE writer in the add-on, a ~3 MB DLL, and
-   a new failure mode if the loader validates the export directory table more strictly than it reads
-   it.
+   Cost: a PE writer in the add-on, a ~5 MB DLL, and a new failure mode if the loader validates the
+   export directory table more strictly than it reads it. *Not taken now; the fallback if the OS takes
+   too long.*
 3. **Do nothing and keep the shader test.** Not a fallback that needs building, but it sets the bar:
-   if the OMM route cannot be made unconditional, the toggle must fall back cleanly, and the whole
-   feature is NVIDIA-only until AMD/Intel report tier 1.2 (AMD: "future hardware", Intel
-   "evaluating"; neither in the SM 6.9 support table).
+   the toggle must fall back cleanly, and the feature is NVIDIA-only until AMD/Intel report tier 1.2
+   (AMD: "future hardware", Intel "evaluating"; neither in the SM 6.9 support table).
 
-If 1 and 2 both fail, a cheaper quality-neutral idea is to replace the per-candidate texture fetch
-with a compact per-triangle alpha bitmask *looked up in the shader* (a software OMM). That removes
-the `TextureLod` and the texture fetch from the inner loop but still pays a shader iteration per
-hit, so the ceiling is far lower.
+If the runtime never arrives, a cheaper quality-neutral idea is to replace the per-candidate texture
+fetch with a compact per-triangle alpha bitmask *looked up in the shader* (a software OMM). That
+removes the `TextureLod` and the texture fetch from the inner loop but still pays a shader iteration
+per hit, so the ceiling is far lower.
 
 ## 5. Baking
 
@@ -232,24 +246,22 @@ needs a second machine, not this one.
 
 | # | Step | Time |
 | --- | --- | --- |
-| 1 | Spike NVAPI OMM + inline `RayQuery`: bake one hand-made 2-state block, link it to a 2-triangle BLAS, trace it | 1-2 days |
-| 2 | If 1 fails: spike in-memory `D3D12SDKVersion`/`D3D12SDKPath` exports + D3D12Core 619, then a 6.9 `RayQuery` OMM triangle | 1 day |
-| 3 | Bake kernel + level heuristic + dedupe + tests (bit packing round-trips, level heuristic, special-index selection) | 3-4 days |
-| 4 | Scene: OMM pool (128-byte alignment, budget), linkage per BLAS, dirtiness on texture replacement | 2-3 days |
-| 5 | Shaders: the template flag, hair exclusion, `cs_6_9` build wiring, menu toggle and tier gate | 2 days |
-| 6 | In-game validation, quality tuning (4-state conservative mip), Ada timing | 2-4 days |
+| 0 | Runtime probe: tier 1.2, SM 6.9, `cs_6_9` RayQuery-OMM PSO on inbox and on a 619 probe exe (done 2026-10-30, see 4) | done |
+| 1 | Bake kernel + level heuristic + dedupe + tests (bit packing round-trips, level heuristic, special-index selection) | 3-4 days |
+| 2 | Scene: OMM pool (128-byte alignment, budget), linkage per BLAS, dirtiness on texture replacement | 2-3 days |
+| 3 | Shaders: the template flag, hair exclusion, `cs_6_9` build wiring, menu toggle, gate (tier + SM 6.9 + trial PSO) | 2 days |
+| 4 | Dev probe exe with the Agility exports + `D3D12\D3D12Core.dll`, so the path can be exercised before the OS ships it | 0.5 day |
+| 5 | In-game validation, quality tuning (4-state conservative mip), Ada timing | 2-4 days |
 
-Stop after step 1 or 2 if the answer is no; the bake work is only worth starting once a runtime
-route is proven.
+The bake work is worth starting because the runtime gate is now measured and the DX12 API shape is
+confirmed; the feature will land for users when the inbox `D3D12Core.dll` moves past 616.
 
 ## 10. Open questions
 
-- NVAPI OMM and inline `RayQuery` on the inbox 1.616 runtime: supported, and is there an opt-in?
-- Does the D3D12 loader read the main module's export directory live, or does it copy it at load
-  time? (Decides whether the in-memory patch must run before the first `D3D12CreateDevice`, which is
-  fine, or before `d3d12.dll` is loaded, which is not.)
 - Unknown-coverage ratio for this content at 4-state, level 4-6, conservatively baked across the
   receiver mip: if most micro-triangles come out unknown, the win evaporates.
 - OMM array build cost per model load, measured on the compute queue next to the BLAS budget.
 - Behaviour when a cut-out texture is replaced while the OMM array is live (the BLAS must be rebuilt,
   not refitted).
+- Whether `D3D12SDKVersion` exports on the *add-on's* module are ever consulted (they are not per the
+  spec; only the main exe), which decides if the feature can ever be forced on without the OS.
