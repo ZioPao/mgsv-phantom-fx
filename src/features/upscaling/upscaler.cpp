@@ -72,7 +72,7 @@ struct Hudless
 {
     unsigned width{}, height{};
     ComPtr<ID3D11Texture2D> source, target;
-    ComPtr<ID3D11ShaderResourceView> sourceView; // As GammaControl reads the scene target: sRGB, or float with HDR
+    ComPtr<ID3D11ShaderResourceView> sourceView; // As GammaControl reads the scene target: sRGB, or float
     ComPtr<ID3D11RenderTargetView> targetView;   // As GammaControl writes the back buffer: sRGB, or R10G10B10A2 with HDR
 };
 
@@ -453,7 +453,7 @@ void ensureHudless()
     const bool hdrOn = hdr::active();
     desc.Format = hdr::sceneFormat();
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    D3D11_SHADER_RESOURCE_VIEW_DESC sourceView{hdrOn ? desc.Format : DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, D3D11_SRV_DIMENSION_TEXTURE2D};
+    D3D11_SHADER_RESOURCE_VIEW_DESC sourceView{hdr::isSceneFloat() ? desc.Format : DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, D3D11_SRV_DIMENSION_TEXTURE2D};
     sourceView.Texture2D.MipLevels = 1;
     // The target holds the back buffer's bits; Streamline reads it as R8G8B8A8_UNORM, as the real swap
     // chain holds them, or R10G10B10A2_UNORM with HDR (frame_generation.cpp).
@@ -478,7 +478,7 @@ void ensureHudless()
     log("Created the hudless texture at " + std::to_string(outputSize[0]) + "x" + std::to_string(outputSize[1]) + " for frame generation.");
 }
 
-// The colour DLSS receives has the game's white at 1, tone-mapped or, with HDR, linear light, so the
+// The colour DLSS receives has the game's white at 1, tone-mapped or, in the float scene, linear light, so the
 // exposure it is told is a constant 1. Handing that over as a texture, rather than leaving it out, keeps add-ons that read the
 // evaluation (OptiScaler) from turning on DLSS's auto-exposure.
 void ensureExposure()
@@ -523,7 +523,7 @@ bool ensureDepthView(ID3D11DepthStencilView* depth)
     return SUCCEEDED(device->CreateShaderResourceView(texture.Get(), &viewDesc, depthView.GetAddressOf()));
 }
 
-// The scene target, read as FXAA's view writes it: sRGB-encoded in 8 bits, or float with HDR.
+// The scene target, read as FXAA's view writes it: sRGB-encoded in 8 bits, or float.
 bool ensureSceneView(ID3D11RenderTargetView* target)
 {
     const auto resource = resourceOf(target);
@@ -656,10 +656,10 @@ bool ensureFeature(const RenderSizePlan& target, const Upscaling& wanted)
     create.Feature.InTargetWidth = target.output.width;
     create.Feature.InTargetHeight = target.output.height;
     create.Feature.InPerfQualityValue = static_cast<NVSDK_NGX_PerfQuality_Value>(target.quality);
-    // The motion vectors are per render pixel; reversed-Z depth; the colour is LDR, or with HDR linear
-    // light, the game's white at 1.
+    // The motion vectors are per render pixel; reversed-Z depth; the colour is LDR, or in the float scene
+    // linear light, the game's white at 1.
     create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_DepthInverted | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
-    if (hdr::active()) create.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
+    if (hdr::isSceneFloat()) create.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
     const auto result = NGX_D3D11_CREATE_DLSS_EXT(ngxContext.Get(), &ngx.feature, ngx.parameters, &create);
     if (NVSDK_NGX_FAILED(result))
     {
@@ -924,12 +924,12 @@ void noteCopy(ID3D11DeviceContext* context)
     context->PSGetShaderResources(0, 1, lastCopy.source.ReleaseAndGetAddressOf());
 }
 
-// The game's motion blur goes through the add-on's surfaces while upscaling (gatherBlur), and with HDR
-// at every upscaler setting: the game's own are 8-bit, which clips HDR highlights while the camera
-// moves. Otherwise the game's passes stay as they are.
+// The game's motion blur goes through the add-on's surfaces while upscaling (gatherBlur), and with the
+// scene in float at every upscaler setting: the game's own are 8-bit, which clips highlights while the
+// camera moves. Otherwise the game's passes stay as they are.
 bool isBlurRedirected()
 {
-    return ui_redirect::isUpscaling() ? replacing.load(std::memory_order_relaxed) : hdr::active();
+    return ui_redirect::isUpscaling() ? replacing.load(std::memory_order_relaxed) : hdr::isSceneFloat();
 }
 
 // What the blur's first pass starts from in place of `gameHalf`, the game's 8-bit half of the scene:
@@ -1193,9 +1193,9 @@ bool upscale(const FxaaPass& pass, const Frame& current)
     ensurePipeline();
     initializeUpscaler(wanted.upscaler);
     // FSR reads its inputs and writes its output through Direct3D 12, and takes linear colour, as DLSS
-    // does in its HDR mode. Linear colour needs more than 8 bits.
+    // does in its HDR mode on the float scene. Linear colour needs more than 8 bits.
     const bool fsr = wanted.upscaler == Upscaler::Fsr;
-    const bool linear = fsr || hdr::active();
+    const bool linear = fsr || hdr::isSceneFloat();
     ensureTarget(colorTarget, width, height, linear ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM,
         "Creating the upscaler's colour texture", fsr);
     ensureTarget(depthTarget, width, height, DXGI_FORMAT_R32_FLOAT, "Creating the upscaler's depth texture", fsr || frameGeneration);
@@ -1252,7 +1252,7 @@ bool upscale(const FxaaPass& pass, const Frame& current)
             inputs.cameraNear = current.view->nearPlane;
             inputs.cameraFar = current.view->farPlane;
             inputs.verticalFov = static_cast<float>(2 * std::atan(1 / current.view->projection[5]));
-            inputs.hdr = hdr::active();
+            inputs.hdr = hdr::isSceneFloat();
             inputs.reset = reset;
             reset = fsr_upscaler::evaluate(inputs) || reset;
         }
@@ -1571,7 +1571,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
 
         if (row->pass == GamePass::GammaControl)
         {
-            // With HDR every GammaControl draw, the hudless one too, encodes for the display.
+            // With the scene in float every GammaControl draw, the hudless one too, encodes for the display.
             const hdr::OutputShader output(context);
             // Out of the fullscreen box, over the whole target: the add-on's draws read output-size
             // images, and the game's own then stretches its scene as it does windowed.

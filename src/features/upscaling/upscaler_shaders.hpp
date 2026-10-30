@@ -7,9 +7,9 @@
 // Fox Engine tonemaps early, in its deferred resolve, so the scene before the grading is LDR colour,
 // stored sRGB-encoded. DLSS runs in LDR mode on those values, after the depth of field, and the
 // composite writes them back over the scene target, or into the UI target when upscaling, before the
-// lens flare layer, bloom's composite and the grading. With HDR (hdr.hpp) the scene holds light
-// beyond white: DLSS runs in its HDR mode on it, linear, and the composite encodes its result again.
-// FSR always gets linear colour, which it is made for.
+// lens flare layer, bloom's composite and the grading. With the scene in float (hdr.hpp), as on every
+// supported build, it holds light beyond white: DLSS runs in its HDR mode on it, linear, and the
+// composite encodes its result again. FSR always gets linear colour, which it is made for.
 namespace phantom_fx::upscaler::shaders
 {
 // Runs once per frame at render resolution and writes what DLSS or FSR reads.

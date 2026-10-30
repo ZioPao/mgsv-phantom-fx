@@ -911,9 +911,10 @@ dark areas, worst at night in fog (issue #28). Found 2026-10-28 in the shaders' 
   what the dither added on average: the centred forms nothing, the forward materials a quarter of
   1/128, so they keep their brightness. It runs before HDR's patch, which finds its TppTonemap the
   same way; both orders give the same code. The add-on's own sky draw has no dither either.
-- **SDR.** Without the dither SDR's 8-bit scene bands a little in smooth fog (2026-10-28: steps of 1
-  and 2 levels at DLSS Quality); with it, DLSS's image was softer. It comes out in SDR too; the
-  banding is issue #54. HDR's 16-bit float scene does not band.
+- **SDR.** Without the dither SDR's 8-bit scene banded a little in smooth fog (2026-10-28: steps of 1
+  and 2 levels at DLSS Quality); with it, DLSS's image was softer. It comes out in SDR too. Since
+  2026-10-30 SDR keeps the scene in 16-bit float, as HDR does, and dithers once at the output (issue
+  #54, see "HDR").
 - **Left as they are.** The G-buffer's alpha test with the ordered alpha stipples cut-out edges (hair,
   manes) before DLSS too; taking it out would make those edges hard. The shadow filters'
   `MicroDither` and the sun pass's 2x2 tap offset move a comparison by an eighth of a texel.
@@ -1256,8 +1257,9 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
   sRGB-encoded LDR, as the resolve tonemapped it, into `R8G8B8A8_UNORM`), depth (`R32_FLOAT`) and
   motion (`R16G16_FLOAT`); NGX evaluates through ReShade's wrapped immediate context with
   `DepthInverted | MVLowRes`, no `IsHDR`, MV scale 1 and a 1x1 exposure texture holding 1. NGX is
-  only ever called on the immediate context. With HDR the colour is the scene's linear light before
-  any tonemap or grading, in `R16G16B16A16_FLOAT`, and the feature has `IsHDR` (see "HDR").
+  only ever called on the immediate context. With the scene in float, as on every supported build
+  since 2026-10-30, the colour is the scene's linear light before any tonemap or grading, in
+  `R16G16B16A16_FLOAT`, and the feature has `IsHDR` (see "HDR").
 - **Composite.** A full-screen draw writes the DLSS output with RCAS (AMD FidelityFX, MIT; 33% by
   default) and alpha 0: at DLAA over the scene target, through FXAA's view; when upscaling into the
   UI target (below). The grading reads only the colour and writes its own alpha (luminance, for
@@ -1544,14 +1546,28 @@ works with either upscaler, and switching between DLSS and FSR frame generation 
 
 ## HDR
 
-With `hdr=1` in `PhantomFX.ini` (a restart applies it) the game outputs HDR10 (`src/hdr.*`). The
+With `hdr=1` in `PhantomFX.ini` (a restart applies it) the game outputs HDR10 (`src/features/hdr/`). The
 game tonemaps early, in the deferred resolve (`TppTonemap`, `cPSMaterial` c0 = a, b, c, usually
 4.87, 0.6, 0.453: x up to b, then b + c - 1 / (a (x - b + c)), which an 8-bit target clamps at 1,
 reached at x = 4) and inline in 23 forward shaders (sky, clouds, oceans, wormholes, sand wind), and
 everything after worked on that image in 8 bits. With HDR the scene keeps its light up to the
 grading, as RenoDX's mods do, and the grading and output follow RenoDX's and Luma's defaults.
 
-- **Swap chain.** `create_swapchain`: `R10G10B10A2_UNORM`, flip model (`FLIP_DISCARD`, at least 2
+**The float scene in SDR.** On a supported build the scene keeps its light in SDR too (since
+2026-10-30, issue #54): all of the below but the swap chain, the light the grading gives back and the
+HDR output. In 8 bits, smooth fog showed steps of one and two levels, a few of three (measured in a
+screenshot at 3840x2160, DLSS Quality); the game hid them with an 8x8 dither before the upscaler,
+which the upscaler made a grid (issue #28, see "Dither"). The grading is the game's own, so below
+the tonemap's knee the image is the game's but for the steps; above it, glass, particles and the
+reflections blend over the light before the tonemap rather than after it, as with HDR. The image is
+rounded to 8 bits once, by GammaControl's write to the game's `R8G8B8A8_UNORM_SRGB` back buffer, with
+up to half a level either way of white noise (PCG of the pixel, one value for the three channels),
+which turns the steps left into grain too fine to see. It costs what HDR's scene costs: about 0.3 ms at 4K on an RTX 5080
+(0.03 ms encoding the scene, 0.27 ms decoding its copies). DLSS and FSR run in their HDR modes on it.
+If the GPU cannot read `R16G16B16A16_FLOAT` through unordered access views, the scene stays the
+game's 8-bit one.
+
+- **Swap chain** (HDR output only). `create_swapchain`: `R10G10B10A2_UNORM`, flip model (`FLIP_DISCARD`, at least 2
   buffers). At `init_swapchain` the colour space is set on the native swap chain (ReShade's proxy
   skips `SetColorSpace1` once an add-on changed the format): `G2084_NONE_P2020` when the output's
   `DXGI_OUTPUT_DESC1` says Windows shows HDR, otherwise `G22_NONE_P709` and SDR output. ReShade's
@@ -1592,9 +1608,10 @@ grading, as RenoDX's mods do, and the grading and output follow RenoDX's and Lum
   to `o0` gets the saturate modifier.
 - **Grading.** `Tonemap` (the LUT pass) draws with the add-on's shader: the scene's light through
   TppTonemap (the resolve's curve, captured into a buffer at each resolve) and the clamp to 1, then the
-  game's grading as its shader does it (bloom screened in gamma 2, the 16x16x16 LUT), then RenoDX's
-  `UpgradeToneMap`: the luminance the tonemap took is added to the graded luminance, and the graded
-  colour scaled to it. Below the knee (0.6) the image is the game's. Alpha keeps the game's luma.
+  game's grading as its shader does it (bloom screened in gamma 2, the 16x16x16 LUT), then, with HDR
+  output, RenoDX's `UpgradeToneMap`: the luminance the tonemap took is added to the graded luminance,
+  and the graded colour scaled to it. Below the knee (0.6) the image is the game's. Alpha keeps the
+  game's luma.
 - **DLSS** runs with `IsHDR` on the linear light, after the depth of field and before the grading;
   RCAS sharpens through x / (1 + x).
 - **Output.** `GammaControl` draws with the add-on's shader: the game's brightness setting as it
@@ -1602,7 +1619,8 @@ grading, as RenoDX's mods do, and the grading and output follow RenoDX's and Lum
   RenoDX's default) and above it with sRGB, then RenoDX's Neutwo on the brightest channel, which puts
   100 times the game's white at the display's peak (`hdr_peak_nits`, 0 for the peak the display
   reports) and leaves values well below it nearly unchanged, BT.709 to BT.2020, the game's white at
-  `hdr_paper_white_nits` (203), and PQ. Without HDR on the display: sRGB, clipped at 1.
+  `hdr_paper_white_nits` (203), and PQ. Without HDR on the display: sRGB, clipped at 1. In SDR: the
+  brightness, then linear light for the back buffer's sRGB view to encode, with the dither above.
 
 Not handled:
 

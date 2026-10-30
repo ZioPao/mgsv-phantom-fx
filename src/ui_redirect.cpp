@@ -21,16 +21,16 @@ namespace
 using Microsoft::WRL::ComPtr;
 
 // The scene target is B8G8R8A8_TYPELESS with UNORM views to draw and an UNORM_SRGB view that
-// GammaControl reads (docs/DEVELOPMENT.md, "Resources"). With HDR it is float, with float views
-// holding the same encoded values (hdr.hpp).
+// GammaControl reads (docs/DEVELOPMENT.md, "Resources"). With the scene in float it is float, with
+// float views holding the same encoded values (hdr.hpp).
 DXGI_FORMAT drawFormat()
 {
-    return hdr::active() ? hdr::sceneFormat() : DXGI_FORMAT_B8G8R8A8_UNORM;
+    return hdr::isSceneFloat() ? hdr::sceneFormat() : DXGI_FORMAT_B8G8R8A8_UNORM;
 }
 
 DXGI_FORMAT gammaFormat()
 {
-    return hdr::active() ? hdr::sceneFormat() : DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    return hdr::isSceneFloat() ? hdr::sceneFormat() : DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
 }
 
 // The output-size textures, by Surface.
@@ -68,7 +68,7 @@ struct Targets
     const Texture& operator[](Surface surface) const { return surfaces[static_cast<std::size_t>(surface)]; }
 };
 
-// The motion blur's surfaces, made apart from the set above: with HDR at native resolution the blur
+// The motion blur's surfaces, made apart from the set above: in the float scene at native resolution the blur
 // goes through these alone, and the set's full-size surfaces would sit unused.
 struct BlurTargets
 {

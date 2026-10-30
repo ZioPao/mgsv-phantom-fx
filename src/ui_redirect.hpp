@@ -32,7 +32,7 @@ struct Output
 };
 
 // The output-size surfaces the game's post processing draws with. The motion blur's are made apart
-// from the others, so the blur alone (with HDR at native resolution) does not make the full-size ones.
+// from the others, so the blur alone (float scene, native resolution) does not make the full-size ones.
 enum class Surface : std::uint8_t
 {
     Scene,    // The output target, in place of the scene target

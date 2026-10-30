@@ -335,7 +335,7 @@ void onDestroyEffectRuntime(effect_runtime* destroyed)
     if (effects == destroyed) effects = nullptr;
 }
 
-// ---- HDR's swap chain and targets, registered only while HDR runs ----
+// ---- The float scene's targets and HDR's swap chain, registered only while the scene is float ----
 
 bool onCreateSwapchain(device_api api, swapchain_desc& desc, void*)
 {
@@ -364,7 +364,7 @@ bool onCreateResource(device* device, resource_desc& desc, subresource_data*, re
     }
 
     bool unorderedAccess{};
-    if (!hdr::active() || !hdr::upgradeTexture(textureFormat, unorderedAccess)) return false;
+    if (!hdr::isSceneFloat() || !hdr::upgradeTexture(textureFormat, unorderedAccess)) return false;
 
     desc.texture.format = static_cast<format>(textureFormat);
     if (unorderedAccess) desc.usage |= resource_usage::unordered_access;
@@ -375,13 +375,13 @@ bool onCreateResource(device* device, resource_desc& desc, subresource_data*, re
 void onInitResource(device*, const resource_desc&, const subresource_data*, resource_usage, resource created)
 {
     atmosphere::textureCreated(reinterpret_cast<ID3D11Resource*>(created.handle));
-    if (hdr::active()) hdr::textureCreated(reinterpret_cast<ID3D11Resource*>(created.handle));
+    if (hdr::isSceneFloat()) hdr::textureCreated(reinterpret_cast<ID3D11Resource*>(created.handle));
 }
 
 void onDestroyResource(device*, resource destroyed)
 {
     atmosphere::resourceDestroyed(reinterpret_cast<ID3D11Resource*>(destroyed.handle));
-    if (hdr::active()) hdr::resourceDestroyed(reinterpret_cast<ID3D11Resource*>(destroyed.handle));
+    if (hdr::isSceneFloat()) hdr::resourceDestroyed(reinterpret_cast<ID3D11Resource*>(destroyed.handle));
 }
 
 bool onCreateResourceView(device* device, resource viewed, resource_usage, resource_view_desc& desc)
@@ -575,8 +575,8 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     frame_log::install(directory);
     upscaler::initialize(directory);
     core::initialize(directory, isSupportedGameBuild());
-    // The game makes its swap chain and targets next, so HDR is decided now.
-    hdr::enable(isSupportedGameBuild() && core::currentSettings().hdr.on);
+    // The game makes its swap chain and targets next, so the float scene and HDR are decided now.
+    hdr::enable(isSupportedGameBuild(), core::currentSettings().hdr.on);
 
     // Frame generation takes over the swap chain the game creates next, so it starts with the game.
     if (const auto mode = core::currentSettings().frameGeneration.mode; isSupportedGameBuild() && mode != upscaler::FrameGenerationMode::Off)
@@ -621,8 +621,8 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
         reshade::register_event<reshade::addon_event::destroy_resource>(onDestroyResource);
     }
 
-    // Every view and copy passes these, so they are only there while HDR runs.
-    if (hdr::active())
+    // Every view and copy passes these, so they are only there while the scene is float.
+    if (hdr::isSceneFloat())
     {
         reshade::register_event<reshade::addon_event::create_swapchain>(onCreateSwapchain);
         reshade::register_event<reshade::addon_event::create_resource_view>(onCreateResourceView);

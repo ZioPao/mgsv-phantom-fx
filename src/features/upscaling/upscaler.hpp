@@ -52,7 +52,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
 // true for its full-size draws (the lens flare layer's composite and the grading), which are then
 // bound to the output size (ui_redirect.hpp) and must be made in that state, whoever makes them;
 // afterPostDraw then puts the game's bindings back. The motion blur's draws as well, while upscaling
-// or, with HDR, at every upscaler setting, on the add-on's float surfaces.
+// or, with the scene in float, at every upscaler setting, on the add-on's float surfaces.
 bool beforePostDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
 void afterPostDraw(ID3D11DeviceContext* context) noexcept;
 bool clearTarget(ID3D11DeviceContext* context, ID3D11RenderTargetView* view, const float color[4]) noexcept;

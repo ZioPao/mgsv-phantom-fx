@@ -49,10 +49,13 @@ constexpr std::uint32_t TonemapBlock[]{0x1D, 0x37, 0x38, 0x36, 0x00, 0x00, 0x36,
 constexpr std::size_t MaskStep = 1, DivideStep = 9, CurveStep = 12;
 constexpr std::uint32_t AndOpcode = 0x01, OpcodeMask = 0x7FF;
 
+// How the output shader writes the back buffer (hdr_shaders.hpp, Output).
+enum class Encoding : std::uint32_t { SrgbView, Srgb, Pq };
+
 struct OutputParameters
 {
     float paperWhite, peak;
-    std::uint32_t pq;
+    Encoding encoding;
     float padding;
 };
 
@@ -83,7 +86,7 @@ struct DofCopy
     ComPtr<ID3D11ShaderResourceView> view;
 };
 
-std::atomic<bool> enabled{}, twinsInUse{};
+std::atomic<bool> sceneFloat{}, outputHdr{}, twinsInUse{};
 std::atomic<Output> shown{Output::Off};
 std::atomic<float> peakNits{}, paperWhiteNits{203}, displayPeak{};
 // When neither the settings nor the display give a peak.
@@ -123,7 +126,8 @@ void createPipeline()
     captureShader = computeShader(device.Get(), shaders::Capture, "hdr-capture");
     encodeShader = computeShader(device.Get(), shaders::Encode, "hdr-encode");
     decodeShader = computeShader(device.Get(), shaders::Decode, "hdr-decode");
-    gradeShader = pixelShader(device.Get(), shaders::Grade, "hdr-grade");
+    const D3D_SHADER_MACRO grade[]{{"UPGRADE_TONEMAP", outputHdr ? "1" : "0"}, {}};
+    gradeShader = pixelShader(device.Get(), shaders::Grade, "hdr-grade", grade);
     reduceShader = pixelShader(device.Get(), shaders::Reduce, "hdr-reduce");
     outputShader = pixelShader(device.Get(), shaders::Output, "hdr-output");
     outputBuffer = makeConstantBuffer(device.Get(), sizeof(OutputParameters), "Creating the HDR output constants");
@@ -188,7 +192,7 @@ void ensureTwin(Upgraded& target)
     target.twinView = std::move(made.view);
     target.twinAccess = std::move(made.access);
     twinsInUse = true;
-    log("HDR: the reflections read a decoded copy of the scene at " + std::to_string(target.width) + "x" + std::to_string(target.height) + ".");
+    log("Float scene: the reflections read a decoded copy of the scene at " + std::to_string(target.width) + "x" + std::to_string(target.height) + ".");
 }
 
 float floatAt(const std::uint8_t* bytes, std::size_t offset)
@@ -313,15 +317,22 @@ void composeDofOverFloat(ID3D11DeviceContext* context)
 }
 }
 
-void enable(bool on) noexcept
+void enable(bool floatScene, bool hdrOutput) noexcept
 {
-    enabled = on;
-    if (on) log("HDR output is on: the swap chain and the scene targets are made for it.");
+    sceneFloat = floatScene;
+    outputHdr = floatScene && hdrOutput;
+    if (outputHdr) log("HDR output is on: the swap chain and the scene targets are made for it.");
+    else if (floatScene) log("The scene targets are made float, with SDR output.");
+}
+
+bool isSceneFloat() noexcept
+{
+    return sceneFloat.load(std::memory_order_relaxed);
 }
 
 bool active() noexcept
 {
-    return enabled.load(std::memory_order_relaxed);
+    return outputHdr.load(std::memory_order_relaxed);
 }
 
 Output output() noexcept
@@ -337,7 +348,7 @@ float peakNitsFor(float chosen) noexcept
 
 void attach(ID3D11Device* gameDevice) noexcept
 {
-    if (!enabled) return;
+    if (!sceneFloat) return;
 
     std::unique_lock lock(mutex);
     device = gameDevice;
@@ -347,10 +358,11 @@ void attach(ID3D11Device* gameDevice) noexcept
     }
     catch (const std::exception& error)
     {
-        // The game has made none of its targets yet, so it runs as without HDR.
-        enabled = false;
-        shown = Output::Unavailable;
-        log(std::string("HDR output is unavailable: ") + error.what());
+        // The game has made none of its targets yet, so it runs with its own 8-bit scene.
+        if (outputHdr) shown = Output::Unavailable;
+        log(std::string(outputHdr ? "HDR output is unavailable: " : "The scene stays 8-bit: ") + error.what());
+        sceneFloat = false;
+        outputHdr = false;
     }
 }
 
@@ -385,7 +397,7 @@ void configure(const Configuration& configuration) noexcept
 
 bool upgradeSwapChain(DXGI_FORMAT& format, DXGI_SWAP_EFFECT& effect, UINT& bufferCount) noexcept
 {
-    if (!enabled) return false;
+    if (!outputHdr) return false;
 
     format = BackBufferFormat;
     // HDR needs flip model, which takes at least two buffers.
@@ -397,7 +409,7 @@ bool upgradeSwapChain(DXGI_FORMAT& format, DXGI_SWAP_EFFECT& effect, UINT& buffe
 
 void swapChainReady(IDXGISwapChain* chain) noexcept
 {
-    if (!enabled || !chain) return;
+    if (!outputHdr || !chain) return;
 
     ComPtr<IDXGISwapChain3> chain3;
     if (FAILED(chain->QueryInterface(IID_PPV_ARGS(&chain3))))
@@ -440,7 +452,7 @@ void swapChainReady(IDXGISwapChain* chain) noexcept
 bool upgradeTexture(DXGI_FORMAT& format, bool& unorderedAccess) noexcept
 {
     creatingTarget = false;
-    if (!enabled || format != GameSceneFormat || !madeForScene()) return false;
+    if (!sceneFloat || format != GameSceneFormat || !madeForScene()) return false;
 
     format = SceneFormat;
     unorderedAccess = true;
@@ -466,7 +478,7 @@ void textureCreated(ID3D11Resource* texture) noexcept
         return;
     }
 
-    log("HDR: a scene target at " + std::to_string(desc.Width) + "x" + std::to_string(desc.Height) + " is R16G16B16A16_FLOAT.");
+    log("A scene target at " + std::to_string(desc.Width) + "x" + std::to_string(desc.Height) + " is R16G16B16A16_FLOAT.");
 }
 
 void resourceDestroyed(ID3D11Resource* resource) noexcept
@@ -483,7 +495,7 @@ void resourceDestroyed(ID3D11Resource* resource) noexcept
 bool upgradeView(ID3D11Resource* resource, DXGI_FORMAT& format) noexcept
 {
     creatingSrgbView = false;
-    if (!enabled) return false;
+    if (!sceneFloat) return false;
 
     bool upgraded{};
     {
@@ -501,7 +513,10 @@ bool upgradeView(ID3D11Resource* resource, DXGI_FORMAT& format) noexcept
         return true;
     }
 
-    // The game draws GammaControl into the back buffer through an R8G8B8A8_UNORM_SRGB view.
+    // The game draws GammaControl into the back buffer through an R8G8B8A8_UNORM_SRGB view, which in
+    // SDR stays as it is.
+    if (!outputHdr) return false;
+
     const bool eightBit = format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
         || format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
     if (!eightBit || textureDesc(resource).Format != BackBufferFormat) return false;
@@ -544,7 +559,7 @@ void viewDestroyed(ID3D11View* view) noexcept
 
 const std::vector<std::uint8_t>* patchedShader(const void* code, std::size_t size) noexcept
 {
-    if (!enabled || !code) return nullptr;
+    if (!sceneFloat || !code) return nullptr;
 
     try
     {
@@ -558,7 +573,7 @@ const std::vector<std::uint8_t>* patchedShader(const void* code, std::size_t siz
         const auto patched = draw2D ? saturateOutput(code, size) : withoutTonemap(code, size);
         if (!patched)
         {
-            if (draw2D) logOnce("HDR: the 2D pass shader " + toHex(*hash) + " keeps its writes unclamped.");
+            if (draw2D) logOnce("Float scene: the 2D pass shader " + toHex(*hash) + " keeps its writes unclamped.");
             return nullptr;
         }
 
@@ -566,14 +581,14 @@ const std::vector<std::uint8_t>* patchedShader(const void* code, std::size_t siz
         ComPtr<ID3D11PixelShader> made;
         if (!device || FAILED(device->CreatePixelShader(patched->data(), patched->size(), nullptr, made.GetAddressOf())))
         {
-            logOnce("HDR: Direct3D refused the patched shader " + toHex(*hash) + "; it keeps the game's.");
+            logOnce("Float scene: Direct3D refused the patched shader " + toHex(*hash) + "; it keeps the game's.");
             return nullptr;
         }
 
         const auto* original = static_cast<const std::uint8_t*>(code);
         auto& entry = patchedShaders[*hash] = Patched{std::move(*patched), std::vector(original, original + size)};
         patchedByCode[entry.code.data()] = &entry;
-        log(std::string("HDR: ") + (draw2D ? "clamped the writes of 2D pass shader " : "took TppTonemap out of shader ") + toHex(*hash) + ".");
+        log(std::string("Float scene: ") + (draw2D ? "clamped the writes of 2D pass shader " : "took TppTonemap out of shader ") + toHex(*hash) + ".");
 
         return &entry.code;
     }
@@ -585,7 +600,7 @@ const std::vector<std::uint8_t>* patchedShader(const void* code, std::size_t siz
 
 std::pair<const void*, std::size_t> originalOf(const void* code, std::size_t size) noexcept
 {
-    if (!enabled) return {code, size};
+    if (!sceneFloat) return {code, size};
 
     std::shared_lock lock(mutex);
     const auto found = patchedByCode.find(code);
@@ -596,7 +611,7 @@ std::pair<const void*, std::size_t> originalOf(const void* code, std::size_t siz
 
 bool beforeDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
-    if (!enabled.load(std::memory_order_relaxed) || call.indexed || call.count != 3 || call.instances != 1) return false;
+    if (!sceneFloat.load(std::memory_order_relaxed) || call.indexed || call.count != 3 || call.instances != 1) return false;
 
     try
     {
@@ -628,7 +643,7 @@ bool beforeDraw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call,
         if (!desc.RenderTarget[0].RenderTargetWriteMask) return false;
         if (desc.RenderTarget[0].BlendEnable)
         {
-            logOnce("HDR: a blended draw through an sRGB view of the scene is left as the game draws it.");
+            logOnce("Float scene: a blended draw through an sRGB view of the scene is left as the game draws it.");
             return false;
         }
 
@@ -678,13 +693,13 @@ void encode(ID3D11DeviceContext* context) noexcept
     }
     catch (const std::exception& error)
     {
-        logOnce(std::string("HDR: ") + error.what());
+        logOnce(std::string("Float scene: ") + error.what());
     }
 }
 
 bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept
 {
-    if (!enabled.load(std::memory_order_relaxed) || call.indexed || call.count != 3 || call.instances != 1) return false;
+    if (!sceneFloat.load(std::memory_order_relaxed) || call.indexed || call.count != 3 || call.instances != 1) return false;
 
     try
     {
@@ -724,7 +739,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
 
 bool clearTarget(ID3D11DeviceContext* context, ID3D11RenderTargetView* view, const float color[4]) noexcept
 {
-    if (!enabled.load(std::memory_order_relaxed) || !view) return false;
+    if (!sceneFloat.load(std::memory_order_relaxed) || !view) return false;
 
     {
         std::shared_lock lock(mutex);
@@ -739,7 +754,7 @@ bool clearTarget(ID3D11DeviceContext* context, ID3D11RenderTargetView* view, con
 
 bool copy(ID3D11DeviceContext* context, ID3D11Resource* source, ID3D11Resource* destination) noexcept
 {
-    if (!enabled.load(std::memory_order_relaxed)) return false;
+    if (!sceneFloat.load(std::memory_order_relaxed)) return false;
 
     try
     {
@@ -776,7 +791,7 @@ bool copy(ID3D11DeviceContext* context, ID3D11Resource* source, ID3D11Resource* 
     }
     catch (const std::exception& error)
     {
-        logOnce(std::string("HDR: ") + error.what());
+        logOnce(std::string("Float scene: ") + error.what());
         return false;
     }
 }
@@ -805,9 +820,12 @@ bool replaceViews(unsigned count, ID3D11ShaderResourceView* const* views, ID3D11
 
 OutputShader::OutputShader(ID3D11DeviceContext* target) noexcept
 {
-    if (!enabled.load(std::memory_order_relaxed) || !outputShader) return;
+    if (!sceneFloat.load(std::memory_order_relaxed) || !outputShader) return;
 
-    const OutputParameters parameters{paperWhiteNits, peakNitsFor(peakNits), shown == Output::Hdr10, 0};
+    // In SDR the back buffer is the game's, written through an sRGB view; HDR's swap chain is
+    // R10G10B10A2, encoded here, in PQ while the display shows HDR.
+    const auto encoding = !outputHdr ? Encoding::SrgbView : shown == Output::Hdr10 ? Encoding::Pq : Encoding::Srgb;
+    const OutputParameters parameters{paperWhiteNits, peakNitsFor(peakNits), encoding, 0};
     if (FAILED(write(target, outputBuffer.Get(), parameters))) return;
 
     target->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
@@ -827,6 +845,6 @@ OutputShader::~OutputShader()
 
 DXGI_FORMAT sceneFormat() noexcept
 {
-    return active() ? SceneFormat : GameSceneFormat;
+    return isSceneFloat() ? SceneFormat : GameSceneFormat;
 }
 }
