@@ -42,6 +42,12 @@ RWStructuredBuffer<uint4> g_GeometryAlbedo : register(u6); // Sums of linear alb
 // (docs/DEVELOPMENT.md, "Velocity"). It carries the frame's jitter, as the camera's motion does here.
 Texture2D<float4> g_ObjectVelocity : register(t17);
 
+// Path tracing's hits (gi_hit_light.hlsli): each row of the game's material table as its specular colour at normal
+// incidence (the guides' pass, ray_tracing.cpp); and the sky as the game draws it, from every side (sky_capture.hpp),
+// in the same units as the sky's light.
+Texture2D<float4> g_MaterialSpecular : register(t23);
+TextureCube<float4> g_SkyCube : register(t24);
+
 SamplerState g_PointSampler : register(s0);
 SamplerState g_LinearSampler : register(s1);
 SamplerState g_WrapSampler : register(s2);
@@ -308,6 +314,15 @@ float3 SkyRadiance(float3 direction)
     return max(radiance, 0.0f);
 }
 
+// The sky a reflection sees in a world direction: the one the game draws, with its horizon, clouds and sun's glow, once
+// captured. Diffuse rays keep the sky's light (SkyRadiance): it is what the game's ambient is tuned to.
+float3 SkySeen(float3 direction)
+{
+    if (g_Frame.reconstruction.z) return g_SkyCube.SampleLevel(g_LinearSampler, direction, 0.0f).rgb;
+
+    return SkyRadiance(direction);
+}
+
 float3 DecodeNormal(float4 encoded)
 {
     return normalize(2.0f * encoded.xyz - 1.0f);
@@ -367,6 +382,20 @@ float3 ToWorld(GIInstanceDesc instance, float3 position)
 {
     float4 p = float4(position, 1.0f);
     return float3(dot(instance.transform[0], p), dot(instance.transform[1], p), dot(instance.transform[2], p));
+}
+
+// A direction under an instance's transform, not normalised.
+float3 ToWorldDirection(GIInstanceDesc instance, float3 direction)
+{
+    return float3(dot(instance.transform[0].xyz, direction), dot(instance.transform[1].xyz, direction), dot(instance.transform[2].xyz, direction));
+}
+
+// A vertex's normal and tangent, w the binormal's side (GIGeometry::normalOffset).
+void VertexFrame(GIGeometry geometry, uint index, out float3 normal, out float4 tangent)
+{
+    uint4 words = g_GeometryPool.Load4(geometry.normalOffset + 16 * index);
+    normal = float3(f16tof32(words.x), f16tof32(words.x >> 16), f16tof32(words.y));
+    tangent = float4(f16tof32(words.z), f16tof32(words.z >> 16), f16tof32(words.w), f16tof32(words.w >> 16));
 }
 
 // A triangle of an instance's geometry: its corners in world space, and the texture coordinates
