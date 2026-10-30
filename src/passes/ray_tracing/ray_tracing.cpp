@@ -970,7 +970,7 @@ void detach() noexcept
         packParameters.Reset();
         guideShader.Reset();
         guideParameters.Reset();
-        guideNormals = guideDiffuse = guideSpecular = guideMaterial = guideTranslucency = {};
+        guideNormals = guideDiffuse = guideSpecular = guideMaterial = guideTranslucency = materialSpecular = {};
         guidesKick = 0;
         terrainPages.Reset();
         terrainHeights.Reset();

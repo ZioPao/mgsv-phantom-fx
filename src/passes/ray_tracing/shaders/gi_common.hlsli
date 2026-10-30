@@ -701,7 +701,8 @@ uint ShadowRayTowards(uint light)
 
 // Whether a hit stops a ray: one towards a light as the game's shadow maps would have it
 // (StopsShadowRay); any other ray passes what the game draws into its shadow maps alone (a stand-in,
-// GI_GEOMETRY_SHADOW_ONLY), as the camera never sees it.
+// GI_GEOMETRY_SHADOW_ONLY), as the camera never sees it, and a self-lit mesh while those give no light
+// (g_Frame.emission.x: without path tracing, or with its slider at 0): it would be a black hit.
 bool IsShadowOnly(uint instance, uint geometry)
 {
     GIInstanceDesc desc = g_Instances[instance];
@@ -710,9 +711,17 @@ bool IsShadowOnly(uint instance, uint geometry)
     return (g_Geometries[FirstGeometry(desc) + geometry].flags & GI_GEOMETRY_SHADOW_ONLY) != 0;
 }
 
+bool IsDarkSelfLit(uint instance, uint geometry)
+{
+    GIInstanceDesc desc = g_Instances[instance];
+    if (g_Frame.emission.x > 0.0f || !(InstanceKind(desc) & GI_INSTANCE_MODEL)) return false;
+
+    return (g_Geometries[FirstGeometry(desc) + geometry].flags & GI_GEOMETRY_EMISSIVE) != 0;
+}
+
 bool StopsRay(uint instance, uint geometry, bool dxrFrontFace, uint towards)
 {
-    if (towards == RayTowardsSurface) return !IsShadowOnly(instance, geometry);
+    if (towards == RayTowardsSurface) return !IsShadowOnly(instance, geometry) && !IsDarkSelfLit(instance, geometry);
 
     return StopsShadowRay(instance, geometry, dxrFrontFace, towards == RayTowardsLamp);
 }

@@ -1673,8 +1673,9 @@ the game's lights) is left alone until it runs.
   `MeshRole::Emissive`, whatever its alpha and shadow bytes (`0x10`, `0x25` on most), but for an additive one
   (alpha bit 0): those are glow cards around lamps, four vertices, no surface. The sky's dome, the moon (intensity 1)
   and a mesh painted black fall below it. Self-lit meshes give light and take none, and rays towards lights pass them
-  (`GI_GEOMETRY_EMISSIVE`, with `GI_GEOMETRY_NO_SHADOW`). A placed mesh within 200 m of the eye is an emitter: the 64
-  strongest at the eye go in the frame's constants (`GIEmitter`), each with the reach of its own light past which a
+  (`GI_GEOMETRY_EMISSIVE`, with `GI_GEOMETRY_NO_SHADOW`). While they give no light, without path tracing or with the
+  slider below at 0, every ray passes them, as a black hit would dim what is behind. A placed mesh within 200 m of the
+  eye is an emitter: the 64 strongest at the eye go in the frame's constants (`GIEmitter`), each with the reach of its own light past which a
   surface does not consider it. Their diffuse light is sampled directly at the pixel
   (`TraceLight`), at the rays' hits (`HitOwnLight`) and in the cache's cells (`HitDirectLight`): one chosen by its
   light there (weighted reservoir sampling), a triangle of it and a point on that, with a shadow ray; it is an

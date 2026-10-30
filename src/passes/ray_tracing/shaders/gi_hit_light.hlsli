@@ -309,7 +309,9 @@ float HitLevel(Texture2D<float4> texture, SceneTriangle t, float footprint)
 // camera sees the hit; otherwise its mesh's albedo texture, or its mesh's mean.
 float3 HitAlbedo(float3 world, HashGridCache_Visibility visibility, float footprint)
 {
-    if (InstanceKind(g_Instances[visibility.instanceIndex]) & GI_INSTANCE_SEA) return float3(GI_SEA_ALBEDO);
+    GIInstanceDesc instance = g_Instances[visibility.instanceIndex];
+    if (InstanceKind(instance) & GI_INSTANCE_SEA) return float3(GI_SEA_ALBEDO);
+    if (g_Geometries[FirstGeometry(instance) + visibility.geometryIndex].flags & GI_GEOMETRY_EMISSIVE) return 0.0f;
 
     float4 clip = mul(g_ViewProjection, float4(world, 1.0f));
     if (clip.w > 0.0f)

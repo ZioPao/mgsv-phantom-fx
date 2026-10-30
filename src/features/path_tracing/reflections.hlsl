@@ -100,7 +100,7 @@ float3 ReflectedLight(float3 origin, float3 normal, float tolerance, float3 dire
         travelled += hit.distance;
         uint hitFlags = g_Geometries[FirstGeometry(g_Instances[hit.instance]) + hit.geometry].flags;
         float3 cached;
-        if (isRough && !(hitFlags & GI_GEOMETRY_EMISSIVE) && CachedLight(origin + hit.distance * direction, direction, hit.distance, cached)) return cached;
+        if (ray == 1 && isRough && !(hitFlags & GI_GEOMETRY_EMISSIVE) && CachedLight(origin + hit.distance * direction, direction, hit.distance, cached)) return cached;
 
         HashGridCache_Visibility visibility = VisibilityOf(hit, direction);
         HitMaterial material = HitMaterialOf(visibility, cone.x + travelled * cone.y, false);

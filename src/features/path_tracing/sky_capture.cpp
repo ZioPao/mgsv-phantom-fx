@@ -60,7 +60,8 @@ struct SkyLightConstants
     float unused[9][4];
 };
 
-// cVSWork, b7 (576 bytes), at the sky draw's vertex shader: m_matrix[0] clip to view, m_matrix[1] view to world.
+// cVSWork, b7 (576 bytes), at the sky draw's vertex shader: m_viewInverse, which it does not read, then m_matrix[0] clip
+// to view at c4 and m_matrix[1] view to world at c8.
 struct SkyWorkConstants
 {
     float viewInverse[4][4];
@@ -95,7 +96,7 @@ void main(uint2 id : SV_DispatchThreadID)
 {
     if (any(id >= Size)) return;
 
-    Output[uint3(id, Face)] = float4(min(Decoded(Drawn.Load(int4(id, Face, 0)).rgb), Most) * Scale, 1);
+    Output[uint3(id, Face)] = float4(clamp(Decoded(Drawn.Load(int4(id, Face, 0)).rgb), 0, Most) * Scale, 1);
 }
 )";
 
