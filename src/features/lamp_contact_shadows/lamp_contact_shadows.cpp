@@ -9,6 +9,7 @@
 #include "performance.hpp"
 
 #include <wrl/client.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -25,11 +26,19 @@ namespace
 using Microsoft::WRL::ComPtr;
 using namespace game_lights;
 
-constexpr UINT DepthSlot = 2;    // t2 of the light passes
-constexpr UINT ShadowSlot = 7;   // t7 of the light shadow shader
-constexpr UINT BoundsSlot = 6;   // b6 of the light shadow shader: the trace's constants
-// A light this close to the camera plane is moved off it, so its place on screen stays finite.
-constexpr float MinLightDepth = 0.01f;
+constexpr UINT DepthSlot = 2;  // t2 of the light passes
+constexpr UINT NormalSlot = 0; // t0 of the light passes: the G-buffer's normals
+constexpr UINT SamplerSlot = 0; // s0: the shadow shader's own, for its gather
+constexpr UINT BoundsSlot = 6; // b6 of the light shadow shader: the add-on's options
+
+// A march step per two pixels of the reach, as renodx-mgsv sizes its steps to the reach, and no more
+// than the shader's own loop takes.
+constexpr float MinSteps = 16, MaxSteps = 64, PixelsPerStep = 2;
+// The caster size the march counts within, in metres, as renodx-mgsv's spot shadows take it. Its own,
+// not Contact shadow thickness: that one is a share of the depth left to the far plane, which grows
+// with the distance until it passes the bound a caster may sit in and leaves no window at all - and it
+// is the sun's window width, so raising it would narrow the lamp's march where it widens the sun's.
+constexpr float ThicknessMetres = 0.005f;
 
 std::atomic<bool> wantedRunning{}, pipelineFailed{};
 
@@ -42,14 +51,28 @@ std::unordered_map<ID3D11DeviceContext*, std::array<float, 3>> marked;
 std::mutex resourceMutex;
 ComPtr<ID3D11Device> device;
 ComPtr<ID3D11PixelShader> lightShadowShader;
-// The light shadow's draw: alpha only, over the whole light volume.
+ComPtr<ID3D11Buffer> optionsBuffer;
+// The light shadow's draw: alpha only, over the light volume the game is already drawing.
 ComPtr<ID3D11BlendState> alphaOnly;
+// The same draw with the game's depth test off: it writes alpha, not depth.
 ComPtr<ID3D11DepthStencilState> noDepth;
-ComPtr<ID3D11RasterizerState> bothFaces;
+// The volume's far faces only, as the game's lighting draw takes them: its marking draw culls none.
+ComPtr<ID3D11RasterizerState> farFaces;
+// The shadow shader's gather reads the depth buffer through this, in the slot the game leaves it.
+ComPtr<ID3D11SamplerState> pointClamp;
 // The game's additive light blend, by the state it binds, and the same scaled by the target's alpha.
 std::unordered_map<ID3D11BlendState*, std::pair<ComPtr<ID3D11BlendState>, ComPtr<ID3D11BlendState>>> shadowedBlends;
-contact_shadow_trace::ShadowTarget lightShadow;
-std::array<bool, 2> tracedOnce{}; // By falloff
+
+// cLampTrace (b6) of the light shadow shader. The viewport is the depth buffer's size, which is the
+// render size the reach and the march's pixel lookups are in.
+struct Options
+{
+    float reachPixels, thickness, contrast, fadeMetres;
+    float rangeMetres, steps, viewportWidth, viewportHeight;
+    float useNormals; // 1 when the marking draw has the G-buffer's normals at t0, 0 when it has not
+    float padding[3];
+};
+static_assert(sizeof(Options) % 16 == 0);
 
 // Compiles the shaders once; call with resourceMutex held. Returns false when they are unavailable.
 bool ensurePipeline()
@@ -73,19 +96,30 @@ bool ensurePipeline()
 
         D3D11_RASTERIZER_DESC rasterizer{};
         rasterizer.FillMode = D3D11_FILL_SOLID;
-        rasterizer.CullMode = D3D11_CULL_NONE;
+        rasterizer.CullMode = D3D11_CULL_FRONT;
         rasterizer.DepthClipEnable = TRUE;
-        check(device->CreateRasterizerState(&rasterizer, bothFaces.ReleaseAndGetAddressOf()), "Creating the light shadow rasterizer state");
+        check(device->CreateRasterizerState(&rasterizer, farFaces.ReleaseAndGetAddressOf()), "Creating the light shadow rasterizer state");
+
+        optionsBuffer = makeConstantBuffer(device.Get(), sizeof(Options), "Creating the lamp contact shadow options");
+
+        const D3D11_SAMPLER_DESC sampler{.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT,
+            .AddressU = D3D11_TEXTURE_ADDRESS_CLAMP,
+            .AddressV = D3D11_TEXTURE_ADDRESS_CLAMP,
+            .AddressW = D3D11_TEXTURE_ADDRESS_CLAMP,
+            .ComparisonFunc = D3D11_COMPARISON_NEVER,
+            .MaxLOD = D3D11_FLOAT32_MAX};
+        check(device->CreateSamplerState(&sampler, pointClamp.ReleaseAndGetAddressOf()), "Creating the lamp shadow sampler");
 
         // Last, so it marks a complete pipeline.
-        lightShadowShader = pixelShader(device.Get(), shaders::LightShadow, "light-shadow");
-        log("Lamp shadow shaders ready.");
+        lightShadowShader = pixelShader(device.Get(), shaders::LightShadow, "lamp-light-shadow");
+        log("Lamp contact shadow shader ready.");
 
         return true;
     }
     catch (const std::exception& error)
     {
         pipelineFailed = true;
+        lightShadowShader.Reset();
         log(std::string("Lamp contact shadows unavailable: ") + error.what());
 
         return false;
@@ -96,6 +130,18 @@ bool ensurePipeline()
 std::array<float, 3> positionOf(const game_constants::LampLightConstants& light)
 {
     return {light.position[0], light.position[1], light.position[2]};
+}
+
+// Whether a light that reaches `radius` metres from `centre` can touch the pass's screen at `size`
+// pixels: its sphere is off the screen, or wholly behind the camera, where the game's own lighting
+// draw reaches nothing and there is no shadow to leave. An unending reach covers the screen.
+bool reachesScreen(const game_constants::SceneConstants& scene, const std::array<float, 3>& centre, float radius, std::array<int, 2> size)
+{
+    if (!std::isfinite(radius) || radius <= 0) return true;
+    if (centre[2] + radius <= 0) return false;
+    if (centre[2] <= radius) return true; // The camera plane crosses the sphere, so part of it is in view.
+
+    return sphereOnScreen(scene, centre, radius, {static_cast<float>(size[0]), static_cast<float>(size[1])}).has_value();
 }
 
 void noteMarked(ID3D11DeviceContext* context, const std::array<float, 3>& position)
@@ -165,9 +211,10 @@ void detach() noexcept
         lightShadowShader.Reset();
         alphaOnly.Reset();
         noDepth.Reset();
-        bothFaces.Reset();
+        farFaces.Reset();
+        pointClamp.Reset();
+        optionsBuffer.Reset();
         shadowedBlends.clear();
-        lightShadow = {};
         device.Reset();
         pipelineFailed = false;
     }
@@ -188,14 +235,16 @@ void configure(const Configuration& configuration) noexcept
 
 Health health()
 {
-    if (pipelineFailed || contact_shadow_trace::failed()) return Health::unavailable("Contact shadows are unavailable (see PhantomFX.log).");
+    if (pipelineFailed) return Health::unavailable("Lamp contact shadows are unavailable (see PhantomFX.log).");
 
     return {};
 }
 
-// At the marking draw (colour writes off), the light's shadow is traced within the light's reach, and
-// the light's volume drawn once more, both faces and without depth test, to put the shadow in the
-// alpha of both light targets wherever the light can reach.
+// At the marking draw (colour writes off), the game's draw is made, then the light's volume is drawn
+// once more with the shadow shader, to put the march's shadow in the alpha of both light targets
+// wherever the light can reach. The second draw takes the volume's far faces, as the lighting draw
+// after it does, so it covers exactly the pixels that read the alpha. The game's marking draw culls
+// none, so its own state would draw both faces: twice the pixels for the same image.
 bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, Falloff falloff, const BoundBlend& gameBlend)
 {
     const auto scene = constant_capture::pixelShaderReads<game_constants::SceneConstants>(context);
@@ -209,7 +258,10 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
     const auto position = positionOf(*light);
 
     ComPtr<ID3D11ShaderResourceView> depth;
+    ComPtr<ID3D11ShaderResourceView> normals;
     context->PSGetShaderResources(DepthSlot, 1, depth.GetAddressOf());
+    context->PSGetShaderResources(NormalSlot, 1, normals.GetAddressOf());
+    const auto shape = contact_shadow_trace::shape();
     std::lock_guard lock(resourceMutex);
     if (!ensurePipeline()) return false;
 
@@ -219,54 +271,56 @@ bool drawMarking(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call
         return false;
     }
 
-    // A light that cannot reach the screen keeps the game's draws.
+    // A light that stands wholly past the contact shadows' fade keeps the game's draws: its shadow
+    // would be lit everywhere, and so would one whose reach cannot touch the screen.
     const float range = eitherShapeRangeOf(*light, falloff);
-    const auto bounds = contact_shadow_trace::boundsOf(*scene, position, range, contact_shadow_trace::depthSize(depth.Get()));
-    if (!bounds) return false;
+    const auto size = contact_shadow_trace::depthSize(depth.Get());
+    if (contact_shadow_trace::beyondFade(position[2], range, shape.fadeMetres)) return false;
+    if (!reachesScreen(*scene, position, range, size)) return false;
 
-    float point[4]{position[0], position[1], position[2], 1};
-    if (std::abs(point[2]) < MinLightDepth) point[2] = std::copysign(MinLightDepth, point[2]);
-    performance::Timed timed(context, performance::Pass::LampTraces);
-    const auto dispatched = contact_shadow_trace::trace(context, depth.Get(), *scene, contact_shadow_trace::project(*scene, point), bounds, lightShadow);
-    timed.end();
-    if (!dispatched || dispatched->dispatches == 0) return false;
+    const Options options{.reachPixels = shape.reachPixels,
+        .thickness = ThicknessMetres,
+        .contrast = shape.contrast,
+        .fadeMetres = shape.fadeMetres,
+        .rangeMetres = range,
+        .steps = std::clamp(shape.reachPixels / PixelsPerStep, MinSteps, MaxSteps),
+        .viewportWidth = static_cast<float>(size[0]),
+        .viewportHeight = static_cast<float>(size[1]),
+        .useNormals = normals ? 1.f : 0.f};
+    if (FAILED(write(context, optionsBuffer.Get(), options))) return false;
 
-    if (auto& once = tracedOnce[static_cast<std::size_t>(falloff)]; !once)
-    {
-        once = true;
-        log("Shadows: first local light trace (" + std::string(falloff == Falloff::Quartic ? "SSLighting2" : "Lighting_NA") + "), light at "
-            + std::to_string(position[0]) + ", " + std::to_string(position[1]) + ", " + std::to_string(position[2]) + " (view space), range "
-            + std::to_string(range) + " m, pixels " + std::to_string(bounds->min[0]) + ", " + std::to_string(bounds->min[1]) + " to "
-            + std::to_string(bounds->max[0]) + ", " + std::to_string(bounds->max[1]) + ", depth " + std::to_string(bounds->depthMin) + " to "
-            + std::to_string(bounds->depthMax) + ", " + contact_shadow_trace::describe(*dispatched) + ".");
-    }
+    static std::atomic<bool> loggedNormals{};
+    if (!loggedNormals.exchange(true))
+        log(normals ? "Shadows: the lamp march skips the pixels that face away from the light."
+                    : "Shadows: a light without the G-buffer's normals marches every pixel it covers.");
 
     ComPtr<ID3D11PixelShader> gameShader;
-    ComPtr<ID3D11ShaderResourceView> gameView;
     ComPtr<ID3D11Buffer> gameOptions;
+    ComPtr<ID3D11SamplerState> gameSampler;
     ComPtr<ID3D11DepthStencilState> gameDepth;
     UINT stencilReference{};
     ComPtr<ID3D11RasterizerState> gameRasterizer;
     context->PSGetShader(gameShader.GetAddressOf(), nullptr, nullptr);
-    context->PSGetShaderResources(ShadowSlot, 1, gameView.GetAddressOf());
     context->PSGetConstantBuffers(BoundsSlot, 1, gameOptions.GetAddressOf());
+    context->PSGetSamplers(SamplerSlot, 1, gameSampler.GetAddressOf());
     context->OMGetDepthStencilState(gameDepth.GetAddressOf(), &stencilReference);
     context->RSGetState(gameRasterizer.GetAddressOf());
 
     context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
-    timed.next(performance::Pass::LampShadows);
-    auto* traceConstants = contact_shadow_trace::parameters();
+
+    performance::Timed timed(context, performance::Pass::LampShadows);
     context->PSSetShader(lightShadowShader.Get(), nullptr, 0);
-    context->PSSetShaderResources(ShadowSlot, 1, lightShadow.view.GetAddressOf());
-    context->PSSetConstantBuffers(BoundsSlot, 1, &traceConstants);
+    context->PSSetConstantBuffers(BoundsSlot, 1, optionsBuffer.GetAddressOf());
+    context->PSSetSamplers(SamplerSlot, 1, pointClamp.GetAddressOf());
     context->OMSetBlendState(alphaOnly.Get(), gameBlend.factor, gameBlend.sampleMask);
     context->OMSetDepthStencilState(noDepth.Get(), 0);
-    context->RSSetState(bothFaces.Get());
+    context->RSSetState(farFaces.Get());
     context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
     timed.end();
+
     context->PSSetShader(gameShader.Get(), nullptr, 0);
-    context->PSSetShaderResources(ShadowSlot, 1, gameView.GetAddressOf());
     context->PSSetConstantBuffers(BoundsSlot, 1, gameOptions.GetAddressOf());
+    context->PSSetSamplers(SamplerSlot, 1, gameSampler.GetAddressOf());
     context->OMSetBlendState(gameBlend.state.Get(), gameBlend.factor, gameBlend.sampleMask);
     context->OMSetDepthStencilState(gameDepth.Get(), stencilReference);
     context->RSSetState(gameRasterizer.Get());

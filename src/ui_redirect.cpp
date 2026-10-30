@@ -21,16 +21,16 @@ namespace
 using Microsoft::WRL::ComPtr;
 
 // The scene target is B8G8R8A8_TYPELESS with UNORM views to draw and an UNORM_SRGB view that
-// GammaControl reads (docs/DEVELOPMENT.md, "Resources"). With HDR it is float, with float views
-// holding the same encoded values (hdr.hpp).
+// GammaControl reads (docs/DEVELOPMENT.md, "Resources"). With the scene in float it is float, with
+// float views holding the same encoded values (hdr.hpp).
 DXGI_FORMAT drawFormat()
 {
-    return hdr::active() ? hdr::sceneFormat() : DXGI_FORMAT_B8G8R8A8_UNORM;
+    return hdr::isSceneFloat() ? hdr::sceneFormat() : DXGI_FORMAT_B8G8R8A8_UNORM;
 }
 
 DXGI_FORMAT gammaFormat()
 {
-    return hdr::active() ? hdr::sceneFormat() : DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    return hdr::isSceneFloat() ? hdr::sceneFormat() : DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
 }
 
 // The output-size textures, by Surface.
@@ -44,7 +44,7 @@ struct Texture
 
 bool isBlurSurface(Surface surface)
 {
-    return surface == Surface::Blur || surface == Surface::BlurTwin;
+    return surface == Surface::Blur || surface == Surface::BlurTwin || surface == Surface::BlurBake;
 }
 
 struct Targets
@@ -68,15 +68,21 @@ struct Targets
     const Texture& operator[](Surface surface) const { return surfaces[static_cast<std::size_t>(surface)]; }
 };
 
-// The motion blur's pair, made apart from the set above: with HDR at native resolution the blur goes
-// through these alone, and the set's full-size surfaces would sit unused.
+// The motion blur's surfaces, made apart from the set above: in the float scene at native resolution the blur
+// goes through these alone, and the set's full-size surfaces would sit unused.
 struct BlurTargets
 {
     unsigned width{}, height{}; // The output size they were made for
-    Texture surfaces[2];        // Blur, BlurTwin
+    Texture surfaces[3];        // Blur, BlurTwin, BlurBake
 
-    const Texture& operator[](Surface surface) const { return surfaces[surface == Surface::Blur ? 0 : 1]; }
+    const Texture& operator[](Surface surface) const
+    {
+        return surfaces[static_cast<std::size_t>(surface) - static_cast<std::size_t>(Surface::Blur)];
+    }
 };
+static_assert(static_cast<int>(Surface::BlurTwin) == static_cast<int>(Surface::Blur) + 1
+        && static_cast<int>(Surface::BlurBake) == static_cast<int>(Surface::Blur) + 2,
+    "BlurTargets counts the blur's surfaces from Blur, in Surface's order.");
 
 // Whether each recording context has a 2D pass vertex shader bound, by the context ReShade reports
 // with each binding.
@@ -187,17 +193,21 @@ std::shared_ptr<const Targets> createTargets(unsigned width, unsigned height)
     return created;
 }
 
-// The motion blur's pair at half the size of the scene it blends over, as the game makes its own, but
-// in the scene's format: the game's are 8-bit, which clips HDR highlights while the camera moves.
+// The motion blur's surfaces at half the size of the scene it blends over, as the game makes its own.
+// The pair it gathers between has the scene's format: the game's are 8-bit, which clips HDR highlights
+// while the camera moves. The bake keeps the game's 8-bit format, so it holds what the game's would.
 std::shared_ptr<const BlurTargets> createBlurTargets(unsigned width, unsigned height)
 {
     auto created = std::make_shared<BlurTargets>();
     created->width = width;
     created->height = height;
 
-    const auto desc = surfaceDesc(std::max(width / 2, 1u), std::max(height / 2, 1u));
-    for (auto& surface : created->surfaces)
-        if (!makeSurface(surface, desc, drawFormat())) return nullptr;
+    auto desc = surfaceDesc(std::max(width / 2, 1u), std::max(height / 2, 1u));
+    auto& [blur, blurTwin, bake] = created->surfaces;
+    if (!makeSurface(blur, desc, drawFormat()) || !makeSurface(blurTwin, desc, drawFormat())) return nullptr;
+
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    if (!makeSurface(bake, desc, desc.Format)) return nullptr;
 
     return created;
 }
@@ -218,7 +228,7 @@ std::shared_ptr<const Targets> currentTargets()
     return targets;
 }
 
-// The blur's pair, made when first needed and again when the output size changes.
+// The blur's surfaces, made when first needed and again when the output size changes.
 std::shared_ptr<const BlurTargets> currentBlurTargets()
 {
     const unsigned width = outputWidth, height = outputHeight;

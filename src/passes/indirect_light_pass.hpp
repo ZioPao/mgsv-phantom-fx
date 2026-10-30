@@ -29,6 +29,14 @@ bool failed() noexcept;
 // The G-buffer's specular target as the last sun pass bound it (its material in .z, 43 for foliage), if
 // it is `width` x `height`; null otherwise. The view is a frame old; the target is the frame's.
 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> specularTarget(UINT width, UINT height) noexcept;
+// The game's tables a sun pass reads the specular target's material by: the Fresnel term by angle and F0
+// (g_lut1), and each material's specular colour and F0 (g_MaterialTexture). As the last sun pass bound
+// them; null before one.
+struct MaterialTables
+{
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> fresnel, materials;
+};
+MaterialTables materialTables() noexcept;
 
 // ---- Recording, on the game's render and worker threads ----
 // Before a draw, whoever draws it: what the ray-traced scene needs (ray_tracing::noteNormals and the

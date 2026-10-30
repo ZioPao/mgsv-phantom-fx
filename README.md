@@ -42,6 +42,7 @@ More comparisons: [Previews](docs/PREVIEWS.md)
 ### Upscaling and frame rate
 
 - **DLSS:** DLAA and upscaling
+- **DLSS Ray Reconstruction:** denoises the ray-traced lighting and upscales, with any ray-traced effect on
 - **FSR:** Native AA and upscaling, FSR 4 on Radeon RX 7000 and 9000, FSR 3.1 elsewhere
 - **DLSS Frame Generation:** 2x to 6x, with NVIDIA Reflex
 - **FSR frame generation:** 2x, on any GPU
@@ -54,6 +55,7 @@ Needs DXR 1.1.
 - **Ray-traced shadows** for the sun
 - **Ray-traced lights:** shadows for every lamp, spot light and flashlight
 - **Ray-traced global illumination** (NVIDIA NRD denoiser)
+- **Path tracing:** traced reflections, sunlight and lamplight, with DLSS Ray Reconstruction
 
 ### Lighting and atmosphere
 
@@ -62,6 +64,7 @@ Needs DXR 1.1.
 - **Ambient occlusion** (GTVBAO)
 - **Indirect lighting** (VB-SSGI)
 - **Volumetric fog** with light shafts and a physical sky
+- **Sea:** ocean waves around Mother Base, lit and reflected like the rest of the world
 
 ### Output and tools
 
@@ -104,7 +107,7 @@ Photo mode: <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> to move, mouse t
 
 ## Uninstall
 
-Delete `PhantomFX.*`, the `PhantomFX` folder, `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `sl.*.dll` and `amd_fidelityfx_*.dll`. Uninstall ReShade.
+Delete `PhantomFX.*`, the `PhantomFX` folder, `nvngx_dlss.dll`, `nvngx_dlssd.dll`, `nvngx_dlssg.dll`, `sl.*.dll` and `amd_fidelityfx_*.dll`. Uninstall ReShade.
 
 ## Bugs
 

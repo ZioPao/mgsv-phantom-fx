@@ -9,6 +9,7 @@ namespace
 {
 using upscaler::Mode;
 using upscaler::Preset;
+using upscaler::ReconstructionPreset;
 using upscaler::Upscaler;
 
 constexpr Upscaling Defaults{};
@@ -49,6 +50,14 @@ constexpr SettingChoice Presets[]{
     {static_cast<int>(Preset::L), "L (Ultra Performance model)"},
 };
 
+// In the menu's order.
+constexpr SettingChoice ReconstructionPresets[]{
+    {static_cast<int>(ReconstructionPreset::Default), "Default"},
+    {static_cast<int>(ReconstructionPreset::F), "F (Ray Reconstruction 2)"},
+    {static_cast<int>(ReconstructionPreset::E), "E (transformer)"},
+    {static_cast<int>(ReconstructionPreset::D), "D (older transformer)"},
+};
+
 std::span<const SettingChoice> modesFor(Upscaler upscaler)
 {
     return upscaler == Upscaler::Fsr ? std::span<const SettingChoice>(FsrModes) : std::span<const SettingChoice>(DlssModes);
@@ -68,7 +77,7 @@ void describe(Upscaling& upscaling, SettingVisitor& visit)
         .name = "Upscaler",
         .tip = "NVIDIA DLSS needs an NVIDIA RTX GPU. AMD FSR runs on any GPU: FSR 4 on Radeon RX 7000 and 9000, FSR 3.1 on the rest.",
         .summary = "Replaces the game's FXAA, at full resolution or upscaled from a lower one. The HUD stays at full resolution.",
-        .keywords = "DLSS FSR DLAA native AA mode quality balanced performance preset sharpening texture detail bias render scale"});
+        .keywords = "DLSS FSR DLAA native AA mode quality balanced performance preset ray reconstruction sharpening texture detail bias render scale"});
     visit.choice(upscaling.upscaler, {.iniKey = "upscaler", .label = "Upscaler", .choices = Upscalers});
     visit.choice(upscaling.mode,
         {.iniKey = "mode",
@@ -98,6 +107,23 @@ void describe(Upscaling& upscaling, SettingVisitor& visit)
             .tip = "Default lets DLSS choose (K for DLAA).",
             .visible = upscaling.upscaler == Upscaler::Dlss,
             .enabled = on});
+    visit.toggle(upscaling.rayReconstruction,
+        {.iniKey = "ray_reconstruction",
+            .label = "Ray Reconstruction",
+            .tip = "DLSS Ray Reconstruction in place of DLSS: one NVIDIA model that cleans up the ray-traced light and upscales. It runs while a "
+                   "ray-traced effect is on (global illumination, shadows or lights) and needs an NVIDIA RTX GPU.",
+            .visible = upscaling.upscaler == Upscaler::Dlss,
+            .enabled = on,
+            .needsRayTracing = true});
+    visit.choice(upscaling.reconstructionPreset,
+        {.iniKey = "ray_reconstruction_preset",
+            .label = "Ray Reconstruction preset",
+            .choices = ReconstructionPresets,
+            .control = ChoiceControl::Dropdown,
+            .tip = "Default lets Ray Reconstruction choose (F). D takes no depth of field guide, so noise can show through the game's depth of field.",
+            .visible = upscaling.upscaler == Upscaler::Dlss && upscaling.rayReconstruction,
+            .enabled = on,
+            .needsRayTracing = true});
     visit.slider(upscaling.sharpness,
         {.iniKey = "sharpness",
             .label = "Sharpening",
@@ -134,6 +160,11 @@ std::string_view label(Mode mode, Upscaler upscaler)
 std::string_view label(Preset preset)
 {
     return labelIn(Presets, preset);
+}
+
+std::string_view label(ReconstructionPreset preset)
+{
+    return labelIn(ReconstructionPresets, preset);
 }
 
 bool upscales(Mode mode)

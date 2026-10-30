@@ -123,10 +123,11 @@ float4 main(float4 position : SV_Position, float2 clip : TEXCOORD0) : SV_Target
 
 // In place of the game's grading pass (Tonemap_ps). The scene holds light, which goes through
 // TppTonemap as the game had it, then the game's own grading: the bloom screened over it and the
-// 16x16x16 colour LUT. The light the tonemap took is then given back as RenoDX's UpgradeToneMap does
-// (MIT, RenoDX-LICENSE.txt): added to the graded luminance, with the graded colour scaled to it, so
-// highlights keep the grade's colour. Below the curve's knee nothing was taken, so the image is the
-// game's. Alpha keeps the game's luma, which FXAA reads.
+// 16x16x16 colour LUT; in SDR that is the image. With HDR output (UPGRADE_TONEMAP) the light the
+// tonemap took is then given back as RenoDX's UpgradeToneMap does (MIT, RenoDX-LICENSE.txt): added to
+// the graded luminance, with the graded colour scaled to it, so highlights keep the grade's colour.
+// Below the curve's knee nothing was taken, so the image is the game's. Alpha keeps the game's luma,
+// which FXAA reads.
 inline constexpr char Grade[] = PHANTOM_FX_HDR_COMMON R"(
 cbuffer cPSSystem : register(b0)
 {
@@ -169,18 +170,23 @@ float4 main(float2 clip : TEXCOORD0, float4 position : SV_Position) : SV_Target
     color = ColorCorrection(color);
     const float luma = dot(color, float3(0.299, 0.587, 0.114));
 
+#if !UPGRADE_TONEMAP
+    return float4(color, luma);
+#else
     const float3 graded = SrgbToLinear(color);
     const float taken = max(Luminance(light) - Luminance(toned), 0);
     const float gradedLuminance = Luminance(graded);
     const float scale = gradedLuminance > 0 ? (gradedLuminance + taken) / gradedLuminance : 0;
     return float4(LinearToSrgb(graded * scale), luma);
+#endif
 }
 )";
 
 // In place of GammaControl, which wrote the back buffer: the game's brightness setting as it applies
 // it, then the display's encoding. HDR10 is PQ with BT.2020 primaries, the game's white at the paper
 // white and the brightest the image can be at the display's peak; without HDR on the display, sRGB
-// with highlights clipped, as the game showed it.
+// with highlights clipped, as the game showed it. In SDR the game's 8-bit back buffer encodes through
+// its sRGB view.
 inline constexpr char Output[] = PHANTOM_FX_HDR_COMMON R"(
 cbuffer cPSSystem : register(b0)
 {
@@ -203,9 +209,14 @@ cbuffer OutputParameters : register(b2)
 {
     float PaperWhite; // Nits
     float Peak;       // Nits
-    uint Pq;          // 1: HDR10; 0: sRGB
+    uint Encoding;    // EncodingSrgbView, EncodingSrgb or EncodingPq
     float Padding;
 };
+
+// As hdr.cpp's Encoding: linear, for the game's 8-bit sRGB view; sRGB; HDR10.
+static const uint EncodingSrgbView = 0u;
+static const uint EncodingSrgb = 1u;
+static const uint EncodingPq = 2u;
 
 Texture2D<float4> inImage : register(t0);
 SamplerState g_samplerLinear_Clamp : register(s11);
@@ -253,11 +264,31 @@ float3 PerceptualQuantizer(float3 y)
     return pow((c1 + c2 * p) / (1 + c3 * p), m2);
 }
 
+// PCG (Jarzynski and Olano, "Hash Functions for GPU Rendering", 2020).
+uint Pcg(uint value)
+{
+    const uint state = value * 747796405u + 2891336453u;
+    const uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// The 8-bit back buffer rounds a smooth gradient to steps a level apart, which show as bands in fog
+// and sky. Up to half a level either way, white noise by the pixel, turns each step's edge into grain
+// too fine to see. The game hid its own 8-bit steps with an 8x8 dither before the upscaler, which the
+// upscaler turned into a grid; here it comes last, at the output size.
+float3 Dithered(float3 encoded, uint2 pixel)
+{
+    const float noise = Pcg(pixel.x + Pcg(pixel.y)) * (1.0 / 4294967296.0);
+    return saturate(encoded + (noise - 0.5) / 255);
+}
+
 float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD0) : SV_Target
 {
     const float2 uv = texcoord * m_renderInfo.xy * m_renderBuffer.zw;
     const float3 encoded = inImage.Sample(g_samplerLinear_Clamp, uv).rgb;
-    if (!Pq) return float4(LinearToSrgb(saturate(Brightness(SrgbToLinear(encoded)))), 1);
+    const float3 sdr = LinearToSrgb(saturate(Brightness(SrgbToLinear(encoded))));
+    if (Encoding == EncodingSrgbView) return float4(SrgbToLinear(Dithered(sdr, uint2(position.xy))), 1);
+    if (Encoding == EncodingSrgb) return float4(sdr, 1);
 
     const float3 color = max(mul(Bt709To2020, Brightness(DisplayLinear(encoded))), 0);
     return float4(PerceptualQuantizer(RollOff(color, Peak / PaperWhite, WhiteClip) * PaperWhite / 10000), 1);

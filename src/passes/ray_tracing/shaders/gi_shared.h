@@ -23,7 +23,12 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 #define GI_INSTANCE_MODEL     1u // One of the game's models (engine_scene.hpp), in object space under its transform
 #define GI_INSTANCE_TERRAIN   2u // A ring of the game's terrain, made from its heightmap (TerrainGrid)
 #define GI_INSTANCE_CHARACTER 4u // With GI_INSTANCE_MODEL: one of the game's skinned models, posed every frame (Skin)
+#define GI_INSTANCE_SEA       8u // The sea's plane at its level under the eye (sea.hpp): one-sided, its front up, water's albedo
 #define GI_INSTANCE_KINDS     0xFFu
+
+// Water's albedo, linear (sea_shaders.hpp): deep, clear tropical sea, the light it sends back up as a share of
+// what falls on it, about 3% in blue and under 1% in red. The sea's own surface and its plane's hits share it.
+#define GI_SEA_ALBEDO 0.002f, 0.012f, 0.03f
 
 // What a geometry is (GIGeometry::flags).
 #define GI_GEOMETRY_CUT_OUT       1u // Its texture cuts holes in it (leaves, nets, a pylon's lattice): non-opaque in its structure
@@ -60,7 +65,7 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 #define GI_COUNTER_PACKED_TILES   0u // Two, by GIFrameConstants.hashMisc.y
 #define GI_COUNTER_UPDATE_TILES   2u
 #define GI_COUNTER_VISIBILITY0    3u // Second hits, the bounce rays', whose cells the light reads
-#define GI_COUNTER_VISIBILITY1    4u // Third hits, from the second hits' cells' multibounce rays
+#define GI_COUNTER_VISIBILITY1    4u // The second hits' cells' multibounce rays: their third hits, and those that got away
 #define GI_COUNTER_LIGHTS         5u // Hits whose light PopulateCells works out
 // Diagnostics, read back with the output's statistics.
 #define GI_COUNTER_HITS           6u // The light's rays that hit something
@@ -70,6 +75,7 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 #define GI_COUNTER_BOUNCE_HITS    10u // Bounce rays that hit something (the rest reach the sky)
 #define GI_COUNTER_FOLIAGE        11u // Light pixels on the game's foliage (PrepareGuides)
 #define GI_COUNTER_FOLIAGE_MEMORY_FULL 12u // Foliage light pixels the foliage memory had no room for (ResolveLight)
+#define GI_COUNTER_MULTIBOUNCE_AWAY 13u // Multibounce rays that reach the sky (PopulateMultibounceCells)
 // The frame's largest value (asuint of a float, its largest channel) at each step of the light
 // (MaxDiagnostic in gi_light.hlsl), to find where light grows past what the sun and sky give.
 #define GI_COUNTER_MAX_ALBEDO     16u // A hit's albedo
@@ -91,6 +97,10 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 // The denoiser's material for the game's foliage (the other pixels' is 0), which it takes as strands
 // (gi_denoiser.cpp).
 #define GI_LIGHT_FOLIAGE_MATERIAL 1.0f
+// The light's debug views into g_LightDebug (GIFrameConstants::lightDiagnostics.z): the denoiser's history,
+// or NRD's validation layer.
+#define GI_LIGHT_DEBUG_HISTORY    1u
+#define GI_LIGHT_DEBUG_VALIDATION 2u
 
 // Slots of the indirect dispatch argument buffer.
 #define GI_DISPATCH_SLOTS 16u
@@ -118,13 +128,26 @@ struct GILocalLight
     float4 shadow;   // x: a spot the game shadows with a shadow map: how far along its axis that map starts, metres; 0 for none
     float4 volumeLow;  // xyz: the lowest corner in the world of the game's volume for it (its box, a spot's cone within one); w: 1 when known
     float4 volumeHigh; // xyz: its highest corner
+    // Path tracing (direct_light.hlsl): x its specular's scale, y its diffuse's (cPSLight c8)
+    float4 scales;
+    float4 mask[3]; // A masked spot's mask projection from the world: the rows for x, y and w
+    uint4 maskTile; // x: its tile in the mask atlas, from 1; 0 for none
 };
+
+// Path tracing's mask atlas (direct_light.hlsl): this many tiles across, each this wide and high.
+#define GI_LAMP_MASK_TILES 8
+#define GI_LAMP_MASK_SIZE 256
 
 struct GIFrameConstants
 {
     GI_ROW_MAJOR float4x4 viewProjection; // World to clip, jittered as the depth was drawn
     GI_ROW_MAJOR float4x4 viewProjectionInverse;
     GI_ROW_MAJOR float4x4 previousViewProjection;
+    // The light's motion (CameraMotionOf in gi_common.hlsli): the last frame's clip position from this frame's,
+    // both unjittered, built in double from the projections and views apart (camera::previousFromCurrentByParts);
+    // and the w row of this frame's unjittered clip to view.
+    GI_ROW_MAJOR float4x4 previousFromCurrent;
+    float4 clipToViewW;
     float4 eye;          // xyz: the camera in the world
     float4 sunDirection; // xyz: towards the sun, world space
     float4 sunColor;     // rgb: the sun's diffuse light at normal incidence, in the game's units
@@ -148,7 +171,11 @@ struct GIFrameConstants
     float4 shadowParams; // x: tangent of the sun's angular radius (SunSample); y: how much sun an alpha-tested mesh blocks; z: ray length; w: 1 on a fresh start
     uint4 objectMotion;  // x: 1 when g_ObjectVelocity (gi_common.hlsli) holds this frame's velocity of the game's moving meshes
     uint4 shadowDiagnostics; // x: 1 for every surface casting from both sides (ShadowRayTowards); y: 1 for the debug view of where the shadow rays leave (ShadowStartColor)
-    uint4 lightDiagnostics;  // z: 1 for the denoiser's history into g_LightDebug (CompositeLight)
+    uint4 lightDiagnostics;  // z: the light's debug view into g_LightDebug (CompositeLight), GI_LIGHT_DEBUG_*
+    // x: 1 while DLSS Ray Reconstruction denoises (ray_reconstruction.hpp): the light takes a sample a render
+    // pixel and goes out without its denoiser (gi_light.hlsl, PerRenderPixel), the sun's and the lights' shadows
+    // as their rays found them.
+    uint4 reconstruction;
     // The game's terrain (TerrainGrid in gi_scene.hlsl): a world point is (u, height, v) x scale +
     // offset, u and v its virtual heightmap coordinates; the page table's converter (the terrain
     // shaders' b4 c0 and c1).

@@ -12,6 +12,8 @@
 //   at any wave size.
 // - Motion comes from the camera, and from the game's velocity where a moving mesh drew
 //   (gi_shadow.hlsli, ReadVelocity).
+// - The temporal pass's neighbourhood and history count only pixels on the pixel's own surface
+//   (ClassifyShadowTiles).
 #include "gi_shadow.hlsli"
 // The denoiser as AMD wrote it; its bitfield helpers shift an untyped literal.
 #pragma dxc diagnostic push
@@ -69,6 +71,9 @@ void TraceSunShadows(uint2 gtid : SV_GroupThreadID, uint2 gid : SV_GroupID, uint
             // The denoiser takes a pixel as lit or not: past hair, lit with the chance its light gets through.
             lit = !blocked && random.rand() < transmittance;
         }
+
+        // DLSS Ray Reconstruction denoises the image: the sun pass reads the ray as it is.
+        if (g_Frame.reconstruction.x != 0u) g_Shadow_Output[did] = lit ? 1.0f : 0.0f;
     }
 
     if (lit) InterlockedOr(g_TileMask, FFX_DNSR_Shadows_GetBitMaskFromPixelPosition(did));
@@ -76,15 +81,189 @@ void TraceSunShadows(uint2 gtid : SV_GroupThreadID, uint2 gid : SV_GroupID, uint
     if (index == 0) g_Shadow_Masks[FFX_DNSR_Shadows_LinearTileIndex(gid, g_Frame.dimensions.x)] = g_TileMask;
 }
 
-// ---- Point and spot lights ----
-// The denoiser's temporal pass, an 8x8 tile a group. It also keeps this frame's depth for the next.
+// ---- The denoiser's temporal pass ----
+// AMD's FFX_DNSR_Shadows_TileClassification with two changes, both for what lies across an edge:
+// - The local neighbourhood that bounds a pixel's history counts only the rays of pixels on its own
+//   surface. AMD's counts every pixel within 8, whatever lies there: a sunlit character's rays lifted the
+//   history of the shaded wall behind him, and its variance let the filters blur his light onto it, a lit
+//   band along his outline 8 render pixels wide at any render scale (Mother Base, 2026-10-29).
+// - The history comes from the last frame's pixels on the pixel's own surface (ReprojectFromSurface).
+
+static const int NeighbourhoodRadius = KERNEL_RADIUS;
+static const int NeighbourhoodSize = 8 + 2 * NeighbourhoodRadius; // The tile and the kernel's reach around it
+
+groupshared float4 g_Neighbours[NeighbourhoodSize][NeighbourhoodSize]; // World position, and 1 where the ray reached the sun, 0 where not, -1 for none
+groupshared float3 g_NeighbourNormals[NeighbourhoodSize][NeighbourhoodSize];
+
+void LoadNeighbourhood(uint index, uint2 gid)
+{
+    for (uint i = index; i < NeighbourhoodSize * NeighbourhoodSize; i += 64)
+    {
+        uint2 at = uint2(i % NeighbourhoodSize, i / NeighbourhoodSize);
+        int2 pixel = int2(gid * 8 + at) - NeighbourhoodRadius;
+        float4 neighbour = float4(0.0f, 0.0f, 0.0f, -1.0f);
+        float3 normal = 0.0f;
+        if (FFX_DNSR_Shadows_IsShadowReciever(uint2(pixel)))
+        {
+            uint tile = FFX_DNSR_Shadows_LinearTileIndex(FFX_DNSR_Shadows_GetTileIndexFromPixelPosition(pixel), g_Frame.dimensions.x);
+            bool lit = (g_Shadow_Masks[tile] & FFX_DNSR_Shadows_GetBitMaskFromPixelPosition(pixel)) != 0;
+            neighbour = float4(DepthPosition(pixel, g_Depth.Load(int3(pixel, 0))), lit ? 1.0f : 0.0f);
+            normal = DecodeNormal(g_Normal.Load(int3(pixel, 0)));
+        }
+
+        g_Neighbours[at.y][at.x] = neighbour;
+        g_NeighbourNormals[at.y][at.x] = normal;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+}
+
+// AMD's 17x17 Gaussian over the rays, among the neighbours on the pixel's surface: each within 5% of the
+// pixel's distance from the other's plane. Every pixel holds 0 or 1, so the mean is the second moment too.
+// Also how many rays the mean is worth, the Gaussian's weights taken into account.
+float SurfaceNeighbourhood(uint2 gtid, out float effectiveSamples)
+{
+    int2 centre = int2(gtid) + NeighbourhoodRadius;
+    float3 position = g_Neighbours[centre.y][centre.x].xyz;
+    float3 normal = g_NeighbourNormals[centre.y][centre.x];
+    float tolerance = 0.05f * distance(position, g_Frame.eye.xyz);
+
+    float lit = 0.0f, total = 0.0f, squares = 0.0f;
+    for (int y = -NeighbourhoodRadius; y <= NeighbourhoodRadius; ++y)
+    {
+        for (int x = -NeighbourhoodRadius; x <= NeighbourhoodRadius; ++x)
+        {
+            float4 neighbour = g_Neighbours[centre.y + y][centre.x + x];
+            float3 apart = neighbour.xyz - position;
+            bool sameSurface = neighbour.w >= 0.0f && abs(dot(normal, apart)) <= tolerance
+                && abs(dot(g_NeighbourNormals[centre.y + y][centre.x + x], apart)) <= tolerance;
+            if (!sameSurface) continue;
+
+            float weight = FFX_DNSR_Shadows_KernelWeight(abs(x)) * FFX_DNSR_Shadows_KernelWeight(abs(y));
+            lit += weight * neighbour.w;
+            total += weight;
+            squares += weight * weight;
+        }
+    }
+
+    effectiveSamples = squares > 0.0f ? total * total / squares : 1.0f;
+    return total > 0.0f ? lit / total : 0.0f;
+}
+
+// The history and moments from the last frame's 2x2 pixels around where this one was, bilinear among
+// those that pass AMD's depth test (FFX_DNSR_Shadows_IsDisoccluded) each; false when none does. AMD's
+// tests the one pixel the point falls in, which with the upscaler's jitter often lay across an edge:
+// along every edge the history started over each frame and the raw rays flickered (2026-10-29, gone
+// with Jitter off).
+bool ReprojectFromSurface(uint2 did, float depth, float2 historyUv, out float history, out float3 moments)
+{
+    history = 0.0f;
+    moments = 0.0f;
+    float2 uv = (did + 0.5f) * FFX_DNSR_Shadows_GetInvBufferDimensions();
+    float2 ndc = (2.0f * uv - 1.0f) * float2(1.0f, -1.0f);
+    float4 clip = mul(FFX_DNSR_Shadows_GetReprojectionMatrix(), float4(ndc, depth, 1.0f));
+    float linearDepth = FFX_DNSR_Shadows_GetLinearDepth(did, clip.z / clip.w);
+    float3 position = DepthPosition(did, depth);
+    float alignment = pow(1.0f - dot(normalize(g_Frame.eye.xyz - position), FFX_DNSR_Shadows_ReadNormals(did)), 8);
+    float tolerance = lerp(1e-2f, 1e-1f, alignment);
+
+    float2 at = historyUv * ShadowSize() - 0.5f;
+    int2 corner = int2(floor(at));
+    float2 fraction = at - corner;
+    float total = 0.0f;
+    for (int i = 0; i < 4; ++i)
+    {
+        int2 offset = int2(i & 1, i >> 1);
+        int2 tap = corner + offset;
+        if (any(tap < 0) || any(tap >= ShadowSize())) continue;
+
+        float previousDepth = FFX_DNSR_Shadows_GetLinearDepth(tap, g_Shadow_Depths[1][tap]);
+        if (abs(previousDepth - linearDepth) / linearDepth >= tolerance) continue;
+
+        float2 axes = lerp(1.0f - fraction, fraction, float2(offset));
+        float weight = axes.x * axes.y;
+        history += weight * g_Shadow_History[tap].x;
+        moments += weight * g_Shadow_Moments[1][tap];
+        total += weight;
+    }
+
+    if (total < 0.01f)
+    {
+        moments = 0.0f;
+        return false;
+    }
+
+    history /= total;
+    moments /= total;
+    return true;
+}
+
+// An 8x8 tile a group. It also keeps this frame's depth for the next.
 [numthreads(64, 1, 1)]
 void ClassifyShadowTiles(uint index : SV_GroupIndex, uint2 gid : SV_GroupID)
 {
-    uint2 did = gid * 8 + FFX_DNSR_Shadows_RemapLane8x8(index);
+    uint2 gtid = FFX_DNSR_Shadows_RemapLane8x8(index); // A 2x2 region a quad, for QuadReadAcross
+    uint2 did = gid * 8 + gtid;
     if (all(did < g_Frame.dimensions.xy)) g_Shadow_Depths[0][did] = g_Depth.Load(int3(did, 0));
 
-    FFX_DNSR_Shadows_TileClassification(index, gid);
+    bool isShadowReceiver = FFX_DNSR_Shadows_IsShadowReciever(did);
+    if (FFX_DNSR_Shadows_ThreadGroupAllTrue(!isShadowReceiver))
+    {
+        FFX_DNSR_Shadows_ClearTargets(did, gtid, gid, 0.0f, isShadowReceiver, false);
+        return;
+    }
+
+    // Tiles whose rays all reached the sun, or none, around as far as the filters reach, need no denoising.
+    bool allInLight, allInShadow;
+    FFX_DNSR_Shadows_SearchSpatialRegion(gid, allInLight, allInShadow);
+    if (FFX_DNSR_Shadows_ThreadGroupAllTrue(allInLight || allInShadow))
+    {
+        FFX_DNSR_Shadows_ClearTargets(did, gtid, gid, allInLight ? 1.0f : 0.0f, isShadowReceiver, allInLight);
+        return;
+    }
+
+    FFX_DNSR_Shadows_WriteTileMetaData(gid, gtid, false, false);
+
+    float depth = FFX_DNSR_Shadows_ReadDepth(did);
+    float2 velocity = FFX_DNSR_Shadows_GetClosestVelocity(did, depth); // While every lane runs
+    LoadNeighbourhood(index, gid);
+    float effectiveSamples;
+    float mean = SurfaceNeighbourhood(gtid, effectiveSamples);
+    if (!isShadowReceiver)
+    {
+        FFX_DNSR_Shadows_WriteReprojectionResults(did, 0.0f);
+        FFX_DNSR_Shadows_WriteMoments(did, 0.0f);
+        return;
+    }
+
+    uint tile = FFX_DNSR_Shadows_LinearTileIndex(FFX_DNSR_Shadows_GetTileIndexFromPixelPosition(did), g_Frame.dimensions.x);
+    float current = (g_Shadow_Masks[tile] & FFX_DNSR_Shadows_GetBitMaskFromPixelPosition(did)) ? 1.0f : 0.0f;
+
+    // This pixel's moments over time, unless what it showed last frame lay elsewhere.
+    float2 historyUv = (did + 0.5f) * FFX_DNSR_Shadows_GetInvBufferDimensions() - velocity;
+    float surfaceHistory;
+    float3 previousMoments;
+    bool hasHistory = ReprojectFromSurface(did, depth, historyUv, surfaceHistory, previousMoments);
+    float samples = previousMoments.z + 1.0f;
+    float newMean = previousMoments.x + (current - previousMoments.x) / samples;
+    float newSquares = previousMoments.y + (current - previousMoments.x) * (current - newMean);
+    float variance = samples > 1.0f ? newSquares / (samples - 1.0f) : 1.0f;
+    float3 moments = float3(newMean, newSquares, samples);
+
+    // The history, clamped to the neighbourhood; the further off, the fewer of its samples count. The
+    // neighbourhood's spread has the most its mean can be off by chance added (p (1 - p) / n at its
+    // worst): the few rays of a thin edge's surface often agree, and a spread of 0 threw its history away.
+    float spatialVariance = max(mean - mean * mean, 0.0f) + 0.25f / effectiveSamples;
+    float deviation = sqrt(spatialVariance);
+    float previous = FFX_DNSR_Shadows_IsFirstFrame() ? current : hasHistory ? surfaceHistory : FFX_DNSR_Shadows_ReadHistory(historyUv);
+    float clamped = clamp(previous, mean - 0.5f * deviation, mean + 0.5f * deviation);
+    float discontinuity = (previous - mean) / max(0.5f * deviation, 0.001f);
+    moments.z *= exp(-discontinuity * discontinuity / 20.0f);
+    if (moments.z < 16.0f) variance = max(variance, spatialVariance) * max(16.0f - moments.z, 1.0f);
+
+    float historyWeight = sqrt(max(8.0f - moments.z, 0.0f) / 8.0f);
+    FFX_DNSR_Shadows_WriteReprojectionResults(did, float2(lerp(clamped, current, lerp(0.05f, 1.0f, historyWeight)), variance));
+    FFX_DNSR_Shadows_WriteMoments(did, moments);
 }
 
 // ---- Diagnostics: the shadow debug view and probe ----

@@ -31,14 +31,15 @@ struct Output
     unsigned width{}, height{};
 };
 
-// The output-size surfaces the game's post processing draws with. The motion blur's pair is made apart
-// from the others, so the blur alone (with HDR at native resolution) does not make the full-size ones.
+// The output-size surfaces the game's post processing draws with. The motion blur's are made apart
+// from the others, so the blur alone (float scene, native resolution) does not make the full-size ones.
 enum class Surface : std::uint8_t
 {
     Scene,    // The output target, in place of the scene target
     Copy,     // In place of the scene target's copy that the grading reads
     Blur,     // Half the output size: in place of the motion blur's two half-size targets
     BlurTwin,
+    BlurBake, // Half the output size: the motion blur's velocity and depth, in the game's 8-bit format
 };
 
 // One draw of the game's at the output size, on a recording context: `target` in place of its render

@@ -7,9 +7,11 @@
 #include "features/lamp_contact_shadows/lamp_contact_shadows.hpp"
 #include "features/lamp_soft_shadows/lamp_soft_shadows.hpp"
 #include "features/motion_blur/motion_blur.hpp"
+#include "features/path_tracing/path_tracing.hpp"
 #include "features/photo_mode/focus.hpp"
 #include "features/photo_mode/photo_mode.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
+#include "features/sea/sea.hpp"
 #include "features/sun_contact_shadows/sun_contact_shadows.hpp"
 #include "features/volumetric_fog/atmosphere.hpp"
 #include "passes/contact_shadow_trace.hpp"
@@ -53,11 +55,13 @@ constexpr Module Modules[]{
     {.attach = withDevice<gtvbao::attach>, .configure = gtvbao::configure, .present = gtvbao::present, .detach = gtvbao::detach},
     {.attach = withDevice<ssgi::attach>, .configure = ssgi::configure, .present = ssgi::present, .detach = ssgi::detach},
     {.attach = withDevice<light_combine::attach>, .configure = light_combine::configure, .present = light_combine::present, .detach = light_combine::detach},
+    {.attach = withDevice<path_tracing::attach>, .configure = path_tracing::configure, .present = path_tracing::present, .detach = path_tracing::detach},
     {.attach = withDevice<visibility_bitmask::attach>, .configure = visibility_bitmask::configure, .detach = visibility_bitmask::detach},
 
     {.attach = ray_tracing::attach, .configure = ray_tracing::configure, .present = ray_tracing::present, .detach = ray_tracing::detach},
     {.attach = local_lights::attach, .configure = local_lights::configure, .present = local_lights::present, .detach = local_lights::detach},
     {.attach = atmosphere::attach, .configure = atmosphere::configure, .present = atmosphere::present, .detach = atmosphere::detach},
+    {.attach = sea::attach, .configure = sea::configure, .present = sea::present, .detach = sea::detach},
 
     {.configure = motion_blur::configure},
     {.configure = frame_rate::configure},

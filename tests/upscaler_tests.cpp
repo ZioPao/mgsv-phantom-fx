@@ -1,10 +1,13 @@
 #include "camera.hpp"
 #include "constant_capture.hpp"
 #include "features/global_illumination/gi_lighting.hpp"
+#include "features/lamp_contact_shadows/lamp_contact_shadows_shaders.hpp"
+#include "features/motion_blur/motion_blur.hpp"
 #include "features/upscaling/frames.hpp"
 #include "features/upscaling/render_size_plan.hpp"
 #include "frame_latch.hpp"
 #include "game_constants.hpp"
+#include "passes/contact_shadow_trace.hpp"
 #include "phantom_fx_settings.hpp"
 #include "range_allocator.hpp"
 #include "shader_bytecode.hpp"
@@ -14,7 +17,9 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -179,11 +184,11 @@ void effectPlan()
     all.rayTracedShadows.on = all.softShadows.on = all.sunContactShadows.on = true;
     all.rayTracedLights.on = all.lampContactShadows.on = all.lampSoftShadows.on = true;
     all.globalIllumination.on = all.ambientOcclusion.on = all.indirectLight.on = true;
-    all.volumetricFog.on = true;
+    all.volumetricFog.on = all.sea.on = true;
 
     const auto plan = planEffects(all, {});
     expect(plan.runs(Effect::RayTracedShadows) && plan.runs(Effect::RayTracedLights) && plan.runs(Effect::GlobalIllumination)
-            && plan.runs(Effect::VolumetricFog),
+            && plan.runs(Effect::VolumetricFog) && plan.runs(Effect::Sea),
         "The effects nothing replaces run.");
 
     for (const auto effect : {Effect::SoftShadows, Effect::SunContactShadows, Effect::LampContactShadows, Effect::LampSoftShadows, Effect::AmbientOcclusion,
@@ -216,6 +221,40 @@ void effectPlan()
         "An unsupported game build stops the ray tracing, not the soft shadows.");
     expect(planEffects(softAndGlobal, {.supportedBuild = false, .enhancements = false})[Effect::GlobalIllumination] == EffectState::Unsupported,
         "Unsupported comes before held.");
+}
+
+// Path tracing replaces the ray-traced shadows and lights, and what they replace, while it can run; without
+// what it needs, they stay.
+void pathTracingPlan()
+{
+    Settings traced;
+    traced.rayTracedShadows.on = traced.softShadows.on = traced.rayTracedLights.on = true;
+    traced.globalIllumination.on = traced.pathTracing.on = traced.upscaling.rayReconstruction = true;
+
+    const auto plan = planEffects(traced, {});
+    expect(plan.runs(Effect::PathTracing) && plan.runs(Effect::GlobalIllumination), "Path tracing runs with the global illumination and Ray Reconstruction.");
+    for (const auto effect : {Effect::RayTracedShadows, Effect::RayTracedLights, Effect::SoftShadows})
+        expect(plan[effect] == EffectState::Replaced && plan.replacers[effect] == Effect::PathTracing,
+            "Path tracing takes the place of the ray-traced shadows and lights, and of what those replace.");
+
+    Settings withoutReconstruction = traced;
+    withoutReconstruction.upscaling.rayReconstruction = false;
+    const auto hybrid = planEffects(withoutReconstruction, {});
+    expect(hybrid[Effect::PathTracing] == EffectState::Lacking && hybrid.runs(Effect::RayTracedShadows) && hybrid.runs(Effect::RayTracedLights)
+            && hybrid.replacers[Effect::SoftShadows] == Effect::RayTracedShadows,
+        "Without Ray Reconstruction the ray-traced shadows and lights stay.");
+
+    Settings withoutLight = traced;
+    withoutLight.globalIllumination.on = false;
+    const auto withoutLightPlan = planEffects(withoutLight, {});
+    expect(withoutLightPlan[Effect::PathTracing] == EffectState::Lacking && withoutLightPlan.runs(Effect::RayTracedShadows),
+        "Without the global illumination the ray-traced shadows stay.");
+
+    LeftOut pathTracingLeftOut;
+    pathTracingLeftOut.effects[Effect::PathTracing] = true;
+    const auto measured = planEffects(traced, {.leftOut = pathTracingLeftOut});
+    expect(measured[Effect::PathTracing] == EffectState::LeftOut && measured[Effect::RayTracedShadows] == EffectState::Replaced,
+        "Leaving out path tracing keeps what it replaces off.");
 }
 
 // A frame keeps the settings it started with.
@@ -425,6 +464,52 @@ void reprojection()
         "Depth and the two matrices find where a point was in the previous frame.");
 }
 
+// The global illumination's motion from the projections and views apart, for a camera far from the
+// world's origin, each frame's projection jittered as the upscaler does it and the jitter taken out again
+// (camera::unjitteredProjection).
+void motionByParts()
+{
+    const auto unjittered = [](game_constants::SceneConstants scene, std::array<float, 2> pixels) {
+        camera::applyJitter(scene, camera::jitterNdc(pixels, 2560, 1440));
+        auto view = camera::viewOf(scene);
+        view.projection = camera::unjitteredProjection(view.projection, {scene.cameraCenterOffset[0], scene.cameraCenterOffset[1]});
+        return view;
+    };
+    const auto current = unjittered(DumpedMainView, {-0.0625f, 0.3148f});
+    const auto still = camera::previousFromCurrentByParts(unjittered(DumpedMainView, {0.4375f, -0.2407f}), current);
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column)
+            expect(close(still[row * 4 + column], row == column ? 1 : 0, 1e-9), "A still camera has no motion, whatever the jitter.");
+
+    // Previous frame: the camera 0.2 m along its view's x axis. A point 2.2 m ahead and 0.5 m to the side
+    // goes from this frame's NDC to where the last frame's projection and view put it.
+    auto before = DumpedMainView;
+    before.view[0][3] += 0.2f;
+    const auto previous = unjittered(before, {0.4375f, -0.2407f});
+    const auto moved = camera::previousFromCurrentByParts(previous, current);
+
+    const auto times = [](const camera::Matrix& m, const std::array<double, 4>& v) {
+        std::array<double, 4> result{};
+        for (int row = 0; row < 4; ++row)
+            for (int k = 0; k < 4; ++k) result[row] += m[row * 4 + k] * v[k];
+
+        return result;
+    };
+    std::array<double, 4> point{0, 0, 0, 1};
+    for (int i = 0; i < 3; ++i) point[i] = DumpedMainView.eye[i] + 2.2 * DumpedMainView.view[2][i] + 0.5 * DumpedMainView.view[0][i];
+    const auto clip = times(current.projection, times(current.view, point));
+    const auto then = times(moved, {clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3], 1});
+    const auto expected = times(previous.projection, times(previous.view, point));
+
+    // In render pixels at 2560 x 1440; the view depth then comes out over the view depth now, as CameraMotionOf
+    // divides it back.
+    const double x = then[0] / then[3] * 1280, y = then[1] / then[3] * 720;
+    const double expectedX = expected[0] / expected[3] * 1280, expectedY = expected[1] / expected[3] * 720;
+    expect(close(x, expectedX, 1e-3) && close(y, expectedY, 1e-3) && close(then[3] * clip[3], expected[3], 1e-6)
+            && !close(x, clip[0] / clip[3] * 1280, 10),
+        "A moved camera's motion finds where a point was in the previous frame, and its view depth then.");
+}
+
 void cuts()
 {
     constexpr float eye[3]{93.75f, 314.25f, 244.15f};
@@ -590,6 +675,19 @@ void planKeptForOtherSettings()
     scaled.customRenderScale = 0.7f;
     expect(!plan.isFor(fsr, Output) && !plan.isFor(quality, Output) && !plan.isFor(scaled, Output) && !plan.isFor(wanted, {1920, 1080}),
         "Another upscaler, mode, custom scale or output size makes a new plan.");
+}
+
+void motionBlurStrength()
+{
+    // The game's plugin gives its blur min(exposure x amount, 1).
+    const auto shutterRatio = [](float exposure, std::optional<float> amount) { return std::min(exposure * amount.value_or(-1.0f), 1.0f); };
+
+    expect(shutterRatio(2, motion_blur::scaledAmount(2, 1, 0.5f)) == 0.5f,
+        "Half strength halves the blur even where the game's own amount passes the plugin's cap.");
+    expect(shutterRatio(0.5f, motion_blur::scaledAmount(0.5f, 1, 2)) == 1.0f && shutterRatio(0.5f, motion_blur::scaledAmount(0.5f, 1, 3)) == 1.0f,
+        "Above full strength the blur grows up to the plugin's cap.");
+    expect(!motion_blur::scaledAmount(0, 1, 1) && !motion_blur::scaledAmount(std::numeric_limits<float>::infinity(), 1, 1),
+        "Without a frame rate and shutter the amount is left alone.");
 }
 
 void jitterSequence()
@@ -999,6 +1097,240 @@ void skyLightMatchesTheGame()
     }
 }
 
+// The lamps' shadows skip a light that stands wholly past the contact shadows' fade, which would be
+// lit everywhere: the light keeps the game's draws.
+void lampShadowsSkipLightsPastTheFade()
+{
+    expect(contact_shadow_trace::beyondFade(600, 8, 500), "A lamp wholly past the contact shadows' fade keeps the game's shadows.");
+    expect(!contact_shadow_trace::beyondFade(505, 8, 500), "A lamp that reaches inside the fade marches.");
+    expect(!contact_shadow_trace::beyondFade(520, 40, 500), "A wide lamp that reaches inside the fade marches.");
+    expect(!contact_shadow_trace::beyondFade(600, std::numeric_limits<float>::infinity(), 500), "A lamp of unknown range marches.");
+}
+
+// The lamps' shadow draw (lamp_contact_shadows_shaders.hpp): a march through the depth buffer towards
+// the light, drawn into the alpha of both light targets. A pixel with nothing between it and the light
+// stays lit; one with a surface close to its ray comes out shadowed; one whose blocker is behind it,
+// or wholly past the fade or the light's reach, stays lit.
+void lampShadowMarch()
+{
+    using Microsoft::WRL::ComPtr;
+    constexpr UINT Size = 8;
+    constexpr float P00 = 1.4f, P11 = 1.75f; // A and B are the dumped view's, above
+    constexpr char FullscreenVertex[] = R"(
+float4 main(uint id : SV_VertexID) : SV_Position
+{
+    return float4(id == 1 ? 3.0 : -1.0, id == 2 ? 3.0 : -1.0, 0.5, 1.0);
+}
+)";
+
+    const auto device = warpDevice();
+    ComPtr<ID3D11DeviceContext> context;
+    device->GetImmediateContext(context.GetAddressOf());
+
+    const auto compiled = [&](const char* source, const char* profile) {
+        ComPtr<ID3DBlob> code, errors;
+        const auto result = D3DCompile(source, std::strlen(source), "lamp shadow", nullptr, nullptr, "main", profile, 0, 0, code.GetAddressOf(),
+            errors.GetAddressOf());
+        expect(SUCCEEDED(result), "Compile the lamp shadow test's shaders.");
+
+        return code;
+    };
+    const auto shaderCode = compiled(lamp_contact_shadows::shaders::LightShadow, "ps_5_0");
+    ComPtr<ID3D11PixelShader> shader;
+    expect(SUCCEEDED(device->CreatePixelShader(shaderCode->GetBufferPointer(), shaderCode->GetBufferSize(), nullptr, shader.GetAddressOf())),
+        "Create the lamp shadow's shader.");
+    const auto vertexCode = compiled(FullscreenVertex, "vs_5_0");
+    ComPtr<ID3D11VertexShader> vertexShader;
+    expect(SUCCEEDED(device->CreateVertexShader(vertexCode->GetBufferPointer(), vertexCode->GetBufferSize(), nullptr, vertexShader.GetAddressOf())),
+        "Create the test's vertex shader.");
+    D3D11_RASTERIZER_DESC rasterizerDesc{};
+    rasterizerDesc.FillMode = D3D11_FILL_SOLID;
+    rasterizerDesc.CullMode = D3D11_CULL_NONE;
+    rasterizerDesc.DepthClipEnable = TRUE;
+    ComPtr<ID3D11RasterizerState> rasterizer;
+    expect(SUCCEEDED(device->CreateRasterizerState(&rasterizerDesc, rasterizer.GetAddressOf())), "Create the test's rasterizer state.");
+    const D3D11_SAMPLER_DESC samplerDesc{.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT,
+        .AddressU = D3D11_TEXTURE_ADDRESS_CLAMP,
+        .AddressV = D3D11_TEXTURE_ADDRESS_CLAMP,
+        .AddressW = D3D11_TEXTURE_ADDRESS_CLAMP,
+        .ComparisonFunc = D3D11_COMPARISON_NEVER,
+        .MaxLOD = D3D11_FLOAT32_MAX};
+    ComPtr<ID3D11SamplerState> sampler;
+    expect(SUCCEEDED(device->CreateSamplerState(&samplerDesc, sampler.GetAddressOf())), "Create the test's sampler state.");
+
+    const auto makeBuffer = [&](const void* data, UINT size) {
+        const D3D11_BUFFER_DESC desc{size, D3D11_USAGE_IMMUTABLE, D3D11_BIND_CONSTANT_BUFFER};
+        const D3D11_SUBRESOURCE_DATA initial{data};
+        ComPtr<ID3D11Buffer> buffer;
+        expect(SUCCEEDED(device->CreateBuffer(&desc, &initial, buffer.GetAddressOf())), "Create a constant buffer.");
+
+        return buffer;
+    };
+    const auto depthOf = [](float viewZ) { return B / viewZ + A; };
+
+    // `depths` is the depth buffer's view depth per pixel; `options` is b6 as lamp_contact_shadows.cpp
+    // writes it; `encodedNormal` is the G-buffer's normal, bound at t0 only when the options ask for it,
+    // as the marking draw either has it or has not. Returns the diffuse target's alpha, the shadow.
+    const auto render = [&](const std::array<float, Size * Size>& viewDepths, const std::array<float, 12>& options,
+                            const std::array<float, 3>& lightPosition, std::array<float, 3> encodedNormal = {0, 0, 0}) {
+        std::array<float, Size * Size> depths{};
+        for (std::size_t i = 0; i < depths.size(); ++i) depths[i] = depthOf(viewDepths[i]);
+        const D3D11_TEXTURE2D_DESC depthDesc{Size, Size, 1, 1, DXGI_FORMAT_R32_FLOAT, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE};
+        const D3D11_SUBRESOURCE_DATA depthInitial{depths.data(), Size * sizeof(float)};
+        ComPtr<ID3D11Texture2D> depth;
+        expect(SUCCEEDED(device->CreateTexture2D(&depthDesc, &depthInitial, depth.GetAddressOf())), "Create the depth.");
+        ComPtr<ID3D11ShaderResourceView> depthView;
+        expect(SUCCEEDED(device->CreateShaderResourceView(depth.Get(), nullptr, depthView.GetAddressOf())), "View the depth.");
+
+        std::array<std::uint8_t, Size * Size * 4> normalBytes{};
+        for (std::size_t i = 0; i < Size * Size; ++i)
+        {
+            for (std::size_t channel = 0; channel < 3; ++channel)
+                normalBytes[i * 4 + channel] = static_cast<std::uint8_t>(encodedNormal[channel] * 255 + 0.5f);
+            normalBytes[i * 4 + 3] = 255;
+        }
+        const D3D11_TEXTURE2D_DESC normalDesc{Size, Size, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D11_USAGE_IMMUTABLE,
+            D3D11_BIND_SHADER_RESOURCE};
+        const D3D11_SUBRESOURCE_DATA normalInitial{normalBytes.data(), Size * 4};
+        ComPtr<ID3D11Texture2D> normalTexture;
+        expect(SUCCEEDED(device->CreateTexture2D(&normalDesc, &normalInitial, normalTexture.GetAddressOf())), "Create the normals.");
+        ComPtr<ID3D11ShaderResourceView> normalView;
+        expect(SUCCEEDED(device->CreateShaderResourceView(normalTexture.Get(), nullptr, normalView.GetAddressOf())), "View the normals.");
+
+        std::array<float, 30 * 4> scene{};
+        scene[21 * 4 + 0] = 1 / P00;
+        scene[21 * 4 + 1] = 1 / P11;
+        scene[21 * 4 + 2] = B;
+        scene[21 * 4 + 3] = A;
+        scene[22 * 4 + 0] = static_cast<float>(Size);
+        scene[22 * 4 + 1] = static_cast<float>(Size);
+        std::array<float, 11 * 4> lamp{};
+        lamp[3 * 4 + 0] = lightPosition[0];
+        lamp[3 * 4 + 1] = lightPosition[1];
+        lamp[3 * 4 + 2] = lightPosition[2];
+
+        std::array<ComPtr<ID3D11Texture2D>, 2> targets;
+        std::array<ComPtr<ID3D11RenderTargetView>, 2> views;
+        for (std::size_t i = 0; i < targets.size(); ++i)
+        {
+            const D3D11_TEXTURE2D_DESC desc{Size, Size, 1, 1, DXGI_FORMAT_R8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET};
+            expect(SUCCEEDED(device->CreateTexture2D(&desc, nullptr, targets[i].GetAddressOf())), "Create a light target.");
+            expect(SUCCEEDED(device->CreateRenderTargetView(targets[i].Get(), nullptr, views[i].GetAddressOf())), "View a light target.");
+        }
+
+        ID3D11RenderTargetView* raw[2]{views[0].Get(), views[1].Get()};
+        context->OMSetRenderTargets(2, raw, nullptr);
+        const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(Size), static_cast<float>(Size), 0, 1};
+        context->RSSetViewports(1, &viewport);
+        context->RSSetState(rasterizer.Get());
+        context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+
+        const auto sceneBuffer = makeBuffer(scene.data(), static_cast<UINT>(sizeof(scene)));
+        const auto lampBuffer = makeBuffer(lamp.data(), static_cast<UINT>(sizeof(lamp)));
+        const auto optionBuffer = makeBuffer(options.data(), static_cast<UINT>(sizeof(options)));
+        ID3D11Buffer* bound[1]{};
+        bound[0] = sceneBuffer.Get();
+        context->PSSetConstantBuffers(2, 1, bound);
+        bound[0] = lampBuffer.Get();
+        context->PSSetConstantBuffers(3, 1, bound);
+        bound[0] = optionBuffer.Get();
+        context->PSSetConstantBuffers(6, 1, bound);
+        context->PSSetShaderResources(2, 1, depthView.GetAddressOf());
+        ID3D11ShaderResourceView* boundNormals[1]{options[8] != 0 ? normalView.Get() : nullptr};
+        context->PSSetShaderResources(0, 1, boundNormals);
+        context->PSSetSamplers(0, 1, sampler.GetAddressOf());
+        context->PSSetShader(shader.Get(), nullptr, 0);
+        context->VSSetShader(vertexShader.Get(), nullptr, 0);
+        context->IASetInputLayout(nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->Draw(3, 0);
+
+        const D3D11_TEXTURE2D_DESC stagingDesc{Size, Size, 1, 1, DXGI_FORMAT_R8_UNORM, {1, 0}, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ};
+        ComPtr<ID3D11Texture2D> staging;
+        expect(SUCCEEDED(device->CreateTexture2D(&stagingDesc, nullptr, staging.GetAddressOf())), "Create the read-back texture.");
+        context->CopyResource(staging.Get(), targets[0].Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        expect(SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)), "Read the light target back.");
+        std::array<float, Size * Size> shadow{};
+        for (UINT y = 0; y < Size; ++y)
+            for (UINT x = 0; x < Size; ++x) shadow[y * Size + x] = static_cast<const std::uint8_t*>(mapped.pData)[y * mapped.RowPitch + x] / 255.0f;
+        context->Unmap(staging.Get(), 0);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+
+        return shadow;
+    };
+
+    // The options as the module writes them: the default shape, this light, this screen, and whether
+    // the G-buffer's normals are bound.
+    const auto optionsFor = [](float fade, float range, bool normals = false) {
+        return std::array<float, 12>{80, 0.005f, 1, fade, range, 48, static_cast<float>(Size), static_cast<float>(Size), normals ? 1.f : 0.f, 0, 0, 0};
+    };
+    const std::array<float, 3> light{0, 2, 2}; // Above the receiver at the bottom of the screen
+    const auto receiver = 6 * Size + 4;        // A pixel low on the screen, at 2 m
+
+    std::array<float, Size * Size> flat{};
+    flat.fill(2);
+    const auto lit = render(flat, optionsFor(500, 100), light);
+    expect(lit[receiver] == 1, "A pixel with nothing between it and the light stays lit.");
+
+    // A surface 10 cm in front of the ray, where the ray climbs towards the light.
+    auto blocked = flat;
+    for (std::size_t i = 0; i < 3 * Size; ++i) blocked[i] = 1.9f;
+    const auto shadowed = render(blocked, optionsFor(500, 100), light);
+    expect(shadowed[receiver] < 0.95f, "A surface in front of the ray shadows the pixel.");
+
+    // Behind the receiver: the ray is in front of it, so it cannot block.
+    auto behind = flat;
+    for (std::size_t i = 0; i < 3 * Size; ++i) behind[i] = 2.1f;
+    expect(render(behind, optionsFor(500, 100), light)[receiver] == 1, "A surface behind the ray does not shadow the pixel.");
+
+    expect(render(blocked, optionsFor(1, 100), light)[receiver] == 1, "Past the fade the pixel is lit.");
+    expect(render(blocked, optionsFor(500, 0.5f), light)[receiver] == 1, "A pixel beyond the light's reach is lit.");
+
+    // A lamp 30 cm above the receiver, under the same surface: the march ends at the light, so a
+    // surface past it casts nothing.
+    const std::array<float, 3> lowLight{0.18f, -0.4f, 2};
+    expect(render(blocked, optionsFor(500, 100), lowLight)[receiver] == 1, "A surface past the light does not shadow the pixel.");
+
+    // The march counts a caster 7.5 mm in front, where Contact shadow thickness - a share of the depth
+    // left to the far plane, 0.5% of this receiver's 2 m - would have put the near bound at 1 cm.
+    auto close = flat;
+    for (std::size_t i = 0; i < 3 * Size; ++i) close[i] = 1.9925f;
+    expect(render(close, optionsFor(500, 100), light)[receiver] < 0.95f, "A caster 7.5 mm in front counts as a contact.");
+
+    // A receiver at 12 m, with a caster 10 cm in front of it. That same share reaches the bound a caster
+    // may sit in by 10 m and leaves no window at all, so the term died with the distance; the march's
+    // fixed 5 mm does not, and the caster still counts.
+    const std::array<float, 3> farLight{0, 2, 12};
+    std::array<float, Size * Size> distant{};
+    distant.fill(12);
+    auto distantBlocked = distant;
+    for (std::size_t i = 4 * Size; i < 6 * Size; ++i) distantBlocked[i] = 11.9f;
+    expect(render(distant, optionsFor(500, 100), farLight)[receiver] == 1, "A receiver at 12 m with nothing in front of it is lit.");
+    expect(render(distantBlocked, optionsFor(500, 100), farLight)[receiver] < 0.95f, "A caster 10 cm in front counts 12 m out.");
+
+    // The G-buffer's normals, when the marking draw has them: a surface facing away from the light takes
+    // none of it, so there is nothing to shadow and no march to spend. The light is above the receiver,
+    // so the encoded normals below decode to one facing up at it and one facing down away from it.
+    const std::array<float, 3> facingUp{0.5f, 1, 0.5f}, facingDown{0.5f, 0, 0.5f};
+    expect(render(blocked, optionsFor(500, 100, true), light, facingDown)[receiver] == 1,
+        "A surface facing away from the light is lit, even with a caster in front of it.");
+    expect(render(blocked, optionsFor(500, 100, true), light, facingUp)[receiver] < 0.95f,
+        "A surface facing the light is shadowed, as it is without the normals.");
+    expect(render(blocked, optionsFor(500, 100), light, facingDown)[receiver] < 0.95f,
+        "Without the normals bound, the march runs on every pixel it covers.");
+
+    // A grazing light: a surface turned mostly to the camera (z -0.9), its slope away from a light above
+    // and in front of it. The game's decode gives it a little of the light, so it is marched; taking the
+    // normal's xy as a unit long, as the march once did, turned it away and left it lit.
+    const std::array<float, 3> nearLight{0, 1, 1};
+    auto ceiling = flat;
+    for (std::size_t i = 0; i < 6 * Size; ++i) ceiling[i] = 1.7f;
+    const std::array<float, 3> grazing{0.8536f, 0.1464f, 0.2236f};
+    expect(render(ceiling, optionsFor(500, 100, true), nearLight, grazing)[receiver] < 0.95f,
+        "A surface the light grazes is shadowed: its normal decodes as the game's does.");
+}
+
 int main()
 {
     const auto root =
@@ -1010,6 +1342,7 @@ int main()
         effectPresets();
         featuresDescribed();
         effectPlan();
+        pathTracingPlan();
         frameLatch();
         mainViewRecognised();
         dumpedMainViewIsTheMainCamera();
@@ -1017,6 +1350,7 @@ int main()
         sunPassDirectionPointsToTheSun();
         jitterShiftsTheImage();
         reprojection();
+        motionByParts();
         cuts();
         streamlineCamera();
         modeMaths();
@@ -1026,6 +1360,7 @@ int main()
         renderSizeNeverAboveOutput();
         customQualityFollowsScale();
         planKeptForOtherSettings();
+        motionBlurStrength();
         jitterSequence();
         frameStartsAfterAnExecute();
         passesAfterAnExecuteBelongToTheNextFrame();
@@ -1037,6 +1372,8 @@ int main()
         hdrSettingsPersist(root);
         motionBlurSettingsPersist(root);
         outputSaturation();
+        lampShadowsSkipLightsPastTheFade();
+        lampShadowMarch();
         writeIsReadOnItsOwnThreadOnly();
         lightPassesKeepOnlySceneAndLight();
         mainCameraWriteNotedOnlyWhileAllKept();

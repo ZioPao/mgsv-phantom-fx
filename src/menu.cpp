@@ -53,7 +53,9 @@ void drawStatus(const upscaler::Status& state, const Upscaling& wanted)
     const auto& name = state.upscalerName;
     const auto nativeMode = label(Mode::Dlaa, wanted.upscaler);
     // FSR has no presets.
-    const auto preset = wanted.upscaler == Upscaler::Dlss ? std::format(", preset {}", label(wanted.dlssPreset)) : std::string();
+    const auto preset = wanted.upscaler == Upscaler::Fsr ? std::string()
+                        : state.rayReconstruction        ? std::format(", preset {}", label(wanted.reconstructionPreset))
+                                                         : std::format(", preset {}", label(wanted.dlssPreset));
     if (!state.supportedBuild) fxui::statusLine(Tone::Bad, "This game version is not supported, so upscaling stays off.");
     else if (wanted.mode == Mode::Off) fxui::statusLine(Tone::Dim, "Upscaling is off. The game's FXAA is in use.");
     else if (state.failed) fxui::statusLine(Tone::Bad, std::format("{} stopped: {} Choose a mode or upscaler again to retry.", name, state.failure));
@@ -68,6 +70,11 @@ void drawStatus(const upscaler::Status& state, const Upscaling& wanted)
     else
         fxui::statusLine(Tone::Ok, std::format("{} {} active: renders {}\xC3\x97{}, outputs {}\xC3\x97{}{}.", name, label(wanted.mode, wanted.upscaler),
             state.renderWidth, state.renderHeight, state.outputWidth, state.outputHeight, preset));
+
+    if (wanted.upscaler != Upscaler::Dlss || !wanted.rayReconstruction || !state.running || state.rayReconstruction) return;
+
+    fxui::statusLine(Tone::Warn, state.reconstructionAvailable ? "Ray Reconstruction waits for a ray-traced effect; DLSS runs meanwhile."
+                                                               : "Ray Reconstruction could not run here (see PhantomFX.log); DLSS runs instead.");
 }
 
 // What the running game adds to a feature's item, beside its description.
@@ -143,7 +150,7 @@ public:
 class MenuPage final : public SettingVisitor
 {
 public:
-    MenuPage(Section section, const SharedControls& shared) : section(section), shared(shared) {}
+    MenuPage(Section section, const SharedControls& shared, bool isRayTracing) : section(section), shared(shared), isRayTracing(isRayTracing) {}
 
     ~MenuPage() { endItem(); }
 
@@ -156,7 +163,11 @@ public:
 
     void toggle(bool& value, const ToggleInfo& info) override
     {
-        if (open()) fxui::checkbox(info.label, value, info.tip);
+        if (!open() || !info.visible || (info.needsRayTracing && !isRayTracing)) return;
+
+        ImGui::BeginDisabled(!info.enabled);
+        fxui::checkbox(info.label, value, info.tip);
+        ImGui::EndDisabled();
     }
 
     void slider(float& value, const SliderInfo& info) override
@@ -166,7 +177,7 @@ public:
 
     void choice(int& value, const ChoiceInfo& info) override
     {
-        if (!open() || !info.visible) return;
+        if (!open() || !info.visible || (info.needsRayTracing && !isRayTracing)) return;
 
         std::vector<Choice<int>> choices;
         for (const auto& choice : info.choices)
@@ -244,6 +255,7 @@ private:
 
     Section section;
     const SharedControls& shared;
+    bool isRayTracing; // A ray-traced effect is on in the settings
 
     std::function<ItemStatus()> nextFeatureStatus;
     ItemStatus status;
@@ -257,7 +269,7 @@ void drawFeatures(Section section, Settings& wanted)
 {
     SharedControls shared;
     describe(wanted, shared);
-    MenuPage page(section, shared);
+    MenuPage page(section, shared, planEffects(wanted, {}).tracesScene());
     forEachFeature(wanted, [&](auto& feature) {
         page.nextStatus([&feature] { return statusOf(feature); });
         describe(feature, page);
@@ -438,23 +450,30 @@ void drawDiagnostics(const upscaler::Status& state)
     bool changed{};
     if (const fxui::Item item({.id = "debugView", .name = "Debug view", .keywords = "motion vectors object motion shadow rays probe"}); item)
     {
-        constexpr Choice<int> views[]{{0, "Final image"}, {1, "Motion vectors"}, {2, "Object motion (red)"}, {ShadowRaysView, "Ray-traced shadow rays"},
-            {LightHistoryView, "Global illumination history"}, {ShadowStartsView, "Shadow ray starts"}};
+        using enum DebugView;
+        constexpr Choice<DebugView> views[]{{FinalImage, "Final image"}, {MotionVectors, "Motion vectors"}, {ObjectMotion, "Object motion (red)"},
+            {ShadowRays, "Ray-traced shadow rays"}, {LightHistory, "Global illumination history"},
+            {LightValidation, "Global illumination denoiser (NRD)"}, {ShadowStarts, "Shadow ray starts"}};
         changed |= fxui::combo("Debug view", options.debugView, views,
             "Ray-traced shadow rays: with ray-traced shadows and an upscaler on, what blocks each pixel's ray to the sun's centre, over the image. The "
             "cross is the probe: its sun ray and, with ray-traced lights on, sun or none, the strongest lamps' rays and what blocks each. Its "
             "findings show below (and, in a dev build, go to PhantomFX.log whenever they change).");
-        if (options.debugView == LightHistoryView)
+        if (options.debugView == LightHistory)
             fxui::note(Tone::Dim, "With global illumination and an upscaler on: red where the denoiser started a pixel's light over this frame or "
                                   "the last two, yellow where it holds under ten frames. Clear: a full history.");
-        if (options.debugView == ShadowStartsView)
+        if (options.debugView == LightValidation)
+            fxui::note(Tone::Dim, "With global illumination and an upscaler on, NRD's own checks of the denoiser's inputs, in a 4 x 4 grid. Top "
+                                  "row: world grid, roughness, view depth (red: past the denoising range), motion against a still scene (black "
+                                  "where right, magenta where it holds the jitter). Second row: normals. Third row, left: frames of history "
+                                  "(red: started over).");
+        if (options.debugView == ShadowStarts)
             fxui::note(Tone::Dim, "With ray-traced shadows on, where each pixel's shadow rays leave, against what the game drew. Grey: from the depth, "
                                   "the scene having no surface there. Blue: the scene's surface faces another way. Red: it lies nearer than the "
                                   "game's, cyan: farther (clear under 5 mm, full from 3 cm). Clear: on the game's surface.");
-        if (options.debugView == ShadowRaysView)
+        if (options.debugView == ShadowRays)
             fxui::note(Tone::Dim, "Lavender: the game's models and characters. Brown: the terrain. Yellow: cut-out geometry. Olive: cut-out geometry "
                                   "without its texture, left to the shadow map. Magenta: anything else only the whole ray finds. Clear: the sun reaches.");
-        if (options.debugView == ShadowRaysView || options.debugView == ShadowStartsView)
+        if (options.debugView == ShadowRays || options.debugView == ShadowStarts)
         {
             if (const auto probe = ray_tracing::shadowProbe(); !probe.empty()) fxui::note(Tone::Dim, probe);
             else fxui::note(Tone::Warn, "Waiting for ray-traced shadows or lights (on, with an upscaler). The sun's rays need a sun: indoors, only "

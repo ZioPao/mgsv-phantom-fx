@@ -7,9 +7,9 @@
 // Fox Engine tonemaps early, in its deferred resolve, so the scene before the grading is LDR colour,
 // stored sRGB-encoded. DLSS runs in LDR mode on those values, after the depth of field, and the
 // composite writes them back over the scene target, or into the UI target when upscaling, before the
-// lens flare layer, bloom's composite and the grading. With HDR (hdr.hpp) the scene holds light
-// beyond white: DLSS runs in its HDR mode on it, linear, and the composite encodes its result again.
-// FSR always gets linear colour, which it is made for.
+// lens flare layer, bloom's composite and the grading. With the scene in float (hdr.hpp), as on every
+// supported build, it holds light beyond white: DLSS runs in its HDR mode on it, linear, and the
+// composite encodes its result again. FSR always gets linear colour, which it is made for.
 namespace phantom_fx::upscaler::shaders
 {
 // Runs once per frame at render resolution and writes what DLSS or FSR reads.
@@ -23,6 +23,11 @@ namespace phantom_fx::upscaler::shaders
 // frame's jitter, because the engine projects the current position with the jittered matrices and
 // the previous one without. The object motion is the cell, less the jitter; the camera motion
 // clamped into it keeps full precision where a character does not move.
+//
+// With DLSS Ray Reconstruction on a frame the game's depth of field drew, also its depth of field guide:
+// how much the depth of field changed each pixel's light, luminance(after - before) by NVIDIA's luminance
+// (DLSS-RR Integration Guide, "Depth of Field Guide"). Ray Reconstruction runs after the depth of field,
+// which blurs the noisy light; the guide tells it where.
 inline constexpr char Inputs[] = PHANTOM_FX_HDR_COMMON R"(
 cbuffer InputParameters : register(b0)
 {
@@ -31,14 +36,17 @@ cbuffer InputParameters : register(b0)
     uint2 RenderSize;
     uint ObjectMotion; // t2 holds the engine's velocity
     uint Linear;       // The upscaler gets linear colour: FSR, or DLSS in its HDR mode
-    uint2 Padding;
+    uint DofGuide;     // t3 holds the scene before the depth of field: write u3
+    uint Padding;
 };
 Texture2D<float4> SceneColor : register(t0);
 Texture2D<float> SceneDepth : register(t1);
 Texture2D<float4> Velocity : register(t2);
+Texture2D<float4> SceneBeforeDof : register(t3);
 RWTexture2D<float4> OutColor : register(u0);
 RWTexture2D<float> OutDepth : register(u1);
 RWTexture2D<float2> OutMotion : register(u2);
+RWTexture2D<float> OutDofGuide : register(u3);
 
 static const float HalfCell = 64.0 / 255.0; // Half the engine's velocity step, in pixels
 
@@ -69,6 +77,12 @@ void main(uint2 pixel : SV_DispatchThreadID)
     OutColor[pixel] = Linear ? float4(min(SrgbToLinear(color.rgb), HalfMax), color.a) : color;
     OutDepth[pixel] = depth;
     OutMotion[pixel] = motion;
+
+    if (DofGuide)
+    {
+        const float3 change = SrgbToLinear(color.rgb) - SrgbToLinear(SceneBeforeDof[pixel].rgb);
+        OutDofGuide[pixel] = clamp(dot(change, float3(0.25, 0.5, 0.25)), -HalfMax, HalfMax);
+    }
 }
 )";
 
@@ -78,15 +92,21 @@ void main(uint2 pixel : SV_DispatchThreadID)
 inline constexpr char Composite[] = PHANTOM_FX_HDR_COMMON R"(
 cbuffer CompositeParameters : register(b0)
 {
-    uint DebugView; // 1 motion vectors, 2 where the engine's velocity was used; 3, 4 and 5 a debug view over the image (ShadowRays)
+    // In place of the image: the motion vectors, or red where the engine's velocity was used.
+    uint ShowMotion;
+    uint ShowObjectMotion;
+    uint ShowProbe; // The probes' cross over the image
     float Sharpness;
     uint ObjectMotion;
     uint Linear; // The upscaler made linear colour, sharpened through x / (1 + x) and encoded here
+    uint2 Padding;
 };
 Texture2D<float4> Upscaled : register(t0);
 Texture2D<float2> Motion : register(t1);
 Texture2D<float4> Velocity : register(t2);
-Texture2D<float4> ShadowRays : register(t3); // At the render size, by its alpha (ray_tracing::shadowDebug or lightDebug)
+// A debug view over the image, at the render size, by its alpha (ray_tracing::shadowDebug or lightDebug);
+// unbound while none shows.
+Texture2D<float4> ShadowRays : register(t3);
 
 float3 Load(int2 pixel)
 {
@@ -113,12 +133,12 @@ float4 main(float4 position : SV_Position) : SV_Target
 {
     int2 pixel = int2(position.xy);
     float3 color = Load(pixel);
-    if (DebugView == 1)
+    if (ShowMotion)
     {
         float2 motion = Motion.Load(int3(pixel, 0));
         color = float3(saturate(0.5 + motion * 0.05), saturate(length(motion) * 0.05));
     }
-    else if (DebugView == 2)
+    else if (ShowObjectMotion)
     {
         bool used = ObjectMotion && Velocity.Load(int3(pixel, 0)).r > 0.5;
         color = lerp(color * 0.5, float3(1, 0, 0), used ? 0.6 : 0);
@@ -126,24 +146,24 @@ float4 main(float4 position : SV_Position) : SV_Target
     else if (Sharpness > 0)
         color = Rcas(Load(pixel + int2(0, -1)), Load(pixel + int2(-1, 0)), color, Load(pixel + int2(1, 0)), Load(pixel + int2(0, 1)));
 
-    if (Linear && (DebugView == 0 || DebugView >= 3)) color = LinearToSrgb(color / max(1 - color, 1.0 / HalfMax));
+    if (Linear && !ShowMotion && !ShowObjectMotion) color = LinearToSrgb(color / max(1 - color, 1.0 / HalfMax));
 
-    if (DebugView >= 3)
+    uint width, height, raysWidth, raysHeight;
+    Upscaled.GetDimensions(width, height);
+    ShadowRays.GetDimensions(raysWidth, raysHeight);
+    if (raysWidth)
     {
-        uint width, height, raysWidth, raysHeight;
-        Upscaled.GetDimensions(width, height);
-        ShadowRays.GetDimensions(raysWidth, raysHeight);
-        if (raysWidth)
-        {
-            float4 rays = ShadowRays.Load(int3(position.xy * float2(raysWidth, raysHeight) / float2(width, height), 0));
-            color = lerp(color, rays.rgb, rays.a);
-        }
+        float4 rays = ShadowRays.Load(int3(position.xy * float2(raysWidth, raysHeight) / float2(width, height), 0));
+        color = lerp(color, rays.rgb, rays.a);
+    }
 
+    if (ShowProbe)
+    {
         // The probes' pixel, the screen's centre, sun or none: indoors only the lamps' probe runs, and
         // without a sun the rays' view stays empty.
         int2 fromCentre = int2(position.xy) - int2(uint2(width, height) / 2);
         bool onCross = (abs(fromCentre.x) <= 1 && abs(fromCentre.y) <= 18) || (abs(fromCentre.y) <= 1 && abs(fromCentre.x) <= 18);
-        if ((DebugView == 3 || DebugView == 5) && onCross) color = 1;
+        if (onCross) color = 1;
     }
 
     return float4(color, 0);

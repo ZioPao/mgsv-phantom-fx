@@ -10,7 +10,9 @@
 #include "features/indirect_light/ssgi.hpp"
 #include "features/lamp_contact_shadows/lamp_contact_shadows.hpp"
 #include "features/lamp_soft_shadows/lamp_soft_shadows.hpp"
+#include "features/path_tracing/path_tracing.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
+#include "features/sea/sea.hpp"
 #include "features/sun_contact_shadows/sun_contact_shadows.hpp"
 #include "features/upscaling/upscaler.hpp"
 #include "features/volumetric_fog/atmosphere.hpp"
@@ -68,10 +70,13 @@ const EffectLine EffectLines[]{
     {.effect = Effect::SoftShadows, .health = sun_light_pass::softShadowHealth},
     {.effect = Effect::LampSoftShadows, .passes = {{Pass::LampSoftLight, "Light draws, with the soft shadow"}}, .health = lamp_soft_shadows::health},
     {.effect = Effect::SunContactShadows, .passes = {{Pass::SunTrace, "Contact shadow trace"}}, .health = sun_contact_shadows::health},
-    {.effect = Effect::LampContactShadows, .passes = {{Pass::LampTraces, "Traces"}, {Pass::LampShadows, "Shadow draws"}}, .health = lamp_contact_shadows::health},
+    {.effect = Effect::LampContactShadows, .passes = {{Pass::LampShadows, "Shadow draws"}}, .health = lamp_contact_shadows::health},
     {.effect = Effect::GlobalIllumination, .passes = {{Pass::GiRays, "Rays and the light cache"}, {Pass::GiDenoiser, "Denoiser and render size"},
             {Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}},
         .health = light_combine::health},
+    {.effect = Effect::PathTracing, .passes = {{Pass::Reflections, "Reflections"}, {Pass::LampLight, "Point and spot lights"},
+            {Pass::PathTracedLight, "Adding the light"}},
+        .health = path_tracing::health},
     {.effect = Effect::AmbientOcclusion, .passes = {{Pass::OcclusionPrefilter, "Depth prefilter"}, {Pass::OcclusionMarch, "March"}, {Pass::OcclusionDenoise, "Denoise"},
             {Pass::OcclusionApply, "Applying to the indirect light"}},
         .health = gtvbao::health},
@@ -81,6 +86,8 @@ const EffectLine EffectLines[]{
     {.effect = Effect::VolumetricFog, .passes = {{Pass::FogPass, "The game's fog pass, larger"}, {Pass::SkyTables, "Sky tables (physical look)"}, {Pass::FogShadow, "Sun shadow in the fog"},
             {Pass::FogScattering, "Scattering"}, {Pass::FogIntegration, "Integration"}, {Pass::Sky, "Physical sky"}},
         .health = atmosphere::health},
+    {.effect = Effect::Sea, .passes = {{Pass::SeaWaves, "Waves: spectrum, FFT and maps"}, {Pass::SeaSurface, "Surface into the G-buffer"}},
+        .health = sea::health},
 };
 static_assert(std::size(EffectLines) == static_cast<std::size_t>(Effect::Count));
 
@@ -89,11 +96,14 @@ std::string_view lineOf(Effect effect)
     return featureOf(effect).menuId;
 }
 
-// The line of the effect that replaces `effect`, if any.
-std::string_view replacerLineOf(Effect effect)
+// What a Lacking effect needs, in its features' words.
+std::string needsOf(Effect effect)
 {
-    const auto replacer = featureOf(effect).replacedBy;
-    return replacer ? lineOf(*replacer) : std::string_view{};
+    const auto& feature = featureOf(effect);
+    std::string needs = feature.needs ? featureOf(*feature.needs).name : "";
+    if (feature.needsRayReconstruction) needs += std::string(needs.empty() ? "" : " and ") + "DLSS Ray Reconstruction";
+
+    return "Needs " + needs + " on.";
 }
 
 // A lighting effect's line state, and its message.
@@ -104,12 +114,13 @@ struct Report
 };
 
 // From the plan, then, while it runs, from its health.
-Report reportOf(EffectState planned, Health health)
+Report reportOf(Effect effect, EffectState planned, Health health)
 {
     if (planned == EffectState::Off) return {State::Off};
     if (planned == EffectState::Unsupported) return {State::Unavailable, "This game version is not supported, so it stays off."};
     if (planned == EffectState::Held) return {State::Held};
     if (planned == EffectState::Replaced) return {State::Replaced};
+    if (planned == EffectState::Lacking) return {State::NotRunning, needsOf(effect)};
     if (health.kind == Health::Kind::Unavailable) return {State::Unavailable, std::move(health.reason)};
     if (health.kind == Health::Kind::Waiting) return {State::NotRunning, std::move(health.reason)};
 
@@ -150,7 +161,7 @@ fxui::Budget budget(Settings& wanted, const performance::Costs& costs)
 
     const auto plan = core::effectPlan(wanted);
     ByEffect<Report> reports;
-    for (const auto& line : EffectLines) reports[line.effect] = reportOf(plan[line.effect], line.health());
+    for (const auto& line : EffectLines) reports[line.effect] = reportOf(line.effect, plan[line.effect], line.health());
 
     const auto lineState = [&](Effect effect) { return LineState{lineOf(effect), reports[effect].state}; };
 
@@ -175,8 +186,9 @@ fxui::Budget budget(Settings& wanted, const performance::Costs& costs)
 
     const auto timed = [&](Pass pass) { return costs.passes[static_cast<std::size_t>(pass)]; };
 
-    // The replacement sun light pass runs for every sun shadow.
-    const LineState sunShadows[]{lineState(Effect::RayTracedShadows), lineState(Effect::SoftShadows), lineState(Effect::SunContactShadows)};
+    // The replacement sun light pass runs for path tracing's sun and every sun shadow.
+    const LineState sunShadows[]{lineState(Effect::PathTracing), lineState(Effect::RayTracedShadows), lineState(Effect::SoftShadows),
+        lineState(Effect::SunContactShadows)};
     const auto sunLight = owner(sunShadows);
 
     // Each ray-traced effect has its own rays on Direct3D 12. What they share, the scene and handing the
@@ -187,7 +199,7 @@ fxui::Budget budget(Settings& wanted, const performance::Costs& costs)
 
     float traced{};
     for (const auto pass : {Pass::RayTracedScene, Pass::SunShadowRays, Pass::SunShadowDenoiser, Pass::LightShadowRays, Pass::LightShadowFilter, Pass::GiRays,
-             Pass::GiDenoiser})
+             Pass::GiDenoiser, Pass::Reflections, Pass::LampLight})
         traced += timed(pass);
 
     const float handOver = std::max(0.0f, timed(Pass::GiInputs) + timed(Pass::GiWait) - traced);
@@ -232,7 +244,7 @@ fxui::Budget budget(Settings& wanted, const performance::Costs& costs)
         const auto& feature = featureOf(line.effect);
         const auto& [state, message] = reports[line.effect];
         add({.id = feature.menuId, .name = feature.name, .tech = feature.tech ? feature.tech : "", .section = at(feature.section), .state = state,
-                .toggle = &switchOf(wanted, line.effect), .replacedBy = replacerLineOf(line.effect), .message = message},
+                .toggle = &switchOf(wanted, line.effect), .replacedBy = plan.replacers[line.effect] ? lineOf(*plan.replacers[line.effect]) : std::string_view{}, .message = message},
             line.passes);
     }
 

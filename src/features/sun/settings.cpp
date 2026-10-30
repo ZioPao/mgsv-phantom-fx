@@ -5,7 +5,7 @@ namespace phantom_fx
 namespace
 {
 constexpr Sun Defaults{};
-constexpr Effect ShownIn[]{Effect::RayTracedShadows, Effect::SoftShadows, Effect::GlobalIllumination};
+constexpr Effect ShownIn[]{Effect::RayTracedShadows, Effect::SoftShadows, Effect::GlobalIllumination, Effect::PathTracing};
 }
 
 void describe(Sun& sun, SettingVisitor& visit)

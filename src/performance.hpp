@@ -39,10 +39,11 @@ enum class Pass : std::size_t
     LightPrefilter, LightMarch, LightDenoise, LightUpsample,
     SsgiGather, SsgiAccumulate, SsgiFilter, SsgiResolve,
     FogPass, SkyTables, FogShadow, FogScattering, FogIntegration, Sky,
-    GiInputs, GiProbeLight, GiCombine, GiWait, LocalLights,
+    SeaWaves, SeaSurface,
+    GiInputs, GiProbeLight, GiCombine, GiWait, LocalLights, PathTracedLight,
 
     // On Direct3D 12
-    RayTracedScene, SunShadowRays, SunShadowDenoiser, LightShadowRays, LightShadowFilter, GiRays, GiDenoiser,
+    RayTracedScene, SunShadowRays, SunShadowDenoiser, LightShadowRays, LightShadowFilter, GiRays, GiDenoiser, Reflections, LampLight,
     HdrEncode, HdrDecode, HdrGrade,
     Count
 };

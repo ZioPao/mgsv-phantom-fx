@@ -16,7 +16,7 @@ namespace phantom_fx::fsr_upscaler
 // FSR is set up for the sizes of the colour and output textures.
 struct Inputs
 {
-    ID3D11Texture2D* color{};  // Linear light, the game's white at 1; above it with HDR
+    ID3D11Texture2D* color{};  // Linear light, the game's white at 1; above it with the scene in float
     ID3D11Texture2D* depth{};  // Device depth, reversed-Z
     ID3D11Texture2D* motion{}; // In render pixels toward the previous frame, without the jitter
     ID3D11Texture2D* output{};

@@ -197,6 +197,13 @@ void applyJitter(SceneConstants& scene, std::array<float, 2> ndc)
     scene.cameraCenterOffset[1] = ndc[1];
 }
 
+Matrix unjitteredProjection(Matrix projection, std::array<float, 2> ndc)
+{
+    projection[2] -= ndc[0];
+    projection[6] -= ndc[1];
+    return projection;
+}
+
 std::array<float, 2> jitterNdc(std::array<float, 2> pixels, float width, float height)
 {
     return {2 * pixels[0] / width, -2 * pixels[1] / height};
@@ -232,6 +239,11 @@ Matrix previousFromCurrent(const View& previous, const View& current)
     return multiply(previous.projectionView, inverse(current.projectionView));
 }
 
+Matrix previousFromCurrentByParts(const View& previous, const View& current)
+{
+    return multiply(previous.projection, multiply(multiply(previous.view, inverse(current.view)), inverse(current.projection)));
+}
+
 bool cameraCut(const View& previous, const View& current)
 {
     float distance = 0, cosine = 0;
@@ -251,9 +263,12 @@ StreamlineCamera streamlineCamera(const View& previous, const View& current)
     // dot(row, v), Streamline as v x M, so each matrix is transposed.
     auto projection = current.projection;
     for (int row = 0; row < 4; ++row) projection[row * 4] = -projection[row * 4];
+    auto view = current.view;
+    for (int column = 0; column < 4; ++column) view[column] = -view[column];
 
     const auto toPrevious = previousFromCurrent(previous, current);
     StreamlineCamera result;
+    result.worldToView = toFloat(transpose(view));
     result.viewToClip = toFloat(transpose(projection));
     result.clipToView = toFloat(transpose(inverse(projection)));
     result.clipToPreviousClip = toFloat(transpose(toPrevious));

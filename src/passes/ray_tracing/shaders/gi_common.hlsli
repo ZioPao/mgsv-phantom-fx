@@ -55,6 +55,14 @@ SamplerState g_WrapSampler : register(s2);
 
 float squared(float v) { return v * v; }
 
+// NaNs and infinities out: through x / (1 + x), saturated, and back.
+float3 RemoveNaNs(float3 color)
+{
+    color /= (1.0f + color);
+    color = saturate(color);
+    return color / max(1.0f - color, 1e-4f);
+}
+
 float luminance(float3 color)
 {
     return dot(color, float3(0.2126f, 0.7152f, 0.0722f));
@@ -264,6 +272,26 @@ bool ObjectMotion(int2 pixel, out float2 moved)
     float4 velocity = g_ObjectVelocity.Load(int3(pixel, 0));
     moved = (velocity.ba * 2.0f - 1.0f) * 64.0f;
     return velocity.r > 0.5f && length(moved) < 63.0f;
+}
+
+// The upscaler's jitter (NDC) as a shift on screen, in uv.
+float2 JitterUv(float2 ndc)
+{
+    return float2(0.5f, -0.5f) * ndc;
+}
+
+// A render pixel's camera motion (the last frame's uv minus this one's, without the jitter) and its view
+// depth last frame: its unjittered clip position through the one matrix built in double from the
+// projections and views apart (camera::previousFromCurrentByParts), as the upscaler's motion vectors.
+// Through its world position and the game's float projection-views the motion was off by up to 0.19 render
+// pixels near the camera on a still frame, changing with each jitter (2026-10-29).
+void CameraMotionOf(uint2 pixel, float depth, out float2 motion, out float previousViewZ)
+{
+    float2 uv = (pixel + 0.5f) / g_Frame.dimensions.xy;
+    float4 unjittered = float4(float2(2.0f * uv.x - 1.0f, 1.0f - 2.0f * uv.y) - g_Frame.jitter.xy, depth, 1.0f);
+    float4 last = mul(g_Frame.previousFromCurrent, unjittered);
+    motion = (float2(0.5f, -0.5f) * last.xy / last.w + 0.5f) - (float2(0.5f, -0.5f) * unjittered.xy + 0.5f);
+    previousViewZ = last.w / dot(g_Frame.clipToViewW, unjittered);
 }
 
 // ---- The scene ----
@@ -542,16 +570,16 @@ void MaxDiagnostic(uint counter, float3 value)
 }
 
 // ---- Point and spot lights ----
-// A point or spot light's diffuse light at a surface, without shadows, as the game's light shaders work
-// it out (Lighting_*_NA, SSLighting2_*), in the sun colour's units; its direction and distance in `toLight`
-// and `lightDistance`. A spot's mask (a flashlight's pattern) is left out.
-float3 LocalLightAt(GILocalLight light, float3 world, float3 normal, out float3 toLight, out float lightDistance)
+// A point or spot light's light reaching `world`, without shadows, as the game's light shaders work it out
+// (Lighting_*_NA, SSLighting2_*), in the sun colour's units, before the surface's cosine: its falloff, a
+// spot's cone, and the game's volume for it; its direction and distance in `toLight` and `lightDistance`. A
+// spot's mask (a flashlight's pattern) is left out.
+float3 LocalLightReaching(GILocalLight light, float3 world, out float3 toLight, out float lightDistance)
 {
     float3 offset = light.position.xyz - world;
     lightDistance = length(offset);
     toLight = offset / max(lightDistance, 1e-6f);
-    float cosine = dot(normal, toLight);
-    if (cosine <= 0.0f || lightDistance >= light.position.w) return 0.0f;
+    if (lightDistance >= light.position.w) return 0.0f;
 
     // The game lights only within the light's volume: a fill light's box keeps its 200 m of reach to its room.
     const float margin = 0.02f;
@@ -568,7 +596,15 @@ float3 LocalLightAt(GILocalLight light, float3 world, float3 normal, out float3 
     float cut = 1.0f;
     if (light.axis.w >= -1.0f) cut = pow(saturate((dot(light.axis.xyz, -toLight) - light.axis.w) * light.shape.y), light.shape.z);
 
-    return light.color.rgb * (falloff * cut * cosine);
+    return light.color.rgb * (falloff * cut);
+}
+
+// Its diffuse light at a surface of `normal`.
+float3 LocalLightAt(GILocalLight light, float3 world, float3 normal, out float3 toLight, out float lightDistance)
+{
+    float3 reaching = LocalLightReaching(light, world, toLight, lightDistance);
+    float cosine = dot(normal, toLight);
+    return cosine > 0.0f ? reaching * cosine : 0.0f;
 }
 
 // How far short of a light its shadow rays towards it (`toLight`, from the surface) end: the lamp around
