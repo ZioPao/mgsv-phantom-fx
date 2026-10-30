@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **The sun's contact shadows run beside the ray-traced ones.** The rays alone leave a pixel here and there
+  reading lit where the game's shadow map has shade — thin lines where geometry meets the ground — and the
+  game had the sun's contact shadows for exactly that. They are forced on with ray-traced shadows, whatever
+  their switch says.
 - **Ray-traced shadows leave from the surface the game drew.** A triangle that only shares the depth's
   point — a wall's dimples drawn as a normal map, a stand-in's facet, another level of detail — could take
   the shadow ray off its own normal, and a facet turned towards a distant opening's sun came back lit where
