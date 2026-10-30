@@ -74,7 +74,7 @@ const EffectLine EffectLines[]{
     {.effect = Effect::GlobalIllumination, .passes = {{Pass::GiRays, "Rays and the light cache"}, {Pass::GiDenoiser, "Denoiser and render size"},
             {Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}},
         .health = light_combine::health},
-    {.effect = Effect::PathTracing, .passes = {{Pass::Reflections, "Reflections"}, {Pass::LampLight, "Point and spot lights (ReSTIR)"},
+    {.effect = Effect::PathTracing, .passes = {{Pass::Reflections, "Reflections"}, {Pass::LampLight, "Point and spot lights"},
             {Pass::PathTracedLight, "Adding the light"}},
         .health = path_tracing::health},
     {.effect = Effect::AmbientOcclusion, .passes = {{Pass::OcclusionPrefilter, "Depth prefilter"}, {Pass::OcclusionMarch, "March"}, {Pass::OcclusionDenoise, "Denoise"},

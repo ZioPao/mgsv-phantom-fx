@@ -57,8 +57,6 @@ struct LocalLight
     std::array<std::array<float, 4>, 3> maskRows{};
     bool isMasked{};
     std::uint32_t maskTile{};
-    // The light from frame to frame (keyOf), for path tracing's light history (path_tracing_rays.hpp).
-    std::uint64_t key{};
 };
 
 // The bounds a light's volume had in the world: lowest, then highest corner.
