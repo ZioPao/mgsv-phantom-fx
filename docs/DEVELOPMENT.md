@@ -150,7 +150,7 @@ what draws it, when that is the feature's own.
 
 | Folder | What draws it |
 | --- | --- |
-| `upscaling/` | `upscaler.*`: DLSS or FSR before the grading, in place of FXAA: NGX, composite, the grading at the output size, texture LOD bias. `frames.*`: the frames the upscaler runs on: when one starts, its main view and its jitter. `render_size_plan.*`: the render size plan, from the upscaler, mode and output size, with DLSS's own size from NGX. `upscaler_shaders.hpp`: the upscaler's inputs and motion vectors, composite with RCAS and debug views, stretch fallback. `fsr_upscaler.*`: FSR upscaling on Direct3D 12. `fxaa.*`: hook on the FXAA plugin, the FXAA pass at any post processing setting |
+| `upscaling/` | `upscaler.*`: DLSS or FSR before the grading, in place of FXAA: NGX, composite, the grading at the output size, texture LOD bias. `frames.*`: the frames the upscaler runs on: when one starts, its main view and its jitter. `render_size_plan.*`: the render size plan, from the upscaler, mode and output size, with DLSS's own size from NGX. `upscaler_shaders.hpp`: the upscaler's inputs and motion vectors, composite with RCAS and debug views, stretch fallback. `fsr_upscaler.*`: FSR upscaling on Direct3D 12. `ray_reconstruction.*`: DLSS Ray Reconstruction on Direct3D 12 (see "Ray Reconstruction"). `fxaa.*`: hook on the FXAA plugin, the FXAA pass at any post processing setting |
 | `frame_generation/` | `presenter.*`: the game's stand-in swap chain, presented through Direct3D 12. `frame_generation.*`: DLSS Frame Generation, Streamline, its inputs and camera, Reflex. `fsr_frame_generation.*`: AMD's swap chain and its inputs |
 | `sun/` | Settings only: the sun size the soft and ray-traced shadows and the global illumination share |
 | `soft_shadows/` | Settings only: a mode of the sun light pass's shaders (`passes/sun_light_pass.*`) |
@@ -161,6 +161,7 @@ what draws it, when that is the feature's own.
 | `ray_traced_shadows/` | `gi_shadow.*`: the sun's shadow rays and the FidelityFX Shadow Denoiser on Direct3D 12. `gi_shadow.hlsl`, `gi_shadow_filter.hlsl`: the rays, the denoiser's temporal pass and filters |
 | `ray_traced_lights/` | `local_lights.*`: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights"). `light_choice.*`: which lights a kick gives the rays (each light's reach, the light cap) and each light as the rays take it. `light_shadow_rays.*`, `light_shadows.hlsl`: the lights' shadow rays and filter on Direct3D 12 |
 | `global_illumination/` | `gi_light.*`, `gi_light.hlsl`: the light on Direct3D 12, its rays, their hits' light, the hash grid cache, the denoiser's inputs and the render size (see "Global illumination"). `gi_denoiser.*`: NVIDIA NRD's RELAX denoiser without NRI. `gi_lighting.*`: the game's sky and sun in the light's terms. `light_combine.*`: the traced light in place of the game's probe light at the resolve |
+| `path_tracing/` | `path_tracing.*`: the traced reflections added at the resolve, the screen-space reflections kept on water and glass (see "Path tracing"). `path_tracing_shaders.hpp`: that add and blend. `reflections.hlsl`, `direct_light.hlsl`: the reflections and the point and spot lights on Direct3D 12 |
 | `ambient_occlusion/` | `gtvbao.*`: GTVBAO's occlusion multiplied into the indirect light at the upscale. `gtvbao_shaders.hpp`: that multiply |
 | `indirect_light/` | `ssilvb.*`: SSILVB's light, brought to the render size and added to the diffuse light the resolve reads. `ssilvb_shaders.hpp`: the upsample |
 | `volumetric_fog/` | `atmosphere.*`: the larger fog texture, the game's fog pass over all of it, the shadowed fill before the resolve. `atmosphere_shaders.hpp`: the game's fog formula per froxel with the sun shadowed; Hillaire's atmosphere tables, the physical fog and sky (Epic Games' reference, MIT) |
@@ -1589,6 +1590,64 @@ otherwise DLSS runs, and the upscaler's status line says why.
   grid changes. Its denoiser's debug views are off meanwhile. Measured on a 2560x1440 render (a base,
   2026-10-30): the light 2.1 ms with NRD at half size, 1.8 ms a render pixel; the sun's shadows 2.8 to
   3.4 ms with the denoiser, 1.4 ms without.
+
+## Path tracing
+
+With **Path tracing** (`path_tracing=1`, under lighting) the reflections, the sun's light and every point
+and spot light's light come from the ray-traced scene, while DLSS Ray Reconstruction denoises (see "Ray
+Reconstruction") and the global illumination runs: the frames it denoised before take it
+(`gi_renderer::Frame::pathTracing`). Primary visibility stays the G-buffer, as in Cyberpunk 2077's path
+tracing. Without Ray Reconstruction the hybrid stays: the game's reflections and light shaders, with the
+ray-traced shadows.
+
+- **Reflections** (`TraceReflections`, `src/features/path_tracing/reflections.hlsl`): a ray a render pixel
+  along a reflection the surface's roughness spreads (GGX's visible normals, Heitz 2018, roughness squared,
+  from Ray Reconstruction's normal guide), lit where it hits as the global illumination's rays light theirs
+  (the sun and a light afresh, its bounce from the sky or the light cache); the sky's light where it gets
+  away, without the sun's disc, which stays the sun's specular. Its light times the specular albedo guide
+  and the exposure goes to the resolve, which adds it to the game's specular light
+  (`path_tracing::addReflections`), and its hit distance to Ray Reconstruction (`pInSpecularHitDistance`,
+  65504 where it got away), which moves the reflections with what they reflect. The game's reflections
+  make way: the sun pass leaves its sky reflection out (`SKY_REFLECTION 0`), indoors the sky's specular
+  pass (`SunLight_ES`) is skipped, and the screen-space reflections' blend (`LocalReflectionAddBuffer`,
+  `97a9ad7e0faca7b1594a38c331826a94`, rebuilt from its disassembly) keeps them only where a surface was
+  drawn in front of the G-buffer's, water and glass, which the G-buffer and so the traced reflections lack:
+  where the depth the reflections' mask read (`LocalReflectionMask`, `2d9cb6c5e467cff5e9c6401b4aafebb7`,
+  `t0`) is nearer than the G-buffer's as the kick packed it (`ray_tracing::surfaceDepth`).
+- **The sun** (`PATH_TRACED` in `sun_light_pass_shaders.hpp`): the sun pass's own shader, lit by the rays'
+  shadow alone, without the shadow map (and the rays leave nothing to it: no shadow range for untextured
+  cut-out meshes), inside the game's shadow range with its clouds' shadow and height fade (`CLOUD_SHADOW`),
+  and with GGX's specular (Trowbridge-Reitz, Smith's height-correlated visibility, Schlick's Fresnel) from
+  the specular colour at normal incidence (the material table's colour times the specular target's
+  intensity times the Fresnel table at a cosine of 1), in place of the game's lookup tables, its specular
+  shadow floor and its sky reflection. The sun's rays are traced under path tracing whether or not the
+  ray-traced shadows are on.
+- **Point and spot lights** (`TraceLampLight`, `direct_light.hlsl`), in place of the game's light shaders:
+  each light's light as they work it out (`LocalLightReaching`: its falloff, a spot's cone, the game's
+  volume for it; a masked spot's mask; the light through leaves, the game's `LN_trans`; its diffuse and
+  specular scales, `cPSLight` `c8.y` and `c8.x`, 1 for the latter where its shader has none), times the
+  exposure as theirs (`falloff x c4 x m_exposure.z`), with GGX's specular. A pixel picks two lights in
+  proportion to their light there without shadows (weighted reservoir sampling over all the frame's lights,
+  white noise) and traces a shadow ray to a point on each one's disc, as the ray-traced lights' rays leave
+  (hair's share, the faces that cast); every light is shadowed in full, as the ray-traced lights shadow them.
+  At the draw point (`local_lights::drawPathTracedLights`) one full-screen draw adds their diffuse and
+  specular light to the light targets, so the skin filter, the resolve and the exposure see it, in place of
+  each light the kick traced drawn again; a light it did not trace is drawn again as before, unshadowed.
+  Path tracing takes the lights' records whether or not the ray-traced lights are on.
+- **Masks.** A masked spot's mask (the game's `t4`) goes into a tile of an atlas of
+  `GI_LAMP_MASK_TILES` x 256 x 256 (`MaskCopySource`, sampled as the game samples it, bilinear and wrapped),
+  each mask once a frame; the projection is the shader's (`cPSScene` `c16`, `c17`, `c19` on the light pass's
+  view position, `uv = xy / w x 0.5 + 0.5`, v flipped), taken into the world through that view
+  (`light_choice::maskRowsInWorld`).
+- **Guides.** Besides Ray Reconstruction's, the kick writes the specular colour at normal incidence with
+  the translucency (`R8G8B8A8_UNORM`) and the light through leaves' floor (the translucency times the
+  material's, `R8_UNORM`).
+- **What stays the game's.** Its shadow maps: 85 of its pixel shaders sample them (its lit particles,
+  glass, rivers and liquids, decals, forward models, the terrain's self-shadow), and the volumetric fog the
+  sun's for its light shafts. Its screen-space reflections' march, for water and glass. Its probe light in
+  the diffuse light target, which its exposure measures.
+- **Cost** (2026-10-30, 2228x1254 rendered for 3840x2160): the light's line in the log, which holds the
+  reflections and the lights, 4 to 5.7 ms, against about 2.4 ms with Ray Reconstruction alone.
 
 ## HDR
 
