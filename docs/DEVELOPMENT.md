@@ -1121,7 +1121,11 @@ level at Camp Omega's cliffs. No names in the exe: the class names here are desc
   headers by type number (`+0x38` of an object, a word; models are type 3, the global at RVA
   `0x29E51B4`), each header the last object, the first and the count; objects are linked first to last
   through `+0x10` (and back through `+0x18`). In Afghanistan the model list held 882 models: 566 rigid,
-  360 skinned. Characters are among them and in no visibility manager.
+  360 skinned. Characters are among them and in no visibility manager. So are a few rigid models, the scene
+  taking those from here: the helicopter's cabin between missions (`84a2d14c3f28beb5`, `84a3b06a43ea483f`, at
+  (0, 1200, 0), 71% of the frame there), 438 models in all there, and none at Mother Base or in Afghanistan.
+  Without them the rays had no walls: the cabin was lit 4 times as brightly as the game's, and the sun's rays
+  reached 76% of the frame the game's shadow map has blocked.
 - **Characters** (found 2026-10-23): a skinned model (its file has bones) is an ordinary model object:
   its world matrix at `+0x40` (identity while unused), the passes it is hidden from at `+0x1A4`, its
   bone count at `+0xF8`, and at `[+0x188] + 0x78` its skinning palette: a 3x4 matrix (rows, translation
