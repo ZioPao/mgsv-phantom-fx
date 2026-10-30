@@ -1660,7 +1660,8 @@ the game's lights) is left alone until it runs.
   normal incidence (the material table's colour times the specular target's intensity times the Fresnel
   table at a cosine of 1), in place of the game's lookup tables, its specular shadow floor and its sky
   reflection. The sun's rays are traced while path tracing runs, whether or not the ray-traced shadows are
-  on.
+  on, and the sun pass is handed them (`ray_tracing::sunShadow`, whose handover is gated on either:
+  path tracing replaces the ray-traced shadows, so gating it on them alone left the game's shadow map).
 - **Point and spot lights** (`TraceLampLight`, `direct_light.hlsl`), in place of the game's light shaders:
   each light's light as they work it out (`LocalLightReaching`: its falloff, a spot's cone, the game's
   volume for it; a masked spot's mask; the light through leaves, the game's `LN_trans`; its diffuse and

@@ -1021,7 +1021,7 @@ void configure(const Configuration& configuration) noexcept
 Health health()
 {
     const auto wanted = latch.latest();
-    if (!wanted.enabled && !wanted.shadows && !wanted.localLights) return {};
+    if (!wanted.enabled && !wanted.shadows && !wanted.localLights && !wanted.isPathTracing) return {};
 
     std::lock_guard lock(executionMutex);
     if (failed) return Health::unavailable("Ray tracing is unavailable: " + failure);
@@ -1397,9 +1397,11 @@ void present() noexcept
 
     const auto options = latch.present();
 
-    const bool on = (options.enabled || options.shadows || options.localLights) && !failed;
+    // Path tracing traces the sun's shadow itself and replaces the ray-traced shadows, so the shadow
+    // is handed over while either runs: without this the sun pass falls back to the game's shadow map.
+    const bool on = (options.enabled || options.shadows || options.localLights || options.isPathTracing) && !failed;
     lighting = on && options.enabled;
-    shadowing = on && options.shadows;
+    shadowing = on && (options.shadows || options.isPathTracing);
     localShadowing = on && options.localLights;
     if (enabled.exchange(on) && !on)
     {
