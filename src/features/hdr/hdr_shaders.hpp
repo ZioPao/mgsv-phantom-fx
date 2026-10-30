@@ -209,9 +209,14 @@ cbuffer OutputParameters : register(b2)
 {
     float PaperWhite; // Nits
     float Peak;       // Nits
-    uint Encoding;    // 0: linear, for the game's sRGB view; 1: sRGB; 2: HDR10
+    uint Encoding;    // EncodingSrgbView, EncodingSrgb or EncodingPq
     float Padding;
 };
+
+// As hdr.cpp's Encoding: linear, for the game's 8-bit sRGB view; sRGB; HDR10.
+static const uint EncodingSrgbView = 0u;
+static const uint EncodingSrgb = 1u;
+static const uint EncodingPq = 2u;
 
 Texture2D<float4> inImage : register(t0);
 SamplerState g_samplerLinear_Clamp : register(s11);
@@ -282,8 +287,8 @@ float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD0) : SV_Tar
     const float2 uv = texcoord * m_renderInfo.xy * m_renderBuffer.zw;
     const float3 encoded = inImage.Sample(g_samplerLinear_Clamp, uv).rgb;
     const float3 sdr = LinearToSrgb(saturate(Brightness(SrgbToLinear(encoded))));
-    if (Encoding == 0) return float4(SrgbToLinear(Dithered(sdr, uint2(position.xy))), 1);
-    if (Encoding == 1) return float4(sdr, 1);
+    if (Encoding == EncodingSrgbView) return float4(SrgbToLinear(Dithered(sdr, uint2(position.xy))), 1);
+    if (Encoding == EncodingSrgb) return float4(sdr, 1);
 
     const float3 color = max(mul(Bt709To2020, Brightness(DisplayLinear(encoded))), 0);
     return float4(PerceptualQuantizer(RollOff(color, Peak / PaperWhite, WhiteClip) * PaperWhite / 10000), 1);

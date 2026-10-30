@@ -165,7 +165,7 @@ what draws it, when that is the feature's own.
 | `indirect_light/` | `ssilvb.*`: SSILVB's light, brought to the render size and added to the diffuse light the resolve reads. `ssilvb_shaders.hpp`: the upsample |
 | `volumetric_fog/` | `atmosphere.*`: the larger fog texture, the game's fog pass over all of it, the shadowed fill before the resolve. `atmosphere_shaders.hpp`: the game's fog formula per froxel with the sun shadowed; Hillaire's atmosphere tables, the physical fog and sky (Epic Games' reference, MIT) |
 | `photo_mode/` | `photo_mode.*`: photo mode (F2), the game's pause, a free camera through the camera selector, the game's input held back; hiding the UI (F3). `focus.*`: its autofocus |
-| `hdr/` | `hdr.*`: HDR10 output, the swap chain, the float scene targets and their sRGB views, the shader patches, the grading and output passes (see "HDR"). `hdr_shaders.hpp`: the encode and decode of the float scene, bloom's reduction, the grading, the output to PQ |
+| `hdr/` | `hdr.*`: the float scene, in SDR too, and HDR10 output: the swap chain, the float scene targets and their sRGB views, the shader patches, the grading and output passes (see "HDR"). `hdr_shaders.hpp`: the encode and decode of the float scene, bloom's reduction, the grading, the output to PQ or, in SDR, to the game's 8 bits with a dither |
 | `frame_rate/` | `frame_rate.*`: hook on the frame wait setter, the optional 60 fps unlock |
 | `motion_blur/` | `motion_blur.*`: hooks on the motion blur plugin, velocity passes every frame |
 
@@ -1319,12 +1319,12 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
     target, viewport and scissor changed. The tiles it reads stay at the render size: they are 32
     render pixels wide and read bilinearly by texture coordinate. The game's own bake still draws, so
     the passes fall back to it whenever the add-on's is missing.
-  - With HDR the blur takes the same route without upscaling too (DLAA, or the upscaler off), as
-    the game's two targets are 8-bit. They are the game's shared half-size scratch targets, which
-    its SSAO draws into earlier in the frame (frame 141835, #491 to #496), so they are not made
-    float where the game creates them. The first pass halves the scene the game's own halving
-    `CopyRenderBuffer` read (the last copy on the thread whose target the pass reads), and the
-    composite stays on the scene, reading the add-on's result at t0; the game's input goes back
+  - With the scene in float the blur takes the same route without upscaling too (DLAA, or the
+    upscaler off), as the game's two targets are 8-bit. They are the game's shared half-size scratch
+    targets, which its SSAO draws into earlier in the frame (frame 141835, #491 to #496), so they
+    are not made float where the game creates them. The first pass halves the scene the game's own
+    halving `CopyRenderBuffer` read (the last copy on the thread whose target the pass reads), and
+    the composite stays on the scene, reading the add-on's result at t0; the game's input goes back
     after the draw. The bake keeps the game's: it already has the gathers' size. The blur's surfaces
     are made apart from the other output-size targets, so this route makes only them: 41 MB at 4K
     (8 MB of it the bake's, unused here), where the full set would add 166 MB unused.
@@ -1514,9 +1514,9 @@ add-on (1.7.1). FSR runs on Direct3D 12 only.
   A native Direct3D 12 device on the game's GPU opens them
   (`src/features/upscaling/fsr_upscaler.cpp`); Direct3D 11 signals a shared fence and flushes after the inputs pass, Direct3D 12 runs FSR on its own queue,
   and Direct3D 11 waits on the GPU before the composite reads the output.
-- **Colour.** FSR is made for linear colour, so the inputs pass decodes the sRGB-encoded LDR image
-  into `R16G16B16A16_FLOAT` in SDR too, and the composite encodes FSR's output again, as for DLSS in
-  HDR. With HDR FSR runs in its HDR mode.
+- **Colour.** FSR is made for linear colour, so the inputs pass decodes the sRGB-encoded image into
+  `R16G16B16A16_FLOAT`, the game's 8-bit LDR one too, and the composite encodes FSR's output again,
+  as for DLSS in its HDR mode. With the scene in float FSR runs in its HDR mode.
 - **Camera.** Reversed-Z with a finite far plane (`FFX_UPSCALE_ENABLE_DEPTH_INVERTED`, not
   infinite); near and far from `m_viewportSize.zw`, the vertical field of view from P11, metres.
   Motion vectors and jitter are DLSS's: render pixels, motion toward the previous frame without the
@@ -1546,34 +1546,35 @@ works with either upscaler, and switching between DLSS and FSR frame generation 
 
 ## HDR
 
-With `hdr=1` in `PhantomFX.ini` (a restart applies it) the game outputs HDR10 (`src/features/hdr/`). The
-game tonemaps early, in the deferred resolve (`TppTonemap`, `cPSMaterial` c0 = a, b, c, usually
+With `hdr=1` in `PhantomFX.ini` (a restart applies it) the game outputs HDR10 (`src/features/hdr/`).
+The game tonemaps early, in the deferred resolve (`TppTonemap`, `cPSMaterial` c0 = a, b, c, usually
 4.87, 0.6, 0.453: x up to b, then b + c - 1 / (a (x - b + c)), which an 8-bit target clamps at 1,
 reached at x = 4) and inline in 23 forward shaders (sky, clouds, oceans, wormholes, sand wind), and
 everything after worked on that image in 8 bits. With HDR the scene keeps its light up to the
 grading, as RenoDX's mods do, and the grading and output follow RenoDX's and Luma's defaults.
 
 **The float scene in SDR.** On a supported build the scene keeps its light in SDR too (since
-2026-10-30, issue #54): all of the below but the swap chain, the light the grading gives back and the
-HDR output. In 8 bits, smooth fog showed steps of one and two levels, a few of three (measured in a
-screenshot at 3840x2160, DLSS Quality); the game hid them with an 8x8 dither before the upscaler,
-which the upscaler made a grid (issue #28, see "Dither"). The grading is the game's own, so below
-the tonemap's knee the image is the game's but for the steps; above it, glass, particles and the
-reflections blend over the light before the tonemap rather than after it, as with HDR. The image is
-rounded to 8 bits once, by GammaControl's write to the game's `R8G8B8A8_UNORM_SRGB` back buffer, with
-up to half a level either way of white noise (PCG of the pixel, one value for the three channels),
-which turns the steps left into grain too fine to see. It costs what HDR's scene costs: about 0.3 ms at 4K on an RTX 5080
-(0.03 ms encoding the scene, 0.27 ms decoding its copies). DLSS and FSR run in their HDR modes on it.
-If the GPU cannot read `R16G16B16A16_FLOAT` through unordered access views, the scene stays the
-game's 8-bit one.
+2026-10-30, issue #54): all of the below but the swap chain, the light the grading gives back and
+the HDR output. In 8 bits, smooth fog showed steps of one and two levels, a few of three (measured
+in a screenshot at 3840x2160, DLSS Quality); the game hid them with an 8x8 dither before the
+upscaler, which the upscaler made a grid (issue #28, see "Dither"). The grading is the game's own,
+so below the tonemap's knee the image is the game's but for the steps; above it, glass, particles
+and the reflections blend over the light before the tonemap rather than after it, as with HDR. The
+image is rounded to 8 bits once, by GammaControl's write to the game's `R8G8B8A8_UNORM_SRGB` back
+buffer, with up to half a level either way of white noise (PCG of the pixel, one value for the three
+channels), which turns the steps left into grain too fine to see. It costs what HDR's scene costs:
+about 0.3 ms at 4K on an RTX 5080 (0.03 ms encoding the scene, 0.27 ms decoding its copies). DLSS
+and FSR run in their HDR modes on it. If the GPU cannot read `R16G16B16A16_FLOAT` through unordered
+access views, the scene stays the game's 8-bit one.
 
-- **Swap chain** (HDR output only). `create_swapchain`: `R10G10B10A2_UNORM`, flip model (`FLIP_DISCARD`, at least 2
-  buffers). At `init_swapchain` the colour space is set on the native swap chain (ReShade's proxy
-  skips `SetColorSpace1` once an add-on changed the format): `G2084_NONE_P2020` when the output's
-  `DXGI_OUTPUT_DESC1` says Windows shows HDR, otherwise `G22_NONE_P709` and SDR output. ReShade's
-  runtime is told the same with `set_color_space`. The game's `R8G8B8A8_UNORM_SRGB` views of the back
-  buffer become `R10G10B10A2_UNORM`. With frame generation the presenter makes its swap chain from the
-  changed description, and the hudless texture is `R10G10B10A2_UNORM`.
+- **Swap chain** (HDR output only). `create_swapchain`: `R10G10B10A2_UNORM`, flip model
+  (`FLIP_DISCARD`, at least 2 buffers). At `init_swapchain` the colour space is set on the native
+  swap chain (ReShade's proxy skips `SetColorSpace1` once an add-on changed the format):
+  `G2084_NONE_P2020` when the output's `DXGI_OUTPUT_DESC1` says Windows shows HDR, otherwise
+  `G22_NONE_P709` and SDR output. ReShade's runtime is told the same with `set_color_space`. The
+  game's `R8G8B8A8_UNORM_SRGB` views of the back buffer become `R10G10B10A2_UNORM`. With frame
+  generation the presenter makes its swap chain from the changed description, and the hudless
+  texture is `R10G10B10A2_UNORM`.
 - **Scene targets.** The scene target and its copy are the renderer's first two size-dependent
   targets (renderer `+0x1E8`, `+0x1F4`), made through `0x242620` at start-up (return addresses
   `0x2BA676`, `0x2BA6DF`) and `0x242AC0` in each rebuild (`0x24B2C1`, `0x24B2D9`). `create_resource`
@@ -1587,14 +1588,15 @@ game's 8-bit one.
   `CopyDepthBuffer` binds the scene's sRGB view with no colour writes and is left alone.
 - **TppTonemap out.** At `create_pipeline`, every pixel shader with TppTonemap's block, as the game
   compiled it unoptimised (14 instructions: `ge, movc, mul, mov, add, add, mov, add, mul, div, add,
-  add, mul, add`, the movc's literals 1/0 and 0, the div's -1), is patched: the movc's second literal
-  takes the first's, so the linear part is always kept, and the curve's multiply becomes an `and`
-  with the zero beside it (a multiply would keep the curve's pole as NaN). The three sky draws keep
-  their clamp to 1 after it (`min` with a literal of ones; no other shader has one): above it the
-  sun's sprite shows as a ring around a dimmer centre (issue #47), and the physical sky clamps the
-  same way for the sprite it draws. 27 shaders: the 4 resolves and the 23 forward ones. The patched code gets its checksum again (`resign`), and
-  Direct3D must take it before the game does, or the game keeps its own. `init_pipeline` hands every
-  part of the add-on the game's own code, so shaders are still known by their checksum.
+  add, mul, add`, the movc's literals 1/0 and 0, the div's -1), is patched: the movc's second
+  literal takes the first's, so the linear part is always kept, and the curve's multiply becomes an
+  `and` with the zero beside it (a multiply would keep the curve's pole as NaN). The three sky draws
+  keep their clamp to 1 after it (`min` with a literal of ones; no other shader has one): above it
+  the sun's sprite shows as a ring around a dimmer centre (issue #47), and the physical sky clamps
+  the same way for the sprite it draws. 27 shaders: the 4 resolves and the 23 forward ones. The
+  patched code gets its checksum again (`resign`), and Direct3D must take it before the game does,
+  or the game keeps its own. `init_pipeline` hands every part of the add-on the game's own code, so
+  shaders are still known by their checksum.
 - **What expects TppTonemap's image.** `CopyReductionX4` from the scene, the quarter-size copy bloom
   and the lens flares start from, draws with a shader that puts each of its four taps through
   TppTonemap and the clamp to 1, so bloom is as the game had it. The depth of field's
@@ -2834,7 +2836,7 @@ planet's centre is the origin, in km; the game's world has y up in metres.
   row, as the game's sky does: the sea at Mother Base ends short of the planet's horizon, and the
   dark air in front of the planet showed between them as a grey band), the game's sprite over it, the
   last slice's fog in front, then the game's TppTonemap (`cPSMaterial` `c1`) and sRGB encoding, or
-  the encoding alone with HDR, which takes TppTonemap out of the scene. No dither (see "Dither").
+  the encoding alone in the float scene, which takes TppTonemap out of it. No dither (see "Dither").
   Its two textures go to `t6` and `t7` for the draw; the game's are bound again after it.
 - Checked on WARP with made-up constants: blue sky with a pale horizon at noon, orange towards the sun
   at 1 degree, the pink band and the Earth's shadow at -2 degrees.

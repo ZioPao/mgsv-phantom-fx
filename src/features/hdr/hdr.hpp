@@ -37,14 +37,17 @@
 // DLSS runs in its HDR mode on the light (upscaler.cpp).
 namespace phantom_fx::hdr
 {
+// What the session keeps of the scene's light: nothing (the game's 8-bit scene), the float scene with
+// SDR output, or the float scene with HDR output.
+enum class Mode : std::uint8_t { Off, FloatScene, HdrOutput };
+
 // What the swap chain shows: HDR10, sRGB when the display has HDR off, or nothing of HDR's because
 // it is off or could not start.
 enum class Output : std::uint8_t { Off, Hdr10, Sdr, Unavailable };
 
 // ---- Setup ----
-// At start, before the game makes its swap chain and targets. A change takes a restart. HDR output
-// needs the float scene.
-void enable(bool floatScene, bool hdrOutput) noexcept;
+// At start, before the game makes its swap chain and targets. A change takes a restart.
+void enable(Mode mode) noexcept;
 // The scene keeps its light in 16-bit float until the grading this session.
 bool isSceneFloat() noexcept;
 // HDR output runs this session.
