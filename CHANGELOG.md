@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Global illumination: light keeps bouncing.** The global illumination's light cache stopped after
+  the third surface. It now passes its own bounced light on every frame, so light bounces until it
+  fades. Its third bounce also counted only the rays that hit something, which made it too bright, most
+  in open ground. Bright, closed rooms gain the most; elsewhere the change is slight.
 - **Global illumination: steadier light along edges and in grass.** With DLSS or FSR jittering the
   frame, the global illumination's denoiser started the light over along object edges every frame,
   most in grass and bushes. Its half-resolution samples now stay on the surface they had the frame
