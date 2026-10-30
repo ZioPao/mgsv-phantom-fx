@@ -13,6 +13,10 @@
   game has shade. The ray now leaves the depth's point (skipping copies, as where the scene lacks the
   surface) whenever the triangle lies more than a centimetre off it; a triangle on the same plane, as a
   character's folds are, keeps its own point.
+- **Ray-traced shadows no longer start behind an opaque surface.** When the sun lay behind a surface, the
+  shadow ray's lift went along the light's side — a few millimetres behind the wall — so the ray never met
+  the wall and the spot read lit where the game's shadow map has shade. The lift now goes towards the eye
+  for opaque geometry (thin cut-out and leaves keep the light's side, so they don't shadow themselves).
 - **Ray-traced shadows start on the camera's side of the surface.** Where a surface's light is behind it,
   the shadow ray start was offset 2 cm along the light's side — behind the wall — and the sun's rays passed
   the wall's back face, lighting dents whose normals turned towards the sun. The offset now goes towards

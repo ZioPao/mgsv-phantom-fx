@@ -242,13 +242,25 @@ float3 LiftOffTriangle(float3 position, float3 normal)
 // side's normal: where the light is behind the surface, facing flips away from the eye, and the start then
 // lay behind the wall the camera sees — where the sun's rays met its back, which they pass (StopsShadowRay)
 // — and a wall's dimples, whose normals point away from the sun, took sun the game has shade there
-// (2026-10-30). Leaves lit from behind are unchanged: the copy skip takes the leaf, and the ray goes on.
+// (2026-10-30). On the scene's own surface the lift does the same, unless the geometry is thin (cut-out,
+// leaves), which keeps the light's side so it does not shadow itself.
 void ShadowRayStart(ShadowSurface surface, float3 toLight, out float3 origin, out float3 facing, out float tolerance)
 {
     facing = dot(surface.normal, toLight) >= 0.0f ? surface.normal : -surface.normal;
     // Towards the eye, where a normal map has turned the fallback's normal past the camera.
     float3 startSide = dot(surface.normal, surface.position - g_Frame.eye.xyz) > 0.0f ? -surface.normal : surface.normal;
-    origin = surface.exact ? LiftOffTriangle(surface.position, facing) : OffsetFromScreenSurface(surface.position, startSide);
+    if (surface.exact)
+    {
+        // An opaque surface the light lies behind blocks its own ray: lift towards the eye, so the ray
+        // meets the surface's front and is stopped — the shade a wall gives its own far side. Before, the
+        // lift went along the light's side, 2.8 mm behind the wall, and with nothing between it and the
+        // light the spot read lit where the game has shade (the shadow probe, 2026-10-30). Thin geometry —
+        // cut-out, leaves — keeps the light's side, so it does not shadow itself.
+        bool thin = surface.hit.hit
+            && (g_Geometries[FirstGeometry(g_Instances[surface.hit.instance]) + surface.hit.geometry].flags & (GI_GEOMETRY_CUT_OUT | GI_GEOMETRY_LEAF)) != 0;
+        origin = LiftOffTriangle(surface.position, thin ? facing : startSide);
+    }
+    else origin = OffsetFromScreenSurface(surface.position, startSide);
     tolerance = surface.exact ? 0.0f : CopyTolerance(surface.position);
 }
 

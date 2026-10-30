@@ -2416,7 +2416,8 @@ denoiser (see "Ray Reconstruction").
   inside the coarser rock behind for some, so the hidden bush's leaves showed as shadows on what lay
   behind (the shadow probe, 2026-10-24: the camera's ray met leaves 0.1 to 1.4 m away, the game's
   surface 2.4 to 5.9 m). Found, the shadow ray leaves its exact
-  point on the triangle, from the side facing the light, lifted off it along the normal by 16 float
+  point on the triangle, lifted off it towards the eye (thin cut-out and leaves keep the light's side,
+  so they do not shadow themselves) by 16 float
   steps of the point's largest coordinate (`LiftOffTriangle`; coordinates under 128 m count as 128),
   and nothing near it is skipped. That is about 2 mm at 1,200 m from the map's origin, where the game's
   maps reach. The point comes from the triangle's corners and the ray is traced in the instance's own
