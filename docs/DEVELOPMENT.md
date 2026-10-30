@@ -1872,10 +1872,20 @@ Now, each frame:
   counting 1.5): the sky's light where it gets away, else the hash grid cell's where it lands, direct and
   indirect (`ResolveLight`, after the cache's update). The cache only ends the path, as NVIDIA's SHaRC
   does in a path tracer: its lag and coarseness come after a bounce and an albedo.
-- **The cache** (AMD's two-level hash grid of GI-1.2, unchanged): the bounce hits' cells take up to
-  four of their hits' light a frame (`PopulateCells`: sun, sky and the lights, each through a shadow ray),
-  blended 1/16; 30% of them trace on to a third hit whose cell's light gives them one bounce more
-  (`PopulateMultibounceCells`, `UpdateMultibounceCells`); tiles nothing touched for 50 frames go.
+- **The cache** (AMD's two-level hash grid of GI-1.2): the bounce hits' cells take up to four of their
+  hits' light a frame (`PopulateCells`: sun, sky and the lights, each through a shadow ray), blended
+  1/16; tiles nothing touched for 50 frames go. 30% of the hits trace on to a third hit
+  (`PopulateMultibounceCells`), whose cell's light, direct and indirect, becomes their cell's indirect
+  light a frame later (`UpdateMultibounceCells`): the cache feeds its own light back, a bounce more each
+  frame, as SHaRC's and DDGI's caches do, and a bounce keeps only its albedo's share, so the sum
+  settles. A ray that gets away counts as bringing no light: the sky is in the direct light already.
+  Until 2026-10-30 it was GI-1.2's as AMD wrote it: the third hit's direct light alone, three bounces in
+  all, averaged over the rays that hit, which made it too bright by the share that got away (1.4 times
+  in the median of the logs, twice in open ground). Compared in game the same day, the two changed the
+  light little: the G-buffer's albedo averages about 0.26 (linear, a 4K frame), about 80% of the
+  multibounce rays hit, so a bounce keeps about a fifth of the one before; the bounces after the third
+  added about what the third had been too bright by (+0.2% in the sun, none seen in a dim room).
+  Bright, closed rooms, where few rays get away, gain the most.
 - **Foliage's light by world position** (`RememberFoliageLight`, `UpdateFoliageMemory`). Grass and
   leaves sway and the denoiser starts their light over every few frames, so a cell in the world keeps it
   instead: cells about 16 render pixels across where they lie (power-of-two sizes, 6.25 cm at the least)

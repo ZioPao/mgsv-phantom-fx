@@ -8,9 +8,9 @@
 //   sampling). Its bounce ray takes the sky's light where it gets away, and otherwise the light of the
 //   surface it reaches from a world-space radiance cache: AMD's two-level hash grid of GI-1.2 (Capsaicin,
 //   MIT; licenses/Capsaicin-LICENSE.txt), whose cells hold the light at second hits and, through their
-//   own rays, one bounce more. The cache only ends the path, where NVIDIA's SHaRC sits in a path tracer:
-//   its lag (a cell takes 1 / 16 of a frame's light) and its coarseness come after a bounce, not in the
-//   light a pixel sees first.
+//   own rays into other cells, every bounce after. The cache only ends the path, where NVIDIA's SHaRC
+//   sits in a path tracer: its lag (a cell takes 1 / 16 of a frame's light) and its coarseness come
+//   after a bounce, not in the light a pixel sees first.
 // - Foliage's light mostly from cells in the world that keep it over the frames (RememberFoliageLight).
 // - NVIDIA's RELAX denoiser in its spherical harmonics form (gi_denoiser.cpp) at the same grid, given the
 //   motion without the upscaler's jitter and the game's foliage as strands, then the render size from the four light pixels around each render pixel, weighed by how alike their surfaces
@@ -811,7 +811,11 @@ void PurgeTiles(uint did : SV_DispatchThreadID)
     g_HashGridCache_PackedTileIndexBuffer[packedTileIndex] = tileIndex;
 }
 
-// GI-1.2's multibounce: some second hits' cells trace on to a third hit's cell.
+// GI-1.2's multibounce: some second hits' cells trace on to a third hit's cell. A ray that gets away is
+// kept too, as a sample without light: a cell's direct light has the sky already (HitDirectLight), so its
+// indirect light is what the surfaces around it give, over all its rays. GI-1.2 left those rays out, which
+// made the indirect light 1.4 times too bright in the median of the logs, twice in open ground (from the
+// share of multibounce rays that hit, 2026-10-30).
 [numthreads(32, 1, 1)]
 void PopulateMultibounceCells(uint did : SV_DispatchThreadID)
 {
@@ -829,20 +833,25 @@ void PopulateMultibounceCells(uint did : SV_DispatchThreadID)
     float3 direction = mapToCosineHemisphere(random.rand2(), normal);
     float3 origin = OffsetFromTriangle(world, normal);
     SceneHit hit = TraceFromSurface(origin, normal, CopyTolerance(world), direction, MAX_HIT_DISTANCE);
-    if (!hit.hit) return;
+    CountDiagnostic(GI_COUNTER_MULTIBOUNCE_AWAY, !hit.hit);
+    uint cellIndex = kGI1_InvalidId;
+    if (hit.hit)
+    {
+        float3 hitPosition = origin + hit.distance * direction;
+        uint tileIndex;
+        bool isNewTile;
+        cellIndex = HashGridCache_InsertCell(hitPosition, direction, hit.distance, tileIndex, isNewTile);
+        // A hit without room in the cache is left out: its light is unknown, not none.
+        if (cellIndex == kGI1_InvalidId) return;
 
-    float3 hitPosition = origin + hit.distance * direction;
-    uint tileIndex;
-    bool isNewTile;
-    uint cellIndex = HashGridCache_InsertCell(hitPosition, direction, hit.distance, tileIndex, isNewTile);
-    if (cellIndex == kGI1_InvalidId) return;
+        HashGridCache_TouchCell(tileIndex, isNewTile);
+    }
 
-    HashGridCache_TouchCell(tileIndex, isNewTile);
     // Third hits follow the second ones' room; Capsaicin divides by the chance to trace, but a cell
     // averages only the samples that were traced, which made its indirect light 1 / 0.3 too bright.
     uint index = HashGridCache_Keep(GI_COUNTER_VISIBILITY1, g_Frame.lightLayout.z, VisibilityOf(hit, direction), cellIndex, did);
     g_HashGridCache_MultibounceInfoBuffer[index] = packHalf4(float4(albedo, 0.0f));
-    HashGridCache_QueueLight(g_Frame.lightLayout.z + index, cellIndex);
+    if (hit.hit) HashGridCache_QueueLight(g_Frame.lightLayout.z + index, cellIndex);
 }
 
 // The direct light of the queued hits, second and third, into their cells.
@@ -935,8 +944,11 @@ void UpdateTiles(uint groupId : SV_GroupID, uint2 threadId : SV_GroupThreadID)
     }
 }
 
-// Third hits' cells' direct light, filtered, into their second hits' cells' indirect light; it takes
-// effect next frame (GI-1.2).
+// Third hits' cells' light, filtered, into their second hits' cells' indirect light; it takes effect next
+// frame. Their indirect light goes along with their direct light, so the cache feeds its own light back: a
+// bounce more each frame, adding up to all of them, as SHaRC's and DDGI's caches do. A bounce keeps its
+// albedo's share of the light, less where rays get away, so the sum settles. GI-1.2 passed on the direct
+// light alone: three bounces in all.
 [numthreads(32, 1, 1)]
 void UpdateMultibounceCells(uint did : SV_DispatchThreadID)
 {
@@ -945,8 +957,12 @@ void UpdateMultibounceCells(uint did : SV_DispatchThreadID)
     uint visibilityIndex = g_Frame.lightLayout.z + did;
     uint cellIndex = g_HashGridCache_VisibilityCellBuffer[visibilityIndex];
     uint baseCellIndex = g_HashGridCache_VisibilityCellBuffer[g_HashGridCache_VisibilityQueryBuffer[visibilityIndex]];
-    float3 weight = unpackHalf4(g_HashGridCache_MultibounceInfoBuffer[did]).rgb;
-    float3 radiance = HashGridCache_FilteredDirect(cellIndex) * weight;
+    float3 radiance = 0.0f; // None for a ray that got away
+    if (cellIndex != kGI1_InvalidId)
+    {
+        float3 cell = HashGridCache_FilteredDirect(cellIndex) + HashGridCache_FilteredIndirect(cellIndex);
+        radiance = cell * unpackHalf4(g_HashGridCache_MultibounceInfoBuffer[did]).rgb;
+    }
     MaxDiagnostic(GI_COUNTER_MAX_BOUNCE, radiance);
     uint4 quantized = HashGridCache_QuantizeRadiance(RemoveNaNs(radiance));
     if (dot(radiance, radiance) > 0.0f)
