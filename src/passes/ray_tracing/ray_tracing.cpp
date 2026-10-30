@@ -1399,8 +1399,9 @@ void present() noexcept
 
     const bool on = (options.enabled || options.shadows || options.localLights) && !failed;
     lighting = on && options.enabled;
-    shadowing = on && options.shadows;
-    localShadowing = on && options.localLights;
+    // Path tracing's sun and lamps read the rays as the ray-traced shadows and lights do, in their place.
+    shadowing = on && (options.shadows || options.isPathTracing);
+    localShadowing = on && (options.localLights || options.isPathTracing);
     if (enabled.exchange(on) && !on)
     {
         // Off gives the GPU memory back.
