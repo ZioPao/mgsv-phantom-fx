@@ -196,12 +196,6 @@ add_gi_kernels(features/path_tracing/reflections.hlsl TraceReflections)
 add_gi_kernels(features/path_tracing/direct_light.hlsl TraceLampLight)
 add_custom_target(gi_kernels DEPENDS ${GI_SHADER_HEADERS})
 
-# GGX's specular, one file for path tracing's kernels and the sun pass's shaders, which compile at run time:
-# copied into a header as text.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${GI_SHADER_SHARED}/ggx_specular.hlsli")
-file(READ "${GI_SHADER_SHARED}/ggx_specular.hlsli" GGX_SPECULAR_SOURCE)
-configure_file("${GI_SHADER_SHARED}/ggx_specular.hpp.in" "${GI_SHADER_DIR}/ggx_specular.hpp" @ONLY)
-
 # Each feature's settings and their description (src/features/).
 set(PHANTOM_FX_FEATURES src/features/upscaling/settings.cpp src/features/frame_generation/settings.cpp src/features/sun/settings.cpp src/features/ray_traced_shadows/settings.cpp src/features/soft_shadows/settings.cpp src/features/sun_contact_shadows/settings.cpp
     src/features/ray_traced_lights/settings.cpp src/features/lamp_contact_shadows/settings.cpp src/features/lamp_soft_shadows/settings.cpp

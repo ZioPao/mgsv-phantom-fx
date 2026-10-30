@@ -14,9 +14,11 @@ void describe(gi_d3d12::Descriptors& d, const Textures& textures)
     if (textures.guideSpecular) d.texture(19, textures.guideSpecular, DXGI_FORMAT_R16G16B16A16_FLOAT);
     if (textures.lampMasks) d.texture(20, textures.lampMasks, DXGI_FORMAT_R8G8B8A8_UNORM);
     if (textures.guideMaterial) d.texture(21, textures.guideMaterial, DXGI_FORMAT_R8G8B8A8_UNORM);
-    if (textures.guideTranslucency) d.texture(22, textures.guideTranslucency, DXGI_FORMAT_R8_UNORM);
+    if (textures.guideLobe) d.texture(22, textures.guideLobe, DXGI_FORMAT_R8G8B8A8_UNORM);
+    if (textures.specularTable) d.texture(25, textures.specularTable, DXGI_FORMAT_R8G8B8A8_UNORM);
     if (textures.reflection) d.outputTexture(93, textures.reflection, DXGI_FORMAT_R16G16B16A16_FLOAT);
     if (textures.reflectionDistance) d.outputTexture(94, textures.reflectionDistance, DXGI_FORMAT_R16_FLOAT);
+    if (textures.reflectionMap) d.outputTexture(98, textures.reflectionMap, DXGI_FORMAT_R16G16B16A16_FLOAT);
     if (textures.lampDiffuse) d.outputTexture(95, textures.lampDiffuse, DXGI_FORMAT_R16G16B16A16_FLOAT);
     if (textures.lampSpecular) d.outputTexture(96, textures.lampSpecular, DXGI_FORMAT_R16G16B16A16_FLOAT);
 }
