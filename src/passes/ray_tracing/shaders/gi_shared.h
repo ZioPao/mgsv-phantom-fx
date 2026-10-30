@@ -60,7 +60,7 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 #define GI_COUNTER_PACKED_TILES   0u // Two, by GIFrameConstants.hashMisc.y
 #define GI_COUNTER_UPDATE_TILES   2u
 #define GI_COUNTER_VISIBILITY0    3u // Second hits, the bounce rays', whose cells the light reads
-#define GI_COUNTER_VISIBILITY1    4u // Third hits, from the second hits' cells' multibounce rays
+#define GI_COUNTER_VISIBILITY1    4u // The second hits' cells' multibounce rays: their third hits, and those that got away
 #define GI_COUNTER_LIGHTS         5u // Hits whose light PopulateCells works out
 // Diagnostics, read back with the output's statistics.
 #define GI_COUNTER_HITS           6u // The light's rays that hit something
@@ -70,6 +70,7 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 #define GI_COUNTER_BOUNCE_HITS    10u // Bounce rays that hit something (the rest reach the sky)
 #define GI_COUNTER_FOLIAGE        11u // Light pixels on the game's foliage (PrepareGuides)
 #define GI_COUNTER_FOLIAGE_MEMORY_FULL 12u // Foliage light pixels the foliage memory had no room for (ResolveLight)
+#define GI_COUNTER_MULTIBOUNCE_AWAY 13u // Multibounce rays that reach the sky (PopulateMultibounceCells)
 // The frame's largest value (asuint of a float, its largest channel) at each step of the light
 // (MaxDiagnostic in gi_light.hlsl), to find where light grows past what the sun and sky give.
 #define GI_COUNTER_MAX_ALBEDO     16u // A hit's albedo
