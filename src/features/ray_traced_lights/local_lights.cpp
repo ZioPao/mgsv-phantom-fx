@@ -4,6 +4,7 @@
 #include "command_list_notes.hpp"
 #include "constant_capture.hpp"
 #include "d3d11_helpers.hpp"
+#include "features/path_tracing/path_tracing.hpp"
 #include "frame_log.hpp"
 #include "game_lights.hpp"
 #include "game_shaders.hpp"
@@ -43,7 +44,7 @@ enum class BeyondVolumes : std::uint8_t { None, ShadowMapped, All };
 // What the light shaders read: t0 to t10 (the G-buffer, its depth at t2, the mask at t4, the specular
 // tables at t8 and t9, the material table at t10), s8 to s11, and the scene, light and material constants
 // at b2 to b4.
-constexpr UINT ResourceSlots = 11, DepthSlot = 2, FirstSampler = 8, SamplerCount = 4;
+constexpr UINT ResourceSlots = 11, DepthSlot = 2, MaskSlot = 4, FirstSampler = 8, SamplerCount = 4;
 // A light's volume as copied from its draw: its indices, then from VolumeVertexStart its vertices. The
 // game's had at most 138 indices and 46 vertices of 16 bytes (2026-10-24).
 constexpr UINT VolumeBytes = 4096, VolumeVertexStart = 1024;
@@ -212,8 +213,9 @@ struct Notes
     }
 };
 
-// What the effect plan asked for (configure).
-std::atomic<bool> wantedRunning{};
+// What the effect plan asked for (configure): the ray-traced lights, or path tracing alone, which takes the
+// game's lights only while it runs (ray_tracing::isPathTracing).
+std::atomic<bool> wantedRunning{}, isForPathTracingOnly{};
 // On with the pipeline and a twin of the game's: the draw points and the lists are followed. Active once a
 // frame also had a draw point, whose list draws them again: the game's lights are taken over. Menus and
 // loading screens, without one, keep the game's.
@@ -271,6 +273,8 @@ std::unordered_map<std::uint64_t, Bounds> volumeBounds;
 // the kick, or the shadow not traced), those of them drawn without their volume, left to the next frame's
 // camera or over the mask's bits at the kick, and lost (a frame ended without a draw point after them).
 std::atomic<std::uint64_t> drawnShadowed{}, drawnUnshadowed{}, drawnWithoutVolume{}, otherFrame{}, overCap{}, lost{};
+// And those path tracing lit (drawPathTracedLights).
+std::atomic<std::uint64_t> drawnPathTraced{};
 // Diagnostics: contexts' or lists' notes never handed over (CommandListNotes::present).
 std::atomic<std::uint64_t> expiredNotes{};
 
@@ -721,6 +725,18 @@ void saveForRecord(const std::filesystem::path& folder, int batch, const char* w
     }
 }
 
+// Path tracing's light (path_tracing::addLampLight) once for every light the frame's kick traced (`traced`);
+// false while it does not light them.
+bool addPathTracedLights()
+{
+    const auto traced = std::ranges::find_if(frameLights, &Light::traced);
+    if (traced == frameLights.end() || !path_tracing::addLampLight(immediate, traced->targets[0].Get(), traced->targets[1].Get())) return false;
+
+    drawnPathTraced += std::ranges::count_if(frameLights, &Light::traced);
+
+    return true;
+}
+
 // The frame's lights so far, on the immediate context; call with resourceMutex held. The command lists
 // the immediate context runs next set their own state, so this only unbinds what it bound.
 void drawFrameLights()
@@ -736,6 +752,8 @@ void drawFrameLights()
             return;
         }
 
+        // Path tracing lit the lights the kick traced, timed as its own; the others are drawn again, unshadowed.
+        const bool isPathTraced = addPathTracedLights();
         const performance::Timed timed(immediate, performance::Pass::LocalLights);
         immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         immediate->IASetInputLayout(nullptr);
@@ -747,7 +765,8 @@ void drawFrameLights()
         if (record.empty()) recordBatch = 0;
         else saveForRecord(record, recordBatch, "before");
 
-        for (const auto& light : frameLights) drawAgain(light);
+        for (const auto& light : frameLights)
+            if (!isPathTraced || !light.traced) drawAgain(light);
 
         measureVolumes();
         if (!record.empty()) saveForRecord(record, recordBatch++, "after");
@@ -789,7 +808,8 @@ void logLights()
     const auto withoutVolumeCount = drawnWithoutVolume.exchange(0);
     const auto otherCount = otherFrame.exchange(0), overCount = overCap.exchange(0), lostCount = lost.exchange(0);
     const auto expiredCount = expiredNotes.exchange(0);
-    if (shadowedCount + unshadowedCount + otherCount + overCount + lostCount + expiredCount == 0) return;
+    const auto pathTracedCount = drawnPathTraced.exchange(0);
+    if (shadowedCount + unshadowedCount + otherCount + overCount + lostCount + expiredCount + pathTracedCount == 0) return;
 
     std::size_t boundsCount{};
     {
@@ -797,7 +817,8 @@ void logLights()
         boundsCount = volumeBounds.size();
     }
 
-    log("Lights in ten seconds: " + std::to_string(shadowedCount) + " drawn with their ray-traced shadow, " + std::to_string(unshadowedCount)
+    log("Lights in ten seconds: " + std::to_string(pathTracedCount) + " path traced, " + std::to_string(shadowedCount) + " drawn with their ray-traced shadow, "
+        + std::to_string(unshadowedCount)
         + " without (recorded after the kick, or not traced), " + std::to_string(withoutVolumeCount)
         + " of all drawn without the game's volume; at the kicks " + std::to_string(otherCount) + " left for another frame's camera, "
         + std::to_string(overCount) + " over the " + std::to_string(GI_MAX_LOCAL_LIGHTS) + " the rays take; " + std::to_string(lostCount)
@@ -863,8 +884,11 @@ void detach() noexcept
 
 void configure(const Configuration& configuration) noexcept
 {
-    const bool running = configuration.effects.runs(Effect::RayTracedLights);
+    // Path tracing lights them from their records (path_tracing::addLampLight), with or without the ray-traced lights.
+    const bool rayTraced = configuration.effects.runs(Effect::RayTracedLights);
+    const bool running = rayTraced || configuration.effects.runs(Effect::PathTracing);
     wantedRunning = running;
+    isForPathTracingOnly = !rayTraced;
     flashlightBrightness = configuration.settings.rayTracedLights.flashlightBrightness;
     beyondVolumes = static_cast<BeyondVolumes>(std::clamp(configuration.diagnostics.lightVolumes, 0, 2));
 
@@ -896,6 +920,9 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
     {
         const auto* game = gameLightOf(shader.row());
         if (!game || isBeam(context, *game)) return false;
+
+        // For path tracing alone, the game draws its lights while the rays do not light them.
+        if (isForPathTracingOnly.load(std::memory_order_relaxed) && !ray_tracing::isPathTracing()) return false;
 
         // A smaller camera's light, as the intro mirror's: the rays trace the main view only.
         if (!viewportFillsTarget(context)) return false;
@@ -956,9 +983,9 @@ void forget(std::uint64_t contextOrList) noexcept
     notes.forget(contextOrList);
 }
 
-std::vector<LocalLight> takeForTrace(const SceneConstants& camera) noexcept
+std::vector<TracedLight> takeForTrace(const SceneConstants& camera) noexcept
 {
-    std::vector<LocalLight> lights;
+    std::vector<TracedLight> lights;
     if (!active.load(std::memory_order_relaxed)) return lights;
 
     try
@@ -981,7 +1008,8 @@ std::vector<LocalLight> takeForTrace(const SceneConstants& camera) noexcept
             {
                 auto& light = *untraced[index];
                 light.traced = true;
-                lights.push_back(light_choice::forRays(light.drawn, volumeBoundsOf(light.drawn)));
+                auto rays = light_choice::forRays(light.drawn, volumeBoundsOf(light.drawn));
+                lights.push_back({rays, rays.isMasked ? light.resources[MaskSlot] : nullptr});
             }
         });
     }

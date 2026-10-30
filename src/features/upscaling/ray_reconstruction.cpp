@@ -57,7 +57,7 @@ struct State
     NVSDK_NGX_Parameter* parameters{};
     NVSDK_NGX_Handle* feature{};
     FeatureKey key;
-    OpenedTexture color, depth, motion, output, normalRoughness, diffuseAlbedo, specularAlbedo, dofGuide;
+    OpenedTexture color, depth, motion, output, normalRoughness, diffuseAlbedo, specularAlbedo, dofGuide, specularHitDistance;
 };
 std::unique_ptr<State> state;
 
@@ -256,11 +256,15 @@ bool evaluate(const Inputs& inputs)
             open(s, s.specularAlbedo, inputs.specularAlbedo, "Opening the Ray Reconstruction specular albedo")};
         auto* dofGuide = inputs.dofGuide ? open(s, s.dofGuide, inputs.dofGuide, "Opening the Ray Reconstruction depth of field guide") : nullptr;
         auto* written = open(s, s.output, inputs.output, "Opening the Ray Reconstruction output");
-        std::array<D3D12_RESOURCE_BARRIER, std::size(reads) + 2> barriers{};
+        auto* hitDistance = inputs.specularHitDistance
+            ? open(s, s.specularHitDistance, inputs.specularHitDistance, "Opening the Ray Reconstruction specular hit distance")
+            : nullptr;
+        std::array<D3D12_RESOURCE_BARRIER, std::size(reads) + 3> barriers{};
         UINT barrierCount{};
         for (auto* read : reads) barriers[barrierCount++] = transition(read, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         if (dofGuide) barriers[barrierCount++] = transition(dofGuide, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (hitDistance) barriers[barrierCount++] = transition(hitDistance, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         barriers[barrierCount++] = transition(written, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         s.list->ResourceBarrier(barrierCount, barriers.data());
 
@@ -276,6 +280,7 @@ bool evaluate(const Inputs& inputs)
         evaluation.pInSpecularAlbedo = reads[5];
         evaluation.pInDepthOfFieldGuide = dofGuide;
         evaluation.pInOutput = written;
+        evaluation.pInSpecularHitDistance = hitDistance;
         evaluation.InJitterOffsetX = inputs.jitter[0];
         evaluation.InJitterOffsetY = inputs.jitter[1];
         evaluation.InRenderSubrectDimensions = {color.Width, color.Height};

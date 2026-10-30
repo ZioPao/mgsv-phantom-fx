@@ -41,6 +41,20 @@ struct Textures
     DXGI_FORMAT velocityFormat{};
     ID3D11Texture2D* localLightShadow{}; // R16_FLOAT, the share of the point and spot lights' light that reaches; null without lights
     ID3D11Texture2D* lightDebug{}; // R8G8B8A8_UNORM, the light's debug view (CompositeLight, LightDebugView); null while off
+    // Path tracing (reflections.hlsl): Ray Reconstruction's guides (ray_tracing::ReconstructionGuides), the reflected light
+    // (R16G16B16A16_FLOAT, times the specular albedo and the exposure) and its hit distance (R16_FLOAT); null while off.
+    ID3D11Texture2D* guideNormals{};
+    ID3D11Texture2D* guideSpecular{};
+    ID3D11Texture2D* reflection{};
+    ID3D11Texture2D* reflectionDistance{};
+    // And its lamps (direct_light.hlsl): the material guides (the specular colour and the translucency, R8G8B8A8_UNORM;
+    // the light through the leaves' floor, R8_UNORM), the masks' atlas (null without masks) and the lamps' diffuse and
+    // specular light (R16G16B16A16_FLOAT); null while off.
+    ID3D11Texture2D* guideMaterial{};
+    ID3D11Texture2D* guideTranslucency{};
+    ID3D11Texture2D* lampMasks{};
+    ID3D11Texture2D* lampDiffuse{};
+    ID3D11Texture2D* lampSpecular{};
 };
 
 using Matrix = std::array<float, 16>; // Rows applied as dot(row, v), as the engine's
@@ -88,6 +102,7 @@ struct Frame
     bool modelInstancesUpdated{};
     std::vector<SceneTexture> newTextures; // Copied, or copied again as the game streamed more of it in, since the last frame
     std::optional<Terrain> terrain; // Absent until the game's terrain draws give its inputs
+    std::optional<float> seaLevel;  // The sea's (sea::level); absent in a frame without the add-on's sea
     std::uint32_t frameIndex{};
     bool showScene{}; // The output shows the traced scene instead of the light
     bool logOften{};  // Diagnostics: the light's statistics logged every few frames (as each readback returns), not every ten seconds
@@ -95,6 +110,8 @@ struct Frame
     // DLSS Ray Reconstruction denoises: the light takes a sample a render pixel and skips its denoiser, and
     // the sun's and the lights' shadows go out as their rays found them (GIFrameConstants::reconstruction).
     bool forReconstruction{};
+    // With it, path tracing: the reflections and the point and spot lights traced (path_tracing_rays.hpp).
+    bool isPathTraced{};
     // The sun's ray-traced shadow into textures.shadow; the game's shadow map range (cPSLight c8.x,
     // c8.y, c6.x, and 1 once known) and the tangent of the sun's angular radius.
     bool traceShadows{};

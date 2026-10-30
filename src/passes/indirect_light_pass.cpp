@@ -4,6 +4,7 @@
 #include "features/ambient_occlusion/gtvbao.hpp"
 #include "features/global_illumination/light_combine.hpp"
 #include "features/indirect_light/ssilvb.hpp"
+#include "features/path_tracing/path_tracing.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
 #include "frame_latch.hpp"
 #include "game_constants.hpp"
@@ -41,8 +42,8 @@ constexpr UINT SpecularSlot = 1; // The sun's g_SpecularTexture
 constexpr UINT FresnelSlot = 9, MaterialSlot = 10; // The sun's g_lut1 and g_MaterialTexture
 constexpr UINT DepthSlot = 2;    // The upscale's inDepthBuffer
 constexpr UINT SceneSlot = game_constants::SceneConstants::Slot; // In the upscale and the resolves
-// Every resolve's inAlbedo, inLightDiffuse, inDepth and inOcclusion.
-constexpr UINT AlbedoSlot = 8, DiffuseSlot = 9, ResolveDepthSlot = 11, OcclusionSlot = 13;
+// Every resolve's inAlbedo, inLightDiffuse, inLightSpecular, inDepth and inOcclusion; the rain's inSpecular.
+constexpr UINT AlbedoSlot = 8, DiffuseSlot = 9, SpecularLightSlot = 10, ResolveDepthSlot = 11, OcclusionSlot = 13, RainSpecularSlot = 3;
 
 // The effects that change these passes, by the effect plan, and the diagnostics' views of them.
 struct Composition
@@ -266,16 +267,20 @@ void noteForRayTracing(ID3D11DeviceContext* context, const GameShader& shader)
 // The resolve while the global illumination runs: the diffuse light with the traced light in place
 // of the game's probe light, white in place of the game's occlusion; or, for the diagnostics, the
 // global illumination's output alone. False leaves the draw to the game.
-bool drawResolveForGlobal(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, const Composition& composition, ID3D11PixelShader* gameShader)
+bool drawResolveForGlobal(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, const Composition& composition, const GameShader& resolve,
+    ID3D11PixelShader* gameShader)
 {
     if (!ray_tracing::lightRuns()) return false;
 
-    ComPtr<ID3D11ShaderResourceView> depth, diffuse, gameOcclusion;
+    ComPtr<ID3D11ShaderResourceView> depth, diffuse, specular, gameOcclusion;
     context->PSGetShaderResources(ResolveDepthSlot, 1, depth.GetAddressOf());
     context->PSGetShaderResources(DiffuseSlot, 1, diffuse.GetAddressOf());
+    context->PSGetShaderResources(SpecularLightSlot, 1, specular.GetAddressOf());
 
     const auto size = sizeOf(depth.Get());
     auto* light = ray_tracing::light(size.first, size.second);
+    // Path tracing's reflections join the specular light.
+    auto* specularWithReflections = path_tracing::addReflections(context, specular.Get(), size);
     std::lock_guard lock(resourceMutex);
     if (!ensurePipeline()) return false;
     if (!light_combine::combine(context, diffuse.Get(), light, size, diffuseWithLight)) return false;
@@ -289,10 +294,24 @@ bool drawResolveForGlobal(ID3D11DeviceContext* context, const ui_redirect::DrawC
     else context->PSSetShaderResources(DiffuseSlot, 1, diffuseWithLight.view.GetAddressOf());
 
     context->PSSetShaderResources(OcclusionSlot, 1, whiteView.GetAddressOf());
+    if (specularWithReflections) context->PSSetShaderResources(SpecularLightSlot, 1, &specularWithReflections);
+    // With the traced reflections in the specular light, the rain's reflection of the sky goes: no specular
+    // intensity (a null view reads 0), as the sun pass leaves its own out.
+    const bool leavesRainReflection = specularWithReflections && resolve.hasRainReflection;
+    ComPtr<ID3D11ShaderResourceView> rainSpecular;
+    if (leavesRainReflection)
+    {
+        context->PSGetShaderResources(RainSpecularSlot, 1, rainSpecular.GetAddressOf());
+        ID3D11ShaderResourceView* none{};
+        context->PSSetShaderResources(RainSpecularSlot, 1, &none);
+    }
+
     context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
     context->PSSetShader(gameShader, nullptr, 0);
     context->PSSetShaderResources(DiffuseSlot, 1, diffuse.GetAddressOf());
+    context->PSSetShaderResources(SpecularLightSlot, 1, specular.GetAddressOf());
     context->PSSetShaderResources(OcclusionSlot, 1, gameOcclusion.GetAddressOf());
+    if (leavesRainReflection) context->PSSetShaderResources(RainSpecularSlot, 1, rainSpecular.GetAddressOf());
 
     return true;
 }
@@ -443,7 +462,7 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
             switch (row->pass)
             {
             case GamePass::Resolve:
-                return viewportFillsTarget(context) ? drawResolveForGlobal(context, call, composition, shader.object()) : drawSmallerViewResolve(context, call);
+                return viewportFillsTarget(context) ? drawResolveForGlobal(context, call, composition, *row, shader.object()) : drawSmallerViewResolve(context, call);
             case GamePass::GameOcclusion: return ray_tracing::lightRuns();
             default: return false;
             }

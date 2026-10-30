@@ -55,6 +55,7 @@ Needs DXR 1.1.
 - **Ray-traced shadows** for the sun
 - **Ray-traced lights:** shadows for every lamp, spot light and flashlight
 - **Ray-traced global illumination** (NVIDIA NRD denoiser)
+- **Path tracing:** traced reflections, sunlight and lamplight, with DLSS Ray Reconstruction
 
 ### Lighting and atmosphere
 
@@ -63,6 +64,7 @@ Needs DXR 1.1.
 - **Ambient occlusion** (GTVBAO)
 - **Indirect lighting** (SSILVB)
 - **Volumetric fog** with light shafts and a physical sky
+- **Sea:** ocean waves around Mother Base, lit and reflected like the rest of the world
 
 ### Output and tools
 

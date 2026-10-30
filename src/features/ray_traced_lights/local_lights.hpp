@@ -7,6 +7,7 @@
 #include "ui_redirect.hpp"
 
 #include <d3d11.h>
+#include <wrl/client.h>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -40,9 +41,15 @@ void recorded(std::uint64_t into, std::uint64_t from) noexcept;
 void forget(std::uint64_t contextOrList) noexcept;
 
 // ---- Immediate context ----
+// A light for the rays, with a masked spot's mask (the game's t4) for path tracing.
+struct TracedLight
+{
+    light_choice::LocalLight light;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> mask;
+};
 // At the kick: the chosen lights (light_choice::choose) among those recorded and not traced yet, as the
 // rays take them; those given are drawn with the rays' shadow.
-std::vector<light_choice::LocalLight> takeForTrace(const game_constants::SceneConstants& camera) noexcept;
+std::vector<TracedLight> takeForTrace(const game_constants::SceneConstants& camera) noexcept;
 // Before the immediate context executes `list`, after the global illumination's wait: at each list with
 // a draw point (noteDrawPoint), the lights of the lists run so far are drawn.
 void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept;

@@ -46,6 +46,9 @@ struct Upscaling
     float customRenderScale{0.75f};
     float textureBiasOffset{};
 
+    // DLSS upscales and Ray Reconstruction is asked for; whether it runs is the upscaler's.
+    bool isRayReconstructionAsked() const { return upscaler == upscaler::Upscaler::Dlss && mode != upscaler::Mode::Off && rayReconstruction; }
+
     bool operator==(const Upscaling&) const = default;
 };
 

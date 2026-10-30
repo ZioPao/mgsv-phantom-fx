@@ -1316,6 +1316,7 @@ bool upscale(const FxaaPass& pass, const Frame& current)
             inputs.diffuseAlbedo = guides->diffuseAlbedo.Get();
             inputs.specularAlbedo = guides->specularAlbedo.Get();
             inputs.dofGuide = sceneBeforeDof ? dofGuideTarget.texture.Get() : nullptr;
+            inputs.specularHitDistance = ray_tracing::reflectionDistance(width, height);
             inputs.worldToView = camera.worldToView;
             inputs.viewToClip = camera.viewToClip;
             inputs.jitter[0] = current.jitter[0];
