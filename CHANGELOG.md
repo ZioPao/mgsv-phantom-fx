@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **SDR: no more banding in smooth fog and sky.** The game kept its picture in 8 bits from early in
+  the frame, so smooth fog showed bands a level or two apart. The picture now stays in 16-bit
+  colour until the end in SDR too, as with HDR, and a fine dither hides the last rounding. It costs
+  about 0.3 ms at 4K.
 - **Global illumination: steadier light along edges and in grass.** With DLSS or FSR jittering the
   frame, the global illumination's denoiser started the light over along object edges every frame,
   most in grass and bushes. Its half-resolution samples now stay on the surface they had the frame
