@@ -225,12 +225,18 @@ float3 LiftOffTriangle(float3 position, float3 normal)
     return position + normal * (steps * step * largest);
 }
 
-// A shadow ray's start towards `toLight`: from the surface's side facing the light, as leaves lit from
-// behind take light through them.
+// A shadow ray's start towards `toLight`: from the surface's side facing the light (`facing`), as leaves
+// lit from behind take light through them. Its point, though, is offset towards the eye, never along that
+// side's normal: where the light is behind the surface, facing flips away from the eye, and the start then
+// lay behind the wall the camera sees — where the sun's rays met its back, which they pass (StopsShadowRay)
+// — and a wall's dimples, whose normals point away from the sun, took sun the game has shade there
+// (2026-10-30). Leaves lit from behind are unchanged: the copy skip takes the leaf, and the ray goes on.
 void ShadowRayStart(ShadowSurface surface, float3 toLight, out float3 origin, out float3 facing, out float tolerance)
 {
     facing = dot(surface.normal, toLight) >= 0.0f ? surface.normal : -surface.normal;
-    origin = surface.exact ? LiftOffTriangle(surface.position, facing) : OffsetFromScreenSurface(surface.position, facing);
+    // Towards the eye, where a normal map has turned the fallback's normal past the camera.
+    float3 startSide = dot(surface.normal, surface.position - g_Frame.eye.xyz) > 0.0f ? -surface.normal : surface.normal;
+    origin = surface.exact ? LiftOffTriangle(surface.position, facing) : OffsetFromScreenSurface(surface.position, startSide);
     tolerance = surface.exact ? 0.0f : CopyTolerance(surface.position);
 }
 

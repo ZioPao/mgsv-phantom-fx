@@ -7,6 +7,10 @@
   the shadow ray off its own normal, and a facet turned towards a distant opening's sun came back lit where
   the game has shade, so the dimples' rims glowed on a shadowed wall. A surface now also has to face within
   60 degrees of the G-buffer's normal to be where the rays leave (the shadow ray starts view's blue).
+- **Ray-traced shadows start on the camera's side of the surface.** Where a surface's light is behind it,
+  the shadow ray start was offset 2 cm along the light's side — behind the wall — and the sun's rays passed
+  the wall's back face, lighting dents whose normals turned towards the sun. The offset now goes towards
+  the eye, so the wall's own front face is in the ray's way.
 - **Normal maps turn the traced light.** The ray-traced scene holds only the triangles' own normals, so a
   hit on a normal-mapped surface was lit as if it were flat: its bounce and the reflections read as coming
   from the wrong side of the bump. Where the camera sees the hit, the light now uses the G-buffer's normal,

@@ -2436,7 +2436,12 @@ denoiser (see "Ray Reconstruction").
    either: a wall's dimples, drawn as a normal map, have the flat wall's facets in the scene, and a facet
    turned towards a distant opening's sun lit the dimple's rim where the game has shade (2026-10-30). So a
    surface must also face within 60 degrees of the G-buffer's normal (`SceneSurfaceNormalCosine`, the
-   shadow ray starts view's blue) to be the one the rays leave from. Until 2026-10-24
+   shadow ray starts view's blue) to be the one the rays leave from. The fallback's offset goes towards
+   the eye, never along the side facing the light: facing flips the normal where the light is behind the
+   surface, and the start 2 cm behind the wall then met its back, which the sun's rays pass
+   (`StopsShadowRay`), so a wall's dimples with their normals turned from the sun took its light where the
+   game has shade — the sun's map has the wall's outside lit, so nothing else darkened them (2026-10-30).
+   Until 2026-10-24
   every ray left that way: a lamp's hard shadow showed the skip taking a character pressed to a wall
   for a copy of the wall, light through his back in patches ragged along the wall's bumpy normals.
 - **Cut-out meshes.** A model mesh the game alpha-tests (FMDL alpha bits 5 and 7, see "Scene objects",
