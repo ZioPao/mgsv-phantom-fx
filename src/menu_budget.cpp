@@ -19,7 +19,6 @@
 
 #include <algorithm>
 #include <array>
-#include <format>
 #include <initializer_list>
 #include <span>
 #include <string>
@@ -94,11 +93,14 @@ std::string_view lineOf(Effect effect)
     return featureOf(effect).menuId;
 }
 
-// The line of the effect that replaces `effect`, if any.
-std::string_view replacerLineOf(Effect effect)
+// What a Lacking effect needs, in its features' words.
+std::string needsOf(Effect effect)
 {
-    const auto replacer = featureOf(effect).replacedBy;
-    return replacer ? lineOf(*replacer) : std::string_view{};
+    const auto& feature = featureOf(effect);
+    std::string needs = feature.needs ? featureOf(*feature.needs).name : "";
+    if (feature.needsRayReconstruction) needs += std::string(needs.empty() ? "" : " and ") + "DLSS Ray Reconstruction";
+
+    return "Needs " + needs + " on.";
 }
 
 // A lighting effect's line state, and its message.
@@ -115,7 +117,7 @@ Report reportOf(Effect effect, EffectState planned, Health health)
     if (planned == EffectState::Unsupported) return {State::Unavailable, "This game version is not supported, so it stays off."};
     if (planned == EffectState::Held) return {State::Held};
     if (planned == EffectState::Replaced) return {State::Replaced};
-    if (planned == EffectState::Lacking) return {State::NotRunning, std::format("Needs {} on.", featureOf(*featureOf(effect).needs).name)};
+    if (planned == EffectState::Lacking) return {State::NotRunning, needsOf(effect)};
     if (health.kind == Health::Kind::Unavailable) return {State::Unavailable, std::move(health.reason)};
     if (health.kind == Health::Kind::Waiting) return {State::NotRunning, std::move(health.reason)};
 
@@ -181,8 +183,9 @@ fxui::Budget budget(Settings& wanted, const performance::Costs& costs)
 
     const auto timed = [&](Pass pass) { return costs.passes[static_cast<std::size_t>(pass)]; };
 
-    // The replacement sun light pass runs for every sun shadow.
-    const LineState sunShadows[]{lineState(Effect::RayTracedShadows), lineState(Effect::SoftShadows), lineState(Effect::SunContactShadows)};
+    // The replacement sun light pass runs for path tracing's sun and every sun shadow.
+    const LineState sunShadows[]{lineState(Effect::PathTracing), lineState(Effect::RayTracedShadows), lineState(Effect::SoftShadows),
+        lineState(Effect::SunContactShadows)};
     const auto sunLight = owner(sunShadows);
 
     // Each ray-traced effect has its own rays on Direct3D 12. What they share, the scene and handing the
@@ -238,7 +241,7 @@ fxui::Budget budget(Settings& wanted, const performance::Costs& costs)
         const auto& feature = featureOf(line.effect);
         const auto& [state, message] = reports[line.effect];
         add({.id = feature.menuId, .name = feature.name, .tech = feature.tech ? feature.tech : "", .section = at(feature.section), .state = state,
-                .toggle = &switchOf(wanted, line.effect), .replacedBy = replacerLineOf(line.effect), .message = message},
+                .toggle = &switchOf(wanted, line.effect), .replacedBy = plan.replacers[line.effect] ? lineOf(*plan.replacers[line.effect]) : std::string_view{}, .message = message},
             line.passes);
     }
 

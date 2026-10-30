@@ -256,15 +256,27 @@ EffectPlan planEffects(const Settings& settings, const EffectConditions& conditi
     EffectSwitches described;
     describe(copy, described);
     const auto on = [&](Effect effect) { return *described.switches[effect]; };
+    const auto asksForNeeds = [&](Effect effect) {
+        const auto& feature = featureOf(effect);
+        return (!feature.needs || on(*feature.needs)) && (!feature.needsRayReconstruction || settings.upscaling.isRayReconstructionAsked());
+    };
+    const auto replacerOf = [&](Effect effect) {
+        std::optional<Effect> replacer;
+        for (auto next = featureOf(effect).replacedBy; next; next = featureOf(*next).replacedBy)
+            if (on(*next) && asksForNeeds(*next)) replacer = next;
+
+        return replacer;
+    };
 
     EffectPlan plan;
     for (const auto effect : AllEffects)
     {
         const auto& feature = featureOf(effect);
+        plan.replacers[effect] = replacerOf(effect);
         plan.states[effect] = !on(effect)                               ? EffectState::Off
             : feature.needsSupportedBuild && !conditions.supportedBuild ? EffectState::Unsupported
             : !conditions.enhancements                                  ? EffectState::Held
-            : feature.replacedBy && on(*feature.replacedBy)             ? EffectState::Replaced
+            : plan.replacers[effect]                                    ? EffectState::Replaced
             : conditions.leftOut.effects[effect]                        ? EffectState::LeftOut
                                                                         : EffectState::Running;
     }
@@ -273,7 +285,7 @@ EffectPlan planEffects(const Settings& settings, const EffectConditions& conditi
     for (const auto effect : AllEffects)
     {
         const auto needs = featureOf(effect).needs;
-        if (plan.runs(effect) && needs && !plan.runs(*needs)) plan.states[effect] = EffectState::Lacking;
+        if (plan.runs(effect) && (!asksForNeeds(effect) || (needs && !plan.runs(*needs)))) plan.states[effect] = EffectState::Lacking;
     }
 
     return plan;

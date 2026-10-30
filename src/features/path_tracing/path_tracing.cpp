@@ -42,8 +42,8 @@ struct MaskParameters
     std::uint32_t tile, padding[3];
 };
 
-// The effect plan runs path tracing (configure), and how strongly the reflections are added; DLSS Ray
-// Reconstruction is asked for, which it waits on.
+// The effect plan runs path tracing (configure), with DLSS Ray Reconstruction asked for, which it waits on;
+// and how strongly the reflections are added.
 struct Wanted
 {
     bool on{};
@@ -51,7 +51,7 @@ struct Wanted
 };
 
 FrameLatch<Wanted> latch;
-std::atomic<bool> wanted{}, isReconstructionAsked{}, pipelineFailed{};
+std::atomic<bool> wanted{}, pipelineFailed{};
 
 // The scene's depth each context's reflection mask read, for the blend it records next.
 std::mutex depthMutex;
@@ -179,7 +179,6 @@ void configure(const Configuration& configuration) noexcept
     const bool on = configuration.effects.runs(Effect::PathTracing);
     latch.set({on, configuration.settings.pathTracing.reflections});
     wanted = on;
-    isReconstructionAsked = configuration.settings.upscaling.isRayReconstructionAsked();
     if (!on) return;
 
     std::lock_guard lock(resourceMutex);
@@ -196,7 +195,6 @@ Health health()
     if (!wanted) return {};
     if (pipelineFailed) return Health::unavailable("Path tracing is unavailable (see PhantomFX.log).");
     if (sun_light_pass::failed()) return Health::unavailable("The sun light pass's shaders are unavailable (see PhantomFX.log).");
-    if (!isReconstructionAsked) return Health::waiting("Needs DLSS Ray Reconstruction (Upscaling).");
     if (!ray_tracing::isPathTracing()) return Health::waiting("Waits for DLSS Ray Reconstruction to denoise a frame.");
 
     return {};
