@@ -47,7 +47,10 @@ constexpr UINT MaterialSlot = 4, CurveSlot = 8, OutputSlot = 2, DofSceneSlot = 1
 // below the knee, the div is -1 / (a (x - b + c)), and the third mul weighs the curve's part.
 constexpr std::uint32_t TonemapBlock[]{0x1D, 0x37, 0x38, 0x36, 0x00, 0x00, 0x36, 0x00, 0x38, 0x0E, 0x00, 0x00, 0x38, 0x00};
 constexpr std::size_t MaskStep = 1, DivideStep = 9, CurveStep = 12;
-constexpr std::uint32_t AndOpcode = 0x01, OpcodeMask = 0x7FF;
+constexpr std::uint32_t AndOpcode = 0x01, MinOpcode = 0x33, OpcodeMask = 0x7FF;
+// The sky draws clamp to 1 within these many instructions after the block.
+constexpr std::size_t ClampReach = 8;
+constexpr float HalfMax = 65504;
 
 // How the output shader writes the back buffer (hdr_shaders.hpp, Output).
 enum class Encoding : std::uint32_t { SrgbView, Srgb, Pq };
@@ -204,13 +207,30 @@ float floatAt(const std::uint8_t* bytes, std::size_t offset)
     return value;
 }
 
+// The first min within ClampReach instructions from `first`: its literals of 1 become HalfMax.
+void liftClamp(std::uint8_t* bytes, const std::vector<Instruction>& steps, std::size_t first)
+{
+    for (std::size_t step = first; step < std::min(steps.size(), first + ClampReach); ++step)
+    {
+        if (steps[step].opcode != MinOpcode) continue;
+
+        for (const auto literal : immediatesOf(bytes, steps[step]))
+            for (std::size_t component = 0; component < 4; ++component)
+                if (floatAt(bytes, literal + 4 * component) == 1) std::memcpy(bytes + literal + 4 * component, &HalfMax, 4);
+
+        return;
+    }
+}
+
 // The scene in light rather than through TppTonemap: in each TppTonemap block the mask that keeps
 // the linear part below the knee takes its linear value whatever the comparison, and the curve's part
 // is ANDed with the zero left beside it, as a multiply by zero would keep the curve's pole as NaN.
-// The sky draws' clamp to 1 that follows stays: above it, the sun's sprite shows its own profile, a
-// ring around a dimmer centre, instead of the disc the clamp makes. Nullopt when the shader has no
-// TppTonemap.
-std::optional<std::vector<std::uint8_t>> withoutTonemap(const void* code, std::size_t size)
+// The sky draws are the only shaders with a clamp to 1 after the block. With HDR output it stays:
+// above it, the sun's sprite shows its own profile, a ring around a dimmer centre, instead of the
+// disc the clamp makes. In SDR it is lifted (shouldLiftClamp), as the grading's tonemap then clamps
+// where the game's did: kept, the sky's light from 1 to 4 would all show as 0.81, never as white.
+// Nullopt when the shader has no TppTonemap.
+std::optional<std::vector<std::uint8_t>> withoutTonemap(const void* code, std::size_t size, bool shouldLiftClamp)
 {
     std::vector<std::uint8_t> patched(static_cast<const std::uint8_t*>(code), static_cast<const std::uint8_t*>(code) + size);
     auto* bytes = patched.data();
@@ -245,6 +265,7 @@ std::optional<std::vector<std::uint8_t>> withoutTonemap(const void* code, std::s
         token = (token & ~OpcodeMask) | AndOpcode;
         std::memcpy(bytes + curve, &token, 4);
         found = true;
+        if (shouldLiftClamp) liftClamp(bytes, steps, first + std::size(TonemapBlock));
     }
 
     if (!found) return std::nullopt;
@@ -569,7 +590,7 @@ const std::vector<std::uint8_t>* patchedShader(const void* code, std::size_t siz
         if (const auto found = patchedShaders.find(*hash); found != patchedShaders.end()) return &found->second.code;
 
         const bool draw2D = draw2DSource(std::string_view(static_cast<const char*>(code), size), "_ps.hlsl");
-        const auto patched = draw2D ? saturateOutput(code, size) : withoutTonemap(code, size);
+        const auto patched = draw2D ? saturateOutput(code, size) : withoutTonemap(code, size, !active());
         if (!patched)
         {
             if (draw2D) logOnce("Float scene: the 2D pass shader " + toHex(*hash) + " keeps its writes unclamped.");

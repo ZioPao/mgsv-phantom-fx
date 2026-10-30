@@ -24,7 +24,8 @@
 //   They hold sRGB-encoded colour, which 8-bit formats encode and decode in their _SRGB views; the
 //   float targets keep the encoded values, so a draw through such a view (the resolve) is encoded
 //   after it, and reads through one (the reflections, from the copy) get a decoded twin.
-// - The game's shaders with TppTonemap get it taken out as they are made, and the sky's clamp to 1.
+// - The game's shaders with TppTonemap get it taken out as they are made; the sky's clamp to 1 after
+//   it stays with HDR output only.
 // - What expects the tonemapped image gets it: bloom's quarter-size copy is tonemapped as it is made,
 //   and the depth of field composites over a float copy of the scene.
 // - The grading pass tonemaps for the game's grading; with HDR output it then adds back the light the

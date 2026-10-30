@@ -207,7 +207,9 @@ bool ensurePipeline()
         ambientShader = computeShader(device.Get(), shaders::SkyAmbient, "sky-ambient");
         // The float scene takes TppTonemap out of the scene for the session.
         const char* floatScene = hdr::isSceneFloat() ? "1" : "0";
-        const D3D_SHADER_MACRO withoutSprite[]{{"MOON", "0"}, {"FLOAT_SCENE", floatScene}, {}}, withSprite[]{{"MOON", "1"}, {"FLOAT_SCENE", floatScene}, {}};
+        const char* hdrOutput = hdr::active() ? "1" : "0";
+        const D3D_SHADER_MACRO withoutSprite[]{{"MOON", "0"}, {"FLOAT_SCENE", floatScene}, {"HDR_OUTPUT", hdrOutput}, {}};
+        const D3D_SHADER_MACRO withSprite[]{{"MOON", "1"}, {"FLOAT_SCENE", floatScene}, {"HDR_OUTPUT", hdrOutput}, {}};
         skyShaders[0] = pixelShader(device.Get(), shaders::SkyDraw, "sky", withoutSprite);
         skyShaders[1] = pixelShader(device.Get(), shaders::SkyDraw, "sky-sprite", withSprite);
 
