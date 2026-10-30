@@ -847,4 +847,12 @@ DXGI_FORMAT sceneFormat() noexcept
 {
     return isSceneFloat() ? SceneFormat : GameSceneFormat;
 }
+
+ComPtr<ID3D11ShaderResourceView> sceneBeforeDof(UINT width, UINT height) noexcept
+{
+    std::shared_lock lock(mutex);
+    if (dofCopy.width != width || dofCopy.height != height) return nullptr;
+
+    return dofCopy.view;
+}
 }

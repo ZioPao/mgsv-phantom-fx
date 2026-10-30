@@ -52,8 +52,10 @@ void drawStatus(const upscaler::Status& state, const Upscaling& wanted)
 {
     const auto& name = state.upscalerName;
     const auto nativeMode = label(Mode::Dlaa, wanted.upscaler);
-    // FSR has no presets; Ray Reconstruction takes NVIDIA's default.
-    const auto preset = wanted.upscaler == Upscaler::Dlss && !state.rayReconstruction ? std::format(", preset {}", label(wanted.dlssPreset)) : std::string();
+    // FSR has no presets.
+    const auto preset = wanted.upscaler == Upscaler::Fsr ? std::string()
+                        : state.rayReconstruction        ? std::format(", preset {}", label(wanted.reconstructionPreset))
+                                                         : std::format(", preset {}", label(wanted.dlssPreset));
     if (!state.supportedBuild) fxui::statusLine(Tone::Bad, "This game version is not supported, so upscaling stays off.");
     else if (wanted.mode == Mode::Off) fxui::statusLine(Tone::Dim, "Upscaling is off. The game's FXAA is in use.");
     else if (state.failed) fxui::statusLine(Tone::Bad, std::format("{} stopped: {} Choose a mode or upscaler again to retry.", name, state.failure));
@@ -72,7 +74,7 @@ void drawStatus(const upscaler::Status& state, const Upscaling& wanted)
     if (wanted.upscaler != Upscaler::Dlss || !wanted.rayReconstruction || !state.running || state.rayReconstruction) return;
 
     fxui::statusLine(Tone::Warn, state.reconstructionAvailable ? "Ray Reconstruction waits for a ray-traced effect; DLSS runs meanwhile."
-                                                               : "Ray Reconstruction is unavailable on this GPU or driver; DLSS runs instead.");
+                                                               : "Ray Reconstruction could not run here (see PhantomFX.log); DLSS runs instead.");
 }
 
 // What the running game adds to a feature's item, beside its description.
@@ -148,7 +150,7 @@ public:
 class MenuPage final : public SettingVisitor
 {
 public:
-    MenuPage(Section section, const SharedControls& shared) : section(section), shared(shared) {}
+    MenuPage(Section section, const SharedControls& shared, bool isRayTracing) : section(section), shared(shared), isRayTracing(isRayTracing) {}
 
     ~MenuPage() { endItem(); }
 
@@ -161,7 +163,7 @@ public:
 
     void toggle(bool& value, const ToggleInfo& info) override
     {
-        if (!open() || !info.visible) return;
+        if (!open() || !info.visible || (info.needsRayTracing && !isRayTracing)) return;
 
         ImGui::BeginDisabled(!info.enabled);
         fxui::checkbox(info.label, value, info.tip);
@@ -175,7 +177,7 @@ public:
 
     void choice(int& value, const ChoiceInfo& info) override
     {
-        if (!open() || !info.visible) return;
+        if (!open() || !info.visible || (info.needsRayTracing && !isRayTracing)) return;
 
         std::vector<Choice<int>> choices;
         for (const auto& choice : info.choices)
@@ -253,6 +255,7 @@ private:
 
     Section section;
     const SharedControls& shared;
+    bool isRayTracing; // A ray-traced effect is on in the settings
 
     std::function<ItemStatus()> nextFeatureStatus;
     ItemStatus status;
@@ -266,7 +269,7 @@ void drawFeatures(Section section, Settings& wanted)
 {
     SharedControls shared;
     describe(wanted, shared);
-    MenuPage page(section, shared);
+    MenuPage page(section, shared, planEffects(wanted, {}).tracesScene());
     forEachFeature(wanted, [&](auto& feature) {
         page.nextStatus([&feature] { return statusOf(feature); });
         describe(feature, page);
