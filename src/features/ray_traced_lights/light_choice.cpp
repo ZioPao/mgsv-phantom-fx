@@ -204,7 +204,7 @@ LocalLight forRays(const DrawnLight& light, const std::optional<Bounds>& volume)
         .leastDistance = spot ? 0 : light.material.leastDistance,
         .radius = !light.game->shadowMap && constants.size > 0 ? constants.size : BulbRadius,
         .shadowStart = shadowMapStart(light),
-        .specularScale = light.game->specular ? constants.specularScale : 0,
+        .specularScale = light.game->specular ? constants.specularScale : 1,
         .diffuseScale = constants.diffuseScale,
         .key = keyOf(light)};
     const bool isMaskedSpot = light.game->twin == game_lights::Twin::MaskedSpotNA || light.game->twin == game_lights::Twin::MaskedSpot2;

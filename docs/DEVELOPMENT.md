@@ -1640,8 +1640,8 @@ lights) is left alone until it runs.
 - **Point and spot lights** (`SampleLamps`, `ShadeLamps`, `direct_light.hlsl`), in place of the game's light
   shaders: each light's light as they work it out (`LocalLightReaching`: its falloff, a spot's cone, the
   game's volume for it; a masked spot's mask; the light through leaves, the game's `LN_trans`; its diffuse
-  and specular scales, `cPSLight` `c8.y` and `c8.x`, no specular where its shader has none, the
-  flashlights, as the game draws them), times the exposure as theirs (`falloff x c4 x m_exposure.z`), with
+  and specular scales, `cPSLight` `c8.y` and `c8.x`, 1 for the latter where its shader has none, as the
+  ray-traced lights draw them), times the exposure as theirs (`falloff x c4 x m_exposure.z`), with
   GGX's specular. The light a pixel takes is picked by ReSTIR DI (Bitterli et al., SIGGRAPH 2020), by its
   light there without shadows (the target): `SampleLamps` takes 8 lights at random (every light when there
   are no more) into a reservoir of one (resampled importance sampling), traces a shadow ray to it (a
