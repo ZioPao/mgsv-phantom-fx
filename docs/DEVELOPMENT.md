@@ -1547,8 +1547,8 @@ works with either upscaler, and switching between DLSS and FSR frame generation 
 
 ## Ray Reconstruction
 
-With **Ray Reconstruction** (`ray_reconstruction=1`, under the upscaler, DLSS only) NVIDIA's DLSS Ray
-Reconstruction takes DLSS's place: one model that denoises the ray-traced light and upscales, as NVIDIA's
+With **Ray Reconstruction** (`ray_reconstruction=1`, under the upscaler, DLSS only, shown while a
+ray-traced effect is on) NVIDIA's DLSS Ray Reconstruction takes DLSS's place: one model that denoises the ray-traced light and upscales, as NVIDIA's
 DLSS-RR Integration Guide (DLSS SDK 310.9.1) describes it. It runs for a frame when it is asked for, the
 scene is float (see "HDR"), NGX says this PC runs it, and the ray-traced scene's kick made its guides
 that frame, so with the global illumination, the ray-traced shadows or the ray-traced lights on;
@@ -1563,12 +1563,14 @@ otherwise DLSS runs, and the upscaler's status line says why.
   device on the game's GPU: the upscaler's colour, depth, motion and output and the guides are shared
   textures, Direct3D 12 waits on a shared fence for Direct3D 11's inputs and Direct3D 11 for its output.
   The colour is the float scene's linear light (`IsHDR`), the depth the hardware's (reversed-Z), the
-  motion per render pixel; NVIDIA's default preset; world-to-view and view-to-clip matrices for row
-  vectors (`camera::StreamlineCamera`), which Streamline always passes; at least 32 jitter phases, as the
-  guide asks. Turning it off releases the feature and keeps NGX: shutting NGX down on Direct3D 12 broke
-  frame generation's feature on the presenter's device (Streamline: "NGX evaluate feature failed
-  0xbad00004" from that moment). A PC it cannot start on keeps DLSS for the session; the release ships
-  NVIDIA's release `nvngx_dlssd.dll` beside the add-on.
+  motion per render pixel; the preset `ray_reconstruction_preset` (Default, F, E or D, NGX's values, for
+  every quality mode, as DLSS's preset); world-to-view and view-to-clip matrices for row vectors
+  (`camera::StreamlineCamera`), which Streamline always passes; at least 32 jitter phases, as the guide
+  asks. Turning it off releases the feature and keeps NGX: shutting NGX down on Direct3D 12 broke frame
+  generation's feature on the presenter's device (Streamline: "NGX evaluate feature failed 0xbad00004"
+  from that moment). Ray Reconstruction and DLSS each keep their own history, so the one taking over
+  from the other starts over. Where it cannot start, or fails, DLSS runs in its place from that frame for
+  the session; the release ships NVIDIA's release `nvngx_dlssd.dll` beside the add-on.
 - **Guides** (`GuideSource` in `ray_tracing.cpp`, at the kick, from the G-buffer at the render size): the
   world-space normal with the roughness (the specular target's `x`) in `w`, `R16G16B16A16_FLOAT`, NGX's
   packed roughness; the diffuse albedo, linear, `R8G8B8A8_UNORM`; the specular albedo, NVIDIA's
@@ -1577,15 +1579,22 @@ otherwise DLSS runs, and the upscaler's status line says why.
   at a cosine of 1 for the material's F0, row 0.75), the roughness squared and the view angle, as the sun
   pass works the angle out. Where the sky is: no normal or roughness, albedo 0.5, no specular albedo. The
   sun pass's `t9` and `t10` give the tables (`indirect_light_pass::materialTables`).
+- **Depth of field guide.** Ray Reconstruction runs after the game's depth of field, which blurs the
+  noisy light into spots, and NVIDIA's guide asks for its guide then: `luminance(after - before)`, with
+  luminance `(r + 2g + b) / 4`, `R16_FLOAT` at the render size, 0 where nothing was blurred. On a frame
+  `DOF_ScatterCompositeFinal` drew (noted at its recording, `Recorded::dofFrame`), the upscaler's input
+  pass makes it from the scene and the float copy the composite drew over (`hdr::sceneBeforeDof`), both
+  decoded to linear light. Preset D cannot take it, so it gets none.
 - **Noisy light for it** (`gi_renderer::Frame::forReconstruction`, `GIFrameConstants::reconstruction`).
   Ray Reconstruction asks for samples apart at every render pixel, without other denoisers. While it
   denoised the frame before (the upscaler counts its frames, `ray_tracing::reconstructed`), the kick
   leaves the light and the shadows to it: the global illumination takes a sample a render pixel, one ray
   (two on foliage) whatever the ray quality, its grid the render size, without NRD (not even made) or
   `PrepareGuides`, and `CompositeLight` passes each render pixel's own rays' light on (`PerRenderPixel` in
-  `gi_light.hlsl`); the sun's shadow is each pixel's ray as it found the sun (`TraceSunShadows` writes the
+  `gi_light.hlsl`), without the foliage memory, whose light is other pixels' and frames'; the sun's shadow is each pixel's ray as it found the sun (`TraceSunShadows` writes the
   output, AMD's denoiser is left out and starts over after); the lights' shadows are each pixel's rays'
-  share (`TraceLocalLightShadows` writes the output, the filter is left out). A frame it left to DLSS, or
+  share (`TraceLocalLightShadows` writes the output, the filter is left out), their starts white noise in
+  place of the interleaved gradient noise, which is a pattern across the screen. A frame it left to DLSS, or
   none, turns the denoisers back on for the next. The global illumination's light is made again when its
   grid changes. Its denoiser's debug views are off meanwhile. Measured on a 2560x1440 render (a base,
   2026-10-30): the light 2.1 ms with NRD at half size, 1.8 ms a render pixel; the sun's shadows 2.8 to
