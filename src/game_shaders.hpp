@@ -32,7 +32,7 @@ enum class GamePass : std::uint8_t
     LocalLight,      // A point or spot light: a draw that marks the stencil, then one that lights
     Resolve,         // The G-buffer and the light into the scene's colour, times the game's occlusion
     Sky,
-    Sea,             // The game's sea, drawn over the lit scene after the sky (Primitive_Tpp*Ocean)
+    Sea,             // The game's sea, drawn over the lit scene after the sky (Primitive_TppFourierOcean*)
     ReflectionMask,  // The screen-space reflections' mask from the depth, normals and roughness; reads the scene's depth at t0
     ReflectionAdd,   // The screen-space reflections blended over the scene
     Reduce,          // The scene's quarter-size copy that bloom and the lens flares start from
@@ -125,10 +125,6 @@ inline constexpr GameShader GameShaders[]{
     {GamePass::Sea, "Primitive_TppFourierOceanLQ", "536ed28c18bb66d2828795bdcf5fc3d5"},
     {.pass = GamePass::Sea, .name = "Primitive_TppFourierOceanFill", .checksum = "51218f2d1ccc9d0f9cf159653ed41f5d", .isFarSea = true},
     {.pass = GamePass::Sea, .name = "Primitive_TppFourierOceanFill", .checksum = "9291bd0ac69ab6cdeae6244f778c4ddb", .isFarSea = true},
-    {GamePass::Sea, "Primitive_Tpp24hOcean", "15813be2f09855201bece13ee4ad0ee4"},
-    {GamePass::Sea, "Primitive_Tpp24hOcean", "bbc397527c4e37ef063e24d5fe59be2a"},
-    {GamePass::Sea, "Primitive_TppBaseOcean", "28488df62ca22bf43836395b116b9621"},
-    {GamePass::Sea, "Primitive_TppBaseOcean", "fa14008376499401986af5774bccce68"},
 
     {GamePass::Reduce, "CopyReductionX4", "e5b80b0a4d737e50533f9a058ffdca42"},
     {GamePass::Copy, "CopyRenderBuffer", "9f93a957f1e21656e0d86bf112b71d6d"},

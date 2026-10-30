@@ -218,7 +218,8 @@ private:
     // failed), and its instances past the instance cap by kind; since the start, the variants made without
     // room for their structure (never traced) and the texture copies refused for want of a free slot.
     std::uint32_t unreceivedPlacements{}, modelsPastCap{}, charactersPastCap{}, ringsPastCap{};
-    bool isSeaTraced{};
     std::uint32_t variantsWithoutRoom{}, texturesRefused{};
+    // Diagnostics: the frame has the sea's plane.
+    bool isSeaTraced{};
 };
 }

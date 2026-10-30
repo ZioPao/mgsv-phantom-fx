@@ -479,6 +479,8 @@ void onExecuteSecondary(command_list* list, command_list* secondary)
         // The frame's timing starts before DLSS, which runs here.
         performance::executing(secondary->get_native());
         upscaler::executing(native(list), secondary->get_native());
+        // Before the kick: the ray-traced scene's plane and the guides take the sea when its list ran.
+        sea::executing(native(list), secondary->get_native());
         ray_tracing::executing(native(list), secondary->get_native());
         // After the global illumination's wait: the point and spot lights read their shadows.
         local_lights::executing(native(list), secondary->get_native());
@@ -492,6 +494,7 @@ void onExecuteSecondary(command_list* list, command_list* secondary)
     upscaler::recorded(list->get_native(), secondary->get_native());
     ray_tracing::recorded(list->get_native(), secondary->get_native());
     local_lights::recorded(list->get_native(), secondary->get_native());
+    sea::recorded(list->get_native(), secondary->get_native());
     ui_redirect::contextFinished(native(secondary));
     sun_contact_shadows::contextFinished(native(secondary));
     lamp_contact_shadows::contextFinished(native(secondary));
@@ -503,6 +506,7 @@ void onDestroyCommandList(command_list* list)
     performance::forget(list->get_native());
     ray_tracing::forget(list->get_native());
     local_lights::forget(list->get_native());
+    sea::forget(list->get_native());
 }
 
 // With frame generation the game's swap chain is the presenter's stand-in, whose Present follows.

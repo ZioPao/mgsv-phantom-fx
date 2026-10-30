@@ -34,9 +34,10 @@ constexpr std::size_t MaxModelParts = 4096;
 constexpr float TerrainCellSize = 1.0f;
 constexpr std::uint32_t TerrainRefreshFrames = 120;
 constexpr std::uint32_t TerrainRingVertices = GI_TERRAIN_CELLS * GI_TERRAIN_CELLS * 6;
-// The sea's plane: a square two units across, its four vertices and six indices, under an instance that
-// stretches it 100 km across under the eye, past the horizon from a helicopter.
-constexpr std::uint64_t SeaVertexBytes = 4 * 16, SeaBytes = SeaVertexBytes + 16;
+// The sea's plane: a square two units across, its four vertices and six indices (padded to 16 bytes, as the
+// pool's ranges are), under an instance that stretches it 100 km across under the eye, past the horizon from
+// a helicopter.
+constexpr std::uint64_t SeaVertexBytes = 4 * 16, SeaIndexBytes = 16, SeaBytes = SeaVertexBytes + SeaIndexBytes;
 constexpr float SeaHalfWidth = 50'000;
 
 template<class Record> auto findVariant(Record& record, std::uint64_t hiddenGroups)
@@ -565,7 +566,7 @@ void SceneContents::makeSea()
     if (!offset) return;
 
     const float vertices[16]{-1, 0, -1, 1, -1, 0, 1, 1, 1, 0, -1, 1, 1, 0, 1, 1};
-    const std::uint16_t indices[8]{0, 1, 2, 2, 1, 3};
+    const std::uint16_t indices[6]{0, 1, 2, 2, 1, 3};
     std::vector<std::uint8_t> bytes(SeaBytes);
     std::memcpy(bytes.data(), vertices, sizeof(vertices));
     std::memcpy(bytes.data() + SeaVertexBytes, indices, sizeof(indices));

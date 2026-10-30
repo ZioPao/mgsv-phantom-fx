@@ -53,6 +53,12 @@ float2 WindDirection()
 static const float Pi = 3.14159265;
 static const float Gravity = 9.81;
 
+// Two complex numbers' product.
+float2 Multiply(float2 a, float2 b)
+{
+    return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
 // The spectrum's texel in its buffer: N x N a slice, two slices a tile.
 uint SpectrumIndex(uint2 texel, uint slice)
 {
@@ -116,11 +122,6 @@ float SpectrumAt(float2 k)
     return Jonswap(omega) * Spreading(theta, omega) * (Gravity / (2 * omega)) / length_;
 }
 
-float2 Multiply(float2 a, float2 b)
-{
-    return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
-}
-
 // p + i q
 float2 Pack(float2 p, float2 q)
 {
@@ -169,11 +170,6 @@ constexpr char Fft[] = R"(
 RWStructuredBuffer<float4> g_Spectrum : register(u0);
 
 groupshared float4 g_Line[2][N];
-
-float2 Multiply(float2 a, float2 b)
-{
-    return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
-}
 
 // The index'th of a row or column (`strip`) in a slice.
 uint IndexOf(uint strip, uint index, uint slice)

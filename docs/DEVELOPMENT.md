@@ -183,7 +183,7 @@ what draws it, when that is the feature's own.
 | `src/passes/visibility_bitmask.*` | The visibility bitmask march GTVBAO and SSILVB share: the depth prefilter, the march, the denoiser. `visibility_bitmask_shaders.hpp`: the march (GTVBAO from three-gtvbao, SSILVB's light as SSRT3 gathers it), XeGTAO's noise and denoiser |
 | `src/passes/ray_tracing/ray_tracing.*` | The ray-traced scene's frame on Direct3D 11: the kick, the waits, the shared textures the global illumination and the ray-traced shadows hand back |
 | `src/passes/ray_tracing/gi_renderer.*` | The Direct3D 12 side: the device, the scene's frame (the scene contents' update, then the recording), each feature's passes recorded in turn, the probes |
-| `src/passes/ray_tracing/scene_contents.*` | The scene contents: the game's models, their variants, characters, terrain rings and textures the ray-traced scene holds, made as the scene memory has room and let go after a while unplaced; each frame's instances of them; their diagnostics (status, the probes' hits, F10's `models.txt`) (see "Ray-traced scene") |
+| `src/passes/ray_tracing/scene_contents.*` | The scene contents: the game's models, their variants, characters, terrain rings, the sea's plane and textures the ray-traced scene holds, made as the scene memory has room and let go after a while unplaced; each frame's instances of them; their diagnostics (status, the probes' hits, F10's `models.txt`) (see "Ray-traced scene") |
 | `src/passes/ray_tracing/scene_memory.hpp` | The scene memory: the seam the scene contents reach the GPU through (the pool, structures, texture slots, instances) |
 | `src/passes/ray_tracing/gi_scene.*` | The ray-traced scene on Direct3D 12, the scene memory: the geometry pool, bottom-level structures (a geometry per mesh, compacted), the geometry table, the game's textures' slots, the frame's instances and top level (see "Ray-traced scene") |
 | `src/passes/ray_tracing/engine_scene.*` | The game's loaded models from its visibility managers and object brush, its characters from its model list, their model files read once, its texture manager, the terrain's heightmap inputs (see "Scene objects") |
@@ -2968,7 +2968,7 @@ screen-space reflections, the global illumination and path tracing take it as an
 - **The game's sea** (2026-10-30, frame 29300 and the shader dump). `Primitive_TppFourierOceanHQ` and `LQ`,
   the near patches (`draw 256`), and `Fill`, the far sea (indexed, no depth write), drawn after the sky over
   the lit scene (blend ONE / INV_SRC_ALPHA); `Tpp24hOcean` and `TppBaseOcean` exist and no capture drew
-  them. Its waves are a 64 x 64 field the CPU makes each frame, copied at the frame's start into two
+  them, so the add-on leaves them alone. Its waves are a 64 x 64 field the CPU makes each frame, copied at the frame's start into two
   `R32G32B32A32_FLOAT` textures (displacement, gradient). Its sky reflection is two fixed colours,
   (0.06, 0.105, 0.195) to (0.135, 0.22, 0.28), times its Fresnel, with the sun's highlight, foam textures and
   a depth tint: no reflection map, no screen-space reflections. It is in neither the G-buffer nor the
@@ -2976,16 +2976,18 @@ screen-space reflections, the global illumination and path tracing take it as an
   `536ed28c18bb66d2828795bdcf5fc3d5`, Fill `9291bd0ac69ab6cdeae6244f778c4ddb`, 24h
   `15813be2f09855201bece13ee4ad0ee4`, Base `fa14008376499401986af5774bccce68`; the float scene takes TppTonemap
   out of them (see "HDR"), and the frame log names them after the patched code (`0b289738...`, `10ece44e...`,
-  `51218f2d...`, `bbc39752...`, `28488df6...`). `game_shaders.hpp` has both (`GamePass::Sea`).
+  `51218f2d...`, `bbc39752...`, `28488df6...`). `game_shaders.hpp` has both of HQ, LQ and Fill (`GamePass::Sea`).
 - **Its level and wind.** The near patches' material constants (`cVSMaterial`, `b4`): `c0.z` the level, `c1.xy`
   the wind's direction, `c1.w` a tile's size, `c0.xy` a scroll that moves with the wind. Read back at Mother
   Base: `c0.z` -23.4, as the patches' world matrices place them (`cVSObject` `c5.w`), the wind towards
   (0.8, 0.6). The far sea's `c0.z`, its `waterHeight` (its vertex shader clips at the plane y = waterHeight),
   is 5 m lower, -28.4: taken first, it put the sea 5 m below the pillars' waterline. Through the constant
   capture these buffers read as other draws' constants (levels from -62 m to 2000 m within a second), so
-  the add-on copies the near patches' `b4` on the GPU once a frame (`CopyResource`): the next frame's sea
-  reads the copy, and the CPU reads it back once a second for the ray-traced scene (`sea::level`), a few
-  frames after the first copy (read in the same frame, the first readback was zeros).
+  the add-on copies the near patches' `b4` on the GPU once between two presents (`CopyResource`): the frames
+  recorded after it read the copy. The copy's list hands it over as the immediate context runs it; only
+  then does the sea draw, and the CPU reads the copy back once a second for the ray-traced scene
+  (`sea::level`), the readback after the copy on the GPU (read before it, the first readback was zeros: the
+  sea 23 m too high). The sea waits for the near patches: a frame with only the far sea gives no level.
 - **The waves** (`sea_shaders.hpp`): Tessendorf's FFT ocean ("Simulating Ocean Water", 2001) on three tiles
   of 256 x 256 texels, 400 m, 59 m and 8.7 m across, each with the wavenumbers from 6 of the next tile across
   down to its own: 400 m to 9.8 m, 9.8 m to 1.45 m, 1.45 m to 7 cm. The spectrum is JONSWAP with Donelan and
@@ -3017,8 +3019,10 @@ screen-space reflections, the global illumination and path tracing take it as an
   roughness from the slopes' spread with Cox and Munk's slope variance the tiles leave out; specular
   intensity 1; material 106 (white, F0 0.027, the table's nearest to water's 0.02). Its own depth goes to a
   fourth target (`sea::surfaceDepth`). The game's sea draws are skipped while the add-on's is drawn: while the
-  game drew its sea in the last 60 s, decided at present for the whole frame; a second without the main
-  view's G-buffer (a loading screen) forgets it.
+  game drew its sea in the last 60 s, decided at present for the frames recorded after it; a second without
+  the main view's G-buffer (a loading screen) forgets it. Sea on or off takes effect at a present too, so the
+  add-on's sea and the game's change together. A frame recorded across that present can have both or
+  neither. A draw that fails gives the game's sea back, and the budget says the sea is unavailable.
 - **The G-buffer** (`fox3ddf_blin` and the sun pass): `rt0` the albedo, sRGB values, alpha 1; `rt1` the
   view-space normal (`xy x 0.5 + 0.5`, `sqrt(z x 0.5 + 0.5)`), alpha the material's `CalcedReflectionTh` (0 on
   most pixels); `rt2` the roughness, the specular rate, the material (`/ 255`) and the translucency. The
@@ -3034,6 +3038,10 @@ screen-space reflections, the global illumination and path tracing take it as an
   structure (`GI_INSTANCE_SEA`), one-sided with its front up, as the terrain is: the decks' rays meet its top,
   and a ray leaving a wave's trough below the plane passes its back, so it lies at the level itself. Its hits
   take water's albedo (`HitAlbedo`). Before, the rays down from the decks met nothing and took the sky's light.
+  The plane and the guide's water are in a kick only when the list that drew the sea into the frame's
+  G-buffer ran before it (handed over, see "Command lists"): a frame counter by presents does not tell, as
+  the game records the next frame while it runs the last. A path-traced reflection's hit on the plane is lit
+  like any other hit, diffuse: no reflection of its own.
 - **Cost** (2026-10-30, 4K output): 0.27 ms for the waves and the surface (the budget's timed passes). The
   lighting and the rays the sea's pixels then take are in the cost measurement's step for it.
 

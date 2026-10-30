@@ -6,6 +6,7 @@
 
 #include <d3d11.h>
 #include <wrl/client.h>
+#include <cstdint>
 #include <optional>
 
 // The sea (docs/DEVELOPMENT.md, "Sea"). The game's sea (Primitive_TppFourierOcean) is a 64 x 64 wave
@@ -24,7 +25,7 @@ void attach(ID3D11Device* device, ID3D11DeviceContext* immediate) noexcept;
 void detach() noexcept;
 // Applies from the frame recorded after the next present.
 void configure(const Configuration& configuration) noexcept;
-// Each present: whether the next frame draws the sea, its time and its wind.
+// Each present: whether the frames recorded after it draw the sea, its time and its wind.
 void present() noexcept;
 // For the budget (fine while off).
 Health health();
@@ -38,12 +39,20 @@ void note(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
 // The game's sea draws, skipped while the add-on draws the sea; returns true when the game's draw must be
 // skipped.
 bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
+// What `from` recorded now belongs to `into`: FinishCommandList, or a command list executed in a
+// deferred context.
+void recorded(std::uint64_t into, std::uint64_t from) noexcept;
+void forget(std::uint64_t contextOrList) noexcept;
 
 // ---- On the immediate context ----
-// Where the sea is in this frame's G-buffer, at `width` x `height`: its depth where it drew, which equals the
-// G-buffer's depth where nothing nearer covers it. Null when this frame has no sea of the add-on's.
+// Before the immediate context executes `list`, and before the ray tracing's kick: whether it drew the sea,
+// whether it copied the game's sea.
+void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept;
+// Where the sea is in the G-buffer of the frame being run, at `width` x `height`: its depth where it drew,
+// which equals the G-buffer's depth where nothing nearer covers it. Null when that G-buffer has no sea of the
+// add-on's.
 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> surfaceDepth(UINT width, UINT height) noexcept;
 // The sea's level, for the ray-traced scene's plane: as the game's sea last gave it, read back from the GPU a
-// second or so late. Absent when this frame has no sea of the add-on's, or before the first read.
+// second or so late. Absent when the frame being run has no sea of the add-on's, or before the first read.
 std::optional<float> level() noexcept;
 }

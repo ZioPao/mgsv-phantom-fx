@@ -2,6 +2,7 @@
 #include "features/sea/sea.hpp"
 
 #include "clock.hpp"
+#include "command_list_notes.hpp"
 #include "d3d11_helpers.hpp"
 #include "features/sea/sea_shaders.hpp"
 #include "frame_latch.hpp"
@@ -89,22 +90,35 @@ static_assert(sizeof(Constants) == 96);
 
 struct Wanted
 {
-    bool on{};
-    float waves{1};
+    Sea sea;
+    bool isRunning{};
 };
 
 FrameLatch<Wanted> latch;
-std::atomic<bool> wanted{}, pipelineFailed{};
+// From each present on, for the frames recorded after it: the effect plan runs the sea, and the sea is drawn
+// in place of the game's (the game shows its sea and has given its level, and nothing failed).
+std::atomic<bool> isRunning{}, isDrawing{};
+std::atomic<bool> hasPipelineFailed{}, hasDrawFailed{};
 
-// The frame being recorded, counted at each present; the frame the sea was drawn in, and whether this one
-// draws it.
-std::atomic<std::uint64_t> frame{1}, drawnFrame{}, gameSeaFrame{}, gBufferFrame{};
-// The frame the game's sea was first copied in: its copy is read back only a few frames later, once the GPU
-// has surely run it (read in the same frame, the first readback found zeros: y 0, 23 m above the sea).
-std::atomic<std::uint64_t> firstGameSeaFrame{};
-std::atomic<bool> drawsThisFrame{};
+// Presents so far: the recording threads tell one frame from the next by them, to take the main view's
+// G-buffer and the game's sea once each between two presents.
+std::atomic<std::uint64_t> presents{1}, gBufferSeenAt{}, gameSeaCopiedAt{};
 // GetTickCount64 when the game last drew its sea, and when the main view's G-buffer was last drawn into.
 std::atomic<std::uint64_t> lastGameSea{}, lastGBuffer{};
+
+// What a deferred context, then its command list, recorded that the immediate context needs.
+struct Notes
+{
+    bool isSeaDrawn{}, isGameSeaCopied{};
+
+    void merge(Notes later)
+    {
+        isSeaDrawn |= later.isSeaDrawn;
+        isGameSeaCopied |= later.isGameSeaCopied;
+    }
+};
+
+CommandListNotes<Notes> notes;
 
 // The waves at present, for the frame recorded after it (present() only).
 double seconds{};
@@ -130,7 +144,7 @@ struct Maps
     ComPtr<ID3D11UnorderedAccessView> access;
 };
 
-// A buffer of `count` elements of `stride` bytes the kernels read and write.
+// A structured buffer the kernels read and write.
 struct WorkBuffer
 {
     ComPtr<ID3D11Buffer> buffer;
@@ -149,6 +163,9 @@ ComPtr<ID3D11Buffer> levelReadback;
 bool isLevelReadbackPending{};
 std::uint64_t lastLevelRead{};
 std::optional<float> readLevel;
+// Handed over as the immediate context runs the lists: the frame being run has the sea in its G-buffer
+// (until its present); a list that copied the game's sea has run, so gameSeaMaterial holds its level.
+bool isSeaInFrameBeingRun{}, hasGameSeaCopy{};
 ComPtr<ID3D11RasterizerState> rasterizer;
 ComPtr<ID3D11DepthStencilState> depthState;
 ComPtr<ID3D11SamplerState> linearSampler, anisotropicSampler;
@@ -235,7 +252,7 @@ ComPtr<ID3D11Buffer> makeIndices()
 bool ensurePipeline()
 {
     if (surfacePixel) return true;
-    if (!device || pipelineFailed) return false;
+    if (!device || hasPipelineFailed) return false;
 
     try
     {
@@ -303,7 +320,7 @@ bool ensurePipeline()
     }
     catch (const std::exception& error)
     {
-        pipelineFailed = true;
+        hasPipelineFailed = true;
         log(std::string("The sea is unavailable: ") + error.what());
         return false;
     }
@@ -323,6 +340,8 @@ void releasePipeline()
     levelReadback.Reset();
     isLevelReadbackPending = false;
     readLevel.reset();
+    // The game's sea's copy starts again from zeros.
+    isSeaInFrameBeingRun = hasGameSeaCopy = false;
     rasterizer.Reset();
     depthState.Reset();
     linearSampler.Reset();
@@ -483,15 +502,16 @@ private:
 };
 
 // The sea into the G-buffer bound on `context`, before the game's first draw into it: the waves, then the
-// surface into the G-buffer's three targets, its depth and the sea's own depth. Call with resourceMutex held.
-void drawSea(ID3D11DeviceContext* context, const Constants& constants)
+// surface into the G-buffer's three targets, its depth and the sea's own depth. Returns whether it drew. Call
+// with resourceMutex held.
+bool drawSea(ID3D11DeviceContext* context, const Constants& constants)
 {
     ComPtr<ID3D11RenderTargetView> gameTargets[3];
     ComPtr<ID3D11DepthStencilView> gameDepth;
     ID3D11RenderTargetView* raw[3]{};
     context->OMGetRenderTargets(3, raw, gameDepth.GetAddressOf());
     for (int i = 0; i < 3; ++i) gameTargets[i].Attach(raw[i]);
-    if (!gameTargets[0] || !gameTargets[1] || !gameTargets[2] || !gameDepth) return;
+    if (!gameTargets[0] || !gameTargets[1] || !gameTargets[2] || !gameDepth) return false;
 
     const auto [width, height] = sizeOf(gameTargets[0].Get());
     ensureDepthTarget(width, height);
@@ -528,6 +548,8 @@ void drawSea(ID3D11DeviceContext* context, const Constants& constants)
     context->PSSetSamplers(0, static_cast<UINT>(std::size(samplers)), samplers);
     context->DrawIndexedInstanced(GridCells * GridCells * 6, Rings, 0, 0, 0);
     logOnce("Sea: drawn into the G-buffer, in place of the game's.");
+
+    return true;
 }
 
 // The render targets bound before the first empty slot.
@@ -555,14 +577,16 @@ bool isGBuffer(UINT count, ID3D11RenderTargetView* const* targets, ID3D11DepthSt
     return true;
 }
 
-// The game's near sea draw's material constants into their copy, once a frame: the next frame's sea reads them.
-// The far sea's lie 5 m lower.
-void copyGameSea(ID3D11DeviceContext* context, std::uint64_t current)
+std::uint64_t keyOf(ID3D11DeviceContext* context)
 {
-    if (gameSeaFrame.exchange(current) == current) return;
+    return reinterpret_cast<std::uint64_t>(context);
+}
 
-    std::uint64_t none{};
-    firstGameSeaFrame.compare_exchange_strong(none, current);
+// The game's near sea draw's material constants into their copy, once between two presents: the frames
+// recorded after it read them. The far sea's lie 5 m lower.
+void copyGameSea(ID3D11DeviceContext* context, std::uint64_t presented)
+{
+    if (gameSeaCopiedAt.exchange(presented) == presented) return;
 
     ComPtr<ID3D11Buffer> material;
     context->VSGetConstantBuffers(GameMaterialSlot, 1, material.GetAddressOf());
@@ -574,12 +598,14 @@ void copyGameSea(ID3D11DeviceContext* context, std::uint64_t current)
     if (!ensurePipeline()) return;
 
     context->CopyResource(gameSeaMaterial.Get(), material.Get());
+    notes.note(keyOf(context), [](Notes& contextNotes) { contextNotes.isGameSeaCopied = true; });
     logOnce("Sea: its level and wind come from the game's sea.");
 }
 
-// The sea's level for the CPU: the game's sea's copy, read back once a second, a frame after its copy so the
-// CPU never waits for the GPU. Once the game's sea has been copied. Call with resourceMutex held, on the
-// immediate context at present.
+// The sea's level for the CPU: the game's sea's copy, read back once a second, a present after its copy so the
+// CPU never waits for the GPU. Only while the sea draws, so after a list with the game's sea's copy ran and the
+// readback follows it on the GPU (read before, it found zeros: y 0, 23 m above the sea). Call with
+// resourceMutex held, on the immediate context at present.
 void readBackLevel()
 {
     if (!immediate || !levelReadback) return;
@@ -599,8 +625,7 @@ void readBackLevel()
     }
 
     const auto now = GetTickCount64();
-    const auto first = firstGameSeaFrame.load();
-    if (now - lastLevelRead < 1000 || !first || frame.load() - first < 3) return;
+    if (now - lastLevelRead < 1000) return;
 
     immediate->CopyResource(levelReadback.Get(), gameSeaMaterial.Get());
     isLevelReadbackPending = true;
@@ -608,11 +633,11 @@ void readBackLevel()
 }
 
 // The next frame's waves: the time, the wind turning towards the weather's, the tiles' wavenumbers.
-Constants constantsAfter(double elapsed, const Wanted& settings)
+Constants constantsAfter(double elapsed, const Sea& sea)
 {
     seconds += elapsed;
     const auto weather = weather::state();
-    const float target = WindOf(weather.requested.value_or(weather::Type::Sunny)) * settings.waves;
+    const float target = WindOf(weather.requested.value_or(weather::Type::Sunny)) * sea.waves;
     if (wind <= 0) wind = target;
     wind += (target - wind) * (1 - std::exp(-static_cast<float>(elapsed) / WindSeconds));
 
@@ -655,25 +680,24 @@ void attach(ID3D11Device* gameDevice, ID3D11DeviceContext* gameImmediate) noexce
     std::lock_guard lock(resourceMutex);
     device = gameDevice;
     immediate = gameImmediate;
-    if (wanted) ensurePipeline();
+    if (latch.latest().isRunning) ensurePipeline();
 }
 
 void detach() noexcept
 {
-    drawsThisFrame = false;
+    isDrawing = false;
+    notes.clear();
     std::lock_guard lock(resourceMutex);
     releasePipeline();
     device.Reset();
     immediate.Reset();
-    pipelineFailed = false;
+    hasPipelineFailed = hasDrawFailed = false;
 }
 
 void configure(const Configuration& configuration) noexcept
 {
-    const bool running = configuration.effects.runs(Effect::Sea);
-    latch.set({running, configuration.settings.sea.waves});
-    wanted = running;
-    if (!running) return;
+    latch.set({configuration.settings.sea, configuration.effects.runs(Effect::Sea)});
+    if (!latch.latest().isRunning) return;
 
     std::lock_guard lock(resourceMutex);
     ensurePipeline();
@@ -681,9 +705,9 @@ void configure(const Configuration& configuration) noexcept
 
 Health health()
 {
-    if (!latch.latest().on) return {};
-    if (pipelineFailed) return Health::unavailable("The sea is unavailable (see PhantomFX.log).");
-    if (!drawsThisFrame.load(std::memory_order_relaxed)) return Health::waiting("The sea shows where the game has one, around Mother Base.");
+    if (!latch.latest().isRunning) return {};
+    if (hasPipelineFailed || hasDrawFailed) return Health::unavailable("The sea is unavailable (see PhantomFX.log).");
+    if (!isDrawing.load(std::memory_order_relaxed)) return Health::waiting("The sea shows where the game has one, around Mother Base.");
 
     return {};
 }
@@ -691,27 +715,42 @@ Health health()
 void present() noexcept
 {
     const auto settings = latch.present();
-    const auto now = GetTickCount64();
-    if (now - lastGBuffer.load() > ForgottenAfterMilliseconds) lastGameSea = 0;
-    const auto gameSea = lastGameSea.load();
-    const bool isGameSeaShown = gameSea && now - gameSea < ShownForMilliseconds;
+    isRunning = settings.isRunning;
+    notes.present();
 
     const auto ticks = clock::ticksNow();
     const double elapsed = lastPresent ? std::clamp(clock::millisecondsOf(ticks - lastPresent) / 1000, 0.0, 0.1) : 0;
     lastPresent = ticks;
+
     {
         std::lock_guard lock(resourceMutex);
-        frameConstants = constantsAfter(elapsed, settings);
-        drawsThisFrame = settings.on && isGameSeaShown && surfacePixel;
-        if (drawsThisFrame) readBackLevel();
+        isSeaInFrameBeingRun = false;
+
+        if (settings.isRunning)
+        {
+            const auto now = GetTickCount64();
+            if (now - lastGBuffer.load() > ForgottenAfterMilliseconds) lastGameSea = 0;
+            const auto gameSea = lastGameSea.load();
+            const bool isGameSeaShown = gameSea && now - gameSea < ShownForMilliseconds;
+            frameConstants = constantsAfter(elapsed, settings.sea);
+            isDrawing = isGameSeaShown && hasGameSeaCopy && surfacePixel && !hasDrawFailed;
+            if (isDrawing) readBackLevel();
+        }
+        else
+        {
+            // The game's sea is seen again before the sea draws again: the targets bound while it was off were
+            // not followed (targetsBound).
+            isDrawing = false;
+            lastGameSea = 0;
+        }
     }
 
-    ++frame;
+    ++presents;
 }
 
 void targetsBound(ID3D11DeviceContext* context, UINT count, ID3D11RenderTargetView* const* targets, ID3D11DepthStencilView* depth) noexcept
 {
-    if (!wanted.load(std::memory_order_relaxed)) return;
+    if (!isRunning.load(std::memory_order_relaxed)) return;
 
     try
     {
@@ -725,63 +764,89 @@ void targetsBound(ID3D11DeviceContext* context, UINT count, ID3D11RenderTargetVi
 
 void note(ID3D11DeviceContext* context, const ui_redirect::DrawCall&, game_shaders::DrawnShader& shader) noexcept
 {
-    if (!wanted.load(std::memory_order_relaxed) || bound.context != context) return;
+    if (!isRunning.load(std::memory_order_relaxed) || bound.context != context) return;
 
     try
     {
-        const auto current = frame.load(std::memory_order_relaxed);
+        const auto presented = presents.load(std::memory_order_relaxed);
         if (bound.isSingleTarget)
         {
             const auto* row = shader.row();
             if (!row || row->pass != GamePass::Sea) return;
 
             lastGameSea = GetTickCount64();
-            if (!row->isFarSea) copyGameSea(context, current);
+            if (!row->isFarSea) copyGameSea(context, presented);
             return;
         }
 
         // The main view's G-buffer: a smaller camera's view (the intro's mirror) draws into a corner of it.
-        // Once a frame has seen it and has its sea, the rest of its draws pass.
-        const bool draws = drawsThisFrame.load(std::memory_order_relaxed);
-        if (!bound.isGBuffer || (gBufferFrame.load() == current && (!draws || drawnFrame.load() == current)) || !viewportFillsTarget(context)) return;
+        if (!bound.isGBuffer || gBufferSeenAt.load() == presented || !viewportFillsTarget(context)) return;
+        if (gBufferSeenAt.exchange(presented) == presented) return;
 
-        gBufferFrame = current;
         lastGBuffer = GetTickCount64();
-        if (!draws || drawnFrame.load() == current) return;
+        if (!isDrawing.load(std::memory_order_relaxed)) return;
 
         std::lock_guard lock(resourceMutex);
-        if (drawnFrame.exchange(current) == current || !ensurePipeline()) return;
+        if (!ensurePipeline() || !drawSea(context, frameConstants)) return;
 
-        drawSea(context, frameConstants);
+        notes.note(keyOf(context), [](Notes& contextNotes) { contextNotes.isSeaDrawn = true; });
     }
     catch (const std::exception& error)
     {
-        logOnce(std::string("Sea: not drawn: ") + error.what());
+        hasDrawFailed = true;
+        logOnce(std::string("Sea: not drawn, the game's sea is back: ") + error.what());
+    }
+    catch (...)
+    {
+        hasDrawFailed = true;
+        logOnce("Sea: not drawn, the game's sea is back.");
     }
 }
 
 bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall&, game_shaders::DrawnShader& shader) noexcept
 {
-    if (!drawsThisFrame.load(std::memory_order_relaxed) || bound.context != context || !bound.isSingleTarget) return false;
+    if (!isDrawing.load(std::memory_order_relaxed) || bound.context != context || !bound.isSingleTarget) return false;
 
     const auto* row = shader.row();
     return row && row->pass == GamePass::Sea;
 }
 
-std::optional<float> level() noexcept
+void recorded(std::uint64_t into, std::uint64_t from) noexcept
 {
-    if (drawnFrame.load() != frame.load()) return std::nullopt;
+    notes.recorded(into, from);
+}
+
+void forget(std::uint64_t contextOrList) noexcept
+{
+    notes.forget(contextOrList);
+}
+
+void executing(ID3D11DeviceContext* context, std::uint64_t list) noexcept
+{
+    if (!isRunning.load(std::memory_order_relaxed)) return;
+
+    const auto noted = notes.take(list);
+    if (!noted) return;
 
     std::lock_guard lock(resourceMutex);
+    if (context != immediate.Get()) return;
+
+    isSeaInFrameBeingRun |= noted->isSeaDrawn;
+    hasGameSeaCopy |= noted->isGameSeaCopied;
+}
+
+std::optional<float> level() noexcept
+{
+    std::lock_guard lock(resourceMutex);
+    if (!isSeaInFrameBeingRun) return std::nullopt;
+
     return readLevel;
 }
 
 ComPtr<ID3D11ShaderResourceView> surfaceDepth(UINT width, UINT height) noexcept
 {
-    if (drawnFrame.load() != frame.load()) return nullptr;
-
     std::lock_guard lock(resourceMutex);
-    if (depthWidth != width || depthHeight != height) return nullptr;
+    if (!isSeaInFrameBeingRun || depthWidth != width || depthHeight != height) return nullptr;
 
     return depthView;
 }
