@@ -28,9 +28,11 @@ public:
     void fill(gi::GIFrameConstants& constants, float verticalFov, std::uint32_t parity) const;
     // Its views in the frame's tables, by the slots gi_light.hlsl gives them.
     void describe(gi_d3d12::Descriptors& descriptors, std::uint32_t parity) const;
-    // The passes, from the rays to the light in the output (u0), on the frame slot's room (`frameSlot`).
-    // The denoiser binds its own root signature and descriptor heap; the recorder's rebind restores the frame's.
-    void record(gi_d3d12::Recorder& recorder, std::uint32_t parity, const gi_denoiser::Camera& camera, std::uint32_t frameSlot);
+    // The passes, from the rays to the light in the output (u0), on the frame slot's room (`frameSlot`), with
+    // NRD's validation layer when `isValidationShown`. The denoiser binds its own root signature and descriptor
+    // heap; the recorder's rebind restores the frame's.
+    void record(gi_d3d12::Recorder& recorder, std::uint32_t parity, const gi_denoiser::Camera& camera, std::uint32_t frameSlot,
+        bool isValidationShown);
 
 private:
     UINT renderWidth, renderHeight, lightWidth, lightHeight;
@@ -43,6 +45,8 @@ private:
 
     // The view depth this frame's and the last's by parity: a moving mesh's depth change takes the last (PrepareGuides).
     gi_d3d12::ComPtr<ID3D12Resource> viewZ[2], normalRoughness, motion, noisy[2], denoised[2], partial, path;
+    // Which render pixel of its 2 x 2 each light pixel's sample is from (PrepareGuides), and NRD's validation layer.
+    gi_d3d12::ComPtr<ID3D12Resource> pick, validation;
     gi_d3d12::ComPtr<ID3D12Resource> hash, decay, values, indirectValues, updateTiles, updateValues, updateIndirectValues, visibility,
         visibilityCells, visibilityQueries, multibounce, lights, packedTiles[2];
     // The foliage memory (gi_light.hlsl, "Foliage's light by world position").

@@ -3,6 +3,7 @@
 #include "features/ray_traced_lights/light_choice.hpp"
 #include "passes/ray_tracing/scene_description.hpp"
 #include "passes/ray_tracing/scene_memory.hpp"
+#include "passes/ray_tracing/shaders/gi_shared.h"
 
 #include <d3d11_4.h>
 #include <array>
@@ -39,10 +40,18 @@ struct Textures
     ID3D11Texture2D* velocity{};
     DXGI_FORMAT velocityFormat{};
     ID3D11Texture2D* localLightShadow{}; // R16_FLOAT, the share of the point and spot lights' light that reaches; null without lights
-    ID3D11Texture2D* lightDebug{}; // R8G8B8A8_UNORM, the light's denoiser history (CompositeLight); null while off
+    ID3D11Texture2D* lightDebug{}; // R8G8B8A8_UNORM, the light's debug view (CompositeLight, LightDebugView); null while off
 };
 
 using Matrix = std::array<float, 16>; // Rows applied as dot(row, v), as the engine's
+
+// What the light's debug view shows in textures.lightDebug.
+enum class LightDebugView : std::uint32_t
+{
+    None,
+    History = GI_LIGHT_DEBUG_HISTORY,       // The denoiser's history
+    Validation = GI_LIGHT_DEBUG_VALIDATION, // NRD's validation layer
+};
 
 using SceneTexture = scene_contents::SceneTexture;
 
@@ -93,6 +102,7 @@ struct Frame
     bool debugShadows{};
     bool shadowStarts{};     // The debug view: where the shadow rays leave each pixel (ShadowStartColor)
     bool twoSidedShadows{};  // Diagnostics: rays towards lights blocked by every surface from both sides, as until 2026-10-26
+    LightDebugView lightDebugView{}; // Diagnostics, with textures.lightDebug
     std::uint32_t lightRays{2}; // The light's rays a light pixel, 1 to 4 (TraceLight)
     // The point and spot lights whose shadows go into textures.localLightShadow, at most GI_MAX_LOCAL_LIGHTS,
     // and the rays a pixel they take.

@@ -333,6 +333,21 @@ struct Uploads
     }
 };
 
+// A camera of the frame in double, its projection without the upscaler's jitter (`x`, `y`: Frame::jitter).
+camera::View unjitteredCamera(const Matrix& projection, const Matrix& view, float x, float y)
+{
+    camera::View result{};
+    for (int i = 0; i < 16; ++i)
+    {
+        result.projection[i] = projection[i];
+        result.view[i] = view[i];
+    }
+
+    result.projection = camera::unjitteredProjection(result.projection, {x, y});
+
+    return result;
+}
+
 // In double (camera::inverse); projection-views are invertible.
 Matrix inverse(const Matrix& input)
 {
@@ -368,6 +383,17 @@ GIFrameConstants constantsOf(const Frame& frame, std::uint32_t newGeometries, st
     constants.shadowParams = {frame.sunTangent, AlphaTestedBlocking, ShadowRayLength, 0};
     constants.rayCone = {2 * std::tan(frame.verticalFov / 2) / static_cast<float>(std::max(frame.height, 1u)), 0, 0, 0};
     constants.jitter = {frame.jitter[0], frame.jitter[1], frame.jitter[2], frame.jitter[3]};
+
+    // The light's motion (CameraMotionOf in gi_light.hlsl), from the projections and views apart.
+    const auto current = unjitteredCamera(frame.projection, frame.view, frame.jitter[0], frame.jitter[1]);
+    const auto previous = unjitteredCamera(frame.previousProjection, frame.previousView, frame.jitter[2], frame.jitter[3]);
+    const auto previousFromCurrent = camera::previousFromCurrentByParts(previous, current);
+    for (int i = 0; i < 16; ++i) constants.previousFromCurrent.m[i] = static_cast<float>(previousFromCurrent[i]);
+
+    const auto clipToView = camera::inverse(current.projection);
+    constants.clipToViewW = {static_cast<float>(clipToView[12]), static_cast<float>(clipToView[13]), static_cast<float>(clipToView[14]),
+        static_cast<float>(clipToView[15])};
+
     const auto localLights = std::min<std::size_t>(frame.localLights.size(), GI_MAX_LOCAL_LIGHTS);
     for (std::size_t i = 0; i < localLights; ++i)
     {
@@ -389,36 +415,32 @@ GIFrameConstants constantsOf(const Frame& frame, std::uint32_t newGeometries, st
 // followed each frame's jittered samples, and grass and fine detail shimmered (2026-10-25).
 gi_denoiser::Camera denoiserCamera(const Frame& frame)
 {
-    const auto columns = [](const Matrix& rows, bool mirrorColumn0, bool mirrorRow0) {
+    const auto columns = [](const camera::Matrix& rows, bool mirrorColumn0, bool mirrorRow0) {
         std::array<float, 16> stored{};
         for (int row = 0; row < 4; ++row)
             for (int column = 0; column < 4; ++column)
             {
                 const bool mirrored = (mirrorColumn0 && column == 0) || (mirrorRow0 && row == 0);
-                stored[column * 4 + row] = mirrored ? -rows[row * 4 + column] : rows[row * 4 + column];
+                stored[column * 4 + row] = static_cast<float>(mirrored ? -rows[row * 4 + column] : rows[row * 4 + column]);
             }
 
         return stored;
     };
 
-    // The jitter is the projection's third column in its first two rows (camera::applyJitter).
-    const auto unjittered = [](Matrix projection, float x, float y) {
-        projection[2] -= x;
-        projection[6] -= y;
-        return projection;
-    };
-    // A light pixel's sample is one of its 2 x 2's render pixels, by depth (RenderPixelOf): at its centre on
+    // A light pixel's sample is one of its 2 x 2's render pixels (PickOf in gi_light.hlsl): at its centre on
     // average, moved the jitter back (x right, y down).
     const float width = static_cast<float>(frame.width), height = static_cast<float>(frame.height);
     const auto sampleOffset = [&](float x, float y) { return std::array<float, 2>{-x * width / 4, y * height / 4}; };
 
+    const auto current = unjitteredCamera(frame.projection, frame.view, frame.jitter[0], frame.jitter[1]);
+    const auto previous = unjitteredCamera(frame.previousProjection, frame.previousView, frame.jitter[2], frame.jitter[3]);
     gi_denoiser::Camera camera;
-    camera.viewToClip = columns(unjittered(frame.projection, frame.jitter[0], frame.jitter[1]), true, false);
-    camera.previousViewToClip = columns(unjittered(frame.previousProjection, frame.jitter[2], frame.jitter[3]), true, false);
+    camera.viewToClip = columns(current.projection, true, false);
+    camera.previousViewToClip = columns(previous.projection, true, false);
     camera.jitter = sampleOffset(frame.jitter[0], frame.jitter[1]);
     camera.previousJitter = sampleOffset(frame.jitter[2], frame.jitter[3]);
-    camera.worldToView = columns(frame.view, false, true);
-    camera.previousWorldToView = columns(frame.previousView, false, true);
+    camera.worldToView = columns(current.view, false, true);
+    camera.previousWorldToView = columns(previous.view, false, true);
     camera.restart = frame.cameraCut;
     return camera;
 }
@@ -1016,7 +1038,7 @@ Result render(const Frame& frame)
         if (traceShadows) s.shadows->fill(constants);
         constants.objectMotion = {velocity ? 1u : 0u, 0, 0, 0};
         constants.shadowDiagnostics = {frame.twoSidedShadows ? 1u : 0u, frame.shadowStarts ? 1u : 0u, 0, 0};
-        constants.lightDiagnostics = {0, 0, lightDebug ? 1u : 0u, 0};
+        constants.lightDiagnostics = {0, 0, lightDebug ? static_cast<std::uint32_t>(frame.lightDebugView) : 0u, 0};
         constants.lightRays = {frame.lightRays, 0, 0, 0};
         std::memcpy(uploads.data + constantsOffset, &constants, sizeof(constants));
 
@@ -1152,7 +1174,7 @@ Result render(const Frame& frame)
             recorder.mark("scene view");
             recorder.dispatch(Kernel::DebugScene, groups(frame.width, 8), groups(frame.height, 8));
         }
-        else if (traceLight) s.light->record(recorder, parity, denoiserCamera(frame), slot);
+        else if (traceLight) s.light->record(recorder, parity, denoiserCamera(frame), slot, lightDebug && frame.lightDebugView == LightDebugView::Validation);
 
         if constexpr (DiagnosticLog)
         {

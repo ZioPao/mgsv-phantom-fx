@@ -197,6 +197,13 @@ void applyJitter(SceneConstants& scene, std::array<float, 2> ndc)
     scene.cameraCenterOffset[1] = ndc[1];
 }
 
+Matrix unjitteredProjection(Matrix projection, std::array<float, 2> ndc)
+{
+    projection[2] -= ndc[0];
+    projection[6] -= ndc[1];
+    return projection;
+}
+
 std::array<float, 2> jitterNdc(std::array<float, 2> pixels, float width, float height)
 {
     return {2 * pixels[0] / width, -2 * pixels[1] / height};
@@ -230,6 +237,11 @@ int jitterPhases(float renderScale)
 Matrix previousFromCurrent(const View& previous, const View& current)
 {
     return multiply(previous.projectionView, inverse(current.projectionView));
+}
+
+Matrix previousFromCurrentByParts(const View& previous, const View& current)
+{
+    return multiply(previous.projection, multiply(multiply(previous.view, inverse(current.view)), inverse(current.projection)));
 }
 
 bool cameraCut(const View& previous, const View& current)

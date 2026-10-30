@@ -430,6 +430,52 @@ void reprojection()
         "Depth and the two matrices find where a point was in the previous frame.");
 }
 
+// The global illumination's motion from the projections and views apart, for a camera far from the
+// world's origin, each frame's projection jittered as the upscaler does it and the jitter taken out again
+// (camera::unjitteredProjection).
+void motionByParts()
+{
+    const auto unjittered = [](game_constants::SceneConstants scene, std::array<float, 2> pixels) {
+        camera::applyJitter(scene, camera::jitterNdc(pixels, 2560, 1440));
+        auto view = camera::viewOf(scene);
+        view.projection = camera::unjitteredProjection(view.projection, {scene.cameraCenterOffset[0], scene.cameraCenterOffset[1]});
+        return view;
+    };
+    const auto current = unjittered(DumpedMainView, {-0.0625f, 0.3148f});
+    const auto still = camera::previousFromCurrentByParts(unjittered(DumpedMainView, {0.4375f, -0.2407f}), current);
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column)
+            expect(close(still[row * 4 + column], row == column ? 1 : 0, 1e-9), "A still camera has no motion, whatever the jitter.");
+
+    // Previous frame: the camera 0.2 m along its view's x axis. A point 2.2 m ahead and 0.5 m to the side
+    // goes from this frame's NDC to where the last frame's projection and view put it.
+    auto before = DumpedMainView;
+    before.view[0][3] += 0.2f;
+    const auto previous = unjittered(before, {0.4375f, -0.2407f});
+    const auto moved = camera::previousFromCurrentByParts(previous, current);
+
+    const auto times = [](const camera::Matrix& m, const std::array<double, 4>& v) {
+        std::array<double, 4> result{};
+        for (int row = 0; row < 4; ++row)
+            for (int k = 0; k < 4; ++k) result[row] += m[row * 4 + k] * v[k];
+
+        return result;
+    };
+    std::array<double, 4> point{0, 0, 0, 1};
+    for (int i = 0; i < 3; ++i) point[i] = DumpedMainView.eye[i] + 2.2 * DumpedMainView.view[2][i] + 0.5 * DumpedMainView.view[0][i];
+    const auto clip = times(current.projection, times(current.view, point));
+    const auto then = times(moved, {clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3], 1});
+    const auto expected = times(previous.projection, times(previous.view, point));
+
+    // In render pixels at 2560 x 1440; the view depth then comes out over the view depth now, as CameraMotionOf
+    // divides it back.
+    const double x = then[0] / then[3] * 1280, y = then[1] / then[3] * 720;
+    const double expectedX = expected[0] / expected[3] * 1280, expectedY = expected[1] / expected[3] * 720;
+    expect(close(x, expectedX, 1e-3) && close(y, expectedY, 1e-3) && close(then[3] * clip[3], expected[3], 1e-6)
+            && !close(x, clip[0] / clip[3] * 1280, 10),
+        "A moved camera's motion finds where a point was in the previous frame, and its view depth then.");
+}
+
 void cuts()
 {
     constexpr float eye[3]{93.75f, 314.25f, 244.15f};
@@ -1269,6 +1315,7 @@ int main()
         sunPassDirectionPointsToTheSun();
         jitterShiftsTheImage();
         reprojection();
+        motionByParts();
         cuts();
         streamlineCamera();
         modeMaths();

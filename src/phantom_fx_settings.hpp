@@ -114,18 +114,24 @@ std::optional<EffectPreset> presetOf(const Settings& settings);
 // A first launch, without a settings file: the screen-space preset, upscaled at Quality.
 Settings firstLaunchSettings();
 
-// The debug view that blends the ray-traced shadows' debug view over the image, with their probe.
-constexpr int ShadowRaysView = 3;
-// The debug view that blends the global illumination's denoiser history over the image.
-constexpr int LightHistoryView = 4;
-// The debug view that blends where each pixel's shadow rays leave over the image, with the shadows' probe.
-constexpr int ShadowStartsView = 5;
+// What the image shows for troubleshooting. The Shadow views, of the ray-traced shadows, and the Light
+// views, of the global illumination's light, blend over the image; the Shadow ones with the shadows'
+// probe at the screen's centre.
+enum class DebugView : std::uint8_t
+{
+    FinalImage,
+    MotionVectors,
+    ObjectMotion,    // Where the engine's velocity was used
+    ShadowRays,      // What blocks each pixel's ray to the sun
+    ShadowStarts,    // Where each pixel's shadow rays leave
+    LightHistory,    // The denoiser's history
+    LightValidation, // NRD's validation layer
+};
 
 // The diagnostic views and switches. Not saved.
 struct Diagnostics
 {
-    int debugView{}; // 0 final image, 1 motion vectors, 2 where the engine's velocity was used, 3 the ray-traced shadows' rays (ShadowRaysView),
-                     // 4 the global illumination's denoiser history (LightHistoryView), 5 where the shadow rays leave (ShadowStartsView)
+    DebugView debugView{};
     bool noJitter{};
     bool gameFxaa{}; // Comparison: leave the frame to the game's FXAA, keeping DLSS ready
     bool onlyScreenSpaceShadows{}; // The sun shadowed by the screen-space shadows alone

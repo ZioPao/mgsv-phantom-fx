@@ -41,6 +41,8 @@ Light::Light(ID3D12Device* device, UINT width, UINT height)
     }
     partial = texture(DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the rays' own light");
     path = texture(DXGI_FORMAT_R32G32B32A32_UINT, "Creating the rays' bounces");
+    pick = texture(DXGI_FORMAT_R8_UINT, "Creating the light's samples");
+    validation = texture(DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the denoiser's validation layer");
 
     hash = buffer(std::uint64_t{HashTiles} * 4, "Creating the hash grid");
     decay = buffer(std::uint64_t{HashTiles} * 4, "Creating the hash grid's ages");
@@ -107,9 +109,12 @@ void Light::describe(gi_d3d12::Descriptors& d, std::uint32_t parity) const
     d.outputBuffer(32, foliageTouched.Get(), 4, GI_FOLIAGE_MEMORY_SLOTS);
     d.outputBuffer(33, foliageAdded.Get(), 4, std::uint64_t{GI_FOLIAGE_MEMORY_SLOTS} * 4);
     d.outputBuffer(34, foliageLight.Get(), 8, GI_FOLIAGE_MEMORY_SLOTS);
+    d.outputTexture(35, pick.Get(), DXGI_FORMAT_R8_UINT);
+    d.outputTexture(36, validation.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
 }
 
-void Light::record(gi_d3d12::Recorder& r, std::uint32_t parity, const gi_denoiser::Camera& camera, std::uint32_t frameSlot)
+void Light::record(gi_d3d12::Recorder& r, std::uint32_t parity, const gi_denoiser::Camera& camera, std::uint32_t frameSlot,
+    bool isValidationShown)
 {
     const auto now = std::chrono::steady_clock::now();
     if (lastRecord)
@@ -152,7 +157,7 @@ void Light::record(gi_d3d12::Recorder& r, std::uint32_t parity, const gi_denoise
 
     r.mark("denoiser", performance::Pass::GiDenoiser);
     denoiser.record(r.commands(), camera, {motion.Get(), normalRoughness.Get(), viewZ[parity].Get(), noisy[0].Get(), noisy[1].Get(), denoised[0].Get(),
-        denoised[1].Get()}, frameSlot, static_cast<float>(1000.0 / smoothedFrameMilliseconds));
+        denoised[1].Get(), isValidationShown ? validation.Get() : nullptr}, frameSlot, static_cast<float>(1000.0 / smoothedFrameMilliseconds));
     r.rebind();
 
     r.mark("render size", performance::Pass::GiDenoiser);

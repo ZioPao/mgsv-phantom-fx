@@ -118,9 +118,9 @@ struct InputConstants
 
 struct CompositeConstants
 {
-    std::uint32_t debugView;
+    std::uint32_t showMotion, showObjectMotion, showProbe;
     float sharpness;
-    std::uint32_t objectMotion, linear;
+    std::uint32_t objectMotion, linear, padding[2];
 };
 
 static_assert(static_cast<int>(DlssQuality::MaxPerformance) == NVSDK_NGX_PerfQuality_Value_MaxPerf
@@ -1100,14 +1100,24 @@ void runInputs(const Frame& current, const camera::Matrix& previousFromCurrent, 
 void runComposite(ID3D11RenderTargetView* destination, ID3D11ShaderResourceView* objectVelocity, const Diagnostics& options, float sharpness,
     bool linear)
 {
-    const CompositeConstants constants{static_cast<std::uint32_t>(options.debugView), sharpness, objectVelocity != nullptr, linear};
+    const auto view = options.debugView;
+    const bool isShadowView = view == DebugView::ShadowRays || view == DebugView::ShadowStarts;
+    const CompositeConstants constants{
+        .showMotion = view == DebugView::MotionVectors,
+        .showObjectMotion = view == DebugView::ObjectMotion,
+        .showProbe = isShadowView,
+        .sharpness = sharpness,
+        .objectMotion = objectVelocity != nullptr,
+        .linear = linear,
+    };
     immediate->UpdateSubresource(compositeConstants.Get(), 0, nullptr, &constants, 0, 0);
 
     const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(outputTarget.width), static_cast<float>(outputTarget.height), 0, 1};
-    auto* shadowRays = options.debugView == ShadowRaysView || options.debugView == ShadowStartsView
+    auto* shadowRays = isShadowView
                            ? ray_tracing::shadowDebug(colorTarget.width, colorTarget.height)
-                       : options.debugView == LightHistoryView ? ray_tracing::lightDebug(colorTarget.width, colorTarget.height)
-                                                               : nullptr;
+                       : view == DebugView::LightHistory || view == DebugView::LightValidation
+                           ? ray_tracing::lightDebug(colorTarget.width, colorTarget.height)
+                           : nullptr;
     ID3D11ShaderResourceView* inputs[]{outputTarget.view.Get(), motionTarget.view.Get(), objectVelocity, shadowRays};
     immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     immediate->VSSetShader(ensureStretch()->vertex.Get(), nullptr, 0);

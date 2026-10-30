@@ -32,7 +32,7 @@ struct Camera
 
 // The textures a frame denoises, at the denoiser's size, all in the unordered access state, which
 // they are left in: the guides (motion, normal and roughness, view depth), the noisy light's two
-// spherical harmonics textures and the denoised ones.
+// spherical harmonics textures and the denoised ones, and NRD's validation layer when it is wanted.
 struct Textures
 {
     ID3D12Resource* motion{};          // RGBA16_FLOAT: the last frame's uv minus this one's, and view z's change
@@ -40,6 +40,7 @@ struct Textures
     ID3D12Resource* viewZ{};           // R32_FLOAT
     ID3D12Resource* light0{}, *light1{};       // RGBA16_FLOAT, RELAX_FrontEnd_PackSh
     ID3D12Resource* denoised0{}, *denoised1{}; // RGBA16_FLOAT, RELAX_BackEnd_UnpackSh
+    ID3D12Resource* validation{};              // RGBA8_UNORM, OUT_VALIDATION; null leaves the layer out
 };
 
 class Denoiser
