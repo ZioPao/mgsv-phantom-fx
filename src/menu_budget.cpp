@@ -10,6 +10,7 @@
 #include "features/indirect_light/ssilvb.hpp"
 #include "features/lamp_contact_shadows/lamp_contact_shadows.hpp"
 #include "features/lamp_soft_shadows/lamp_soft_shadows.hpp"
+#include "features/path_tracing/path_tracing.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
 #include "features/sun_contact_shadows/sun_contact_shadows.hpp"
 #include "features/upscaling/upscaler.hpp"
@@ -18,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <format>
 #include <initializer_list>
 #include <span>
 #include <string>
@@ -70,9 +72,11 @@ const EffectLine EffectLines[]{
     {.effect = Effect::SunContactShadows, .passes = {{Pass::SunTrace, "Contact shadow trace"}}, .health = sun_contact_shadows::health},
     {.effect = Effect::LampContactShadows, .passes = {{Pass::LampShadows, "Shadow draws"}}, .health = lamp_contact_shadows::health},
     {.effect = Effect::GlobalIllumination, .passes = {{Pass::GiRays, "Rays and the light cache"}, {Pass::GiDenoiser, "Denoiser and render size"},
-            {Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}, {Pass::Reflections, "Path-traced reflections"},
-            {Pass::LampLight, "Path-traced lamps"}},
+            {Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}},
         .health = light_combine::health},
+    {.effect = Effect::PathTracing, .passes = {{Pass::Reflections, "Reflections"}, {Pass::LampLight, "Point and spot lights (ReSTIR)"},
+            {Pass::PathTracedLight, "Adding the light"}},
+        .health = path_tracing::health},
     {.effect = Effect::AmbientOcclusion, .passes = {{Pass::OcclusionPrefilter, "Depth prefilter"}, {Pass::OcclusionMarch, "March"}, {Pass::OcclusionDenoise, "Denoise"},
             {Pass::OcclusionApply, "Applying to the indirect light"}},
         .health = gtvbao::health},
@@ -105,12 +109,13 @@ struct Report
 };
 
 // From the plan, then, while it runs, from its health.
-Report reportOf(EffectState planned, Health health)
+Report reportOf(Effect effect, EffectState planned, Health health)
 {
     if (planned == EffectState::Off) return {State::Off};
     if (planned == EffectState::Unsupported) return {State::Unavailable, "This game version is not supported, so it stays off."};
     if (planned == EffectState::Held) return {State::Held};
     if (planned == EffectState::Replaced) return {State::Replaced};
+    if (planned == EffectState::Lacking) return {State::NotRunning, std::format("Needs {} on.", featureOf(*featureOf(effect).needs).name)};
     if (health.kind == Health::Kind::Unavailable) return {State::Unavailable, std::move(health.reason)};
     if (health.kind == Health::Kind::Waiting) return {State::NotRunning, std::move(health.reason)};
 
@@ -151,7 +156,7 @@ fxui::Budget budget(Settings& wanted, const performance::Costs& costs)
 
     const auto plan = core::effectPlan(wanted);
     ByEffect<Report> reports;
-    for (const auto& line : EffectLines) reports[line.effect] = reportOf(plan[line.effect], line.health());
+    for (const auto& line : EffectLines) reports[line.effect] = reportOf(line.effect, plan[line.effect], line.health());
 
     const auto lineState = [&](Effect effect) { return LineState{lineOf(effect), reports[effect].state}; };
 

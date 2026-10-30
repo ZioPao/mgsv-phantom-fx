@@ -167,10 +167,10 @@ list(SORT DXC_SDK_DIRS COMPARE NATURAL ORDER DESCENDING)
 find_program(DXC_EXECUTABLE dxc HINTS "$ENV{WindowsSdkVerBinPath}x64" ${DXC_SDK_DIRS} REQUIRED)
 set(GI_SHADER_DIR "${CMAKE_BINARY_DIR}/gi_shaders")
 set(GI_SHADER_SHARED "${CMAKE_SOURCE_DIR}/src/passes/ray_tracing/shaders")
-set(GI_SHADER_INCLUDES "${GI_SHADER_SHARED}/gi_shared.h" "${GI_SHADER_SHARED}/gi_common.hlsli" "${GI_SHADER_SHARED}/gi_shadow.hlsli" "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_filter.h"
+set(GI_SHADER_INCLUDES "${GI_SHADER_SHARED}/gi_shared.h" "${GI_SHADER_SHARED}/gi_common.hlsli" "${GI_SHADER_SHARED}/gi_shadow.hlsli" "${GI_SHADER_SHARED}/gi_hit_light.hlsli"
+    "${GI_SHADER_SHARED}/ggx_specular.hlsli" "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_filter.h"
     "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_tileclassification.h"
-    "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_util.h" "${nrd_SOURCE_DIR}/Shaders/NRD.hlsli"
-    "${CMAKE_SOURCE_DIR}/src/features/global_illumination/gi_light.hlsl")
+    "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_util.h" "${nrd_SOURCE_DIR}/Shaders/NRD.hlsli")
 set(GI_SHADER_HEADERS)
 function(add_gi_kernels source)
     foreach(entry IN LISTS ARGN)
@@ -193,8 +193,14 @@ add_gi_kernels(features/ray_traced_shadows/gi_shadow.hlsl TraceSunShadows Classi
 add_gi_kernels(features/ray_traced_shadows/gi_shadow_filter.hlsl FilterShadows)
 add_gi_kernels(features/ray_traced_lights/light_shadows.hlsl TraceLocalLightShadows FilterLocalLightShadows ProbeLocalLights)
 add_gi_kernels(features/path_tracing/reflections.hlsl TraceReflections)
-add_gi_kernels(features/path_tracing/direct_light.hlsl TraceLampLight)
+add_gi_kernels(features/path_tracing/direct_light.hlsl SampleLamps ShadeLamps)
 add_custom_target(gi_kernels DEPENDS ${GI_SHADER_HEADERS})
+
+# GGX's specular, one file for path tracing's kernels and the sun pass's shaders, which compile at run time:
+# copied into a header as text.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${GI_SHADER_SHARED}/ggx_specular.hlsli")
+file(READ "${GI_SHADER_SHARED}/ggx_specular.hlsli" GGX_SPECULAR_SOURCE)
+configure_file("${GI_SHADER_SHARED}/ggx_specular.hpp.in" "${GI_SHADER_DIR}/ggx_specular.hpp" @ONLY)
 
 # Each feature's settings and their description (src/features/).
 set(PHANTOM_FX_FEATURES src/features/upscaling/settings.cpp src/features/frame_generation/settings.cpp src/features/sun/settings.cpp src/features/ray_traced_shadows/settings.cpp src/features/soft_shadows/settings.cpp src/features/sun_contact_shadows/settings.cpp
@@ -210,7 +216,7 @@ add_library(phantom_fx SHARED src/addon.cpp src/core.cpp src/modules.cpp src/fea
     src/passes/local_light_pass.cpp src/features/lamp_contact_shadows/lamp_contact_shadows.cpp src/features/lamp_soft_shadows/lamp_soft_shadows.cpp
     src/passes/indirect_light_pass.cpp src/passes/visibility_bitmask.cpp src/features/ambient_occlusion/gtvbao.cpp
     src/features/indirect_light/ssilvb.cpp src/features/global_illumination/light_combine.cpp src/features/photo_mode/photo_mode.cpp src/features/photo_mode/focus.cpp src/features/hdr/hdr.cpp src/weather.cpp src/character.cpp src/game_lua.cpp src/travel.cpp src/features/volumetric_fog/atmosphere.cpp src/sun_movement.cpp
-    src/fidelityfx.cpp src/features/upscaling/fsr_upscaler.cpp src/features/upscaling/ray_reconstruction.cpp src/features/path_tracing/path_tracing.cpp src/features/frame_generation/fsr_frame_generation.cpp src/performance.cpp src/performance_menu.cpp
+    src/fidelityfx.cpp src/features/upscaling/fsr_upscaler.cpp src/features/upscaling/ray_reconstruction.cpp src/features/path_tracing/path_tracing.cpp src/features/path_tracing/path_tracing_rays.cpp src/features/frame_generation/fsr_frame_generation.cpp src/performance.cpp src/performance_menu.cpp
     src/passes/ray_tracing/ray_tracing.cpp src/passes/ray_tracing/engine_scene.cpp src/passes/ray_tracing/scene_description.cpp src/passes/ray_tracing/engine_brush.cpp src/passes/ray_tracing/gi_inputs.cpp src/features/ray_traced_lights/local_lights.cpp src/features/ray_traced_lights/light_choice.cpp src/features/ray_traced_lights/light_shadow_rays.cpp src/passes/ray_tracing/gi_renderer.cpp src/passes/ray_tracing/gi_scene.cpp src/passes/ray_tracing/scene_contents.cpp src/passes/ray_tracing/gi_textures.cpp src/features/global_illumination/gi_light.cpp src/features/global_illumination/gi_denoiser.cpp src/features/global_illumination/gi_lighting.cpp src/features/ray_traced_shadows/gi_shadow.cpp
     "${CMAKE_BINARY_DIR}/version.rc")
 add_dependencies(phantom_fx gi_kernels)

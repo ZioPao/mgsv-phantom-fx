@@ -5,7 +5,7 @@
 // pass's specular. The light goes out times the surface's specular albedo (the Ray Reconstruction guide)
 // and the exposure, for the resolve to add to the game's specular light, and the hit distance goes to
 // Ray Reconstruction to move the reflection with what it reflects.
-#include "../global_illumination/gi_light.hlsl"
+#include "gi_hit_light.hlsli"
 
 Texture2D<float4> g_Guide_NormalRoughness : register(t18); // The world-space normal, the roughness in w (ray_tracing::ReconstructionGuides)
 Texture2D<float4> g_Guide_SpecularAlbedo : register(t19);  // The share of light the surface reflects towards the eye
@@ -49,14 +49,14 @@ float3 ReflectedLight(float3 origin, float3 normal, float tolerance, float3 dire
     float3 hitWorld, hitNormal;
     HitSurface(visibility, hitWorld, hitNormal);
     float3 albedo = HitAlbedo(hitWorld, visibility);
-    bool leaf = HitIsLeaf(visibility);
+    bool isLeaf = HitIsLeaf(visibility);
     float3 hitOrigin = OffsetFromTriangle(hitWorld, hitNormal);
     float hitTolerance = CopyTolerance(hitWorld);
-    float3 light = albedo * (SunLight(hitWorld, hitNormal, hitOrigin, hitTolerance, leaf, random)
+    float3 light = albedo * (SunLight(hitWorld, hitNormal, hitOrigin, hitTolerance, isLeaf, random)
         + SampledLocalLight(hitWorld, hitNormal, hitOrigin, hitTolerance, random));
 
     float weight;
-    float3 side = BounceSide(hitNormal, leaf, random, weight);
+    float3 side = BounceSide(hitNormal, isLeaf, random, weight);
     float3 bounceDirection = mapToCosineHemisphere(random.rand2(), side);
     float3 bounceOrigin = all(side == hitNormal) ? hitOrigin : OffsetFromTriangle(hitWorld, side);
     SceneHit bounce = TraceFromSurface(bounceOrigin, side, hitTolerance, bounceDirection, MAX_HIT_DISTANCE);

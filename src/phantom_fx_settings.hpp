@@ -157,8 +157,9 @@ struct LeftOut
     bool globalLight{};
 };
 
-// What an effect is: the first of these that applies.
-enum class EffectState : std::uint8_t { Off, Unsupported, Held, Replaced, LeftOut, Running };
+// What an effect is: the first of these that applies. Lacking: the effect it builds on
+// (FeatureInfo::needs) does not run.
+enum class EffectState : std::uint8_t { Off, Unsupported, Held, Replaced, LeftOut, Lacking, Running };
 
 struct EffectPlan
 {

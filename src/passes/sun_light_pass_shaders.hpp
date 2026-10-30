@@ -10,8 +10,9 @@ namespace phantom_fx::sun_light_pass::shaders
 // shadow map, the screen-space shadow in t7 multiplies the sun's shadow, and the ray-traced shadow in
 // t6 takes the place of the game's. With all off they give the game's output bit for bit (checked on
 // WARP with random inputs). For path tracing (PATH_TRACED 1, path_tracing.hpp), the rays' shadow alone,
-// the clouds' inside the shadow range (CLOUD_SHADOW 1), and GGX's specular, as the traced reflections and
-// Ray Reconstruction's guides have it. Split into literals, as MSVC limits each to 16 KB.
+// the clouds' inside the shadow range (CLOUD_SHADOW 1), and GGX's specular (GgxSpecular, ggx_specular.hlsli,
+// which goes before this source), as the traced reflections and Ray Reconstruction's guides have it. Split
+// into literals, as MSVC limits each to 16 KB.
 inline constexpr char SunLight[] = R"(
 cbuffer cPSScene : register(b2)
 {
@@ -279,25 +280,6 @@ float PathTracedShadow(float3 viewPosition, float rayTraced)
     shadow *= heightFade * heightFade;
 #endif
     return shadow;
-}
-
-// GGX's specular for a light of `lightColor` (the diffuse light's units, the game's irradiance over pi) from
-// `toLight`: the Trowbridge-Reitz distribution, Smith's height-correlated visibility and Schlick's Fresnel,
-// of roughness squared and the specular colour at normal incidence.
-float3 GgxSpecular(float3 lightColor, float3 normal, float3 toEye, float3 toLight, float roughness, float3 specularColor)
-{
-    float3 halfway = normalize(toEye + toLight);
-    float NoL = saturate(dot(normal, toLight));
-    float NoV = max(dot(normal, toEye), 1e-4);
-    float NoH = saturate(dot(normal, halfway));
-    float VoH = saturate(dot(toEye, halfway));
-    float alpha = max(roughness * roughness, 1e-3);
-    float a2 = alpha * alpha;
-    float d = (NoH * a2 - NoH) * NoH + 1;
-    float distribution = a2 / (3.14159265 * d * d);
-    float visibility = 0.5 / max(NoL * sqrt(NoV * NoV * (1 - a2) + a2) + NoV * sqrt(NoL * NoL * (1 - a2) + a2), 1e-6);
-    float3 fresnel = specularColor + (1 - specularColor) * pow(1 - VoH, 5);
-    return 3.14159265 * lightColor * (NoL * distribution * visibility) * fresnel;
 }
 #endif
 )" R"(

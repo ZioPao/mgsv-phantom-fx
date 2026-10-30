@@ -38,7 +38,7 @@ enum class Pass : std::size_t
     OcclusionPrefilter, OcclusionMarch, OcclusionDenoise, OcclusionApply,
     LightPrefilter, LightMarch, LightDenoise, LightUpsample,
     FogPass, SkyTables, FogShadow, FogScattering, FogIntegration, Sky,
-    GiInputs, GiProbeLight, GiCombine, GiWait, LocalLights,
+    GiInputs, GiProbeLight, GiCombine, GiWait, LocalLights, PathTracedLight,
 
     // On Direct3D 12
     RayTracedScene, SunShadowRays, SunShadowDenoiser, LightShadowRays, LightShadowFilter, GiRays, GiDenoiser, Reflections, LampLight,

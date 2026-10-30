@@ -274,6 +274,26 @@ bool ObjectMotion(int2 pixel, out float2 moved)
     return velocity.r > 0.5f && length(moved) < 63.0f;
 }
 
+// The upscaler's jitter (NDC) as a shift on screen, in uv.
+float2 JitterUv(float2 ndc)
+{
+    return float2(0.5f, -0.5f) * ndc;
+}
+
+// A render pixel's camera motion (the last frame's uv minus this one's, without the jitter) and its view
+// depth last frame: its unjittered clip position through the one matrix built in double from the
+// projections and views apart (camera::previousFromCurrentByParts), as the upscaler's motion vectors.
+// Through its world position and the game's float projection-views the motion was off by up to 0.19 render
+// pixels near the camera on a still frame, changing with each jitter (2026-10-29).
+void CameraMotionOf(uint2 pixel, float depth, out float2 motion, out float previousViewZ)
+{
+    float2 uv = (pixel + 0.5f) / g_Frame.dimensions.xy;
+    float4 unjittered = float4(float2(2.0f * uv.x - 1.0f, 1.0f - 2.0f * uv.y) - g_Frame.jitter.xy, depth, 1.0f);
+    float4 last = mul(g_Frame.previousFromCurrent, unjittered);
+    motion = (float2(0.5f, -0.5f) * last.xy / last.w + 0.5f) - (float2(0.5f, -0.5f) * unjittered.xy + 0.5f);
+    previousViewZ = last.w / dot(g_Frame.clipToViewW, unjittered);
+}
+
 // ---- The scene ----
 
 // The sky's radiance in a world direction, from the game's own sky light (gi_renderer.cpp).
