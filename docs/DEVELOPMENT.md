@@ -1638,7 +1638,8 @@ the game's lights) is left alone until it runs.
   the game draws, a reflection is a faint blur: the ray's hit takes the light cache's light for its place (`CachedLight`),
   one ray a pixel; where no ray has lit that cell yet, and at a self-lit mesh, it is shaded as below. On a glossy
   surface the hit has its material (see "Hits" below) and takes the sun, a light and a self-lit mesh afresh, each
-  diffuse by its albedo and specular by GGX. One of its lobes then goes on, chosen by what each reflects: the
+  diffuse by its albedo. The sun and the light are specular by GGX too; a self-lit mesh's specular light is the
+  specular ray that meets it. One of its lobes then goes on, chosen by what each reflects: the
   specular one, on a glossy hit, by GGX's visible normals again, so a reflection holds reflections, up to three
   specular rays a path (`SpecularRays`), or the diffuse one, whose ray ends the path at the sky's light or the
   light cache as the global illumination's rays do. A ray that gets away takes the

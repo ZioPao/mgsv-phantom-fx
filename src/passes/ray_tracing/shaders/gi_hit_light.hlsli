@@ -620,8 +620,9 @@ float3 SunLight(float3 world, float3 normal, float3 origin, float tolerance, boo
 }
 
 // The light a hit sends towards `toEye` from the sun, a point or spot light and a self-lit mesh: their diffuse light
-// by its albedo, and with path tracing their specular light by GGX, as the sun pass and the lamps shade what the camera
-// sees. `origin` and `tolerance` as OffsetFromTriangle and CopyTolerance give them for its triangle.
+// by its albedo, and with path tracing the sun's and the light's specular light by GGX, as the sun pass and the lamps
+// shade what the camera sees; a self-lit mesh's specular light is the specular ray that meets it. `origin` and
+// `tolerance` as OffsetFromTriangle and CopyTolerance give them for its triangle.
 float3 HitOwnLight(HitMaterial material, float3 toEye, float3 origin, float tolerance, inout Random random)
 {
     float3 toSun, toLight;
