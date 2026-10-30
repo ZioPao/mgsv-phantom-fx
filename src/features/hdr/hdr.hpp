@@ -12,40 +12,51 @@
 #include <utility>
 #include <vector>
 
-// HDR10 output (docs/DEVELOPMENT.md, "HDR"). Fox Engine tonemaps early, in the deferred resolve and
-// in the sky, clouds and ocean, and everything after worked on that tonemapped image in 8 bits: glass
-// and particles, the reflections, bloom, the depth of field, the grading, FXAA and the HUD. With HDR
-// the scene keeps its light until the grading:
+// The scene in float, and HDR10 output (docs/DEVELOPMENT.md, "HDR"). Fox Engine tonemaps early, in the
+// deferred resolve and in the sky, clouds and ocean, and everything after worked on that tonemapped image
+// in 8 bits: glass and particles, the reflections, bloom, the depth of field, the grading, FXAA and the
+// HUD. On a supported build the scene keeps its light until the grading, in SDR too, where the 8 bits
+// showed as bands in smooth fog:
 //
-// - The swap chain becomes R10G10B10A2 with flip model, in the HDR10 colour space (PQ, BT.2020).
+// - With HDR output, the swap chain becomes R10G10B10A2 with flip model, in the HDR10 colour space (PQ,
+//   BT.2020).
 // - The scene target and its copy, which the renderer makes at known places, become 16-bit float.
 //   They hold sRGB-encoded colour, which 8-bit formats encode and decode in their _SRGB views; the
 //   float targets keep the encoded values, so a draw through such a view (the resolve) is encoded
 //   after it, and reads through one (the reflections, from the copy) get a decoded twin.
-// - The game's shaders with TppTonemap get it taken out as they are made, and the sky's clamp to 1.
+// - The game's shaders with TppTonemap get it taken out as they are made; the sky's clamp to 1 after
+//   it stays with HDR output only.
 // - What expects the tonemapped image gets it: bloom's quarter-size copy is tonemapped as it is made,
 //   and the depth of field composites over a float copy of the scene.
-// - The grading pass tonemaps for the game's grading, then adds back the light the tonemap took.
+// - The grading pass tonemaps for the game's grading; with HDR output it then adds back the light the
+//   tonemap took.
 // - GammaControl, which wrote the back buffer, applies the game's brightness and maps the light to
-//   the display.
+//   the display: with HDR output, its range; in SDR, 8 bits with a dither of half a step, which hides
+//   the steps left.
 // - The 2D pass's writes are clamped to 0 to 1, as the 8-bit target clamped them.
 //
 // DLSS runs in its HDR mode on the light (upscaler.cpp).
 namespace phantom_fx::hdr
 {
+// What the session keeps of the scene's light: nothing (the game's 8-bit scene), the float scene with
+// SDR output, or the float scene with HDR output.
+enum class Mode : std::uint8_t { Off, FloatScene, HdrOutput };
+
 // What the swap chain shows: HDR10, sRGB when the display has HDR off, or nothing of HDR's because
 // it is off or could not start.
 enum class Output : std::uint8_t { Off, Hdr10, Sdr, Unavailable };
 
 // ---- Setup ----
 // At start, before the game makes its swap chain and targets. A change takes a restart.
-void enable(bool on) noexcept;
-// HDR runs this session.
+void enable(Mode mode) noexcept;
+// The scene keeps its light in 16-bit float until the grading this session.
+bool isSceneFloat() noexcept;
+// HDR output runs this session.
 bool active() noexcept;
 Output output() noexcept;
 // The peak brightness HDR maps to for a chosen one, in nits: 0 takes what the display reports.
 float peakNitsFor(float chosen) noexcept;
-// Checks the device can run HDR; it stays off for the session when it cannot.
+// Checks the device can keep the scene in float; it and HDR stay off for the session when it cannot.
 void attach(ID3D11Device* device) noexcept;
 // Releases everything; only when no Direct3D work can run (device teardown, unload).
 void detach() noexcept;
@@ -97,7 +108,7 @@ bool copy(ID3D11DeviceContext* context, ID3D11Resource* source, ID3D11Resource* 
 // target is to be replaced by its twin.
 bool replaceViews(unsigned count, ID3D11ShaderResourceView* const* views, ID3D11ShaderResourceView** replaced) noexcept;
 
-// While GammaControl draws: the output shader in place of the game's, when HDR runs.
+// While GammaControl draws: the output shader in place of the game's, while the scene is float.
 class OutputShader
 {
 public:
@@ -116,4 +127,7 @@ private:
 
 // The format the scene target has this session.
 DXGI_FORMAT sceneFormat() noexcept;
+// The scene as the depth of field's composite last found it: its float copy, sRGB-encoded as the scene.
+// None unless it is `width` x `height`.
+Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sceneBeforeDof(UINT width, UINT height) noexcept;
 }

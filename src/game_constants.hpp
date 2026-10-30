@@ -65,7 +65,8 @@ struct SunLightConstants
 
     float direction[3], padding0;                          // c0: towards the sun
     float color[3], padding1;                              // c1: before the exposure
-    float padding2[4][4];                                  // c2-c5
+    float padding2[2], skyReflectionFloor, padding7;       // c2.z: the least F0 its sky reflection takes
+    float padding8[3][4];                                  // c3-c5
     float shadowRangeFade, padding3[3];                    // c6
     float padding4[4];                                     // c7
     float shadowRangeCentre, shadowRangeStart, padding5[2]; // c8: the range's centre depth, the distance it starts at
@@ -73,7 +74,8 @@ struct SunLightConstants
 };
 
 static_assert(sizeof(SunLightConstants) == 11 * RegisterSize);
-static_assert(offsetof(SunLightConstants, color) == 1 * RegisterSize && offsetof(SunLightConstants, shadowRangeFade) == 6 * RegisterSize
+static_assert(offsetof(SunLightConstants, color) == 1 * RegisterSize && offsetof(SunLightConstants, skyReflectionFloor) == 2 * RegisterSize + 8
+    && offsetof(SunLightConstants, shadowRangeFade) == 6 * RegisterSize
     && offsetof(SunLightConstants, shadowRangeCentre) == 8 * RegisterSize && offsetof(SunLightConstants, shadowRangeStart) == 8 * RegisterSize + 4);
 
 // cPSLight, b3 (176 bytes), in the point and spot light passes (game_lights.hpp); view space.
@@ -87,7 +89,7 @@ struct LampLightConstants
     float axis[3], padding2;                                   // c5: the way a spot points
     float falloff[4];                                          // c6: see game_lights::Falloff
     float cutOffCosine, penumbraScale, coneExponent, padding3; // c7: a spot's cone; y 1 / its penumbra
-    float specularScale, padding4[3];                          // c8
+    float specularScale, diffuseScale, padding4[2];            // c8: z the shadow's strength
     float padding5[2][4];                                      // c9-c10
 };
 

@@ -9,6 +9,7 @@
 // wider than the penumbra (light_shadows.hlsl). The light pass reads the result (local_lights.hpp).
 namespace phantom_fx::light_shadow_rays
 {
-// The rays, then the filter's three passes, at the render size. Needs the frame's scene built.
-void record(gi_d3d12::Recorder& recorder, std::uint32_t width, std::uint32_t height);
+// The rays, then the filter's three passes, at the render size; the rays alone for DLSS Ray Reconstruction
+// (`forReconstruction`), which denoises itself. Needs the frame's scene built.
+void record(gi_d3d12::Recorder& recorder, std::uint32_t width, std::uint32_t height, bool forReconstruction);
 }

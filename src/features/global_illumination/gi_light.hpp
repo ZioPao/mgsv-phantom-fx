@@ -12,17 +12,20 @@
 // The global illumination's indirect light on its Direct3D 12 device (docs/DEVELOPMENT.md, "Global
 // illumination", "Light"): a ray a pixel of a grid half the render size each way, its hits lit afresh,
 // its bounce from the two-level hash grid cache, NRD's denoiser, then the render size
-// (gi_light.hlsl), with their memory at one render size.
+// (gi_light.hlsl), with their memory at one render size. For DLSS Ray Reconstruction, which denoises
+// itself, a sample a render pixel and no denoiser.
 namespace phantom_fx::gi_light
 {
 class Light
 {
 public:
-    // Makes the memory for a render size. Throws on Direct3D 12 or NRD errors.
-    Light(ID3D12Device* device, UINT width, UINT height);
+    // Makes the memory for a render size, with a sample a render pixel for Ray Reconstruction
+    // (`isPerRenderPixel`). Throws on Direct3D 12 or NRD errors.
+    Light(ID3D12Device* device, UINT width, UINT height, bool isPerRenderPixel);
 
     UINT width() const { return renderWidth; }
     UINT height() const { return renderHeight; }
+    bool isPerRenderPixel() const { return !denoiser; }
 
     // The light's and the hash grid's constants; `verticalFov` in radians.
     void fill(gi::GIFrameConstants& constants, float verticalFov, std::uint32_t parity) const;
@@ -37,7 +40,8 @@ public:
 private:
     UINT renderWidth, renderHeight, lightWidth, lightHeight;
     std::uint32_t rayCount;
-    gi_denoiser::Denoiser denoiser;
+    // None for Ray Reconstruction.
+    std::optional<gi_denoiser::Denoiser> denoiser;
     // The real frame rate, smoothed as NRD asks (NRDSettings.h, GetMaxAccumulatedFrameNum): its history is
     // half a second whatever the rate.
     double smoothedFrameMilliseconds{1000.0 / 60.0};

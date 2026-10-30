@@ -184,11 +184,11 @@ void effectPlan()
     all.rayTracedShadows.on = all.softShadows.on = all.sunContactShadows.on = true;
     all.rayTracedLights.on = all.lampContactShadows.on = all.lampSoftShadows.on = true;
     all.globalIllumination.on = all.ambientOcclusion.on = all.indirectLight.on = true;
-    all.volumetricFog.on = true;
+    all.volumetricFog.on = all.sea.on = true;
 
     const auto plan = planEffects(all, {});
     expect(plan.runs(Effect::RayTracedShadows) && plan.runs(Effect::RayTracedLights) && plan.runs(Effect::GlobalIllumination)
-            && plan.runs(Effect::VolumetricFog),
+            && plan.runs(Effect::VolumetricFog) && plan.runs(Effect::Sea),
         "The effects nothing replaces run.");
 
     for (const auto effect : {Effect::SoftShadows, Effect::SunContactShadows, Effect::LampContactShadows, Effect::LampSoftShadows, Effect::AmbientOcclusion,
@@ -221,6 +221,40 @@ void effectPlan()
         "An unsupported game build stops the ray tracing, not the soft shadows.");
     expect(planEffects(softAndGlobal, {.supportedBuild = false, .enhancements = false})[Effect::GlobalIllumination] == EffectState::Unsupported,
         "Unsupported comes before held.");
+}
+
+// Path tracing replaces the ray-traced shadows and lights, and what they replace, while it can run; without
+// what it needs, they stay.
+void pathTracingPlan()
+{
+    Settings traced;
+    traced.rayTracedShadows.on = traced.softShadows.on = traced.rayTracedLights.on = true;
+    traced.globalIllumination.on = traced.pathTracing.on = traced.upscaling.rayReconstruction = true;
+
+    const auto plan = planEffects(traced, {});
+    expect(plan.runs(Effect::PathTracing) && plan.runs(Effect::GlobalIllumination), "Path tracing runs with the global illumination and Ray Reconstruction.");
+    for (const auto effect : {Effect::RayTracedShadows, Effect::RayTracedLights, Effect::SoftShadows})
+        expect(plan[effect] == EffectState::Replaced && plan.replacers[effect] == Effect::PathTracing,
+            "Path tracing takes the place of the ray-traced shadows and lights, and of what those replace.");
+
+    Settings withoutReconstruction = traced;
+    withoutReconstruction.upscaling.rayReconstruction = false;
+    const auto hybrid = planEffects(withoutReconstruction, {});
+    expect(hybrid[Effect::PathTracing] == EffectState::Lacking && hybrid.runs(Effect::RayTracedShadows) && hybrid.runs(Effect::RayTracedLights)
+            && hybrid.replacers[Effect::SoftShadows] == Effect::RayTracedShadows,
+        "Without Ray Reconstruction the ray-traced shadows and lights stay.");
+
+    Settings withoutLight = traced;
+    withoutLight.globalIllumination.on = false;
+    const auto withoutLightPlan = planEffects(withoutLight, {});
+    expect(withoutLightPlan[Effect::PathTracing] == EffectState::Lacking && withoutLightPlan.runs(Effect::RayTracedShadows),
+        "Without the global illumination the ray-traced shadows stay.");
+
+    LeftOut pathTracingLeftOut;
+    pathTracingLeftOut.effects[Effect::PathTracing] = true;
+    const auto measured = planEffects(traced, {.leftOut = pathTracingLeftOut});
+    expect(measured[Effect::PathTracing] == EffectState::LeftOut && measured[Effect::RayTracedShadows] == EffectState::Replaced,
+        "Leaving out path tracing keeps what it replaces off.");
 }
 
 // A frame keeps the settings it started with.
@@ -1308,6 +1342,7 @@ int main()
         effectPresets();
         featuresDescribed();
         effectPlan();
+        pathTracingPlan();
         frameLatch();
         mainViewRecognised();
         dumpedMainViewIsTheMainCamera();

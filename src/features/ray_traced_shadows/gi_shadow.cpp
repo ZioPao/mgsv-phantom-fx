@@ -52,11 +52,17 @@ void Shadows::describe(gi_d3d12::Descriptors& d, std::uint32_t parity, ID3D12Res
     d.outputTexture(88, output, DXGI_FORMAT_R16_FLOAT);
 }
 
-void Shadows::record(gi_d3d12::Recorder& r)
+void Shadows::record(gi_d3d12::Recorder& r, bool forReconstruction)
 {
     r.mark("shadow rays", performance::Pass::SunShadowRays);
     r.dispatch(Kernel::TraceSunShadows, groups(renderWidth, MaskTileWidth), groups(renderHeight, MaskTileHeight));
     r.barrier();
+    // The rays wrote the output; the denoiser's history stops here, and starts over after.
+    if (forReconstruction)
+    {
+        fresh = true;
+        return;
+    }
 
     // The temporal pass, then three spatial passes 1, 2 and 4 pixels apart.
     r.mark("shadow denoiser", performance::Pass::SunShadowDenoiser);

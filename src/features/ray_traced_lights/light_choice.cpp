@@ -155,6 +155,33 @@ std::uint64_t keyOf(const DrawnLight& light)
     return key;
 }
 
+// A masked spot's mask projection (cPSScene c16, c17, c19, applied to the light pass's view position) from
+// the world: each row through the light pass's view, the inverse of its view to world (c8 to c10), a
+// rotation and a translation.
+std::array<std::array<float, 4>, 3> maskRowsInWorld(const game_constants::SceneConstants& scene)
+{
+    const auto& toWorld = scene.view;
+    const auto& projection = scene.shadowProjection2;
+    const int rows[]{0, 1, 3};
+    std::array<std::array<float, 4>, 3> world{};
+    for (int i = 0; i < 3; ++i)
+    {
+        const auto& row = projection[rows[i]];
+        double translation = row[3];
+        for (int column = 0; column < 3; ++column)
+        {
+            double sum = 0;
+            for (int k = 0; k < 3; ++k) sum += double{row[k]} * toWorld[column][k];
+            world[i][column] = static_cast<float>(sum);
+            for (int k = 0; k < 3; ++k) translation -= double{row[k]} * toWorld[column][k] * toWorld[column][3];
+        }
+
+        world[i][3] = static_cast<float>(translation);
+    }
+
+    return world;
+}
+
 LocalLight forRays(const DrawnLight& light, const std::optional<Bounds>& volume)
 {
     const bool spot = light.game->shape == Shape::Spot;
@@ -176,7 +203,16 @@ LocalLight forRays(const DrawnLight& light, const std::optional<Bounds>& volume)
         .addedDistance = spot ? 0 : falloff[0],
         .leastDistance = spot ? 0 : light.material.leastDistance,
         .radius = !light.game->shadowMap && constants.size > 0 ? constants.size : BulbRadius,
-        .shadowStart = shadowMapStart(light)};
+        .shadowStart = shadowMapStart(light),
+        .specularScale = light.game->specular ? constants.specularScale : 1,
+        .diffuseScale = constants.diffuseScale};
+    const bool isMaskedSpot = light.game->twin == game_lights::Twin::MaskedSpotNA || light.game->twin == game_lights::Twin::MaskedSpot2;
+    if (isMaskedSpot)
+    {
+        rays.maskRows = maskRowsInWorld(light.scene);
+        rays.isMasked = true;
+    }
+
     if (volume)
     {
         rays.volumeLowest = {(*volume)[0], (*volume)[1], (*volume)[2]};

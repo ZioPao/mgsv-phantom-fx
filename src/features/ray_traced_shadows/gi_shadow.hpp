@@ -8,7 +8,8 @@
 
 // The sun's ray-traced shadows on the global illumination's Direct3D 12 device (docs/DEVELOPMENT.md,
 // "Ray-traced shadows"): a shadow ray a pixel through the scene, then AMD's FidelityFX Shadow
-// Denoiser, with their memory at one render size (gi_shadow.hlsl, gi_shadow_filter.hlsl).
+// Denoiser, with their memory at one render size (gi_shadow.hlsl, gi_shadow_filter.hlsl). For DLSS Ray
+// Reconstruction, which denoises itself, the rays alone.
 namespace phantom_fx::gi_shadow
 {
 class Shadows
@@ -25,8 +26,9 @@ public:
     // Its views in the frame's tables, by the slots gi_shadow.hlsli gives them; `output` is
     // the shared shadow, in the unordered access state while the passes run.
     void describe(gi_d3d12::Descriptors& descriptors, std::uint32_t parity, ID3D12Resource* output) const;
-    // The rays, then the denoiser's passes, into the output. Needs the frame's scene built.
-    void record(gi_d3d12::Recorder& recorder);
+    // The rays, then the denoiser's passes, into the output; the rays alone `forReconstruction`. Needs the
+    // frame's scene built.
+    void record(gi_d3d12::Recorder& recorder, bool forReconstruction);
 
 private:
     UINT renderWidth, renderHeight;

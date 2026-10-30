@@ -21,28 +21,34 @@ constexpr float HashCellPixels = 32, HashMinCellSize = 0.1f, MaxSamples = 16, Di
 constexpr std::uint32_t CellSamplesPerFrame = 4;
 }
 
-Light::Light(ID3D12Device* device, UINT width, UINT height)
-    : renderWidth(width), renderHeight(height), lightWidth((width + 1) / 2), lightHeight((height + 1) / 2), rayCount(lightWidth * lightHeight),
-      denoiser(device, lightWidth, lightHeight)
+Light::Light(ID3D12Device* device, UINT width, UINT height, bool isPerRenderPixel)
+    : renderWidth(width), renderHeight(height), lightWidth(isPerRenderPixel ? width : (width + 1) / 2),
+      lightHeight(isPerRenderPixel ? height : (height + 1) / 2), rayCount(lightWidth * lightHeight)
 {
+    if (!isPerRenderPixel) denoiser.emplace(device, lightWidth, lightHeight);
+
     const auto texture = [&](DXGI_FORMAT format, const char* what) {
         return gi_d3d12::createTexture(device, lightWidth, lightHeight, format, 1, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, what);
     };
+    // Only the denoiser and the light grid's render pixel picks read these: a texel each for Ray Reconstruction.
+    const auto denoiserTexture = [&](DXGI_FORMAT format, const char* what) {
+        return isPerRenderPixel ? gi_d3d12::createTexture(device, 1, 1, format, 1, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, what) : texture(format, what);
+    };
     const auto buffer = [&](std::uint64_t bytes, const char* what) { return gi_d3d12::createStorage(device, bytes, what); };
 
-    normalRoughness = texture(DXGI_FORMAT_R10G10B10A2_UNORM, "Creating the light's normals");
-    motion = texture(DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the light's motion");
+    normalRoughness = denoiserTexture(DXGI_FORMAT_R10G10B10A2_UNORM, "Creating the light's normals");
+    motion = denoiserTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the light's motion");
     for (int i = 0; i < 2; ++i)
     {
-        viewZ[i] = texture(DXGI_FORMAT_R32_FLOAT, "Creating the light's view depth");
+        viewZ[i] = denoiserTexture(DXGI_FORMAT_R32_FLOAT, "Creating the light's view depth");
         noisy[i] = texture(DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the light's rays");
-        denoised[i] = texture(DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the denoised light");
+        denoised[i] = denoiserTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the denoised light");
         packedTiles[i] = buffer(std::uint64_t{HashTiles} * 4, "Creating the packed tiles");
     }
     partial = texture(DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the rays' own light");
     path = texture(DXGI_FORMAT_R32G32B32A32_UINT, "Creating the rays' bounces");
-    pick = texture(DXGI_FORMAT_R8_UINT, "Creating the light's samples");
-    validation = texture(DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the denoiser's validation layer");
+    pick = denoiserTexture(DXGI_FORMAT_R8_UINT, "Creating the light's samples");
+    validation = denoiserTexture(DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the denoiser's validation layer");
 
     hash = buffer(std::uint64_t{HashTiles} * 4, "Creating the hash grid");
     decay = buffer(std::uint64_t{HashTiles} * 4, "Creating the hash grid's ages");
@@ -136,7 +142,8 @@ void Light::record(gi_d3d12::Recorder& r, std::uint32_t parity, const gi_denoise
     r.barrier();
     // Tiles nothing touched for 50 frames leave the cache.
     r.indirect(Kernel::PurgeTiles, GI_COUNTER_PACKED_TILES + 1 - parity, 64);
-    lightPixels(Kernel::PrepareGuides);
+    // The denoiser's guides, and which render pixel of its 2 x 2 a light pixel samples: none for Ray Reconstruction.
+    if (denoiser) lightPixels(Kernel::PrepareGuides);
 
     r.mark("rays and their hits' light", performance::Pass::GiRays);
     lightPixels(Kernel::TraceLight);
@@ -155,10 +162,14 @@ void Light::record(gi_d3d12::Recorder& r, std::uint32_t parity, const gi_denoise
     r.dispatch(Kernel::UpdateFoliageMemory, groups(GI_FOLIAGE_MEMORY_SLOTS, 64));
     r.barrier();
 
-    r.mark("denoiser", performance::Pass::GiDenoiser);
-    denoiser.record(r.commands(), camera, {motion.Get(), normalRoughness.Get(), viewZ[parity].Get(), noisy[0].Get(), noisy[1].Get(), denoised[0].Get(),
-        denoised[1].Get(), isValidationShown ? validation.Get() : nullptr}, frameSlot, static_cast<float>(1000.0 / smoothedFrameMilliseconds));
-    r.rebind();
+    if (denoiser)
+    {
+        r.mark("denoiser", performance::Pass::GiDenoiser);
+        denoiser->record(r.commands(), camera, {motion.Get(), normalRoughness.Get(), viewZ[parity].Get(), noisy[0].Get(), noisy[1].Get(),
+            denoised[0].Get(), denoised[1].Get(), isValidationShown ? validation.Get() : nullptr}, frameSlot,
+            static_cast<float>(1000.0 / smoothedFrameMilliseconds));
+        r.rebind();
+    }
 
     r.mark("render size", performance::Pass::GiDenoiser);
     r.dispatch(Kernel::CompositeLight, groups(renderWidth, 8), groups(renderHeight, 8));

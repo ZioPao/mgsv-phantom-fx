@@ -29,6 +29,8 @@ struct FeatureInfo
     const char* keywords{}; // More words the menu's search finds it by
     std::optional<Effect> effect;
     std::optional<Effect> replacedBy;
+    std::optional<Effect> needs; // The effect it builds on: it runs only while that one runs
+    bool needsRayReconstruction{}; // And DLSS Ray Reconstruction asked for, its only denoiser
     bool needsSupportedBuild{};
 };
 
@@ -37,6 +39,9 @@ struct ToggleInfo
     std::string_view iniKey;
     const char* label;
     const char* tip{};
+    bool visible{true};
+    bool enabled{true};
+    bool needsRayTracing{}; // Does something only while a ray-traced effect is on; the menu hides it otherwise
 };
 
 struct SliderInfo
@@ -76,6 +81,7 @@ struct ChoiceInfo
     const char* tip{};
     bool visible{true};
     bool enabled{true};
+    bool needsRayTracing{}; // As a toggle's
 };
 
 class SettingVisitor
