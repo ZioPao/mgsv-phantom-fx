@@ -68,7 +68,7 @@ void describe(Upscaling& upscaling, SettingVisitor& visit)
         .name = "Upscaler",
         .tip = "NVIDIA DLSS needs an NVIDIA RTX GPU. AMD FSR runs on any GPU: FSR 4 on Radeon RX 7000 and 9000, FSR 3.1 on the rest.",
         .summary = "Replaces the game's FXAA, at full resolution or upscaled from a lower one. The HUD stays at full resolution.",
-        .keywords = "DLSS FSR DLAA native AA mode quality balanced performance preset sharpening texture detail bias render scale"});
+        .keywords = "DLSS FSR DLAA native AA mode quality balanced performance preset ray reconstruction sharpening texture detail bias render scale"});
     visit.choice(upscaling.upscaler, {.iniKey = "upscaler", .label = "Upscaler", .choices = Upscalers});
     visit.choice(upscaling.mode,
         {.iniKey = "mode",
@@ -96,6 +96,13 @@ void describe(Upscaling& upscaling, SettingVisitor& visit)
             .choices = Presets,
             .control = ChoiceControl::Dropdown,
             .tip = "Default lets DLSS choose (K for DLAA).",
+            .visible = upscaling.upscaler == Upscaler::Dlss,
+            .enabled = on});
+    visit.toggle(upscaling.rayReconstruction,
+        {.iniKey = "ray_reconstruction",
+            .label = "Ray Reconstruction",
+            .tip = "DLSS Ray Reconstruction in place of DLSS: one NVIDIA model that cleans up the ray-traced light and upscales. It runs while a "
+                   "ray-traced effect is on (global illumination, shadows or lights) and needs an NVIDIA RTX GPU.",
             .visible = upscaling.upscaler == Upscaler::Dlss,
             .enabled = on});
     visit.slider(upscaling.sharpness,

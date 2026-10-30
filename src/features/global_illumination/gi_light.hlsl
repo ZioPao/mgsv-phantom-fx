@@ -15,6 +15,9 @@
 // - NVIDIA's RELAX denoiser in its spherical harmonics form (gi_denoiser.cpp) at the same grid, given the
 //   motion without the upscaler's jitter and the game's foliage as strands, then the render size from the four light pixels around each render pixel, weighed by how alike their surfaces
 //   are and resolved against the render pixel's own normal (CompositeLight).
+// - With DLSS Ray Reconstruction, which denoises the image itself and asks for samples apart at every
+//   render pixel, the grid is the render size, a ray a pixel, and the light goes out as the rays found it,
+//   without the denoiser (PerRenderPixel).
 //
 // Where it deviates from a path tracer, and why:
 // - A hit's albedo is the G-buffer's where the hit is on screen; otherwise the game's albedo texture
@@ -94,9 +97,17 @@ uint2 LightSize()
     return g_Frame.lightLayout.xy;
 }
 
-// Render pixel `index` (x + 2 y) of a light pixel's 2 x 2.
+// For DLSS Ray Reconstruction: a light pixel is a render pixel, and nothing is denoised here.
+bool PerRenderPixel()
+{
+    return g_Frame.reconstruction.x != 0u;
+}
+
+// Render pixel `index` (x + 2 y) of a light pixel's 2 x 2; the light pixel itself per render pixel.
 uint2 RenderPixelAt(uint2 lightPixel, uint index)
 {
+    if (PerRenderPixel()) return lightPixel;
+
     return min(lightPixel * 2 + uint2(index & 1u, index >> 1), g_BufferDimensions - 1);
 }
 
@@ -127,6 +138,8 @@ uint DepthPickOf(uint2 lightPixel)
 // The render pixel a light pixel's sample is from this frame, as PrepareGuides chose it (PickOf).
 uint2 RenderPixelOf(uint2 lightPixel)
 {
+    if (PerRenderPixel()) return lightPixel;
+
     return RenderPixelAt(lightPixel, g_Light_Pick[lightPixel]);
 }
 
@@ -1062,6 +1075,13 @@ void ResolveLight(uint2 did : SV_DispatchThreadID)
 
     MaxDiagnostic(GI_COUNTER_MAX_TRACED, radiance);
     radiance = RememberFoliageLight(did, radiance);
+    // Ray Reconstruction takes the light as it is.
+    if (PerRenderPixel())
+    {
+        g_Light_Noisy[0][did] = float4(radiance, partial.w);
+        return;
+    }
+
     // The rays' direction, at most 1 long (TraceLight).
     float3 direction = unpackNormal(path.y);
     float4 second;
@@ -1111,6 +1131,15 @@ void CompositeLight(uint2 did : SV_DispatchThreadID)
     {
         g_Output[did] = float4(0.0f, 0.0f, 0.0f, 1.0f);
         WriteLightDebug(did, 0.0f);
+        return;
+    }
+
+    // For Ray Reconstruction, the render pixel's own rays' light (ResolveLight).
+    if (PerRenderPixel())
+    {
+        float3 traced = g_Light_Noisy[0][did].rgb;
+        MaxDiagnostic(GI_COUNTER_MAX_OUTPUT, traced);
+        g_Output[did] = float4(traced * g_Frame.nearFar.w, 1.0f);
         return;
     }
 

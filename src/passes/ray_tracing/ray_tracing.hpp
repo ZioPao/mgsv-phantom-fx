@@ -5,8 +5,10 @@
 #include "ui_redirect.hpp"
 
 #include <d3d11.h>
+#include <wrl/client.h>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 // The ray-traced scene's frame on Direct3D 11 (docs/DEVELOPMENT.md, "Global illumination"): what the
@@ -76,6 +78,19 @@ ID3D11ShaderResourceView* lightDebug(UINT width, UINT height) noexcept;
 // Diagnostics: the probes at the screen's centre as text, with the debug view on: the sun's, while there is
 // a sun, and the lamps', with the ray-traced lights.
 std::string shadowProbe();
+// What DLSS Ray Reconstruction reads beside the colour, made from the G-buffer at the kick while it is
+// asked for (upscaler.cpp), at the render size.
+struct ReconstructionGuides
+{
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> normalRoughness; // R16G16B16A16_FLOAT: the world-space normal, the roughness in w
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> diffuseAlbedo;   // R8G8B8A8_UNORM, linear
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> specularAlbedo;  // R8G8B8A8_UNORM, linear
+};
+// None until a kick made them at this size, or when the last kick did not make them.
+std::optional<ReconstructionGuides> reconstructionGuides(UINT width, UINT height) noexcept;
+// Ray Reconstruction denoised a frame. While it does, frame after frame, the kicks leave the light and the
+// shadows noisy for it: the light a sample a render pixel without its denoiser, the shadows unfiltered.
+void reconstructed() noexcept;
 bool active() noexcept;
 // The global illumination's light is on and lighting frames: the game's probe light and SSAO make way
 // for it. Until then they stay.

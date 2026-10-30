@@ -62,7 +62,8 @@ function(download_pinned directory)
 endfunction()
 
 # NVIDIA DLSS SDK v310.9.1. The repository carries every platform's binaries (over 1 GB),
-# so only the D3D11 headers, the static NGX loader and the x64 model DLL are downloaded.
+# so only the D3D11 headers, the static NGX loader and the x64 model DLLs (DLSS and Ray
+# Reconstruction) are downloaded.
 set(DLSS_SDK_COMMIT 374959484e79a640feaba44c93ac8cfb0a03f5b5)
 set(DLSS_SDK_DIR "${CMAKE_BINARY_DIR}/_deps/dlss-sdk")
 set(sdk "NVIDIA/DLSS/${DLSS_SDK_COMMIT}")
@@ -74,10 +75,15 @@ download_pinned("${DLSS_SDK_DIR}"
     "${sdk}/include/nvsdk_ngx_helpers.h|include/nvsdk_ngx_helpers.h|5bcbadfe7478b802cf6d3aca4dc5ddd7d0889b99726e69c63f9e9bd555f44471"
     "${sdk}/include/nvsdk_ngx_helpers_d3d.h|include/nvsdk_ngx_helpers_d3d.h|ec75224f36ed6580baaf250fa83620405ad81a1d98c2c436654a0c9cf6a6b8ba"
     "${sdk}/include/nvsdk_ngx_helpers_cuda.h|include/nvsdk_ngx_helpers_cuda.h|f2851a76107bdf4fbcb7b261f3c35573c312d8ecb4bc18fb02d9e2cec7705042"
+    "${sdk}/include/nvsdk_ngx_defs_dlssd.h|include/nvsdk_ngx_defs_dlssd.h|2e97fe1595b1334f71b51724f2cb67496e8c296a7a2eec5606da53055882e716"
+    "${sdk}/include/nvsdk_ngx_params_dlssd.h|include/nvsdk_ngx_params_dlssd.h|d41e3ba8f1d72583b55273092c99bf426dc4a0d46de827229e25d5b1325a370e"
+    "${sdk}/include/nvsdk_ngx_helpers_dlssd_d3d.h|include/nvsdk_ngx_helpers_dlssd_d3d.h|6df9d02c6f47feee3afc8d12340a9f554a7ddce4ddacb1b6a13a42b26c2c6293"
     "${sdk}/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib|lib/Windows_x86_64/x64/nvsdk_ngx_s.lib|4e5d355086d2bc11e1a0842457d2519ea528ee1f3e112c45679a84960c07dff3"
     "${sdk}/lib/Windows_x86_64/x64/nvsdk_ngx_s_dbg.lib|lib/Windows_x86_64/x64/nvsdk_ngx_s_dbg.lib|f62f94f7a444ddffa118e71bc412298d803784bf042464be178a989915198cab"
     "${sdk}/lib/Windows_x86_64/rel/nvngx_dlss.dll|lib/Windows_x86_64/rel/nvngx_dlss.dll|3975567b8943c53acce397f2b72380092f84f162d00b0d2c7d08a1025c563983"
+    "${sdk}/lib/Windows_x86_64/rel/nvngx_dlssd.dll|lib/Windows_x86_64/rel/nvngx_dlssd.dll|4bc7ea5fcb2f32cf86bc2cb072e8d2860914a0be511cbdcb2fc206c1d9d83b80"
 )
+set(DLSS_FILES "${DLSS_SDK_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll" "${DLSS_SDK_DIR}/lib/Windows_x86_64/rel/nvngx_dlssd.dll")
 
 # ReShade 6.8.0 add-on API headers and the Dear ImGui 1.92.5 header its overlay requires.
 set(RESHADE_COMMIT 18deaa52de0c425a78b329e9cb3c497281cd00ec) # v6.8.0
@@ -201,7 +207,7 @@ add_library(phantom_fx SHARED src/addon.cpp src/core.cpp src/modules.cpp src/fea
     src/passes/local_light_pass.cpp src/features/lamp_contact_shadows/lamp_contact_shadows.cpp src/features/lamp_soft_shadows/lamp_soft_shadows.cpp
     src/passes/indirect_light_pass.cpp src/passes/visibility_bitmask.cpp src/features/ambient_occlusion/gtvbao.cpp
     src/features/indirect_light/ssilvb.cpp src/features/global_illumination/light_combine.cpp src/features/photo_mode/photo_mode.cpp src/features/photo_mode/focus.cpp src/features/hdr/hdr.cpp src/weather.cpp src/character.cpp src/game_lua.cpp src/travel.cpp src/features/volumetric_fog/atmosphere.cpp src/sun_movement.cpp
-    src/fidelityfx.cpp src/features/upscaling/fsr_upscaler.cpp src/features/frame_generation/fsr_frame_generation.cpp src/performance.cpp src/performance_menu.cpp
+    src/fidelityfx.cpp src/features/upscaling/fsr_upscaler.cpp src/features/upscaling/ray_reconstruction.cpp src/features/frame_generation/fsr_frame_generation.cpp src/performance.cpp src/performance_menu.cpp
     src/passes/ray_tracing/ray_tracing.cpp src/passes/ray_tracing/engine_scene.cpp src/passes/ray_tracing/scene_description.cpp src/passes/ray_tracing/engine_brush.cpp src/passes/ray_tracing/gi_inputs.cpp src/features/ray_traced_lights/local_lights.cpp src/features/ray_traced_lights/light_choice.cpp src/features/ray_traced_lights/light_shadow_rays.cpp src/passes/ray_tracing/gi_renderer.cpp src/passes/ray_tracing/gi_scene.cpp src/passes/ray_tracing/scene_contents.cpp src/passes/ray_tracing/gi_textures.cpp src/features/global_illumination/gi_light.cpp src/features/global_illumination/gi_denoiser.cpp src/features/global_illumination/gi_lighting.cpp src/features/ray_traced_shadows/gi_shadow.cpp
     "${CMAKE_BINARY_DIR}/version.rc")
 add_dependencies(phantom_fx gi_kernels)
@@ -220,15 +226,15 @@ set_target_properties(phantom_fx PROPERTIES
     SUFFIX .addon64
     CXX_EXTENSIONS OFF
 )
-# NGX loads the model DLL, and the add-on Streamline and the FSR runtime, from the add-on's directory.
+# NGX loads the model DLLs, and the add-on Streamline and the FSR runtime, from the add-on's directory.
 add_custom_command(TARGET phantom_fx POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-        "${DLSS_SDK_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll" ${STREAMLINE_FILES} ${FIDELITYFX_FILES} "$<TARGET_FILE_DIR:phantom_fx>"
+        ${DLSS_FILES} ${STREAMLINE_FILES} ${FIDELITYFX_FILES} "$<TARGET_FILE_DIR:phantom_fx>"
 )
 
 # The add-on and its DLLs go beside mgsvtpp.exe; documentation and licenses into PhantomFX/.
 install(TARGETS phantom_fx RUNTIME DESTINATION . COMPONENT addon)
-install(FILES "${DLSS_SDK_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll" ${STREAMLINE_FILES} ${FIDELITYFX_FILES} DESTINATION . COMPONENT addon)
+install(FILES ${DLSS_FILES} ${STREAMLINE_FILES} ${FIDELITYFX_FILES} DESTINATION . COMPONENT addon)
 install(FILES README.md CHANGELOG.md LICENSE DESTINATION PhantomFX COMPONENT addon)
 install(FILES "${DLSS_SDK_DIR}/LICENSE.txt" DESTINATION PhantomFX RENAME NVIDIA-DLSS-LICENSE.txt COMPONENT addon)
 install(FILES "${STREAMLINE_DIR}/license.txt" DESTINATION PhantomFX RENAME NVIDIA-Streamline-LICENSE.txt COMPONENT addon)

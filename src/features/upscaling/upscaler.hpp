@@ -19,7 +19,9 @@ namespace phantom_fx::upscaler
 struct Status
 {
     bool supportedBuild{}, failed{}, running{}, fxaaRecognised{}, upscalingAvailable{};
-    std::string upscalerName; // "DLSS", or "FSR" with its version ("FSR 3.1.5") once it ran
+    // NGX says this PC runs DLSS Ray Reconstruction; the last frame was Ray Reconstruction's.
+    bool reconstructionAvailable{}, rayReconstruction{};
+    std::string upscalerName; // "DLSS", "DLSS Ray Reconstruction", or "FSR" with its version ("FSR 3.1.5") once it ran
     std::string failure, lastFallback;
     unsigned renderWidth{}, renderHeight{}, outputWidth{}, outputHeight{};
     std::uint64_t evaluations{}, fallbacks{}, resets{};

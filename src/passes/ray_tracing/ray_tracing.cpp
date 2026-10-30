@@ -62,6 +62,7 @@ struct Options
     bool logOften{};         // Diagnostics: the light's statistics logged every few frames (as each readback returns), not every ten seconds
     // A cost measurement leaves the light passes out (the output keeps its last light).
     bool light = true;
+    bool reconstructionGuides{}; // DLSS Ray Reconstruction is asked for: the kick makes its guides (reconstructionGuides)
 };
 
 // MotionBlurCameraVelocity reads the game's velocity for its moving meshes here, right after the
@@ -113,6 +114,120 @@ struct PackParameters
 {
     float view[3][4];
     std::uint32_t width, height, hasAlbedo, hasSpecular;
+};
+
+// DLSS Ray Reconstruction's guides from the G-buffer, as its integration guide asks for them: the
+// world-space normal with the roughness in w, the diffuse albedo, and the specular albedo, the share of
+// light the surface reflects towards the eye, from the game's specular colour (the material table's,
+// times the specular target's intensity, at normal incidence through the game's Fresnel table) by
+// NVIDIA's EnvBRDFApprox2. Where the sky is: no normal and roughness, albedo 0.5, no specular albedo.
+constexpr char GuideSource[] = R"(
+Texture2D<float> g_Depth : register(t0);
+Texture2D<float4> g_Normal : register(t1);
+Texture2D<float4> g_Albedo : register(t2);    // Through an sRGB view: linear
+Texture2D<float4> g_Specular : register(t3);  // Roughness, intensity, material, translucency
+Texture2D<float4> g_Fresnel : register(t4);   // g_lut1: u the cosine, v F0
+Texture2D<float4> g_Materials : register(t5); // g_MaterialTexture: u the material, row 0.25 its colour, 0.75 its F0
+RWTexture2D<float4> g_NormalRoughness : register(u0);
+RWTexture2D<float4> g_DiffuseAlbedo : register(u1);
+RWTexture2D<float4> g_SpecularAlbedo : register(u2);
+
+cbuffer Parameters : register(b0)
+{
+    float4 g_View[3];          // World to view, rows
+    float4 g_ProjectionParam;  // cPSScene c21: 1 / P00, 1 / P11, B, A
+    float2 g_Jitter;           // cPSScene c28.xy, in NDC
+    uint2 g_Size;
+    uint g_HasAlbedo;
+    uint g_HasSpecular;
+    uint g_HasTables;
+    uint g_Padding;
+};
+
+// NVIDIA's DLSS-RR Integration Guide, appendix (from Ray Tracing Gems, chapter 32).
+float3 EnvBRDFApprox2(float3 specularColor, float alpha, float NoV)
+{
+    NoV = abs(NoV);
+    float4 X = float4(1, NoV, NoV * NoV, NoV * NoV * NoV);
+    float4 Y = float4(1, alpha, alpha * alpha, alpha * alpha * alpha);
+    float2x2 M1 = float2x2(0.99044, -1.28514, 1.29678, -0.755907);
+    float3x3 M2 = float3x3(1, 2.92338, 59.4188, 20.3225, -27.0302, 222.592, 121.563, 626.13, 316.627);
+    float2x2 M3 = float2x2(0.0365463, 3.32707, 9.0632, -9.04756);
+    float3x3 M4 = float3x3(1, 3.59685, -1.36772, 9.04401, -16.3174, 9.22949, 5.56589, 19.7886, -20.2123);
+    float bias = dot(mul(M1, X.xy), Y.xy) * rcp(dot(mul(M2, X.xyw), Y.xyw));
+    float scale = dot(mul(M3, X.xy), Y.xy) * rcp(dot(mul(M4, X.xzw), Y.xyw));
+    bias *= saturate(specularColor.g * 50);
+    return mad(specularColor, max(0, scale), max(0, bias));
+}
+
+// The texel a point sampler takes at (u, v), as the sun pass reads the material table.
+float4 PointAt(Texture2D<float4> table, float u, float v)
+{
+    uint width, height;
+    table.GetDimensions(width, height);
+    return table.Load(int3(min(uint2(float2(u, v) * float2(width, height)), uint2(width, height) - 1), 0));
+}
+
+// The Fresnel table at normal incidence (its last column), between rows as a linear sampler takes them.
+float FresnelAtNormal(float F0)
+{
+    uint width, height;
+    g_Fresnel.GetDimensions(width, height);
+    float row = clamp(F0 * height - 0.5, 0, height - 1);
+    float above = g_Fresnel.Load(int3(width - 1, uint(row), 0)).x;
+    float below = g_Fresnel.Load(int3(width - 1, min(uint(row) + 1, height - 1), 0)).x;
+    return lerp(above, below, frac(row));
+}
+
+[numthreads(8, 8, 1)]
+void main(uint2 id : SV_DispatchThreadID)
+{
+    if (any(id >= g_Size)) return;
+
+    float depth = g_Depth.Load(int3(id, 0));
+    if (depth <= 0)
+    {
+        g_NormalRoughness[id] = 0;
+        g_DiffuseAlbedo[id] = float4(0.5, 0.5, 0.5, 1);
+        g_SpecularAlbedo[id] = 0;
+        return;
+    }
+
+    // DecodeViewSpaceNormal, as the pack above.
+    float3 encoded = g_Normal.Load(int3(id, 0)).xyz;
+    float2 xy = encoded.xy * 2 - 1;
+    float z = encoded.z * encoded.z * 2 - 1;
+    float rest = 1 - z * z;
+    float3 normal = float3(rsqrt(dot(xy, xy) * rest + 1e-7) * (rest * xy), z);
+    float3 world = normalize(normal.x * g_View[0].xyz + normal.y * g_View[1].xyz + normal.z * g_View[2].xyz);
+
+    // The eye's direction to the pixel in view space, as the sun pass works it out.
+    float2 ndc = float2((id.x + 0.5) / g_Size.x * 2 - 1, 1 - (id.y + 0.5) / g_Size.y * 2) - g_Jitter;
+    float viewZ = g_ProjectionParam.z / (depth - g_ProjectionParam.w);
+    float3 eye = normalize(float3(ndc * g_ProjectionParam.xy * viewZ, viewZ));
+
+    float4 specular = g_HasSpecular ? g_Specular.Load(int3(id, 0)) : float4(1, 0, 0, 0);
+    float roughness = specular.x;
+    float3 specularColor = specular.y * 0.04;
+    if (g_HasTables)
+    {
+        float3 color = PointAt(g_Materials, specular.z, 0.25).rgb;
+        float F0 = PointAt(g_Materials, specular.z, 0.75).x;
+        specularColor = specular.y * color * FresnelAtNormal(F0);
+    }
+
+    g_NormalRoughness[id] = float4(world, roughness);
+    g_DiffuseAlbedo[id] = float4(g_HasAlbedo ? g_Albedo.Load(int3(id, 0)).rgb : 0.5, 1);
+    g_SpecularAlbedo[id] = float4(saturate(EnvBRDFApprox2(specularColor, roughness * roughness, dot(normal, eye))), 1);
+}
+)";
+
+struct GuideParameters
+{
+    float view[3][4];
+    float projectionParam[4];
+    float jitter[2];
+    std::uint32_t width, height, hasAlbedo, hasSpecular, hasTables, padding;
 };
 
 // The light the global illumination keeps in its caches is the game's before exposure, scaled by
@@ -192,8 +307,14 @@ std::optional<Sun> sun;
 bool sunSincePresent{};
 std::array<float, 4> shadowRange{};
 ComPtr<ID3D11ShaderResourceView> normals, albedo;
-ComPtr<ID3D11ComputeShader> packShader;
-ComPtr<ID3D11Buffer> packParameters;
+ComPtr<ID3D11ComputeShader> packShader, guideShader;
+ComPtr<ID3D11Buffer> packParameters, guideParameters;
+// DLSS Ray Reconstruction's guides at the render size, and the kick that made them.
+ComputeTexture guideNormals, guideDiffuse, guideSpecular;
+std::uint32_t guidesKick{};
+// The frames Ray Reconstruction denoised, counted by reconstructed(), and the count the last kick saw.
+std::atomic<std::uint64_t> reconstructions{};
+std::uint64_t reconstructionsAtKick{};
 // Shared copies of the game's terrain heightmap (gi_renderer::Terrain).
 ComPtr<ID3D11Texture2D> terrainPages, terrainHeights;
 SharedTexture depthOut, normalOut, albedoOut;
@@ -257,6 +378,8 @@ void ensurePipeline()
 
     packShader = computeShader(device.Get(), PackSource, "gi-pack");
     packParameters = makeConstantBuffer(device.Get(), sizeof(PackParameters), "Creating the G-buffer pack's constants");
+    guideShader = computeShader(device.Get(), GuideSource, "reconstruction-guides");
+    guideParameters = makeConstantBuffer(device.Get(), sizeof(GuideParameters), "Creating the Ray Reconstruction guides' constants");
 
     check(device->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence)), "Creating the shared fence");
     check(fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &fenceHandle), "Sharing the fence");
@@ -296,6 +419,48 @@ void pack(ID3D11ShaderResourceView* depth, const SceneConstants& scene)
     ID3D11UnorderedAccessView* noOutputs[3]{};
     immediate->CSSetShaderResources(0, 4, noInputs);
     immediate->CSSetUnorderedAccessViews(0, 3, noOutputs, nullptr);
+    immediate->CSSetShader(nullptr, nullptr, 0);
+}
+
+// DLSS Ray Reconstruction's guides from the G-buffer, at the depth's size; on the immediate context, call
+// with executionMutex held.
+void makeGuides(ID3D11ShaderResourceView* depth, const SceneConstants& scene)
+{
+    const auto [width, height] = sizeOf(depth);
+    if (guideNormals.width != width || guideNormals.height != height)
+    {
+        // Ray Reconstruction reads them on Direct3D 12 (ray_reconstruction.hpp).
+        guideNormals = makeShared(device.Get(), width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the Ray Reconstruction normals");
+        guideDiffuse = makeShared(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the Ray Reconstruction diffuse albedo");
+        guideSpecular = makeShared(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the Ray Reconstruction specular albedo");
+    }
+
+    const auto specular = indirect_light_pass::specularTarget(width, height);
+    const auto tables = indirect_light_pass::materialTables();
+    const bool hasAlbedo = albedo && sizeOf(albedo.Get()) == std::pair{width, height};
+    GuideParameters parameters{};
+    for (int row = 0; row < 3; ++row) std::memcpy(parameters.view[row], scene.view[row], sizeof(parameters.view[row]));
+    std::memcpy(parameters.projectionParam, scene.projectionParam, sizeof(parameters.projectionParam));
+    parameters.jitter[0] = scene.cameraCenterOffset[0];
+    parameters.jitter[1] = scene.cameraCenterOffset[1];
+    parameters.width = width;
+    parameters.height = height;
+    parameters.hasAlbedo = hasAlbedo;
+    parameters.hasSpecular = specular != nullptr;
+    parameters.hasTables = tables.fresnel && tables.materials;
+    check(write(immediate.Get(), guideParameters.Get(), parameters), "Writing the Ray Reconstruction guides' constants");
+
+    ID3D11ShaderResourceView* inputs[]{depth, normals.Get(), hasAlbedo ? albedo.Get() : nullptr, specular.Get(), tables.fresnel.Get(), tables.materials.Get()};
+    ID3D11UnorderedAccessView* outputs[]{guideNormals.access.Get(), guideDiffuse.access.Get(), guideSpecular.access.Get()};
+    immediate->CSSetShader(guideShader.Get(), nullptr, 0);
+    immediate->CSSetConstantBuffers(0, 1, guideParameters.GetAddressOf());
+    immediate->CSSetShaderResources(0, static_cast<UINT>(std::size(inputs)), inputs);
+    immediate->CSSetUnorderedAccessViews(0, static_cast<UINT>(std::size(outputs)), outputs, nullptr);
+    immediate->Dispatch(groups(width), groups(height), 1);
+    ID3D11ShaderResourceView* noInputs[std::size(inputs)]{};
+    ID3D11UnorderedAccessView* noOutputs[std::size(outputs)]{};
+    immediate->CSSetShaderResources(0, static_cast<UINT>(std::size(noInputs)), noInputs);
+    immediate->CSSetUnorderedAccessViews(0, static_cast<UINT>(std::size(noOutputs)), noOutputs, nullptr);
     immediate->CSSetShader(nullptr, nullptr, 0);
 }
 
@@ -489,6 +654,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     }
 
     pack(depth, *sceneCamera);
+    if (options.reconstructionGuides) makeGuides(depth, *sceneCamera);
     ID3D11Texture2D* light{};
     ID3D11Texture2D* shadow{};
     ID3D11Texture2D* shadowDebug{};
@@ -601,6 +767,12 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     frame.characters = std::move(engineScene.characters);
     frame.modelInstancesUpdated = engineScene.instancesUpdated;
     frame.frameIndex = ++kicks;
+    if (options.reconstructionGuides) guidesKick = kicks;
+    // Noisy for Ray Reconstruction only while it denoised the frame before: a frame it left to DLSS, or none,
+    // turns the denoisers back on.
+    const auto denoised = reconstructions.load(std::memory_order_relaxed);
+    frame.forReconstruction = options.reconstructionGuides && denoised != reconstructionsAtKick;
+    reconstructionsAtKick = denoised;
     frame.showScene = options.showScene;
     frame.logOften = options.logOften;
     frame.traceLight = options.enabled && options.light;
@@ -677,6 +849,10 @@ void detach() noexcept
         gi_renderer::stop();
         packShader.Reset();
         packParameters.Reset();
+        guideShader.Reset();
+        guideParameters.Reset();
+        guideNormals = guideDiffuse = guideSpecular = {};
+        guidesKick = 0;
         terrainPages.Reset();
         terrainHeights.Reset();
         gi_textures::reset();
@@ -733,6 +909,8 @@ void configure(const Configuration& configuration) noexcept
                                                                                 : gi_renderer::LightDebugView::None,
         .logOften = diagnostics.logGlobalIlluminationOften,
         .light = !configuration.leftOut.globalLight,
+        .reconstructionGuides = settings.upscaling.upscaler == upscaler::Upscaler::Dlss && settings.upscaling.mode != upscaler::Mode::Off
+            && settings.upscaling.rayReconstruction,
     };
 
     latch.set(options);
@@ -971,6 +1149,21 @@ ID3D11ShaderResourceView* sunShadow(UINT width, UINT height) noexcept
         log(std::string("Ray-traced shadows: ") + error.what());
         return nullptr;
     }
+}
+
+std::optional<ReconstructionGuides> reconstructionGuides(UINT width, UINT height) noexcept
+{
+    if (!enabled.load(std::memory_order_relaxed) || failed || sinceKick() > 1000) return std::nullopt;
+
+    std::lock_guard lock(executionMutex);
+    if (!guidesKick || guidesKick != kicks || guideNormals.width != width || guideNormals.height != height) return std::nullopt;
+
+    return ReconstructionGuides{guideNormals.texture, guideDiffuse.texture, guideSpecular.texture};
+}
+
+void reconstructed() noexcept
+{
+    reconstructions.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool active() noexcept

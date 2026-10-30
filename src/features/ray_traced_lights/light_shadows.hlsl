@@ -90,6 +90,8 @@ void TraceLocalLightShadows(uint2 did : SV_DispatchThreadID)
     }
 
     g_LocalShadowRays[did] = result;
+    // DLSS Ray Reconstruction denoises the image: the light pass reads the rays as they are.
+    if (g_Frame.reconstruction.x != 0u) g_LocalLightShadow[did] = result.x;
 }
 
 // Three edge-avoiding a-trous passes (Dammertz et al., "Edge-Avoiding A-Trous Wavelet Transform for

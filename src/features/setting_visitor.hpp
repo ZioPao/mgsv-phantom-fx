@@ -37,6 +37,8 @@ struct ToggleInfo
     std::string_view iniKey;
     const char* label;
     const char* tip{};
+    bool visible{true};
+    bool enabled{true};
 };
 
 struct SliderInfo

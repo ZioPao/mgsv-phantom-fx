@@ -38,6 +38,7 @@ constexpr GamePass DrawnPasses[]{GamePass::IndirectUpscale, GamePass::Resolve, G
 
 constexpr UINT NormalSlot = 0;   // The sky light's g_NormalTexture
 constexpr UINT SpecularSlot = 1; // The sun's g_SpecularTexture
+constexpr UINT FresnelSlot = 9, MaterialSlot = 10; // The sun's g_lut1 and g_MaterialTexture
 constexpr UINT DepthSlot = 2;    // The upscale's inDepthBuffer
 constexpr UINT SceneSlot = game_constants::SceneConstants::Slot; // In the upscale and the resolves
 // Every resolve's inAlbedo, inLightDiffuse, inDepth and inOcclusion.
@@ -63,6 +64,7 @@ std::atomic<bool> active{}, pipelineFailed{};
 std::mutex gBufferMutex;
 std::unordered_map<ID3D11DeviceContext*, ComPtr<ID3D11ShaderResourceView>> normals;
 ComPtr<ID3D11ShaderResourceView> lastNormals, lastSpecular;
+MaterialTables lastTables;
 
 // ---- Direct3D, guarded by resourceMutex ----
 std::mutex resourceMutex;
@@ -123,9 +125,13 @@ void noteNormals(ID3D11DeviceContext* context)
 void noteSpecular(ID3D11DeviceContext* context)
 {
     ComPtr<ID3D11ShaderResourceView> view;
+    MaterialTables tables;
     context->PSGetShaderResources(SpecularSlot, 1, view.GetAddressOf());
+    context->PSGetShaderResources(FresnelSlot, 1, tables.fresnel.GetAddressOf());
+    context->PSGetShaderResources(MaterialSlot, 1, tables.materials.GetAddressOf());
     std::lock_guard lock(gBufferMutex);
     lastSpecular = std::move(view);
+    if (tables.fresnel && tables.materials) lastTables = std::move(tables);
 }
 
 ComPtr<ID3D11ShaderResourceView> takeNormals(ID3D11DeviceContext* context)
@@ -377,6 +383,12 @@ ComPtr<ID3D11ShaderResourceView> specularTarget(UINT width, UINT height) noexcep
     {
         return nullptr;
     }
+}
+
+MaterialTables materialTables() noexcept
+{
+    std::lock_guard lock(gBufferMutex);
+    return lastTables;
 }
 
 void note(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept

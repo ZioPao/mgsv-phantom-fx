@@ -914,12 +914,15 @@ Result render(const Frame& frame)
     // A new render size starts the light and the shadows over. Each has memory only once traced;
     // the shadows give theirs back when turned off.
     const auto waitForAll = [&] { waitFor(s, *std::max_element(s.submitted.begin(), s.submitted.end())); };
-    if (frame.traceLight && (!s.light || s.light->width() != frame.width || s.light->height() != frame.height))
+    // Ray Reconstruction coming or going changes the light's grid, a sample a render pixel or a 2 x 2.
+    if (frame.traceLight
+        && (!s.light || s.light->width() != frame.width || s.light->height() != frame.height || s.light->isPerRenderPixel() != frame.forReconstruction))
     {
         waitForAll();
         s.light.reset();
-        s.light = std::make_unique<gi_light::Light>(s.device.Get(), frame.width, frame.height);
-        log("Global illumination's light at " + std::to_string(frame.width) + "x" + std::to_string(frame.height) + ".");
+        s.light = std::make_unique<gi_light::Light>(s.device.Get(), frame.width, frame.height, frame.forReconstruction);
+        log("Global illumination's light at " + std::to_string(frame.width) + "x" + std::to_string(frame.height)
+            + (frame.forReconstruction ? ", a sample a render pixel for Ray Reconstruction." : "."));
     }
 
     if (frame.traceShadows && (!s.shadows || s.shadows->width() != frame.width || s.shadows->height() != frame.height))
@@ -991,7 +994,8 @@ Result render(const Frame& frame)
         auto* output = openShared(s, s.output, frame.textures.output, "Opening the output").Get();
         auto* shadow = traceShadows ? openShared(s, s.shadow, frame.textures.shadow, "Opening the shadow").Get() : nullptr;
         auto* shadowDebug = debugShadows ? openShared(s, s.shadowDebug, frame.textures.shadowDebug, "Opening the shadow debug view").Get() : nullptr;
-        auto* lightDebug = traceLight && frame.textures.lightDebug
+        // The light's debug views are its denoiser's.
+        auto* lightDebug = traceLight && !frame.forReconstruction && frame.textures.lightDebug
             ? openShared(s, s.lightDebug, frame.textures.lightDebug, "Opening the light's debug view").Get()
             : nullptr;
         auto* velocity = (traceShadows || traceLight) && frame.textures.velocity
@@ -1039,7 +1043,10 @@ Result render(const Frame& frame)
         constants.objectMotion = {velocity ? 1u : 0u, 0, 0, 0};
         constants.shadowDiagnostics = {frame.twoSidedShadows ? 1u : 0u, frame.shadowStarts ? 1u : 0u, 0, 0};
         constants.lightDiagnostics = {0, 0, lightDebug ? static_cast<std::uint32_t>(frame.lightDebugView) : 0u, 0};
-        constants.lightRays = {frame.lightRays, 0, 0, 0};
+        constants.reconstruction = {frame.forReconstruction ? 1u : 0u, 0, 0, 0};
+        // A ray a render pixel for Ray Reconstruction, whatever the ray quality: as many rays as High's four a
+        // 2 x 2, the most a sample can take apart.
+        constants.lightRays = {frame.forReconstruction ? 1u : frame.lightRays, 0, 0, 0};
         std::memcpy(uploads.data + constantsOffset, &constants, sizeof(constants));
 
         // ---- Descriptors ----
@@ -1145,7 +1152,7 @@ Result render(const Frame& frame)
         // ---- The shadows, then the light or the debug view ----
         if (traceLocalLights)
         {
-            light_shadow_rays::record(recorder, frame.width, frame.height);
+            light_shadow_rays::record(recorder, frame.width, frame.height, frame.forReconstruction);
             if (probeLights)
             {
                 recorder.dispatch(Kernel::ProbeLocalLights, 1, 1);
@@ -1157,7 +1164,7 @@ Result render(const Frame& frame)
                 s.probedLights[slot] = frame.localLights;
             }
         }
-        if (traceShadows) s.shadows->record(recorder);
+        if (traceShadows) s.shadows->record(recorder, frame.forReconstruction);
         if (debugShadows)
         {
             recorder.mark("debug view and probe");

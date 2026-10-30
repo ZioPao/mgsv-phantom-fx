@@ -92,6 +92,9 @@ struct Frame
     bool showScene{}; // The output shows the traced scene instead of the light
     bool logOften{};  // Diagnostics: the light's statistics logged every few frames (as each readback returns), not every ten seconds
     bool traceLight = true; // A cost measurement leaves the light out: the scene is still built
+    // DLSS Ray Reconstruction denoises: the light takes a sample a render pixel and skips its denoiser, and
+    // the sun's and the lights' shadows go out as their rays found them (GIFrameConstants::reconstruction).
+    bool forReconstruction{};
     // The sun's ray-traced shadow into textures.shadow; the game's shadow map range (cPSLight c8.x,
     // c8.y, c6.x, and 1 once known) and the tangent of the sun's angular radius.
     bool traceShadows{};

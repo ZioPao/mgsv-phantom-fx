@@ -36,6 +36,7 @@ struct Upscaling
     upscaler::Upscaler upscaler{upscaler::Upscaler::Dlss};
     upscaler::Mode mode{upscaler::Mode::Dlaa};
     upscaler::Preset dlssPreset{upscaler::Preset::Default};
+    bool rayReconstruction{};
     float sharpness{0.33f};
     float customRenderScale{0.75f};
     float textureBiasOffset{};

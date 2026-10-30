@@ -72,13 +72,13 @@ Matrix previousFromCurrentByParts(const View& previous, const View& current);
 // one frame, or changes the field of view at once; DLSS then drops its history.
 bool cameraCut(const View& previous, const View& current);
 
-// The camera as NVIDIA Streamline takes it for DLSS Frame Generation: matrices for row vectors
-// (v x M) and a view space with x right, y up and z forward. The engine's view mirrors x (P00 < 0);
-// the mirror moves from the projection into the view, so the projection is the usual one and P x V
-// is unchanged.
+// The camera as NVIDIA Streamline takes it for DLSS Frame Generation, and NGX for Ray Reconstruction:
+// matrices for row vectors (v x M) and a view space with x right, y up and z forward. The engine's view
+// mirrors x (P00 < 0); the mirror moves from the projection into the view, so the projection is the
+// usual one and P x V is unchanged.
 struct StreamlineCamera
 {
-    std::array<float, 16> viewToClip{}, clipToView{}, clipToPreviousClip{}, previousClipToClip{};
+    std::array<float, 16> worldToView{}, viewToClip{}, clipToView{}, clipToPreviousClip{}, previousClipToClip{};
     std::array<float, 3> position{}, right{}, up{}, forward{};
     float nearPlane{}, farPlane{};
     float verticalFov{}; // Radians

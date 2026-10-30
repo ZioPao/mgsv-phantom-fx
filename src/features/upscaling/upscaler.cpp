@@ -10,6 +10,7 @@
 #include "features/upscaling/frames.hpp"
 #include "features/upscaling/fsr_upscaler.hpp"
 #include "features/upscaling/fxaa.hpp"
+#include "features/upscaling/ray_reconstruction.hpp"
 #include "features/upscaling/render_size_plan.hpp"
 #include "features/upscaling/upscaler_shaders.hpp"
 #include "game_constants.hpp"
@@ -170,6 +171,10 @@ std::atomic<bool> replacing{};
 std::atomic<bool> frameGeneration{};
 // The current plan's jitter phases and texture LOD bias.
 std::atomic<int> jitterPhases{8};
+// The last DLSS frame was Ray Reconstruction's; Ray Reconstruction could not start on this PC, and why.
+std::atomic<bool> reconstructing{};
+bool reconstructionFailed{};
+std::string reconstructionFailure;
 std::atomic<float> targetMipBias{};
 
 // Frame generation's hudless texture, made at a present for the output size; GammaControl's
@@ -621,7 +626,33 @@ void initializeUpscaler(Upscaler upscaler)
 void releaseUnused(const Upscaling& wanted)
 {
     if (wanted.mode == Mode::Off || wanted.upscaler != Upscaler::Dlss) releaseFeature();
+    if (wanted.mode == Mode::Off || wanted.upscaler != Upscaler::Dlss || !wanted.rayReconstruction) ray_reconstruction::release();
     if (wanted.mode == Mode::Off || wanted.upscaler != Upscaler::Fsr) fsr_upscaler::stop();
+}
+
+// Ray Reconstruction runs for this frame: asked for, with DLSS, and with the guides the ray-traced
+// scene's kick made (ray_tracing::reconstructionGuides). Starts it the first time; a PC it cannot start
+// on keeps DLSS for the session.
+std::optional<ray_tracing::ReconstructionGuides> reconstructionGuides(const Upscaling& wanted, UINT width, UINT height)
+{
+    if (wanted.upscaler != Upscaler::Dlss || !wanted.rayReconstruction || reconstructionFailed) return std::nullopt;
+
+    auto guides = ray_tracing::reconstructionGuides(width, height);
+    if (!guides || ray_reconstruction::started()) return guides;
+
+    try
+    {
+        ray_reconstruction::start(device.Get(), dataDirectory);
+    }
+    catch (const std::exception& error)
+    {
+        reconstructionFailed = true;
+        reconstructionFailure = error.what();
+        log("Ray Reconstruction is unavailable; DLSS runs instead: " + reconstructionFailure);
+        return std::nullopt;
+    }
+
+    return guides;
 }
 
 // DLSS's own optimal render size for the mode at `output`; none when NGX has none.
@@ -1192,16 +1223,20 @@ bool upscale(const FxaaPass& pass, const Frame& current)
 
     ensurePipeline();
     initializeUpscaler(wanted.upscaler);
-    // FSR reads its inputs and writes its output through Direct3D 12, and takes linear colour, as DLSS
-    // does in its HDR mode on the float scene. Linear colour needs more than 8 bits.
+    // FSR and Ray Reconstruction read their inputs and write their output through Direct3D 12. FSR takes
+    // linear colour, as DLSS does in its HDR mode on the float scene; Ray Reconstruction needs it. Linear
+    // colour needs more than 8 bits.
     const bool fsr = wanted.upscaler == Upscaler::Fsr;
+    auto guides = reconstructionGuides(wanted, width, height);
+    if (guides && !hdr::isSceneFloat()) guides.reset();
+    const bool shared = fsr || guides.has_value();
     const bool linear = fsr || hdr::isSceneFloat();
     ensureTarget(colorTarget, width, height, linear ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM,
-        "Creating the upscaler's colour texture", fsr);
-    ensureTarget(depthTarget, width, height, DXGI_FORMAT_R32_FLOAT, "Creating the upscaler's depth texture", fsr || frameGeneration);
-    ensureTarget(motionTarget, width, height, DXGI_FORMAT_R16G16_FLOAT, "Creating the upscaler's motion texture", fsr || frameGeneration);
+        "Creating the upscaler's colour texture", shared);
+    ensureTarget(depthTarget, width, height, DXGI_FORMAT_R32_FLOAT, "Creating the upscaler's depth texture", shared || frameGeneration);
+    ensureTarget(motionTarget, width, height, DXGI_FORMAT_R16G16_FLOAT, "Creating the upscaler's motion texture", shared || frameGeneration);
     ensureTarget(outputTarget, planned.output.width, planned.output.height, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        "Creating the upscaler's output texture", fsr);
+        "Creating the upscaler's output texture", shared);
 
     // A gap means the upscaler missed frames; its history and the previous camera are stale.
     bool reset = !lastEvaluated || lastEvaluated->index + 1 != current.index;
@@ -1239,7 +1274,39 @@ bool upscale(const FxaaPass& pass, const Frame& current)
         performance::Timed timed(immediate.Get(), performance::Pass::UpscalerInputs);
         runInputs(current, reprojection, objectVelocity, linear);
         timed.next(performance::Pass::Upscaler);
-        if (fsr)
+        if (guides)
+        {
+            const auto camera = camera::streamlineCamera(previous, *current.view);
+            ray_reconstruction::Inputs inputs;
+            inputs.color = colorTarget.texture.Get();
+            inputs.depth = depthTarget.texture.Get();
+            inputs.motion = motionTarget.texture.Get();
+            inputs.output = outputTarget.texture.Get();
+            inputs.normalRoughness = guides->normalRoughness.Get();
+            inputs.diffuseAlbedo = guides->diffuseAlbedo.Get();
+            inputs.specularAlbedo = guides->specularAlbedo.Get();
+            inputs.worldToView = camera.worldToView;
+            inputs.viewToClip = camera.viewToClip;
+            inputs.jitter[0] = current.jitter[0];
+            inputs.jitter[1] = current.jitter[1];
+            inputs.frameTime = frameTime;
+            inputs.quality = static_cast<int>(planned.quality);
+            inputs.hdr = true;
+            inputs.reset = reset;
+            try
+            {
+                reset = ray_reconstruction::evaluate(inputs) || reset;
+                ray_tracing::reconstructed();
+            }
+            catch (const std::exception& error)
+            {
+                // Upscaling stops (fail); chosen again, it runs DLSS.
+                reconstructionFailed = true;
+                reconstructionFailure = error.what();
+                throw;
+            }
+        }
+        else if (fsr)
         {
             fsr_upscaler::Inputs inputs;
             inputs.color = colorTarget.texture.Get();
@@ -1282,6 +1349,7 @@ bool upscale(const FxaaPass& pass, const Frame& current)
         timed.next(performance::Pass::UpscalerOutput);
         runComposite(destination.Get(), objectVelocity, options, wanted.sharpness, linear);
     });
+    reconstructing = guides.has_value();
     focus::depthReady(immediate.Get(), depthTarget.texture.Get(), *current.view);
     pendingHudless.reset();
     if (hudlessSource) pendingHudless = PendingHudless{hudlessSource, resourceOf(destination.Get())};
@@ -1383,10 +1451,12 @@ void updatePlan()
 {
     const auto setup = currentConfiguration();
     const auto& wanted = setup.upscaling;
+    // Ray Reconstruction asks for many more jitter positions than DLSS: at least 32.
+    const int leastPhases = wanted.upscaler == Upscaler::Dlss && wanted.rayReconstruction ? 32 : 0;
     if (!setup.supportedBuild || failed || !upscales(wanted.mode) || !render_scale::hooked() || !outputSize[0] || !outputSize[1])
     {
         plan.reset();
-        jitterPhases = camera::jitterPhases(1.0f);
+        jitterPhases = std::max(camera::jitterPhases(1.0f), leastPhases);
         targetMipBias = replacing ? mipBias(1.0f, wanted.textureBiasOffset) : 0.0f;
         render_scale::request({}, {});
         return;
@@ -1409,7 +1479,7 @@ void updatePlan()
     }
 
     const float scale = static_cast<float>(plan->render.width) / static_cast<float>(plan->output.width);
-    jitterPhases = camera::jitterPhases(scale);
+    jitterPhases = std::max(camera::jitterPhases(scale), leastPhases);
     targetMipBias = mipBias(scale, wanted.textureBiasOffset);
     render_scale::request(plan->render, plan->output);
 }
@@ -1499,6 +1569,7 @@ void detach() noexcept
     presented = {};
     plan.reset();
     releaseNgx();
+    ray_reconstruction::stop();
     fsr_upscaler::stop();
 
     {
@@ -1880,7 +1951,11 @@ Status status()
     std::lock_guard lock(executionMutex);
     const auto setup = currentConfiguration();
     result.supportedBuild = setup.supportedBuild;
-    result.upscalerName = setup.upscaling.upscaler == Upscaler::Fsr ? fsr_upscaler::name() : "DLSS";
+    result.reconstructionAvailable = !reconstructionFailed;
+    result.rayReconstruction = setup.upscaling.upscaler == Upscaler::Dlss && reconstructing;
+    result.upscalerName = setup.upscaling.upscaler == Upscaler::Fsr ? fsr_upscaler::name()
+                          : result.rayReconstruction                 ? "DLSS Ray Reconstruction"
+                                                                     : "DLSS";
     result.failed = failed;
     result.failure = failure;
     result.lastFallback = lastFallback;

@@ -158,6 +158,10 @@ struct GIFrameConstants
     uint4 objectMotion;  // x: 1 when g_ObjectVelocity (gi_common.hlsli) holds this frame's velocity of the game's moving meshes
     uint4 shadowDiagnostics; // x: 1 for every surface casting from both sides (ShadowRayTowards); y: 1 for the debug view of where the shadow rays leave (ShadowStartColor)
     uint4 lightDiagnostics;  // z: the light's debug view into g_LightDebug (CompositeLight), GI_LIGHT_DEBUG_*
+    // x: 1 while DLSS Ray Reconstruction denoises (ray_reconstruction.hpp): the light takes a sample a render
+    // pixel and goes out without its denoiser (gi_light.hlsl, PerRenderPixel), the sun's and the lights' shadows
+    // as their rays found them.
+    uint4 reconstruction;
     // The game's terrain (TerrainGrid in gi_scene.hlsl): a world point is (u, height, v) x scale +
     // offset, u and v its virtual heightmap coordinates; the page table's converter (the terrain
     // shaders' b4 c0 and c1).
