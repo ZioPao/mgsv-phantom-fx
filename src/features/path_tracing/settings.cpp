@@ -2,6 +2,11 @@
 
 namespace phantom_fx
 {
+namespace
+{
+constexpr PathTracing Defaults{};
+}
+
 void describe(PathTracing& pathTracing, SettingVisitor& visit)
 {
     visit.feature(pathTracing.on,
@@ -23,5 +28,11 @@ void describe(PathTracing& pathTracing, SettingVisitor& visit)
             .needs = Effect::GlobalIllumination,
             .needsRayReconstruction = true,
             .needsSupportedBuild = true});
+    visit.slider(pathTracing.reflections,
+        {.iniKey = "path_traced_reflections",
+            .label = "Reflections",
+            .max = 4,
+            .standard = Defaults.reflections,
+            .tip = "How strongly surfaces reflect. 1 is the strength the game gives each material; higher makes the reflections stronger, 0 leaves them out."});
 }
 }

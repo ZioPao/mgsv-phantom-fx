@@ -985,6 +985,7 @@ Result render(const Frame& frame)
         .characters = frame.characters,
         .newTextures = frame.newTextures,
         .terrainEye = terrain ? std::optional(frame.eye) : std::nullopt,
+        .seaCentre = frame.seaLevel ? std::optional(std::array{frame.eye[0], *frame.seaLevel, frame.eye[2]}) : std::nullopt,
         .shouldListInstances = debugShadows || probeLights};
     auto update = s.contents->update(game);
     s.instancedModels[slot] = std::move(update.instanced);

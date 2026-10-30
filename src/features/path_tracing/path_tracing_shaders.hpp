@@ -3,12 +3,13 @@
 // HLSL for path tracing on Direct3D 11 (path_tracing.hpp), compiled at runtime with d3dcompiler_47.
 namespace phantom_fx::path_tracing::shaders
 {
-// The traced reflections added to the game's specular light, as the resolve reads it.
+// The traced reflections added to the game's specular light, as the resolve reads it, times the menu's strength.
 inline constexpr char AddReflections[] = R"(
 cbuffer Parameters : register(b0)
 {
     uint2 Size;
-    uint2 Padding;
+    float Strength;
+    float Padding;
 };
 
 Texture2D<float4> Specular : register(t0);   // The game's specular light
@@ -21,7 +22,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
     if (any(pixel >= Size)) return;
 
     float4 specular = Specular[pixel];
-    OutSpecular[pixel] = float4(specular.rgb + Reflection[pixel].rgb, specular.a);
+    OutSpecular[pixel] = float4(specular.rgb + Reflection[pixel].rgb * Strength, specular.a);
 }
 )";
 

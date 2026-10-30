@@ -33,7 +33,8 @@ constexpr ComputeSlots PassSlots{.buffers = 1, .views = 2, .accesses = 1};
 
 struct Parameters
 {
-    std::uint32_t width, height, padding[2];
+    std::uint32_t width, height;
+    float reflections, padding;
 };
 
 struct MaskParameters
@@ -41,8 +42,15 @@ struct MaskParameters
     std::uint32_t tile, padding[3];
 };
 
-// The effect plan runs path tracing (configure), with DLSS Ray Reconstruction asked for, which it waits on.
-FrameLatch<bool> latch;
+// The effect plan runs path tracing (configure), with DLSS Ray Reconstruction asked for, which it waits on;
+// and how strongly the reflections are added.
+struct Wanted
+{
+    bool on{};
+    float reflections{};
+};
+
+FrameLatch<Wanted> latch;
 std::atomic<bool> wanted{}, pipelineFailed{};
 
 // The scene's depth each context's reflection mask read, for the blend it records next.
@@ -113,7 +121,7 @@ bool ensurePipeline()
 // sky reflection out.
 bool isReflecting()
 {
-    return wanted.load(std::memory_order_relaxed) && latch.frame() && ray_tracing::isPathTracing() && !sun_light_pass::failed();
+    return wanted.load(std::memory_order_relaxed) && latch.frame().on && ray_tracing::isPathTracing() && !sun_light_pass::failed();
 }
 
 // The masks' tiles into the atlas; call with resourceMutex held.
@@ -169,7 +177,7 @@ void detach() noexcept
 void configure(const Configuration& configuration) noexcept
 {
     const bool on = configuration.effects.runs(Effect::PathTracing);
-    latch.set(on);
+    latch.set({on, configuration.settings.pathTracing.reflections});
     wanted = on;
     if (!on) return;
 
@@ -208,7 +216,7 @@ ID3D11ShaderResourceView* addReflections(ID3D11DeviceContext* context, ID3D11Sha
         if (specularWithReflections.width != width || specularWithReflections.height != height)
             specularWithReflections = makeComputeTexture(device.Get(), width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the specular light with reflections");
 
-        check(write(context, parameterBuffer.Get(), Parameters{width, height}), "Writing the reflections' constants");
+        check(write(context, parameterBuffer.Get(), Parameters{width, height, latch.frame().reflections}), "Writing the reflections' constants");
         const performance::Timed timed(context, performance::Pass::PathTracedLight);
         const SavedComputeState saved(context, PassSlots);
         ID3D11ShaderResourceView* inputs[]{specular, reflection};

@@ -11,7 +11,7 @@ using gi_d3d12::Kernel;
 void describe(gi_d3d12::Descriptors& d, const Textures& textures)
 {
     if (textures.guideNormals) d.texture(18, textures.guideNormals, DXGI_FORMAT_R16G16B16A16_FLOAT);
-    if (textures.guideSpecular) d.texture(19, textures.guideSpecular, DXGI_FORMAT_R8G8B8A8_UNORM);
+    if (textures.guideSpecular) d.texture(19, textures.guideSpecular, DXGI_FORMAT_R16G16B16A16_FLOAT);
     if (textures.lampMasks) d.texture(20, textures.lampMasks, DXGI_FORMAT_R8G8B8A8_UNORM);
     if (textures.guideMaterial) d.texture(21, textures.guideMaterial, DXGI_FORMAT_R8G8B8A8_UNORM);
     if (textures.guideTranslucency) d.texture(22, textures.guideTranslucency, DXGI_FORMAT_R8_UNORM);

@@ -12,6 +12,7 @@
 #include "features/lamp_soft_shadows/lamp_soft_shadows.hpp"
 #include "features/path_tracing/path_tracing.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
+#include "features/sea/sea.hpp"
 #include "features/sun_contact_shadows/sun_contact_shadows.hpp"
 #include "features/upscaling/upscaler.hpp"
 #include "features/volumetric_fog/atmosphere.hpp"
@@ -85,6 +86,8 @@ const EffectLine EffectLines[]{
     {.effect = Effect::VolumetricFog, .passes = {{Pass::FogPass, "The game's fog pass, larger"}, {Pass::SkyTables, "Sky tables (physical look)"}, {Pass::FogShadow, "Sun shadow in the fog"},
             {Pass::FogScattering, "Scattering"}, {Pass::FogIntegration, "Integration"}, {Pass::Sky, "Physical sky"}},
         .health = atmosphere::health},
+    {.effect = Effect::Sea, .passes = {{Pass::SeaWaves, "Waves: spectrum, FFT and maps"}, {Pass::SeaSurface, "Surface into the G-buffer"}},
+        .health = sea::health},
 };
 static_assert(std::size(EffectLines) == static_cast<std::size_t>(Effect::Count));
 

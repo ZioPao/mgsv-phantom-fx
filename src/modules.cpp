@@ -11,6 +11,7 @@
 #include "features/photo_mode/focus.hpp"
 #include "features/photo_mode/photo_mode.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
+#include "features/sea/sea.hpp"
 #include "features/sun_contact_shadows/sun_contact_shadows.hpp"
 #include "features/volumetric_fog/atmosphere.hpp"
 #include "passes/contact_shadow_trace.hpp"
@@ -60,6 +61,7 @@ constexpr Module Modules[]{
     {.attach = ray_tracing::attach, .configure = ray_tracing::configure, .present = ray_tracing::present, .detach = ray_tracing::detach},
     {.attach = local_lights::attach, .configure = local_lights::configure, .present = local_lights::present, .detach = local_lights::detach},
     {.attach = atmosphere::attach, .configure = atmosphere::configure, .present = atmosphere::present, .detach = atmosphere::detach},
+    {.attach = sea::attach, .configure = sea::configure, .present = sea::present, .detach = sea::detach},
 
     {.configure = motion_blur::configure},
     {.configure = frame_rate::configure},

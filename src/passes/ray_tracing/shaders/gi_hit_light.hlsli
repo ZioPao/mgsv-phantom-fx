@@ -292,10 +292,12 @@ void HitSurface(HashGridCache_Visibility visibility, out float3 world, out float
     normal = FacingNormal(t, visibility.direction);
 }
 
-// A hit's albedo: the G-buffer's where the camera sees the hit; otherwise its mesh's albedo texture,
-// or its mesh's mean.
+// A hit's albedo: the sea's water; the G-buffer's where the camera sees the hit; otherwise its mesh's
+// albedo texture, or its mesh's mean.
 float3 HitAlbedo(float3 world, HashGridCache_Visibility visibility)
 {
+    if (InstanceKind(g_Instances[visibility.instanceIndex]) & GI_INSTANCE_SEA) return float3(GI_SEA_ALBEDO);
+
     float4 clip = mul(g_ViewProjection, float4(world, 1.0f));
     if (clip.w > 0.0f)
     {
