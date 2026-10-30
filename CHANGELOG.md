@@ -2,10 +2,11 @@
 
 ## Unreleased
 
-- **DLSS Ray Reconstruction.** A new **Ray Reconstruction** switch under the upscaler, for NVIDIA RTX GPUs:
-  NVIDIA's model cleans up the ray-traced global illumination, shadows and lights and upscales in one
-  step, in place of DLSS and the add-on's own denoisers. It runs while a ray-traced effect is on; the
-  global illumination then takes a sample at every pixel, for sharper, quicker light.
+- **DLSS Ray Reconstruction.** A new **Ray Reconstruction** switch under the upscaler, for NVIDIA RTX GPUs,
+  shown while a ray-traced effect is on: NVIDIA's model cleans up the ray-traced global illumination,
+  shadows and lights and upscales in one step, in place of DLSS and the add-on's own denoisers, with a
+  choice of NVIDIA's presets. The global illumination then takes a sample at every pixel, for sharper,
+  quicker light, and the game's depth of field tells it where it blurs.
 - **SDR: no more banding in smooth fog and sky.** The game kept its picture in 8 bits from early in
   the frame, so smooth fog showed bands a level or two apart. The picture now stays in 16-bit
   colour until the end in SDR too, as with HDR, and a fine dither hides the last rounding. It costs
