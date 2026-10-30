@@ -269,6 +269,13 @@ EffectPlan planEffects(const Settings& settings, const EffectConditions& conditi
                                                                         : EffectState::Running;
     }
 
+    // Once every effect has its state: what it builds on may come later in the order.
+    for (const auto effect : AllEffects)
+    {
+        const auto needs = featureOf(effect).needs;
+        if (plan.runs(effect) && needs && !plan.runs(*needs)) plan.states[effect] = EffectState::Lacking;
+    }
+
     return plan;
 }
 

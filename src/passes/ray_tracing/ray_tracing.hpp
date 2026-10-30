@@ -10,7 +10,6 @@
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <utility>
 
 // The ray-traced scene's frame on Direct3D 11 (docs/DEVELOPMENT.md, "Global illumination"): what the
 // global illumination (gi_light.hpp), the sun's ray-traced shadows (gi_shadow.hpp) and the point and
@@ -95,16 +94,22 @@ void reconstructed() noexcept;
 // Path tracing (path_tracing.hpp): the last kick traced the reflections. The passes recorded meanwhile leave
 // them to it: the sun pass's sky reflection, the indoor sky specular, the screen-space reflections on the
 // G-buffer's surfaces.
-bool pathTracingRuns() noexcept;
+bool isPathTracing() noexcept;
 // The reflections the last kick traced, at the render size, for the resolve to add to the specular light:
 // R16G16B16A16_FLOAT, the reflected light times the specular albedo and the exposure. Null while off.
 ID3D11ShaderResourceView* reflection(UINT width, UINT height) noexcept;
 // Their hit distance, R16_FLOAT, for Ray Reconstruction (ray_reconstruction.hpp). Null while off.
 ID3D11Texture2D* reflectionDistance(UINT width, UINT height) noexcept;
-// The point and spot lights' diffuse and specular light the last kick path traced (direct_light.hlsl), at
-// the render size, R16G16B16A16_FLOAT times the exposure, for the light targets at the draw point
-// (local_lights.hpp); none while path tracing does not light them.
-std::optional<std::pair<ID3D11ShaderResourceView*, ID3D11ShaderResourceView*>> lampLight(UINT width, UINT height) noexcept;
+// The point and spot lights' light the last kick path traced (direct_light.hlsl), at the render size,
+// R16G16B16A16_FLOAT times the exposure.
+struct LampLight
+{
+    ID3D11ShaderResourceView* diffuse;
+    ID3D11ShaderResourceView* specular;
+};
+// For the light targets at the draw point (path_tracing::addLampLight); none while path tracing does not light
+// them.
+std::optional<LampLight> lampLight(UINT width, UINT height) noexcept;
 // The G-buffer's depth as the last kick packed it, R32_FLOAT, reversed-Z; null before one at this size.
 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> surfaceDepth(UINT width, UINT height) noexcept;
 bool active() noexcept;

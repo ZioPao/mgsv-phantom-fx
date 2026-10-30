@@ -9,12 +9,13 @@
 namespace phantom_fx
 {
 // The lighting effects: those the enhancements switch (F1) holds.
-// In a cost measurement's order (performance.hpp): the ray-traced shadows and lights before the global
-// illumination, so with it on, their steps give their own cost while its scene stays; the last of them
-// left out takes the scene with it.
+// In a cost measurement's order (performance.hpp): path tracing, the ray-traced shadows and lights before
+// the global illumination, so with it on, their steps give their own cost while its scene stays; the last
+// of them left out takes the scene with it.
 enum class Effect : std::uint8_t
 {
     VolumetricFog,
+    PathTracing,
     RayTracedShadows,
     RayTracedLights,
     GlobalIllumination,
@@ -34,7 +35,7 @@ constexpr auto AllEffects = [] {
 }();
 
 // The effects that trace rays through the ray-traced scene, which they share.
-constexpr std::array RayTracedEffects{Effect::GlobalIllumination, Effect::RayTracedShadows, Effect::RayTracedLights};
+constexpr std::array RayTracedEffects{Effect::GlobalIllumination, Effect::RayTracedShadows, Effect::RayTracedLights, Effect::PathTracing};
 
 template<class T> struct ByEffect
 {

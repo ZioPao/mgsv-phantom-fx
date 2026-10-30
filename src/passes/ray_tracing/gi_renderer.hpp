@@ -51,7 +51,7 @@ struct Textures
     // the light through the leaves' floor, R8_UNORM), the masks' atlas (null without masks) and the lamps' diffuse and
     // specular light (R16G16B16A16_FLOAT); null while off.
     ID3D11Texture2D* guideMaterial{};
-    ID3D11Texture2D* guideWrap{};
+    ID3D11Texture2D* guideTranslucency{};
     ID3D11Texture2D* lampMasks{};
     ID3D11Texture2D* lampDiffuse{};
     ID3D11Texture2D* lampSpecular{};
@@ -109,8 +109,8 @@ struct Frame
     // DLSS Ray Reconstruction denoises: the light takes a sample a render pixel and skips its denoiser, and
     // the sun's and the lights' shadows go out as their rays found them (GIFrameConstants::reconstruction).
     bool forReconstruction{};
-    // With it, path tracing: the reflections traced into textures.reflection (reflections.hlsl).
-    bool pathTracing{};
+    // With it, path tracing: the reflections and the point and spot lights traced (path_tracing_rays.hpp).
+    bool isPathTraced{};
     // The sun's ray-traced shadow into textures.shadow; the game's shadow map range (cPSLight c8.x,
     // c8.y, c6.x, and 1 once known) and the tangent of the sun's angular radius.
     bool traceShadows{};

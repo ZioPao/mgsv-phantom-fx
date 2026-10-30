@@ -4,6 +4,7 @@
 #include "command_list_notes.hpp"
 #include "constant_capture.hpp"
 #include "d3d11_helpers.hpp"
+#include "features/path_tracing/path_tracing.hpp"
 #include "frame_log.hpp"
 #include "game_lights.hpp"
 #include "game_shaders.hpp"
@@ -96,20 +97,6 @@ void main(uint id : SV_VertexID, out float4 position : SV_Position, out float4 c
 // On the light's far faces, the light's shadow into both light targets' alpha, for the light's blend to
 // scale it by; where the surface lies past them, none of its light. The full-screen triangle, at depth 0
 // (as far as can be), lies past every surface.
-// Path tracing's lamps (ray_tracing::lampLight, direct_light.hlsl) into both light targets, added as the game
-// adds its lights' light, in place of every light it traced drawn again.
-constexpr char PathTracedSource[] = R"(
-Texture2D<float4> g_LampDiffuse : register(t0);
-Texture2D<float4> g_LampSpecular : register(t1);
-
-void main(float4 position : SV_Position, out float4 diffuse : SV_Target0, out float4 specular : SV_Target1)
-{
-    int3 pixel = int3(position.xy, 0);
-    diffuse = float4(g_LampDiffuse.Load(pixel).rgb, 0);
-    specular = float4(g_LampSpecular.Load(pixel).rgb, 0);
-}
-)";
-
 constexpr char ShadowSource[] = R"(
 cbuffer LightPass : register(b0)
 {
@@ -226,8 +213,9 @@ struct Notes
     }
 };
 
-// What the effect plan asked for (configure).
-std::atomic<bool> wantedRunning{};
+// What the effect plan asked for (configure): the ray-traced lights, or path tracing alone, which takes the
+// game's lights only while it runs (ray_tracing::isPathTracing).
+std::atomic<bool> wantedRunning{}, isForPathTracingOnly{};
 // On with the pipeline and a twin of the game's: the draw points and the lists are followed. Active once a
 // frame also had a draw point, whose list draws them again: the game's lights are taken over. Menus and
 // loading screens, without one, keep the game's.
@@ -257,8 +245,8 @@ std::mutex resourceMutex;
 ComPtr<ID3D11Device> device;
 ID3D11DeviceContext* immediate{};
 ComPtr<ID3D11VertexShader> fullScreenShader, volumeShader;
-ComPtr<ID3D11PixelShader> shadowShader, beforeVolumeShader, pathTracedShader;
-ComPtr<ID3D11BlendState> alphaOnly, shadowed, added;
+ComPtr<ID3D11PixelShader> shadowShader, beforeVolumeShader;
+ComPtr<ID3D11BlendState> alphaOnly, shadowed;
 ComPtr<ID3D11RasterizerState> scissored, farFaces, nearFaces;
 ComPtr<ID3D11DepthStencilState> noDepth;
 ComPtr<ID3D11Buffer> passBuffer, sceneBuffer, lightBuffer, materialBuffer;
@@ -299,15 +287,6 @@ bool ensurePipeline()
     try
     {
         shadowShader = pixelShader(device.Get(), ShadowSource, "light-shadow");
-        pathTracedShader = pixelShader(device.Get(), PathTracedSource, "light-path-traced");
-        D3D11_BLEND_DESC adding{};
-        adding.RenderTarget[0].BlendEnable = TRUE;
-        adding.RenderTarget[0].SrcBlend = adding.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
-        adding.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
-        adding.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
-        adding.RenderTarget[0].BlendOp = adding.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-        adding.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
-        check(device->CreateBlendState(&adding, added.ReleaseAndGetAddressOf()), "Creating the path-traced lights' blend");
         beforeVolumeShader = pixelShader(device.Get(), BeforeVolumeSource, "light-before-volume");
         const auto volumeCode = compile(VolumeSource, "light-volume", "vs_5_0");
         check(device->CreateVertexShader(volumeCode->GetBufferPointer(), volumeCode->GetBufferSize(), nullptr, volumeShader.ReleaseAndGetAddressOf()),
@@ -746,35 +725,20 @@ void saveForRecord(const std::filesystem::path& folder, int batch, const char* w
     }
 }
 
-// The frame's lights so far, on the immediate context; call with resourceMutex held. The command lists
-// the immediate context runs next set their own state, so this only unbinds what it bound.
-// Path tracing's lamps into the light targets once, for every light the frame's kick traced (`traced`);
+// Path tracing's light (path_tracing::addLampLight) once for every light the frame's kick traced (`traced`);
 // false while it does not light them.
-bool drawPathTracedLights()
+bool addPathTracedLights()
 {
     const auto traced = std::ranges::find_if(frameLights, &Light::traced);
-    if (traced == frameLights.end()) return false;
+    if (traced == frameLights.end() || !path_tracing::addLampLight(immediate, traced->targets[0].Get(), traced->targets[1].Get())) return false;
 
-    const auto [width, height] = sizeOf(traced->targets[0].Get());
-    const auto lamps = ray_tracing::lampLight(width, height);
-    if (!lamps) return false;
-
-    ID3D11RenderTargetView* targets[]{traced->targets[0].Get(), traced->targets[1].Get()};
-    ID3D11ShaderResourceView* inputs[]{lamps->first, lamps->second};
-    const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1};
-    immediate->VSSetShader(fullScreenShader.Get(), nullptr, 0);
-    immediate->PSSetShader(pathTracedShader.Get(), nullptr, 0);
-    immediate->PSSetShaderResources(0, 2, inputs);
-    immediate->OMSetRenderTargets(2, targets, nullptr);
-    immediate->OMSetBlendState(added.Get(), nullptr, 0xFFFFFFFF);
-    immediate->RSSetState(nullptr);
-    immediate->RSSetViewports(1, &viewport);
-    immediate->Draw(3, 0);
     drawnPathTraced += std::ranges::count_if(frameLights, &Light::traced);
 
     return true;
 }
 
+// The frame's lights so far, on the immediate context; call with resourceMutex held. The command lists
+// the immediate context runs next set their own state, so this only unbinds what it bound.
 void drawFrameLights()
 {
     if (frameLights.empty()) return;
@@ -788,6 +752,8 @@ void drawFrameLights()
             return;
         }
 
+        // Path tracing lit the lights the kick traced, timed as its own; the others are drawn again, unshadowed.
+        const bool isPathTraced = addPathTracedLights();
         const performance::Timed timed(immediate, performance::Pass::LocalLights);
         immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         immediate->IASetInputLayout(nullptr);
@@ -799,10 +765,8 @@ void drawFrameLights()
         if (record.empty()) recordBatch = 0;
         else saveForRecord(record, recordBatch, "before");
 
-        // Path tracing lit the lights the kick traced; the others are drawn again, unshadowed.
-        const bool pathTraced = drawPathTracedLights();
         for (const auto& light : frameLights)
-            if (!pathTraced || !light.traced) drawAgain(light);
+            if (!isPathTraced || !light.traced) drawAgain(light);
 
         measureVolumes();
         if (!record.empty()) saveForRecord(record, recordBatch++, "after");
@@ -920,11 +884,11 @@ void detach() noexcept
 
 void configure(const Configuration& configuration) noexcept
 {
-    // Path tracing lights them from their records (ray_tracing::lampLight), with or without the ray-traced lights.
-    const auto& settings = configuration.settings;
-    const bool running = configuration.effects.runs(Effect::RayTracedLights)
-        || (settings.pathTracing.on && settings.upscaling.rayReconstruction && configuration.effects.runs(Effect::GlobalIllumination));
+    // Path tracing lights them from their records (path_tracing::addLampLight), with or without the ray-traced lights.
+    const bool rayTraced = configuration.effects.runs(Effect::RayTracedLights);
+    const bool running = rayTraced || configuration.effects.runs(Effect::PathTracing);
     wantedRunning = running;
+    isForPathTracingOnly = !rayTraced;
     flashlightBrightness = configuration.settings.rayTracedLights.flashlightBrightness;
     beyondVolumes = static_cast<BeyondVolumes>(std::clamp(configuration.diagnostics.lightVolumes, 0, 2));
 
@@ -956,6 +920,9 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
     {
         const auto* game = gameLightOf(shader.row());
         if (!game || isBeam(context, *game)) return false;
+
+        // For path tracing alone, the game draws its lights while the rays do not light them.
+        if (isForPathTracingOnly.load(std::memory_order_relaxed) && !ray_tracing::isPathTracing()) return false;
 
         // A smaller camera's light, as the intro mirror's: the rays trace the main view only.
         if (!viewportFillsTarget(context)) return false;
