@@ -64,6 +64,7 @@ Needs DXR 1.1.
 - **Ambient occlusion** (GTVBAO)
 - **Indirect lighting** (SSILVB)
 - **Volumetric fog** with light shafts and a physical sky
+- **Sea:** ocean waves around Mother Base, lit and reflected like the rest of the world
 
 ### Output and tools
 

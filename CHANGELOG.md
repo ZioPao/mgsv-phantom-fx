@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **The sea.** A new **Sea** switch under atmosphere replaces the sea around Mother Base: waves from a real
+  ocean spectrum that rise and roll with the wind, bigger in rain, with foam where their crests break. It is
+  lit like the rest of the world, so it reflects the sky, the sun and the platforms and takes their shadows;
+  with path tracing its reflections are traced. The ray-traced light under the platforms now bounces off the
+  water instead of the sky. A **Waves** slider sets the wind against the weather's. It costs about 0.3 ms.
 - **Path tracing.** A new **Path tracing** switch under lighting, with DLSS Ray Reconstruction and the
   global illumination on: reflections are traced on every surface, sharp on smooth ones and spread on
   rough ones, in place of the game's screen-space and sky reflections (water and glass keep the game's;

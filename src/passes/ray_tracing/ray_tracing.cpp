@@ -9,6 +9,7 @@
 #include "features/global_illumination/gi_lighting.hpp"
 #include "features/path_tracing/path_tracing.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
+#include "features/sea/sea.hpp"
 #include "frame_latch.hpp"
 #include "game_constants.hpp"
 #include "log.hpp"
@@ -125,8 +126,9 @@ struct PackParameters
 // specular target's intensity) through its Fresnel table at the eye's angle, from at least the sun pass's
 // least F0 (cPSLight c2.z), times half the smoothness. The game's materials are tuned to it: with a
 // physical one (NVIDIA's EnvBRDFApprox2), Snake's red arm, an 11% white specular of roughness 0.59,
-// reflected 3 to 4 times as much and the sky's light turned it grey. Where the sky is: no normal and
-// roughness, albedo 0.5, no specular albedo.
+// reflected 3 to 4 times as much and the sky's light turned it grey. The sea (sea.hpp) is not one of the
+// game's materials: it reflects as water does, all of its light at grazing angles. Where the sky is: no
+// normal and roughness, albedo 0.5, no specular albedo.
 constexpr char GuideSource[] = R"(
 Texture2D<float> g_Depth : register(t0);
 Texture2D<float4> g_Normal : register(t1);
@@ -134,6 +136,7 @@ Texture2D<float4> g_Albedo : register(t2);    // Through an sRGB view: linear
 Texture2D<float4> g_Specular : register(t3);  // Roughness, intensity, material, translucency
 Texture2D<float4> g_Fresnel : register(t4);   // g_lut1: u the cosine, v F0
 Texture2D<float4> g_Materials : register(t5); // g_MaterialTexture: u the material, row 0.25 its colour, 0.75 its F0
+Texture2D<float> g_SeaDepth : register(t6);   // The sea's depth where it drew (sea::surfaceDepth)
 RWTexture2D<float4> g_NormalRoughness : register(u0);
 RWTexture2D<float4> g_DiffuseAlbedo : register(u1);
 RWTexture2D<float4> g_SpecularAlbedo : register(u2);
@@ -150,6 +153,7 @@ cbuffer Parameters : register(b0)
     uint g_HasSpecular;
     uint g_HasTables;
     float g_SkyReflectionFloor; // The sun pass's cPSLight c2.z, the frame before
+    uint g_HasSea;
 };
 
 // The texel a point sampler takes at (u, v), as the sun pass reads the material table.
@@ -172,6 +176,18 @@ float FresnelAt(float cosine, float F0)
     float above = lerp(g_Fresnel.Load(int3(low.x, low.y, 0)).x, g_Fresnel.Load(int3(high.x, low.y, 0)).x, t.x);
     float below = lerp(g_Fresnel.Load(int3(low.x, high.y, 0)).x, g_Fresnel.Load(int3(high.x, high.y, 0)).x, t.x);
     return lerp(above, below, t.y);
+}
+
+// Water's reflectance (F0 0.02) at the eye's angle, over GGX's lobe: Karis' fit of the split sum ("Physically
+// Based Shading on Mobile", 2014).
+float WaterReflectance(float toEyeN, float roughness)
+{
+    const float4 c0 = float4(-1, -0.0275, -0.572, 0.022);
+    const float4 c1 = float4(1, 0.0425, 1.04, -0.04);
+    float4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * toEyeN)) * r.x + r.y;
+    float2 ab = float2(-1.04, 1.04) * a004 + r.zw;
+    return 0.02 * ab.x + ab.y;
 }
 
 [numthreads(8, 8, 1)]
@@ -220,7 +236,8 @@ void main(uint2 id : SV_DispatchThreadID)
 
     g_NormalRoughness[id] = float4(world, roughness);
     g_DiffuseAlbedo[id] = float4(g_HasAlbedo ? g_Albedo.Load(int3(id, 0)).rgb : 0.5, 1);
-    g_SpecularAlbedo[id] = float4(saturate(reflected * ((1 - roughness) * 0.5)), 1);
+    bool isSea = g_HasSea && g_SeaDepth.Load(int3(id, 0)) == depth;
+    g_SpecularAlbedo[id] = float4(isSea ? WaterReflectance(toEyeN, roughness) : saturate(reflected * ((1 - roughness) * 0.5)), 1);
     g_Material[id] = float4(saturate(specularColor), specular.w);
     g_Wrap[id] = saturate(specular.w * translucencyScale);
 }
@@ -233,6 +250,7 @@ struct GuideParameters
     float jitter[2];
     std::uint32_t width, height, hasAlbedo, hasSpecular, hasTables;
     float skyReflectionFloor;
+    std::uint32_t hasSea, padding[3];
 };
 
 // The light the global illumination keeps in its caches is the game's before exposure, scaled by
@@ -469,9 +487,12 @@ void makeGuides(ID3D11ShaderResourceView* depth, const SceneConstants& scene, fl
     parameters.hasSpecular = specular != nullptr;
     parameters.hasTables = tables.fresnel && tables.materials;
     parameters.skyReflectionFloor = skyReflectionFloor;
+    const auto seaDepth = sea::surfaceDepth(width, height);
+    parameters.hasSea = seaDepth != nullptr;
     check(write(immediate.Get(), guideParameters.Get(), parameters), "Writing the Ray Reconstruction guides' constants");
 
-    ID3D11ShaderResourceView* inputs[]{depth, normals.Get(), hasAlbedo ? albedo.Get() : nullptr, specular.Get(), tables.fresnel.Get(), tables.materials.Get()};
+    ID3D11ShaderResourceView* inputs[]{depth, normals.Get(), hasAlbedo ? albedo.Get() : nullptr, specular.Get(), tables.fresnel.Get(), tables.materials.Get(),
+        seaDepth.Get()};
     ID3D11UnorderedAccessView* outputs[]{guideNormals.access.Get(), guideDiffuse.access.Get(), guideSpecular.access.Get(), guideMaterial.access.Get(),
         guideTranslucency.access.Get()};
     immediate->CSSetShader(guideShader.Get(), nullptr, 0);
@@ -762,6 +783,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     gi_textures::update(device.Get(), immediate.Get(), frame.newTextures);
     endStep(TexturesStep);
     if (const auto terrain = engine_scene::takeTerrain()) copyTerrain(*terrain, frame);
+    frame.seaLevel = sea::level();
 
     // The game's velocity for its moving meshes, for the shadows' and the light's denoisers: only this
     // frame's, drawn before this list, at the render size.
