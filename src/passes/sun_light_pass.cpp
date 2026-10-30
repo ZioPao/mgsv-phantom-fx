@@ -5,7 +5,6 @@
 #include "features/upscaling/upscaler.hpp"
 #include "features/sun_contact_shadows/sun_contact_shadows.hpp"
 #include "frame_latch.hpp"
-#include "ggx_specular.hpp"
 #include "log.hpp"
 #include "passes/contact_shadow_trace.hpp"
 #include "passes/ray_tracing/ray_tracing.hpp"
@@ -96,12 +95,10 @@ bool ensurePipeline()
                 replacements[replacementOf(isShadowMapped, reflectsSky)] = pixelShader(device.Get(), shaders::SunLight, "sun-light", defines);
             }
 
-        // Path tracing's call GGX's specular, which goes before the source.
-        const std::string pathTracedSource = std::string(ggx_specular::Source) + shaders::SunLight;
         for (const bool isInShadowRange : {true, false})
         {
             const D3D_SHADER_MACRO defines[]{{"SHADOW_MAP", "0"}, {"SKY_REFLECTION", "0"}, {"PATH_TRACED", "1"}, {"CLOUD_SHADOW", isInShadowRange ? "1" : "0"}, {}};
-            replacements[pathTracedOf(isInShadowRange)] = pixelShader(device.Get(), pathTracedSource.c_str(), "sun-light-path-traced", defines);
+            replacements[pathTracedOf(isInShadowRange)] = pixelShader(device.Get(), shaders::SunLight, "sun-light-path-traced", defines);
         }
 
         // Last, so it marks a complete pipeline.

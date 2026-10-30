@@ -6,13 +6,15 @@
 // too (a reflection in a reflection), and its diffuse one, whose ray ends the path at the sky's light or the light
 // cache. A ray that gets away takes the sky as the game draws it (SkySeen). The light goes out times the surface's
 // specular albedo (the Ray Reconstruction guide) and the exposure, for the resolve to add to the game's specular
-// light, and the first hit's distance goes to Ray Reconstruction to move the reflection with what it reflects.
+// light, and the first hit's distance goes to Ray Reconstruction to move the reflection with what it reflects. A ray
+// that hit something also writes the game's reflection map, which its blend reads as it reads the screen-space one's.
 #include "gi_hit_light.hlsli"
 
 Texture2D<float4> g_Guide_NormalRoughness : register(t18); // The world-space normal, the roughness in w (ray_tracing::ReconstructionGuides)
-Texture2D<float4> g_Guide_SpecularAlbedo : register(t19);  // The share of light the surface reflects towards the eye
-RWTexture2D<float4> g_Reflection : register(u93);          // The reflected light times the specular albedo and the exposure
+Texture2D<float4> g_Guide_SpecularAlbedo : register(t19);  // The share of light the surface reflects towards the eye; a: 0 on the sea
+RWTexture2D<float4> g_Reflection : register(u93);          // The reflected light times the specular albedo and the exposure; a: how far across the screen its hit is
 RWTexture2D<float> g_ReflectionDistance : register(u94);   // The ray's hit distance; FP16's largest where it got away
+RWTexture2D<float4> g_ReflectionMap : register(u98);       // The hit as the game's reflection map holds it (ReflectionBlend): rgb its light, a how much it blends
 
 // FP16's largest, which Ray Reconstruction takes as the sky.
 static const float SkyHitDistance = 65504.0f;
@@ -40,6 +42,15 @@ static const uint SpecularRays = 3;
 // From this roughness a surface's reflection is a blur (GGX's alpha 0.25 and up): a path leaving it needs no more than
 // the cache gives, and a hit of it no specular ray of its own. Most of what the game draws is rougher than this.
 static const float RoughSurface = 0.5f;
+// The game's screen-space reflections (LocalReflectionMask and LocalReflectionTPP's disassembly) leave out surfaces
+// rougher than this (their cPSObject c11.z), and those their Fresnel takes less than this much from, and fade away
+// over this far from the eye, in metres.
+static const float MostReflectingRoughness = 0.9f, LeastGameFresnel = 0.1f, GameReflectionReach = 100.0f;
+// The brightest hit the game's blend takes, the scene's value at the top of the game's tonemap: a ray's light is
+// not filtered as the screen's is, and at the blend's strength one bright hit would be a firefly.
+static const float BrightestHit = 4.0f;
+// Past the blend's reach however far that is (ReflectionBlend).
+static const float BehindTheEye = 1000.0f;
 
 // Where a specular ray goes from a surface: GGX's visible normals of `alpha`, around `normal`, seen from `toEye`;
 // `cosineToEye` is the chosen one's with the eye, for its Fresnel.
@@ -63,6 +74,37 @@ float SmithMasking(float cosine, float alpha)
 {
     float a2 = alpha * alpha;
     return 2.0f * cosine / max(cosine + sqrt(a2 + (1.0f - a2) * cosine * cosine), 1e-4f);
+}
+
+// The Fresnel of the game's screen-space reflections, which goes by the roughness and not by the material's F0.
+float GameFresnel(float roughness, float toEyeN)
+{
+    float rate = 1.0f - roughness;
+    rate *= rate;
+    rate *= rate;
+
+    return rate + (1.0f - rate) * (1.0f - toEyeN);
+}
+
+// How much of a ray's hit the game's blend takes at a surface: nothing where its screen-space reflections leave the
+// surface out, and fading with the surface's distance and as the ray turns towards the eye.
+float GameReflectionFade(float3 world, float3 normal, float3 direction, float roughness, float fresnel)
+{
+    if (roughness > MostReflectingRoughness || fresnel < LeastGameFresnel) return 0.0f;
+
+    float3 forward = normalize(g_Frame.viewProjection[3].xyz);
+    float distanceFade = 1.0f - saturate(dot(world - g_Frame.eye.xyz, forward) / GameReflectionReach);
+    return distanceFade * saturate(1.0f + 2.0f * min(dot(direction + 0.05f * normal, forward), 0.0f));
+}
+
+// How far across the screen a ray went, as a share of the screen's width and height.
+float ScreenTravel(float3 from, float3 to)
+{
+    float4 start = mul(g_Frame.viewProjection, float4(from, 1.0f));
+    float4 end = mul(g_Frame.viewProjection, float4(to, 1.0f));
+    if (end.w <= 0.0f) return BehindTheEye;
+
+    return length((end.xy / end.w - start.xy / start.w) * float2(0.5f, -0.5f));
 }
 
 // The light the cache holds for a hit, its own and what it reflects, diffuse; false where no ray has lit that cell yet.
@@ -159,10 +201,11 @@ void TraceReflections(uint2 did : SV_DispatchThreadID)
     if (any(did >= g_BufferDimensions)) return;
 
     float depth = g_Depth.Load(int3(did, 0));
-    float3 specularAlbedo = g_Guide_SpecularAlbedo.Load(int3(did, 0)).rgb;
-    if (depth <= 0.0f || all(specularAlbedo < 1e-3f))
+    float4 specularAlbedo = g_Guide_SpecularAlbedo.Load(int3(did, 0));
+    if (depth <= 0.0f || all(specularAlbedo.rgb < 1e-3f))
     {
         g_Reflection[did] = 0.0f;
+        g_ReflectionMap[did] = 0.0f;
         g_ReflectionDistance[did] = depth <= 0.0f ? SkyHitDistance : 0.0f;
         return;
     }
@@ -181,6 +224,10 @@ void TraceReflections(uint2 did : SV_DispatchThreadID)
     float hitDistance;
     bool isRough = normalRoughness.w >= RoughSurface;
     float3 light = ReflectedLight(origin, normal, CopyTolerance(world), direction, PixelCone(world, g_Frame.rayCone.x + alpha), isRough, random, hitDistance);
-    g_Reflection[did] = float4(RemoveNaNs(light) * specularAlbedo * g_Frame.nearFar.w, 1.0f);
+    float3 exposed = RemoveNaNs(light) * g_Frame.nearFar.w;
+    bool isGameBlended = hitDistance < SkyHitDistance && specularAlbedo.a > 0.0f;
+    float fresnel = GameFresnel(normalRoughness.w, saturate(dot(normal, toEye)));
+    g_Reflection[did] = float4(exposed * specularAlbedo.rgb, isGameBlended ? ScreenTravel(world, origin + hitDistance * direction) : BehindTheEye);
+    g_ReflectionMap[did] = isGameBlended ? float4(min(exposed, BrightestHit) * fresnel, GameReflectionFade(world, normal, direction, normalRoughness.w, fresnel)) : 0.0f;
     g_ReflectionDistance[did] = hitDistance;
 }

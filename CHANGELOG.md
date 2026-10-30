@@ -11,7 +11,8 @@
   global illumination on: reflections are traced on every surface, sharp on smooth ones and spread on
   rough ones, in place of the game's screen-space and sky reflections (water and glass keep the game's;
   in rain, wet surfaces take the traced ones), and the sun and every lamp and flashlight light the scene
-  from the path tracer, each light with its own soft shadow where lights overlap. Each surface reflects
+  from the path tracer, each light with its own soft shadow where lights overlap, keeping the game's own
+  highlights on its materials. Each surface reflects
   with the strength the game gives its material, and a **Reflections** slider makes them stronger or
   weaker. Rays now see what the camera sees: surfaces they hit keep their roughness, shine and normal maps,
   so shiny things stay shiny in reflections and reflections show other reflections. Glowing bulbs and signs
