@@ -206,8 +206,8 @@ LocalLight forRays(const DrawnLight& light, const std::optional<Bounds>& volume)
         .shadowStart = shadowMapStart(light),
         .specularScale = light.game->specular ? constants.specularScale : 1,
         .diffuseScale = constants.diffuseScale};
-    const bool masked = light.game->twin == game_lights::Twin::MaskedSpotNA || light.game->twin == game_lights::Twin::MaskedSpot2;
-    if (masked)
+    const bool isMaskedSpot = light.game->twin == game_lights::Twin::MaskedSpotNA || light.game->twin == game_lights::Twin::MaskedSpot2;
+    if (isMaskedSpot)
     {
         rays.maskRows = maskRowsInWorld(light.scene);
         rays.isMasked = true;

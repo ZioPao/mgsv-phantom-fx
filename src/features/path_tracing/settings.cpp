@@ -16,11 +16,17 @@ void describe(PathTracing& pathTracing, SettingVisitor& visit)
             .name = "Path tracing",
             .tech = "PT",
             .tag = "Experimental",
-            .tip = "With DLSS Ray Reconstruction denoising, the reflections are traced too: a ray from every pixel along its surface's "
-                   "reflection, sharp on smooth surfaces and spread on rough ones, in place of the game's screen-space and sky reflections. "
-                   "Water and glass keep the game's reflections. Needs the global illumination on and DLSS Ray Reconstruction running.",
-            .summary = "Traced reflections on every surface, in place of the game's screen-space and sky reflections.",
-            .keywords = "PT path tracing reflections ray reconstruction",
+            .tip = "With DLSS Ray Reconstruction denoising, the reflections and the direct light are traced too. A reflection ray from every "
+                   "pixel, sharp on smooth surfaces and spread on rough ones, in place of the game's screen-space and sky reflections; water "
+                   "and glass keep the game's. The sun lit by its traced shadow alone, and every point and spot light by the path tracer, "
+                   "each with a shadow ray, in place of the game's light shaders. The "
+                   "sun's and the lights' rays are its own: it replaces ray-traced shadows and lights while on. Needs the global illumination on "
+                   "and DLSS Ray Reconstruction running.",
+            .summary = "Traced reflections, sun and lamps, in place of the game's reflections and light shaders.",
+            .keywords = "PT path tracing reflections ray reconstruction lamps lights sun",
+            .effect = Effect::PathTracing,
+            .needs = Effect::GlobalIllumination,
+            .needsRayReconstruction = true,
             .needsSupportedBuild = true});
     visit.slider(pathTracing.reflections,
         {.iniKey = "path_traced_reflections",

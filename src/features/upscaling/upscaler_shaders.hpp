@@ -23,6 +23,11 @@ namespace phantom_fx::upscaler::shaders
 // frame's jitter, because the engine projects the current position with the jittered matrices and
 // the previous one without. The object motion is the cell, less the jitter; the camera motion
 // clamped into it keeps full precision where a character does not move.
+//
+// With DLSS Ray Reconstruction on a frame the game's depth of field drew, also its depth of field guide:
+// how much the depth of field changed each pixel's light, luminance(after - before) by NVIDIA's luminance
+// (DLSS-RR Integration Guide, "Depth of Field Guide"). Ray Reconstruction runs after the depth of field,
+// which blurs the noisy light; the guide tells it where.
 inline constexpr char Inputs[] = PHANTOM_FX_HDR_COMMON R"(
 cbuffer InputParameters : register(b0)
 {
@@ -31,14 +36,17 @@ cbuffer InputParameters : register(b0)
     uint2 RenderSize;
     uint ObjectMotion; // t2 holds the engine's velocity
     uint Linear;       // The upscaler gets linear colour: FSR, or DLSS in its HDR mode
-    uint2 Padding;
+    uint DofGuide;     // t3 holds the scene before the depth of field: write u3
+    uint Padding;
 };
 Texture2D<float4> SceneColor : register(t0);
 Texture2D<float> SceneDepth : register(t1);
 Texture2D<float4> Velocity : register(t2);
+Texture2D<float4> SceneBeforeDof : register(t3);
 RWTexture2D<float4> OutColor : register(u0);
 RWTexture2D<float> OutDepth : register(u1);
 RWTexture2D<float2> OutMotion : register(u2);
+RWTexture2D<float> OutDofGuide : register(u3);
 
 static const float HalfCell = 64.0 / 255.0; // Half the engine's velocity step, in pixels
 
@@ -69,6 +77,12 @@ void main(uint2 pixel : SV_DispatchThreadID)
     OutColor[pixel] = Linear ? float4(min(SrgbToLinear(color.rgb), HalfMax), color.a) : color;
     OutDepth[pixel] = depth;
     OutMotion[pixel] = motion;
+
+    if (DofGuide)
+    {
+        const float3 change = SrgbToLinear(color.rgb) - SrgbToLinear(SceneBeforeDof[pixel].rgb);
+        OutDofGuide[pixel] = clamp(dot(change, float3(0.25, 0.5, 0.25)), -HalfMax, HalfMax);
+    }
 }
 )";
 

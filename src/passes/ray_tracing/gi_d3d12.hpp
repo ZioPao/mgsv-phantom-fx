@@ -15,8 +15,9 @@
 #include <string>
 
 // Direct3D 12 helpers shared by the global illumination's renderer (gi_renderer.cpp), its light's
-// passes (gi_light.cpp) and the sun's ray-traced shadows (gi_shadow.cpp): one root signature, one
-// descriptor table pair per frame, and the kernels of src/shaders.
+// passes (gi_light.cpp), the sun's ray-traced shadows (gi_shadow.cpp) and path tracing's rays
+// (path_tracing_rays.cpp): one root signature, one descriptor table pair per frame, and the kernels of
+// src/shaders.
 namespace phantom_fx::gi_d3d12
 {
 using Microsoft::WRL::ComPtr;

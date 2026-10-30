@@ -7,22 +7,22 @@
 // a shadow ray to a point on each picked light: an unbiased estimate of all their shadowed light, which
 // Ray Reconstruction denoises. The light goes out times the exposure, for the game's light targets.
 #include "gi_shadow.hlsli"
+#include "ggx_specular.hlsli"
 
 Texture2D<float4> g_Guide_NormalRoughness : register(t18); // The world-space normal, the roughness in w (ray_tracing::ReconstructionGuides)
 Texture2D<float4> g_LampMasks : register(t20);             // The masks: GI_LAMP_MASK_TILES tiles across
 Texture2D<float4> g_Guide_Material : register(t21);        // rgb: the specular colour at normal incidence; a: the translucency
-Texture2D<float> g_Guide_Wrap : register(t22);             // The light through the leaves' floor: the translucency times the material's
+Texture2D<float> g_Guide_Translucency : register(t22);     // The light through the leaves' floor: the translucency times the material's
 RWTexture2D<float4> g_LampDiffuse : register(u95);         // The lights' diffuse light, times the exposure
 RWTexture2D<float4> g_LampSpecular : register(u96);        // Their specular light
 
 // Lights a pixel picks, each with a shadow ray.
 static const uint PickedLights = 2;
-static const float Pi = 3.14159265f;
 
 // A masked spot's mask at `world`, as its shader projects and samples it (wrapped, bilinear); 1 for the others.
 float3 MaskAt(GILocalLight light, float3 world)
 {
-    uint tile = uint(light.lighting.z);
+    uint tile = light.maskTile.x;
     if (tile == 0u) return 1.0f;
 
     float4 position = float4(world, 1.0f);
@@ -37,33 +37,15 @@ float3 MaskAt(GILocalLight light, float3 world)
     return g_LampMasks.SampleLevel(g_LinearSampler, float2((float(tile - 1u) + uv.x) / GI_LAMP_MASK_TILES, uv.y), 0.0f).rgb;
 }
 
-// GGX's specular for light `reaching` from `toLight`, in the diffuse light's units: the Trowbridge-Reitz
-// distribution, Smith's height-correlated visibility and Schlick's Fresnel, of roughness squared.
-float3 GgxSpecular(float3 reaching, float3 normal, float3 toEye, float3 toLight, float roughness, float3 specularColor)
-{
-    float3 halfway = normalize(toEye + toLight);
-    float NoL = saturate(dot(normal, toLight));
-    float NoV = max(dot(normal, toEye), 1e-4f);
-    float NoH = saturate(dot(normal, halfway));
-    float VoH = saturate(dot(toEye, halfway));
-    float alpha = max(roughness * roughness, 1e-3f);
-    float a2 = alpha * alpha;
-    float d = (NoH * a2 - NoH) * NoH + 1.0f;
-    float distribution = a2 / (Pi * d * d);
-    float visibility = 0.5f / max(NoL * sqrt(NoV * NoV * (1.0f - a2) + a2) + NoV * sqrt(NoL * NoL * (1.0f - a2) + a2), 1e-6f);
-    float3 fresnel = specularColor + (1.0f - specularColor) * pow(1.0f - VoH, 5.0f);
-    return Pi * reaching * (NoL * distribution * visibility) * fresnel;
-}
-
 // The surface a pixel's lights light.
 struct LitSurface
 {
     float3 world, normal, toEye, specularColor;
-    float roughness, translucency, wrapFloor;
+    float roughness, translucency, translucencyFloor;
 };
 
 // A light's diffuse and specular light at the surface without shadows; false where it gives none.
-bool LampLight(GILocalLight light, LitSurface surface, out float3 diffuse, out float3 specular, out float3 toLight)
+bool LampLightAt(GILocalLight light, LitSurface surface, out float3 diffuse, out float3 specular, out float3 toLight)
 {
     float lightDistance;
     float3 reaching = LocalLightReaching(light, surface.world, toLight, lightDistance) * MaskAt(light, surface.world);
@@ -73,9 +55,9 @@ bool LampLight(GILocalLight light, LitSurface surface, out float3 diffuse, out f
 
     // The game's light through leaves (LN_trans): lit from behind as much as the translucency lets it.
     float LN = dot(surface.normal, toLight);
-    float wrap = saturate(max(surface.wrapFloor, surface.translucency * (1.0f - LN * LN) + LN));
-    diffuse = reaching * (wrap * light.lighting.y);
-    specular = GgxSpecular(reaching, surface.normal, surface.toEye, toLight, surface.roughness, surface.specularColor) * light.lighting.x;
+    float wrap = saturate(max(surface.translucencyFloor, surface.translucency * (1.0f - LN * LN) + LN));
+    diffuse = reaching * (wrap * light.scales.y);
+    specular = GgxSpecular(reaching, surface.normal, surface.toEye, toLight, surface.roughness, surface.specularColor) * light.scales.x;
     return any(diffuse > 0.0f) || any(specular > 0.0f);
 }
 
@@ -102,7 +84,7 @@ void TraceLampLight(uint2 did : SV_DispatchThreadID)
     surface.roughness = normalRoughness.w;
     surface.specularColor = material.rgb;
     surface.translucency = material.a;
-    surface.wrapFloor = g_Guide_Wrap.Load(int3(did, 0));
+    surface.translucencyFloor = g_Guide_Translucency.Load(int3(did, 0));
 
     // Apart from the global illumination's and the reflections' rays from the same pixel.
     uint pixels = g_Frame.dimensions.x * g_Frame.dimensions.y;
@@ -121,7 +103,7 @@ void TraceLampLight(uint2 did : SV_DispatchThreadID)
     for (uint i = 0; i < count; ++i)
     {
         float3 diffuse, specular, toLight;
-        if (!LampLight(g_Frame.localLights[i], surface, diffuse, specular, toLight)) continue;
+        if (!LampLightAt(g_Frame.localLights[i], surface, diffuse, specular, toLight)) continue;
 
         float weight = luminance(diffuse + specular);
         total += weight;
@@ -144,7 +126,7 @@ void TraceLampLight(uint2 did : SV_DispatchThreadID)
 
             GILocalLight light = g_Frame.localLights[picked[k]];
             float3 diffuse, specular, toLight;
-            LampLight(light, surface, diffuse, specular, toLight);
+            LampLightAt(light, surface, diffuse, specular, toLight);
 
             // A point on the light's disc facing the pixel, its radius in falloff.w.
             float3 target = light.position.xyz + DiscOffset(toLight, light.falloff.w, random.rand2());
@@ -156,12 +138,12 @@ void TraceLampLight(uint2 did : SV_DispatchThreadID)
             ShadowRayStart(shadowSurface, direction, origin, facing, tolerance);
             float rayLength = targetDistance - ClearanceTowards(light, direction);
             float blocker = FLT_MAX, transmittance = 1.0f;
-            bool blocked = false;
+            bool isBlocked = false;
             if (rayLength > 0.0f)
-                blocked = SurfaceRayBlocked(origin, facing, tolerance, direction, rayLength, cone, true, 0.0f, ShadowRayTowards(RayTowardsLamp), random, blocker,
-                    transmittance);
+                isBlocked = SurfaceRayBlocked(origin, facing, tolerance, direction, rayLength, cone, true, 0.0f, ShadowRayTowards(RayTowardsLamp), random,
+                    blocker, transmittance);
 
-            float scale = (blocked ? 0.0f : transmittance) * total / (pickedWeight[k] * PickedLights);
+            float scale = (isBlocked ? 0.0f : transmittance) * total / (pickedWeight[k] * PickedLights);
             diffuseLight += diffuse * scale;
             specularLight += specular * scale;
         }

@@ -56,6 +56,9 @@ struct GameShader
     // the game's rain filter draws instead.
     bool isShadowMapped{}, reflectsSky{};
     bool hasTppTonemap{}; // Resolve: TppTonemap's curve, which HDR's grading takes; the first to read the fog
+    // Resolve: in rain, the sky's reflection on wet surfaces added to the scene, scaled by inSpecular's (t3) y
+    // alone, the specular intensity.
+    bool hasRainReflection{};
     bool hasSprite{};     // Sky: the sun's or the moon's sprite
     bool isFarSea{};      // Sea: the far sea, a plane 5 m below the near sea (its material constants' c0.z)
 };
@@ -103,8 +106,9 @@ inline constexpr GameShader GameShaders[]{
 
     {.pass = GamePass::Resolve, .name = "DR_VolFog_TppTonemap", .checksum = "00a609370c2e8b47a645263f91f6d3e8", .hasTppTonemap = true},
     {.pass = GamePass::Resolve, .name = "DR_VolFog_TppTonemap_MD", .checksum = "79c001e295254d8a749e41d1d7e49de7", .hasTppTonemap = true},
-    {.pass = GamePass::Resolve, .name = "DR_TonemapRainFilter", .checksum = "9a4abc815afc5f121572d695f07af5af", .hasTppTonemap = true},
-    {.pass = GamePass::Resolve, .name = "DR_TonemapRainFilter_NoIR", .checksum = "47f52852eaccaa83c25745ce790a212c", .hasTppTonemap = true},
+    {.pass = GamePass::Resolve, .name = "DR_TonemapRainFilter", .checksum = "9a4abc815afc5f121572d695f07af5af", .hasTppTonemap = true, .hasRainReflection = true},
+    {.pass = GamePass::Resolve, .name = "DR_TonemapRainFilter_NoIR", .checksum = "47f52852eaccaa83c25745ce790a212c", .hasTppTonemap = true,
+        .hasRainReflection = true},
     {GamePass::ReflectionMask, "LocalReflectionMask", "2d9cb6c5e467cff5e9c6401b4aafebb7"},
     {GamePass::ReflectionAdd, "LocalReflectionAddBuffer", "97a9ad7e0faca7b1594a38c331826a94"},
     {GamePass::Resolve, "DeferredRendering", "df87979884e90877ee0337c13e01664f"},

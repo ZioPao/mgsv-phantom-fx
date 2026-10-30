@@ -1,5 +1,7 @@
 #pragma once
 
+#include "features/upscaling/settings.hpp"
+
 #include <array>
 #include <filesystem>
 
@@ -27,6 +29,8 @@ struct Inputs
     ID3D11Texture2D* normalRoughness{};
     ID3D11Texture2D* diffuseAlbedo{};
     ID3D11Texture2D* specularAlbedo{};
+    // How much the game's depth of field changed each pixel (R16_FLOAT); none on a frame without it.
+    ID3D11Texture2D* dofGuide{};
     // Path tracing's reflections' hit distance (ray_tracing::reflectionDistance), which moves the reflections with
     // what they reflect; null without.
     ID3D11Texture2D* specularHitDistance{};
@@ -34,6 +38,7 @@ struct Inputs
     float jitter[2]{};                                 // In render pixels, +Y down
     float frameTime{};                                 // Milliseconds since the previous frame
     int quality{};                                     // NVSDK_NGX_PerfQuality_Value
+    upscaler::ReconstructionPreset preset{};
     bool hdr{}, reset{};
 };
 

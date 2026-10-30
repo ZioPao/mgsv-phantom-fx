@@ -127,10 +127,10 @@ struct GILocalLight
     float4 shadow;   // x: a spot the game shadows with a shadow map: how far along its axis that map starts, metres; 0 for none
     float4 volumeLow;  // xyz: the lowest corner in the world of the game's volume for it (its box, a spot's cone within one); w: 1 when known
     float4 volumeHigh; // xyz: its highest corner
-    // Path tracing (direct_light.hlsl): x its specular's scale, y its diffuse's (cPSLight c8); z a masked spot's tile in
-    // the mask atlas, from 1, 0 for none
-    float4 lighting;
+    // Path tracing (direct_light.hlsl): x its specular's scale, y its diffuse's (cPSLight c8)
+    float4 scales;
     float4 mask[3]; // A masked spot's mask projection from the world: the rows for x, y and w
+    uint4 maskTile; // x: its tile in the mask atlas, from 1; 0 for none
 };
 
 // Path tracing's mask atlas (direct_light.hlsl): this many tiles across, each this wide and high.
@@ -142,7 +142,7 @@ struct GIFrameConstants
     GI_ROW_MAJOR float4x4 viewProjection; // World to clip, jittered as the depth was drawn
     GI_ROW_MAJOR float4x4 viewProjectionInverse;
     GI_ROW_MAJOR float4x4 previousViewProjection;
-    // The light's motion (CameraMotionOf in gi_light.hlsl): the last frame's clip position from this frame's,
+    // The light's motion (CameraMotionOf in gi_common.hlsli): the last frame's clip position from this frame's,
     // both unjittered, built in double from the projections and views apart (camera::previousFromCurrentByParts);
     // and the w row of this frame's unjittered clip to view.
     GI_ROW_MAJOR float4x4 previousFromCurrent;

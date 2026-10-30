@@ -4,6 +4,7 @@
 #include "camera.hpp"
 #include "clock.hpp"
 #include "features/global_illumination/gi_light.hpp"
+#include "features/path_tracing/path_tracing_rays.hpp"
 #include "features/ray_traced_lights/light_shadow_rays.hpp"
 #include "features/ray_traced_shadows/gi_shadow.hpp"
 #include "frame_log.hpp"
@@ -46,15 +47,15 @@
 #include "PopulateMultibounceCells.h"
 #include "PrepareGuides.h"
 #include "ProbeLocalLights.h"
-#include "TraceReflections.h"
-#include "TraceLampLight.h"
 #include "ProbeShadows.h"
 #include "PurgeTiles.h"
 #include "ResolveLight.h"
 #include "Skin.h"
 #include "TerrainGrid.h"
+#include "TraceLampLight.h"
 #include "TraceLight.h"
 #include "TraceLocalLightShadows.h"
+#include "TraceReflections.h"
 #include "TraceSunShadows.h"
 #include "UpdateFoliageMemory.h"
 #include "UpdateMultibounceCells.h"
@@ -173,7 +174,7 @@ struct State
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT statsFootprint{};
     std::uint64_t statsFence{}, lastStats{};
     Shared depth, normal, albedo, output, shadow, shadowDebug, velocity, terrainPages, terrainHeights, localLightShadow, lightDebug, guideNormals,
-        guideSpecular, reflection, reflectionDistance, guideMaterial, guideWrap, lampMasks, lampDiffuse, lampSpecular;
+        guideSpecular, reflection, reflectionDistance, guideMaterial, guideTranslucency, lampMasks, lampDiffuse, lampSpecular;
 
     ~State()
     {
@@ -406,10 +407,11 @@ GIFrameConstants constantsOf(const Frame& frame, std::uint32_t newGeometries, st
             {light.color[0], light.color[1], light.color[2], light.factor}, {light.sixteenth ? 1.0f : 0.0f, light.addedDistance, light.leastDistance, light.radius},
             {light.shadowStart, 0, 0, 0}, {light.volumeLowest[0], light.volumeLowest[1], light.volumeLowest[2], light.volumeKnown ? 1.0f : 0.0f},
             {light.volumeHighest[0], light.volumeHighest[1], light.volumeHighest[2], 0},
-            {light.specularScale, light.diffuseScale, static_cast<float>(light.maskTile), 0},
+            {light.specularScale, light.diffuseScale, 0, 0},
             {{light.maskRows[0][0], light.maskRows[0][1], light.maskRows[0][2], light.maskRows[0][3]},
                 {light.maskRows[1][0], light.maskRows[1][1], light.maskRows[1][2], light.maskRows[1][3]},
-                {light.maskRows[2][0], light.maskRows[2][1], light.maskRows[2][2], light.maskRows[2][3]}}};
+                {light.maskRows[2][0], light.maskRows[2][1], light.maskRows[2][2], light.maskRows[2][3]}},
+            {light.maskTile, 0, 0, 0}};
     }
     constants.localLightCount = {static_cast<std::uint32_t>(localLights), frame.localLightRays, 0, 0};
 
@@ -950,11 +952,11 @@ Result render(const Frame& frame)
     const bool debugShadows = traceShadows && frame.debugShadows && frame.textures.shadowDebug;
     const bool traceLocalLights = !frame.localLights.empty() && frame.textures.localLightShadow;
     // Path tracing lights the point and spot lights itself (direct_light.hlsl), with Ray Reconstruction's guides.
-    const bool traceLamps = frame.pathTracing && !frame.localLights.empty() && frame.textures.lampDiffuse && frame.textures.lampSpecular
-        && frame.textures.guideNormals && frame.textures.guideMaterial && frame.textures.guideWrap;
+    const bool traceLamps = frame.isPathTraced && !frame.localLights.empty() && frame.textures.lampDiffuse && frame.textures.lampSpecular
+        && frame.textures.guideNormals && frame.textures.guideMaterial && frame.textures.guideTranslucency;
     // The reflections read the light's cache.
-    const bool traceReflections = frame.pathTracing && traceLight && !frame.showScene && frame.textures.reflection && frame.textures.reflectionDistance
-        && frame.textures.guideNormals && frame.textures.guideSpecular;
+    const bool traceReflections = frame.isPathTraced && traceLight && !frame.showScene && frame.textures.reflection
+        && frame.textures.reflectionDistance && frame.textures.guideNormals && frame.textures.guideSpecular;
     if (traceLocalLights && (s.localShadowWidth != frame.width || s.localShadowHeight != frame.height))
     {
         waitForAll();
@@ -1018,18 +1020,23 @@ Result render(const Frame& frame)
         auto* localLightShadow = traceLocalLights
             ? openShared(s, s.localLightShadow, frame.textures.localLightShadow, "Opening the lights' shadow").Get()
             : nullptr;
-        ID3D12Resource* guideNormals = traceReflections ? openShared(s, s.guideNormals, frame.textures.guideNormals, "Opening the normals guide").Get() : nullptr;
-        auto* guideSpecular = traceReflections ? openShared(s, s.guideSpecular, frame.textures.guideSpecular, "Opening the specular albedo guide").Get() : nullptr;
-        auto* reflection = traceReflections ? openShared(s, s.reflection, frame.textures.reflection, "Opening the reflections").Get() : nullptr;
-        if (traceLamps && !guideNormals) guideNormals = openShared(s, s.guideNormals, frame.textures.guideNormals, "Opening the normals guide").Get();
-        auto* guideMaterial = traceLamps ? openShared(s, s.guideMaterial, frame.textures.guideMaterial, "Opening the material guide").Get() : nullptr;
-        auto* guideWrap = traceLamps ? openShared(s, s.guideWrap, frame.textures.guideWrap, "Opening the translucency guide").Get() : nullptr;
-        auto* lampMasks = traceLamps && frame.textures.lampMasks ? openShared(s, s.lampMasks, frame.textures.lampMasks, "Opening the masks").Get() : nullptr;
-        auto* lampDiffuse = traceLamps ? openShared(s, s.lampDiffuse, frame.textures.lampDiffuse, "Opening the lamps' diffuse light").Get() : nullptr;
-        auto* lampSpecular = traceLamps ? openShared(s, s.lampSpecular, frame.textures.lampSpecular, "Opening the lamps' specular light").Get() : nullptr;
-        auto* reflectionDistance = traceReflections
-            ? openShared(s, s.reflectionDistance, frame.textures.reflectionDistance, "Opening the reflections' hit distance").Get()
-            : nullptr;
+        // Path tracing's: Ray Reconstruction's guides, the reflections' and the lamps' (path_tracing_rays.hpp).
+        path_tracing_rays::Textures traced;
+        if (traceReflections || traceLamps) traced.guideNormals = openShared(s, s.guideNormals, frame.textures.guideNormals, "Opening the normals guide").Get();
+        if (traceReflections)
+        {
+            traced.guideSpecular = openShared(s, s.guideSpecular, frame.textures.guideSpecular, "Opening the specular albedo guide").Get();
+            traced.reflection = openShared(s, s.reflection, frame.textures.reflection, "Opening the reflections").Get();
+            traced.reflectionDistance = openShared(s, s.reflectionDistance, frame.textures.reflectionDistance, "Opening the reflections' hit distance").Get();
+        }
+        if (traceLamps)
+        {
+            traced.guideMaterial = openShared(s, s.guideMaterial, frame.textures.guideMaterial, "Opening the material guide").Get();
+            traced.guideTranslucency = openShared(s, s.guideTranslucency, frame.textures.guideTranslucency, "Opening the translucency guide").Get();
+            if (frame.textures.lampMasks) traced.lampMasks = openShared(s, s.lampMasks, frame.textures.lampMasks, "Opening the masks").Get();
+            traced.lampDiffuse = openShared(s, s.lampDiffuse, frame.textures.lampDiffuse, "Opening the lamps' diffuse light").Get();
+            traced.lampSpecular = openShared(s, s.lampSpecular, frame.textures.lampSpecular, "Opening the lamps' specular light").Get();
+        }
         auto* terrainPages = terrain ? openShared(s, s.terrainPages, frame.terrain->pages, "Opening the terrain's page table").Get() : nullptr;
         auto* terrainHeights = terrain ? openShared(s, s.terrainHeights, frame.terrain->heights, "Opening the terrain's heights").Get() : nullptr;
 
@@ -1103,22 +1110,7 @@ Result render(const Frame& frame)
             descriptors.outputTexture(78, shadowDebug, DXGI_FORMAT_R8G8B8A8_UNORM);
         }
         if (lightDebug) descriptors.outputTexture(79, lightDebug, DXGI_FORMAT_R8G8B8A8_UNORM);
-        if (traceLamps)
-        {
-            descriptors.texture(18, guideNormals, DXGI_FORMAT_R16G16B16A16_FLOAT);
-            if (lampMasks) descriptors.texture(20, lampMasks, DXGI_FORMAT_R8G8B8A8_UNORM);
-            descriptors.texture(21, guideMaterial, DXGI_FORMAT_R8G8B8A8_UNORM);
-            descriptors.texture(22, guideWrap, DXGI_FORMAT_R8_UNORM);
-            descriptors.outputTexture(95, lampDiffuse, DXGI_FORMAT_R16G16B16A16_FLOAT);
-            descriptors.outputTexture(96, lampSpecular, DXGI_FORMAT_R16G16B16A16_FLOAT);
-        }
-        if (traceReflections)
-        {
-            descriptors.texture(18, guideNormals, DXGI_FORMAT_R16G16B16A16_FLOAT);
-            descriptors.texture(19, guideSpecular, DXGI_FORMAT_R16G16B16A16_FLOAT);
-            descriptors.outputTexture(93, reflection, DXGI_FORMAT_R16G16B16A16_FLOAT);
-            descriptors.outputTexture(94, reflectionDistance, DXGI_FORMAT_R16_FLOAT);
-        }
+        if (traceReflections || traceLamps) path_tracing_rays::describe(descriptors, traced);
         if (traceLight) s.light->describe(descriptors, parity);
         if (traceShadows) s.shadows->describe(descriptors, parity, shadow);
         if (traceLocalLights)
@@ -1159,8 +1151,8 @@ Result render(const Frame& frame)
         constexpr auto Read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, Write = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         const std::pair<ID3D12Resource*, D3D12_RESOURCE_STATES> shared[]{{depth, Read}, {normal, Read}, {albedo, Read}, {output, Write},
             {shadow, Write}, {shadowDebug, Write}, {lightDebug, Write}, {velocity, Read}, {localLightShadow, Write}, {terrainPages, Read},
-            {terrainHeights, Read}, {guideNormals, Read}, {guideSpecular, Read}, {reflection, Write}, {reflectionDistance, Write}, {guideMaterial, Read},
-            {guideWrap, Read}, {lampMasks, Read}, {lampDiffuse, Write}, {lampSpecular, Write}};
+            {terrainHeights, Read}, {traced.guideNormals, Read}, {traced.guideSpecular, Read}, {traced.reflection, Write}, {traced.reflectionDistance, Write},
+            {traced.guideMaterial, Read}, {traced.guideTranslucency, Read}, {traced.lampMasks, Read}, {traced.lampDiffuse, Write}, {traced.lampSpecular, Write}};
         const auto transitionShared = [&](bool toCommon) {
             std::vector<D3D12_RESOURCE_BARRIER> barriers;
             if (toCommon) barriers.push_back(uavBarrier());
@@ -1207,12 +1199,7 @@ Result render(const Frame& frame)
                 s.probedLights[slot] = frame.localLights;
             }
         }
-        if (traceLamps)
-        {
-            recorder.mark("path-traced lamps", performance::Pass::LampLight);
-            recorder.dispatch(Kernel::TraceLampLight, groups(frame.width, 8), groups(frame.height, 8));
-            recorder.barrier();
-        }
+        if (traceLamps) path_tracing_rays::recordLamps(recorder, frame.width, frame.height);
         if (traceShadows) s.shadows->record(recorder, frame.forReconstruction);
         if (debugShadows)
         {
@@ -1232,12 +1219,7 @@ Result render(const Frame& frame)
         }
         else if (traceLight) s.light->record(recorder, parity, denoiserCamera(frame), slot, lightDebug && frame.lightDebugView == LightDebugView::Validation);
 
-        if (traceReflections)
-        {
-            recorder.mark("path-traced reflections", performance::Pass::Reflections);
-            recorder.dispatch(Kernel::TraceReflections, groups(frame.width, 8), groups(frame.height, 8));
-            recorder.barrier();
-        }
+        if (traceReflections) path_tracing_rays::recordReflections(recorder, frame.width, frame.height);
 
         if constexpr (DiagnosticLog)
         {

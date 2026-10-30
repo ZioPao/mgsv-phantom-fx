@@ -9,6 +9,7 @@ namespace
 {
 using upscaler::Mode;
 using upscaler::Preset;
+using upscaler::ReconstructionPreset;
 using upscaler::Upscaler;
 
 constexpr Upscaling Defaults{};
@@ -47,6 +48,14 @@ constexpr SettingChoice Presets[]{
     {static_cast<int>(Preset::J), "J (transformer, less ghosting)"},
     {static_cast<int>(Preset::M), "M (Performance model)"},
     {static_cast<int>(Preset::L), "L (Ultra Performance model)"},
+};
+
+// In the menu's order.
+constexpr SettingChoice ReconstructionPresets[]{
+    {static_cast<int>(ReconstructionPreset::Default), "Default"},
+    {static_cast<int>(ReconstructionPreset::F), "F (Ray Reconstruction 2)"},
+    {static_cast<int>(ReconstructionPreset::E), "E (transformer)"},
+    {static_cast<int>(ReconstructionPreset::D), "D (older transformer)"},
 };
 
 std::span<const SettingChoice> modesFor(Upscaler upscaler)
@@ -104,7 +113,17 @@ void describe(Upscaling& upscaling, SettingVisitor& visit)
             .tip = "DLSS Ray Reconstruction in place of DLSS: one NVIDIA model that cleans up the ray-traced light and upscales. It runs while a "
                    "ray-traced effect is on (global illumination, shadows or lights) and needs an NVIDIA RTX GPU.",
             .visible = upscaling.upscaler == Upscaler::Dlss,
-            .enabled = on});
+            .enabled = on,
+            .needsRayTracing = true});
+    visit.choice(upscaling.reconstructionPreset,
+        {.iniKey = "ray_reconstruction_preset",
+            .label = "Ray Reconstruction preset",
+            .choices = ReconstructionPresets,
+            .control = ChoiceControl::Dropdown,
+            .tip = "Default lets Ray Reconstruction choose (F). D takes no depth of field guide, so noise can show through the game's depth of field.",
+            .visible = upscaling.upscaler == Upscaler::Dlss && upscaling.rayReconstruction,
+            .enabled = on,
+            .needsRayTracing = true});
     visit.slider(upscaling.sharpness,
         {.iniKey = "sharpness",
             .label = "Sharpening",
@@ -141,6 +160,11 @@ std::string_view label(Mode mode, Upscaler upscaler)
 std::string_view label(Preset preset)
 {
     return labelIn(Presets, preset);
+}
+
+std::string_view label(ReconstructionPreset preset)
+{
+    return labelIn(ReconstructionPresets, preset);
 }
 
 bool upscales(Mode mode)

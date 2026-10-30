@@ -4,7 +4,8 @@
 
 namespace phantom_fx
 {
-// Path tracing (path_tracing.hpp): with DLSS Ray Reconstruction denoising, the reflections traced too.
+// Path tracing (path_tracing.hpp): with DLSS Ray Reconstruction denoising, the reflections, the sun and the
+// point and spot lights traced too.
 struct PathTracing
 {
     bool on{};
