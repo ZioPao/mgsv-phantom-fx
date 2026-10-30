@@ -52,13 +52,16 @@ float3 ReflectedLight(float3 origin, float3 normal, float tolerance, float3 dire
     bool isLeaf = HitIsLeaf(visibility);
     float3 hitOrigin = OffsetFromTriangle(hitWorld, hitNormal);
     float hitTolerance = CopyTolerance(hitWorld);
-    float3 light = albedo * (SunLight(hitWorld, hitNormal, hitOrigin, hitTolerance, isLeaf, random)
-        + SampledLocalLight(hitWorld, hitNormal, hitOrigin, hitTolerance, random));
+    // The hit's normal map where the camera sees it (`HitShadingNormal`): the light turns on its bump as
+    // it does for the game's own, and the bounce leaves the bump.
+    float3 hitShadeNormal = HitShadingNormal(hitWorld, hitNormal);
+    float3 light = albedo * (SunLight(hitWorld, hitShadeNormal, hitOrigin, hitTolerance, isLeaf, random)
+        + SampledLocalLight(hitWorld, hitShadeNormal, hitOrigin, hitTolerance, random));
 
     float weight;
-    float3 side = BounceSide(hitNormal, isLeaf, random, weight);
+    float3 side = BounceSide(hitShadeNormal, isLeaf, random, weight);
     float3 bounceDirection = mapToCosineHemisphere(random.rand2(), side);
-    float3 bounceOrigin = all(side == hitNormal) ? hitOrigin : OffsetFromTriangle(hitWorld, side);
+    float3 bounceOrigin = all(side == hitShadeNormal) ? hitOrigin : OffsetFromTriangle(hitWorld, side);
     SceneHit bounce = TraceFromSurface(bounceOrigin, side, hitTolerance, bounceDirection, MAX_HIT_DISTANCE);
     float3 throughput = albedo * weight;
     if (!bounce.hit) return light + throughput * SkyRadiance(bounceDirection);

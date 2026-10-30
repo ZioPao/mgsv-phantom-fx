@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Normal maps turn the traced light.** The ray-traced scene holds only the triangles' own normals, so a
+  hit on a normal-mapped surface was lit as if it were flat: its bounce and the reflections read as coming
+  from the wrong side of the bump. Where the camera sees the hit, the light now uses the G-buffer's normal,
+  normal map and all; elsewhere, and where that normal faces away, the triangle's as before.
 - **Path tracing's sun shadow reaches the sun pass.** With path tracing on, the sun was still shadowed
   by the game's shadow map: the traced shadow was drawn but the sun pass was not handed it, because the
   handover was gated on the ray-traced shadows that path tracing replaces. The sun now takes the traced

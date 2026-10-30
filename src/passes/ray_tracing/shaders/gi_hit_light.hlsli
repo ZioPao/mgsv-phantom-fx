@@ -292,23 +292,30 @@ void HitSurface(HashGridCache_Visibility visibility, out float3 world, out float
     normal = FacingNormal(t, visibility.direction);
 }
 
+// The pixel the camera sees `world` at, when it sees that surface there: the G-buffer's depth agrees with
+// the clip's. Where it does, the hit is the surface the G-buffer holds, its normal map and all.
+bool ScreenSurface(float3 world, out uint2 pixel)
+{
+    pixel = 0;
+    float4 clip = mul(g_ViewProjection, float4(world, 1.0f));
+    if (!(clip.w > 0.0f)) return false;
+
+    float2 ndc = clip.xy / clip.w;
+    if (!all(abs(ndc) < 1.0f)) return false;
+
+    pixel = min(uint2((ndc * float2(0.5f, -0.5f) + 0.5f) * g_BufferDimensions), g_BufferDimensions - 1);
+    float depth = g_Depth.Load(int3(pixel, 0));
+    return depth > 0.0f && abs(toLinearDepth(depth, g_NearFar) - clip.w) < 0.02f * clip.w;
+}
+
 // A hit's albedo: the sea's water; the G-buffer's where the camera sees the hit; otherwise its mesh's
 // albedo texture, or its mesh's mean.
 float3 HitAlbedo(float3 world, HashGridCache_Visibility visibility)
 {
     if (InstanceKind(g_Instances[visibility.instanceIndex]) & GI_INSTANCE_SEA) return float3(GI_SEA_ALBEDO);
 
-    float4 clip = mul(g_ViewProjection, float4(world, 1.0f));
-    if (clip.w > 0.0f)
-    {
-        float2 ndc = clip.xy / clip.w;
-        if (all(abs(ndc) < 1.0f))
-        {
-            uint2 pixel = min(uint2((ndc * float2(0.5f, -0.5f) + 0.5f) * g_BufferDimensions), g_BufferDimensions - 1);
-            float depth = g_Depth.Load(int3(pixel, 0));
-            if (depth > 0.0f && abs(toLinearDepth(depth, g_NearFar) - clip.w) < 0.02f * clip.w) return g_Albedo.Load(int3(pixel, 0)).rgb;
-        }
-    }
+    uint2 pixel;
+    if (ScreenSurface(world, pixel)) return g_Albedo.Load(int3(pixel, 0)).rgb;
 
     // The texture's mean over a few texels' patch: the light varies over centimetres to metres.
     SceneTriangle t = LoadTriangle(visibility.instanceIndex, visibility.geometryIndex, visibility.primitiveIndex);
@@ -322,6 +329,22 @@ float3 HitAlbedo(float3 world, HashGridCache_Visibility visibility)
 
     uint4 learnt = g_GeometryAlbedo[t.row];
     return learnt.w ? float3(learnt.xyz) / (255.0f * learnt.w) : g_Frame.nearFar.z;
+}
+
+// The normal a hit shades with. The traced scene holds the triangles' own normals, which leave out the
+// detail a normal map draws; where the camera sees the hit, the G-buffer's normal is the surface's as the
+// game shades it, so the sun and the lamps turn there as the game's own light does. Elsewhere, or where
+// that normal faces the other way (the camera sees a thin surface from its far side), the triangle's own.
+float3 HitShadingNormal(float3 world, float3 geometric)
+{
+    uint2 pixel;
+    if (!ScreenSurface(world, pixel)) return geometric;
+
+    float3 encoded = g_Normal.Load(int3(pixel, 0)).xyz;
+    if (dot(encoded, encoded) == 0.0f) return geometric;
+
+    float3 normal = DecodeNormal(float4(encoded, 0.0f));
+    return dot(normal, geometric) > 0.0f ? normal : geometric;
 }
 
 // Leaves (GI_GEOMETRY_LEAF) let light through.
@@ -404,6 +427,9 @@ float3 BounceSide(float3 normal, bool leaf, inout Random random, out float weigh
 // game's diffuse light units times albedo; a leaf adds what it lets through from its far side.
 float3 HitDirectLight(float3 world, float3 normal, float3 albedo, bool leaf, inout Random random)
 {
+    // The hit as the game shades it where the camera sees it, normal map and all (`HitShadingNormal`);
+    // the offset follows it as the screen's rays follow theirs.
+    normal = HitShadingNormal(world, normal);
     float3 origin = OffsetFromTriangle(world, normal);
     float tolerance = CopyTolerance(world);
     float3 light = SunLight(world, normal, origin, tolerance, leaf, random);

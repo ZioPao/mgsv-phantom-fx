@@ -1630,7 +1630,9 @@ the game's lights) is left alone until it runs.
 - **Reflections** (`TraceReflections`, `src/features/path_tracing/reflections.hlsl`): a ray a render pixel
   along a reflection the surface's roughness spreads (GGX's visible normals, Heitz 2018, roughness squared,
   from Ray Reconstruction's normal guide), lit where it hits as the global illumination's rays light theirs
-  (`gi_hit_light.hlsli`: the sun and a light afresh, its bounce from the sky or the light cache); the sky's
+  (`gi_hit_light.hlsli`: the sun and a light afresh, its bounce from the sky or the light cache), with the
+  hit's normal from the G-buffer where the camera sees it (`HitShadingNormal`), normal map and all, so a
+  bump reflects from the side the game shades; the sky's
   light where it gets away, without the sun's disc, which stays the sun's specular. Its light times the
   specular albedo guide and the exposure goes to the resolve, which scales it by the menu's **Reflections**
   strength (`path_traced_reflections`, 1 by default) and adds it to the game's specular light
@@ -2046,6 +2048,11 @@ Now, each frame:
   shadows' rays; a leaf lets half through from its far side) and one to a point or spot light picked in
   proportion to its light there (weighted reservoir sampling over the frame's lights, flashlights among
   them), times the hit's albedo (`HitAlbedo`).
+  The hit's normal is the G-buffer's where the camera sees it (`HitShadingNormal`), which carries the
+  normal map's detail the traced scene's triangles leave out, so the light turns on a bump as it does
+  for the game's own; elsewhere, and where that normal faces the other way, the triangle's own. Before,
+  every hit was lit with the flat triangle normal, and a normal-mapped surface's light read as coming
+  from the wrong side (`gi_hit_light.hlsli`; the path-traced reflections take it too).
   Nothing of the hit's own light comes from a history.
 - **Its bounce.** A cosine-weighted ray from the hit (a leaf's to its far side a third of the time,
   counting 1.5): the sky's light where it gets away, else the hash grid cell's where it lands, direct and
