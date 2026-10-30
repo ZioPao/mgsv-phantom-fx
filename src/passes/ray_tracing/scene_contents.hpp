@@ -45,6 +45,8 @@ struct GameScene
     // Where the terrain rings centre, once the game's terrain draws give its inputs; without it the
     // terrain is left out of the frame.
     std::optional<std::array<float, 3>> terrainEye;
+    // The sea's level under the eye (sea.hpp), where its plane lies this frame; without it the frame has no sea.
+    std::optional<std::array<float, 3>> seaCentre;
     // Diagnostics (the probes): the frame's instances of the game's models listed (Update::instanced).
     bool shouldListInstances{};
 };
@@ -185,6 +187,7 @@ private:
     void updateModels(const GameScene& frame, Update& update);
     void updateCharacters(const GameScene& frame, Update& update);
     void planTerrain(const std::array<float, 3>& eye, std::uint32_t frameIndex, Update& update);
+    void makeSea();
     void addInstances(const GameScene& frame, Update& update);
     std::string describeCharacterMesh(std::uint64_t id, std::uint32_t shownIndex) const;
     static std::uint32_t partOfGeometry(const ModelRecord& record, std::uint64_t hiddenGroups, std::uint32_t geometry);
@@ -198,6 +201,8 @@ private:
     std::unordered_map<std::uint64_t, CharacterRecord> characters;
     std::vector<CharacterInstance> characterList;
     std::array<TerrainRing, GI_TERRAIN_RINGS> terrain;
+    // The sea's plane, made the first frame with a sea and kept.
+    std::optional<BlasId> sea;
     // The game's textures the models' meshes use, by path hash.
     std::unordered_map<std::uint64_t, TextureRecord> textures;
 
@@ -214,5 +219,7 @@ private:
     // room for their structure (never traced) and the texture copies refused for want of a free slot.
     std::uint32_t unreceivedPlacements{}, modelsPastCap{}, charactersPastCap{}, ringsPastCap{};
     std::uint32_t variantsWithoutRoom{}, texturesRefused{};
+    // Diagnostics: the frame has the sea's plane.
+    bool isSeaTraced{};
 };
 }

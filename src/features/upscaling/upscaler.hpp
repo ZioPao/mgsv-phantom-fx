@@ -19,7 +19,9 @@ namespace phantom_fx::upscaler
 struct Status
 {
     bool supportedBuild{}, failed{}, running{}, fxaaRecognised{}, upscalingAvailable{};
-    std::string upscalerName; // "DLSS", or "FSR" with its version ("FSR 3.1.5") once it ran
+    // DLSS Ray Reconstruction has not failed this session; the last frame was Ray Reconstruction's.
+    bool reconstructionAvailable{}, rayReconstruction{};
+    std::string upscalerName; // "DLSS", "DLSS Ray Reconstruction", or "FSR" with its version ("FSR 3.1.5") once it ran
     std::string failure, lastFallback;
     unsigned renderWidth{}, renderHeight{}, outputWidth{}, outputHeight{};
     std::uint64_t evaluations{}, fallbacks{}, resets{};
@@ -48,7 +50,8 @@ void setOutputSize(unsigned width, unsigned height) noexcept;
 // grading), so the game's own draw must be skipped; the render target clear likewise.
 bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
 // After the notes, before the draws that may take the draw: notes the camera velocity pass, whose input
-// holds the moving meshes' velocity, and the game's grading, which DLSS runs before. While upscaling,
+// holds the moving meshes' velocity, the depth of field's composite (for Ray Reconstruction's guide), and
+// the game's grading, which DLSS runs before. While upscaling,
 // true for its full-size draws (the lens flare layer's composite and the grading), which are then
 // bound to the output size (ui_redirect.hpp) and must be made in that state, whoever makes them;
 // afterPostDraw then puts the game's bindings back. The motion blur's draws as well, while upscaling

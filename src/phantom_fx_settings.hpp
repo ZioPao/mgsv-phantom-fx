@@ -11,9 +11,11 @@
 #include "features/lamp_contact_shadows/settings.hpp"
 #include "features/lamp_soft_shadows/settings.hpp"
 #include "features/motion_blur/settings.hpp"
+#include "features/path_tracing/settings.hpp"
 #include "features/photo_mode/settings.hpp"
 #include "features/ray_traced_lights/settings.hpp"
 #include "features/ray_traced_shadows/settings.hpp"
+#include "features/sea/settings.hpp"
 #include "features/setting_visitor.hpp"
 #include "features/soft_shadows/settings.hpp"
 #include "features/sun/settings.hpp"
@@ -42,9 +44,11 @@ struct Settings
     LampSoftShadows lampSoftShadows;
     ContactShadowShape contactShadowShape;
     GlobalIllumination globalIllumination;
+    PathTracing pathTracing;
     AmbientOcclusion ambientOcclusion;
     IndirectLight indirectLight;
     VolumetricFog volumetricFog;
+    Sea sea;
     PhotoMode photoMode;
     Hdr hdr;
     FrameRate frameRate;
@@ -67,9 +71,11 @@ template<class Visit> void forEachFeature(Settings& settings, Visit&& visit)
     visit(settings.lampContactShadows);
     visit(settings.contactShadowShape);
     visit(settings.globalIllumination);
+    visit(settings.pathTracing);
     visit(settings.ambientOcclusion);
     visit(settings.indirectLight);
     visit(settings.volumetricFog);
+    visit(settings.sea);
     visit(settings.photoMode);
     visit(settings.hdr);
     visit(settings.frameRate);
@@ -154,12 +160,14 @@ struct LeftOut
     bool globalLight{};
 };
 
-// What an effect is: the first of these that applies.
-enum class EffectState : std::uint8_t { Off, Unsupported, Held, Replaced, LeftOut, Running };
+// What an effect is: the first of these that applies. Lacking: what it builds on (FeatureInfo::needs,
+// needsRayReconstruction) does not run, or is not asked for.
+enum class EffectState : std::uint8_t { Off, Unsupported, Held, Replaced, LeftOut, Lacking, Running };
 
 struct EffectPlan
 {
     ByEffect<EffectState> states;
+    ByEffect<std::optional<Effect>> replacers; // The effect that takes a Replaced one's place
 
     EffectState operator[](Effect effect) const;
     bool runs(Effect effect) const;
@@ -175,8 +183,9 @@ struct EffectConditions
     LeftOut leftOut;
 };
 
-// A replaced effect stays off while its replacer's setting is on, even when the replacer is left out
-// or cannot run.
+// A replaced effect stays off while a replacer's setting is on, with what that one needs, even when the
+// replacer is left out or waits. Replacers chain (soft shadows by the ray-traced shadows, those by path
+// tracing): the farthest along that is on takes the place.
 EffectPlan planEffects(const Settings& settings, const EffectConditions& conditions);
 
 // What each module configures itself from (its configure): core.cpp passes it to them all whenever any

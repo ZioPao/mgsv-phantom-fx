@@ -4,7 +4,7 @@
 
 namespace phantom_fx::light_shadow_rays
 {
-void record(gi_d3d12::Recorder& recorder, std::uint32_t width, std::uint32_t height)
+void record(gi_d3d12::Recorder& recorder, std::uint32_t width, std::uint32_t height, bool forReconstruction)
 {
     using gi_d3d12::groups;
     using gi_d3d12::Kernel;
@@ -12,6 +12,8 @@ void record(gi_d3d12::Recorder& recorder, std::uint32_t width, std::uint32_t hei
     recorder.mark("shadow rays for lights", performance::Pass::LightShadowRays);
     recorder.dispatch(Kernel::TraceLocalLightShadows, groups(width, 8), groups(height, 8));
     recorder.barrier();
+    // The rays wrote the output.
+    if (forReconstruction) return;
     recorder.mark("shadow filter for lights", performance::Pass::LightShadowFilter);
     for (std::uint32_t pass = 0; pass < 3; ++pass)
     {

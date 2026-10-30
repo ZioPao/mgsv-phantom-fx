@@ -32,6 +32,9 @@ enum class GamePass : std::uint8_t
     LocalLight,      // A point or spot light: a draw that marks the stencil, then one that lights
     Resolve,         // The G-buffer and the light into the scene's colour, times the game's occlusion
     Sky,
+    Sea,             // The game's sea, drawn over the lit scene after the sky (Primitive_TppFourierOcean*)
+    ReflectionMask,  // The screen-space reflections' mask from the depth, normals and roughness; reads the scene's depth at t0
+    ReflectionAdd,   // The screen-space reflections blended over the scene
     Reduce,          // The scene's quarter-size copy that bloom and the lens flares start from
     Copy,            // A plain copy the game makes anywhere
     DofComposite,    // The depth of field over its copy of the scene
@@ -53,7 +56,11 @@ struct GameShader
     // the game's rain filter draws instead.
     bool isShadowMapped{}, reflectsSky{};
     bool hasTppTonemap{}; // Resolve: TppTonemap's curve, which HDR's grading takes; the first to read the fog
+    // Resolve: in rain, the sky's reflection on wet surfaces added to the scene, scaled by inSpecular's (t3) y
+    // alone, the specular intensity.
+    bool hasRainReflection{};
     bool hasSprite{};     // Sky: the sun's or the moon's sprite
+    bool isFarSea{};      // Sea: the far sea, a plane 5 m below the near sea (its material constants' c0.z)
 };
 
 inline constexpr GameShader GameShaders[]{
@@ -99,8 +106,11 @@ inline constexpr GameShader GameShaders[]{
 
     {.pass = GamePass::Resolve, .name = "DR_VolFog_TppTonemap", .checksum = "00a609370c2e8b47a645263f91f6d3e8", .hasTppTonemap = true},
     {.pass = GamePass::Resolve, .name = "DR_VolFog_TppTonemap_MD", .checksum = "79c001e295254d8a749e41d1d7e49de7", .hasTppTonemap = true},
-    {.pass = GamePass::Resolve, .name = "DR_TonemapRainFilter", .checksum = "9a4abc815afc5f121572d695f07af5af", .hasTppTonemap = true},
-    {.pass = GamePass::Resolve, .name = "DR_TonemapRainFilter_NoIR", .checksum = "47f52852eaccaa83c25745ce790a212c", .hasTppTonemap = true},
+    {.pass = GamePass::Resolve, .name = "DR_TonemapRainFilter", .checksum = "9a4abc815afc5f121572d695f07af5af", .hasTppTonemap = true, .hasRainReflection = true},
+    {.pass = GamePass::Resolve, .name = "DR_TonemapRainFilter_NoIR", .checksum = "47f52852eaccaa83c25745ce790a212c", .hasTppTonemap = true,
+        .hasRainReflection = true},
+    {GamePass::ReflectionMask, "LocalReflectionMask", "2d9cb6c5e467cff5e9c6401b4aafebb7"},
+    {GamePass::ReflectionAdd, "LocalReflectionAddBuffer", "97a9ad7e0faca7b1594a38c331826a94"},
     {GamePass::Resolve, "DeferredRendering", "df87979884e90877ee0337c13e01664f"},
     {GamePass::Resolve, "DeferredRendering_VolFog", "322890810465ee05f4895bc69e80a187"},
     {GamePass::Resolve, "DeferredRenderingTone", "47256d38f45b59b6c46cf32bf29564f0"},
@@ -111,6 +121,14 @@ inline constexpr GameShader GameShaders[]{
     {.pass = GamePass::Sky, .name = "Sky_Draw_TppBaked", .checksum = "0fddc9d03f8bd436af2eabe2bc620c44", .hasSprite = true},
     {.pass = GamePass::Sky, .name = "Sky_Draw_Tpp", .checksum = "175290aae288daa07d2440ce316c7a50", .hasSprite = true},
     {GamePass::Sky, "Sky_Draw_TppNoSky", "3cf390b8d8af0de27c093019a693b636"}, // In fog and sandstorms: the fog's colour alone
+
+    // Each as the game makes it and as the float scene patches it (HDR's withoutTonemap).
+    {GamePass::Sea, "Primitive_TppFourierOceanHQ", "0b2897387196afcf41609619bde5527a"},
+    {GamePass::Sea, "Primitive_TppFourierOceanHQ", "799e8c706b42d3aa642843f8e73fdaf9"},
+    {GamePass::Sea, "Primitive_TppFourierOceanLQ", "10ece44e892dd5f659f6cd56fed6f626"},
+    {GamePass::Sea, "Primitive_TppFourierOceanLQ", "536ed28c18bb66d2828795bdcf5fc3d5"},
+    {.pass = GamePass::Sea, .name = "Primitive_TppFourierOceanFill", .checksum = "51218f2d1ccc9d0f9cf159653ed41f5d", .isFarSea = true},
+    {.pass = GamePass::Sea, .name = "Primitive_TppFourierOceanFill", .checksum = "9291bd0ac69ab6cdeae6244f778c4ddb", .isFarSea = true},
 
     {GamePass::Reduce, "CopyReductionX4", "e5b80b0a4d737e50533f9a058ffdca42"},
     {GamePass::Copy, "CopyRenderBuffer", "9f93a957f1e21656e0d86bf112b71d6d"},

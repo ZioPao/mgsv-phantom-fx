@@ -71,6 +71,9 @@ void TraceSunShadows(uint2 gtid : SV_GroupThreadID, uint2 gid : SV_GroupID, uint
             // The denoiser takes a pixel as lit or not: past hair, lit with the chance its light gets through.
             lit = !blocked && random.rand() < transmittance;
         }
+
+        // DLSS Ray Reconstruction denoises the image: the sun pass reads the ray as it is.
+        if (g_Frame.reconstruction.x != 0u) g_Shadow_Output[did] = lit ? 1.0f : 0.0f;
     }
 
     if (lit) InterlockedOr(g_TileMask, FFX_DNSR_Shadows_GetBitMaskFromPixelPosition(did));

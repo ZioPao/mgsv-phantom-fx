@@ -263,9 +263,12 @@ StreamlineCamera streamlineCamera(const View& previous, const View& current)
     // dot(row, v), Streamline as v x M, so each matrix is transposed.
     auto projection = current.projection;
     for (int row = 0; row < 4; ++row) projection[row * 4] = -projection[row * 4];
+    auto view = current.view;
+    for (int column = 0; column < 4; ++column) view[column] = -view[column];
 
     const auto toPrevious = previousFromCurrent(previous, current);
     StreamlineCamera result;
+    result.worldToView = toFloat(transpose(view));
     result.viewToClip = toFloat(transpose(projection));
     result.clipToView = toFloat(transpose(inverse(projection)));
     result.clipToPreviousClip = toFloat(transpose(toPrevious));

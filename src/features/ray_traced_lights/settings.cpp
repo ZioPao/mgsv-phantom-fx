@@ -6,6 +6,8 @@ namespace
 {
 constexpr RayTracedLights Defaults{};
 constexpr SettingChoice Qualities[]{{1, "Low 1"}, {2, "Medium 2"}, {4, "High 4"}, {8, "Ultra 8"}};
+// Path tracing lights the flashlights too.
+constexpr Effect FlashlightsShownIn[]{Effect::RayTracedLights, Effect::PathTracing};
 }
 
 void describe(RayTracedLights& lights, SettingVisitor& visit)
@@ -23,6 +25,7 @@ void describe(RayTracedLights& lights, SettingVisitor& visit)
             .summary = "Every lamp, spot light and flashlight casts traced shadows, where most of the game's lights shine through walls.",
             .keywords = "RT DXR ray quality flashlight brightness",
             .effect = Effect::RayTracedLights,
+            .replacedBy = Effect::PathTracing,
             .needsSupportedBuild = true});
     visit.choice(lights.shadowRaysPerPixel,
         {.iniKey = "ray_quality",
@@ -40,6 +43,7 @@ void describe(RayTracedLights& lights, SettingVisitor& visit)
             .logarithmic = true,
             .tip = "The weapon flashlights, yours and the soldiers', brighter than the game's; they reach further with it, as a brighter light "
                    "fades to the same dimness further away. 1x is the game's: about 5 times the moonlight at 10 m and cut off at 30 m. 8x is "
-                   "about a real 1980s weapon light against the game's night. Only the look: the guards see as before."});
+                   "about a real 1980s weapon light against the game's night. Only the look: the guards see as before.",
+            .shownIn = FlashlightsShownIn});
 }
 }
