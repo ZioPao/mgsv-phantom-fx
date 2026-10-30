@@ -149,10 +149,11 @@ float FFX_DNSR_Shadows_ReadHistory(float2 uv)
 // The scene's own surface where a ray from the eye through the pixel meets it near the depth's point: its
 // exact point and its triangle's normal, from which a ray leaves past that very surface (LiftOffTriangle),
 // so nothing near it needs skipping.
-// Where the game drew something the scene lacks or holds at another level of detail, the depth's point
-// and the G-buffer's normal, with copies of the surface skipped (gi_common.hlsli). Until 2026-10-24
-// every ray left that way: the skip took a character pressed to a wall for a copy of the wall, and
-// light went through him, ragged along the wall's bumpy normals.
+// Where the game drew something the scene lacks, holds at another level of detail, or only shares a depth
+// with (a hole the game draws as a normal map, a stand-in's facet), the depth's point and the G-buffer's
+// normal, with copies of the surface skipped (gi_common.hlsli). Until 2026-10-24 every ray left that way:
+// the skip took a character pressed to a wall for a copy of the wall, and light went through him, ragged
+// along the wall's bumpy normals.
 struct ShadowSurface
 {
     float3 position;
@@ -160,6 +161,12 @@ struct ShadowSurface
     bool exact;    // On the scene's own surface
     SceneHit hit;  // Diagnostics (the probe): the eye's ray's hit on it
 };
+
+// How far the scene's surface may face from the game's normal and still be the surface the rays leave:
+// the shadow ray starts view's blue, 60 degrees (ShadowStartColor). A triangle that only shares the depth's
+// point is not what the game drew there, and its rays left lit where the game has shade: a wall's dimples,
+// drawn as a normal map, glowed from their own facets (2026-10-30).
+static const float SceneSurfaceNormalCosine = 0.5f;
 
 ShadowSurface ShadowSurfaceAt(float3 position, float3 gbufferNormal)
 {
@@ -189,7 +196,10 @@ ShadowSurface ShadowSurfaceAt(float3 position, float3 gbufferNormal)
     if (!(lengthSquared > 0.0f)) return surface;
 
     normal *= rsqrt(lengthSquared);
-    surface.normal = dot(normal, direction) > 0.0f ? -normal : normal;
+    float3 facing = dot(normal, direction) > 0.0f ? -normal : normal;
+    if (dot(facing, gbufferNormal) < SceneSurfaceNormalCosine) return surface;
+
+    surface.normal = facing;
     surface.position = TrianglePoint(t, hit.barycentrics);
     surface.exact = true;
     surface.hit = hit;

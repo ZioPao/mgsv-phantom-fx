@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Ray-traced shadows leave from the surface the game drew.** A triangle that only shares the depth's
+  point — a wall's dimples drawn as a normal map, a stand-in's facet, another level of detail — could take
+  the shadow ray off its own normal, and a facet turned towards a distant opening's sun came back lit where
+  the game has shade, so the dimples' rims glowed on a shadowed wall. A surface now also has to face within
+  60 degrees of the G-buffer's normal to be where the rays leave (the shadow ray starts view's blue).
 - **Normal maps turn the traced light.** The ray-traced scene holds only the triangles' own normals, so a
   hit on a normal-mapped surface was lit as if it were flat: its bounce and the reflections read as coming
   from the wrong side of the bump. Where the camera sees the hit, the light now uses the G-buffer's normal,

@@ -2431,7 +2431,12 @@ denoiser (see "Ray Reconstruction").
   other frame, black blotches flickering on his face. Where the game
   drew something the scene lacks, or holds at another level of detail too far off, it leaves from
   the depth's point along the G-buffer's normal, offset by 2 cm plus 0.2% of the distance, skipping
-  copies of the surface just above it ("Copies of a surface" in `gi_common.hlsli`). Until 2026-10-24
+  copies of the surface just above it ("Copies of a surface" in `gi_common.hlsli`). A triangle that only
+   shares the depth's point is not the surface the game drew, and its rays are not the game's shade
+   either: a wall's dimples, drawn as a normal map, have the flat wall's facets in the scene, and a facet
+   turned towards a distant opening's sun lit the dimple's rim where the game has shade (2026-10-30). So a
+   surface must also face within 60 degrees of the G-buffer's normal (`SceneSurfaceNormalCosine`, the
+   shadow ray starts view's blue) to be the one the rays leave from. Until 2026-10-24
   every ray left that way: a lamp's hard shadow showed the skip taking a character pressed to a wall
   for a copy of the wall, light through his back in patches ragged along the wall's bumpy normals.
 - **Cut-out meshes.** A model mesh the game alpha-tests (FMDL alpha bits 5 and 7, see "Scene objects",
@@ -2547,9 +2552,9 @@ denoiser (see "Ray Reconstruction").
 - **Shadow ray starts debug view** (Diagnostics, Debug view "Shadow ray starts"; needs the ray-traced
   shadows and an upscaler, with the probe). `ShadowStartColor` colours where each pixel's shadow rays
   leave (`ShadowSurfaceAt`) against the depth's point and the G-buffer's normal: grey from the depth's
-  point (no scene surface near), blue on a scene surface facing over 60 degrees away from the game's
-  normal, red where the scene's surface lies nearer the eye than the game's, cyan where farther (clear
-  up to 5 mm, full from 3 cm); clear on the game's surface. Built 2026-10-25 for the detached shelf
+  point (no scene surface near, or one facing over 60 degrees away from the game's normal and so not
+  the surface the game drew), red where the scene's surface lies nearer the eye than the game's, cyan
+  where farther (clear up to 5 mm, full from 3 cm); clear on the game's surface. Built 2026-10-25 for the detached shelf
   shadow ("Ray-traced scene", "Characters").
 - **Open: terrain blocking for one refresh** (2026-10-23, after the copy race was fixed). With the camera
   still, the probe showed a pixel's sun ray blocked by the terrain 140 m away (66 m above the pixel) for
