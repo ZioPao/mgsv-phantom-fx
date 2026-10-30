@@ -55,6 +55,14 @@ SamplerState g_WrapSampler : register(s2);
 
 float squared(float v) { return v * v; }
 
+// NaNs and infinities out: through x / (1 + x), saturated, and back.
+float3 RemoveNaNs(float3 color)
+{
+    color /= (1.0f + color);
+    color = saturate(color);
+    return color / max(1.0f - color, 1e-4f);
+}
+
 float luminance(float3 color)
 {
     return dot(color, float3(0.2126f, 0.7152f, 0.0722f));
@@ -542,16 +550,16 @@ void MaxDiagnostic(uint counter, float3 value)
 }
 
 // ---- Point and spot lights ----
-// A point or spot light's diffuse light at a surface, without shadows, as the game's light shaders work
-// it out (Lighting_*_NA, SSLighting2_*), in the sun colour's units; its direction and distance in `toLight`
-// and `lightDistance`. A spot's mask (a flashlight's pattern) is left out.
-float3 LocalLightAt(GILocalLight light, float3 world, float3 normal, out float3 toLight, out float lightDistance)
+// A point or spot light's light reaching `world`, without shadows, as the game's light shaders work it out
+// (Lighting_*_NA, SSLighting2_*), in the sun colour's units, before the surface's cosine: its falloff, a
+// spot's cone, and the game's volume for it; its direction and distance in `toLight` and `lightDistance`. A
+// spot's mask (a flashlight's pattern) is left out.
+float3 LocalLightReaching(GILocalLight light, float3 world, out float3 toLight, out float lightDistance)
 {
     float3 offset = light.position.xyz - world;
     lightDistance = length(offset);
     toLight = offset / max(lightDistance, 1e-6f);
-    float cosine = dot(normal, toLight);
-    if (cosine <= 0.0f || lightDistance >= light.position.w) return 0.0f;
+    if (lightDistance >= light.position.w) return 0.0f;
 
     // The game lights only within the light's volume: a fill light's box keeps its 200 m of reach to its room.
     const float margin = 0.02f;
@@ -568,7 +576,15 @@ float3 LocalLightAt(GILocalLight light, float3 world, float3 normal, out float3 
     float cut = 1.0f;
     if (light.axis.w >= -1.0f) cut = pow(saturate((dot(light.axis.xyz, -toLight) - light.axis.w) * light.shape.y), light.shape.z);
 
-    return light.color.rgb * (falloff * cut * cosine);
+    return light.color.rgb * (falloff * cut);
+}
+
+// Its diffuse light at a surface of `normal`.
+float3 LocalLightAt(GILocalLight light, float3 world, float3 normal, out float3 toLight, out float lightDistance)
+{
+    float3 reaching = LocalLightReaching(light, world, toLight, lightDistance);
+    float cosine = dot(normal, toLight);
+    return cosine > 0.0f ? reaching * cosine : 0.0f;
 }
 
 // How far short of a light its shadow rays towards it (`toLight`, from the surface) end: the lamp around

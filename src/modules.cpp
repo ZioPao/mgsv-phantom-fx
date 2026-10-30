@@ -7,6 +7,7 @@
 #include "features/lamp_contact_shadows/lamp_contact_shadows.hpp"
 #include "features/lamp_soft_shadows/lamp_soft_shadows.hpp"
 #include "features/motion_blur/motion_blur.hpp"
+#include "features/path_tracing/path_tracing.hpp"
 #include "features/photo_mode/focus.hpp"
 #include "features/photo_mode/photo_mode.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
@@ -53,6 +54,7 @@ constexpr Module Modules[]{
     {.attach = withDevice<gtvbao::attach>, .configure = gtvbao::configure, .present = gtvbao::present, .detach = gtvbao::detach},
     {.attach = withDevice<ssilvb::attach>, .configure = ssilvb::configure, .present = ssilvb::present, .detach = ssilvb::detach},
     {.attach = withDevice<light_combine::attach>, .configure = light_combine::configure, .present = light_combine::present, .detach = light_combine::detach},
+    {.attach = withDevice<path_tracing::attach>, .configure = path_tracing::configure, .present = path_tracing::present, .detach = path_tracing::detach},
     {.attach = withDevice<visibility_bitmask::attach>, .configure = visibility_bitmask::configure, .detach = visibility_bitmask::detach},
 
     {.attach = ray_tracing::attach, .configure = ray_tracing::configure, .present = ray_tracing::present, .detach = ray_tracing::detach},

@@ -18,6 +18,7 @@
 #include "features/hdr/hdr.hpp"
 #include "features/lamp_contact_shadows/lamp_contact_shadows.hpp"
 #include "features/motion_blur/motion_blur.hpp"
+#include "features/path_tracing/path_tracing.hpp"
 #include "features/photo_mode/photo_mode.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
 #include "features/sun_contact_shadows/sun_contact_shadows.hpp"
@@ -226,6 +227,7 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
     ray_tracing::note(context, call, shader);
     atmosphere::note(context, call, shader);
     indirect_light_pass::note(context, call, shader);
+    path_tracing::note(context, call, shader);
 
     // 2. While upscaling, the game's grading draws at the output size, whoever draws it.
     if (upscaler::beforePostDraw(context, call, shader))
@@ -239,7 +241,8 @@ bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t 
     // 3. The owners. Each takes game passes of its own (the upscaler also the 2D pass), so their order
     // does not matter.
     const bool drawn = atmosphere::draw(context, call, shader) || indirect_light_pass::draw(context, call, shader)
-        || sun_light_pass::draw(context, call, shader) || hdr::draw(context, call, shader) || upscaler::draw(context, call, shader);
+        || sun_light_pass::draw(context, call, shader) || path_tracing::draw(context, call, shader) || hdr::draw(context, call, shader)
+        || upscaler::draw(context, call, shader);
     if (!encode) return drawn;
 
     if (!drawn) context->DrawInstanced(vertices, instances, first, firstInstance);

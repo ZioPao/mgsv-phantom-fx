@@ -4,6 +4,7 @@
 #include "features/ambient_occlusion/gtvbao.hpp"
 #include "features/global_illumination/light_combine.hpp"
 #include "features/indirect_light/ssilvb.hpp"
+#include "features/path_tracing/path_tracing.hpp"
 #include "features/ray_traced_lights/local_lights.hpp"
 #include "frame_latch.hpp"
 #include "game_constants.hpp"
@@ -42,7 +43,7 @@ constexpr UINT FresnelSlot = 9, MaterialSlot = 10; // The sun's g_lut1 and g_Mat
 constexpr UINT DepthSlot = 2;    // The upscale's inDepthBuffer
 constexpr UINT SceneSlot = game_constants::SceneConstants::Slot; // In the upscale and the resolves
 // Every resolve's inAlbedo, inLightDiffuse, inDepth and inOcclusion.
-constexpr UINT AlbedoSlot = 8, DiffuseSlot = 9, ResolveDepthSlot = 11, OcclusionSlot = 13;
+constexpr UINT AlbedoSlot = 8, DiffuseSlot = 9, SpecularLightSlot = 10, ResolveDepthSlot = 11, OcclusionSlot = 13;
 
 // The effects that change these passes, by the effect plan, and the diagnostics' views of them.
 struct Composition
@@ -270,12 +271,15 @@ bool drawResolveForGlobal(ID3D11DeviceContext* context, const ui_redirect::DrawC
 {
     if (!ray_tracing::lightRuns()) return false;
 
-    ComPtr<ID3D11ShaderResourceView> depth, diffuse, gameOcclusion;
+    ComPtr<ID3D11ShaderResourceView> depth, diffuse, specular, gameOcclusion;
     context->PSGetShaderResources(ResolveDepthSlot, 1, depth.GetAddressOf());
     context->PSGetShaderResources(DiffuseSlot, 1, diffuse.GetAddressOf());
+    context->PSGetShaderResources(SpecularLightSlot, 1, specular.GetAddressOf());
 
     const auto size = sizeOf(depth.Get());
     auto* light = ray_tracing::light(size.first, size.second);
+    // Path tracing's reflections join the specular light.
+    auto* specularWithReflections = path_tracing::addReflections(context, specular.Get(), size);
     std::lock_guard lock(resourceMutex);
     if (!ensurePipeline()) return false;
     if (!light_combine::combine(context, diffuse.Get(), light, size, diffuseWithLight)) return false;
@@ -289,9 +293,11 @@ bool drawResolveForGlobal(ID3D11DeviceContext* context, const ui_redirect::DrawC
     else context->PSSetShaderResources(DiffuseSlot, 1, diffuseWithLight.view.GetAddressOf());
 
     context->PSSetShaderResources(OcclusionSlot, 1, whiteView.GetAddressOf());
+    if (specularWithReflections) context->PSSetShaderResources(SpecularLightSlot, 1, &specularWithReflections);
     context->DrawInstanced(call.count, call.instances, call.first, call.firstInstance);
     context->PSSetShader(gameShader, nullptr, 0);
     context->PSSetShaderResources(DiffuseSlot, 1, diffuse.GetAddressOf());
+    context->PSSetShaderResources(SpecularLightSlot, 1, specular.GetAddressOf());
     context->PSSetShaderResources(OcclusionSlot, 1, gameOcclusion.GetAddressOf());
 
     return true;

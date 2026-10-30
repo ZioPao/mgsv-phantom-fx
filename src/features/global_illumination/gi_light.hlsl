@@ -143,12 +143,6 @@ uint2 RenderPixelOf(uint2 lightPixel)
     return RenderPixelAt(lightPixel, g_Light_Pick[lightPixel]);
 }
 
-float3 RemoveNaNs(float3 color)
-{
-    color /= (1.0f + color);
-    color = saturate(color);
-    return color / max(1.0f - color, 1e-4f);
-}
 
 // ---- Hash grid cache (Capsaicin's hash_grid_cache.hlsl) ----
 

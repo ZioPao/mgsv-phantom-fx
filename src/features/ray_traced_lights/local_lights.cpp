@@ -43,7 +43,7 @@ enum class BeyondVolumes : std::uint8_t { None, ShadowMapped, All };
 // What the light shaders read: t0 to t10 (the G-buffer, its depth at t2, the mask at t4, the specular
 // tables at t8 and t9, the material table at t10), s8 to s11, and the scene, light and material constants
 // at b2 to b4.
-constexpr UINT ResourceSlots = 11, DepthSlot = 2, FirstSampler = 8, SamplerCount = 4;
+constexpr UINT ResourceSlots = 11, DepthSlot = 2, MaskSlot = 4, FirstSampler = 8, SamplerCount = 4;
 // A light's volume as copied from its draw: its indices, then from VolumeVertexStart its vertices. The
 // game's had at most 138 indices and 46 vertices of 16 bytes (2026-10-24).
 constexpr UINT VolumeBytes = 4096, VolumeVertexStart = 1024;
@@ -96,6 +96,20 @@ void main(uint id : SV_VertexID, out float4 position : SV_Position, out float4 c
 // On the light's far faces, the light's shadow into both light targets' alpha, for the light's blend to
 // scale it by; where the surface lies past them, none of its light. The full-screen triangle, at depth 0
 // (as far as can be), lies past every surface.
+// Path tracing's lamps (ray_tracing::lampLight, direct_light.hlsl) into both light targets, added as the game
+// adds its lights' light, in place of every light it traced drawn again.
+constexpr char PathTracedSource[] = R"(
+Texture2D<float4> g_LampDiffuse : register(t0);
+Texture2D<float4> g_LampSpecular : register(t1);
+
+void main(float4 position : SV_Position, out float4 diffuse : SV_Target0, out float4 specular : SV_Target1)
+{
+    int3 pixel = int3(position.xy, 0);
+    diffuse = float4(g_LampDiffuse.Load(pixel).rgb, 0);
+    specular = float4(g_LampSpecular.Load(pixel).rgb, 0);
+}
+)";
+
 constexpr char ShadowSource[] = R"(
 cbuffer LightPass : register(b0)
 {
@@ -243,8 +257,8 @@ std::mutex resourceMutex;
 ComPtr<ID3D11Device> device;
 ID3D11DeviceContext* immediate{};
 ComPtr<ID3D11VertexShader> fullScreenShader, volumeShader;
-ComPtr<ID3D11PixelShader> shadowShader, beforeVolumeShader;
-ComPtr<ID3D11BlendState> alphaOnly, shadowed;
+ComPtr<ID3D11PixelShader> shadowShader, beforeVolumeShader, pathTracedShader;
+ComPtr<ID3D11BlendState> alphaOnly, shadowed, added;
 ComPtr<ID3D11RasterizerState> scissored, farFaces, nearFaces;
 ComPtr<ID3D11DepthStencilState> noDepth;
 ComPtr<ID3D11Buffer> passBuffer, sceneBuffer, lightBuffer, materialBuffer;
@@ -271,6 +285,8 @@ std::unordered_map<std::uint64_t, Bounds> volumeBounds;
 // the kick, or the shadow not traced), those of them drawn without their volume, left to the next frame's
 // camera or over the mask's bits at the kick, and lost (a frame ended without a draw point after them).
 std::atomic<std::uint64_t> drawnShadowed{}, drawnUnshadowed{}, drawnWithoutVolume{}, otherFrame{}, overCap{}, lost{};
+// And those path tracing lit (drawPathTracedLights).
+std::atomic<std::uint64_t> drawnPathTraced{};
 // Diagnostics: contexts' or lists' notes never handed over (CommandListNotes::present).
 std::atomic<std::uint64_t> expiredNotes{};
 
@@ -283,6 +299,15 @@ bool ensurePipeline()
     try
     {
         shadowShader = pixelShader(device.Get(), ShadowSource, "light-shadow");
+        pathTracedShader = pixelShader(device.Get(), PathTracedSource, "light-path-traced");
+        D3D11_BLEND_DESC adding{};
+        adding.RenderTarget[0].BlendEnable = TRUE;
+        adding.RenderTarget[0].SrcBlend = adding.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+        adding.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+        adding.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+        adding.RenderTarget[0].BlendOp = adding.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        adding.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
+        check(device->CreateBlendState(&adding, added.ReleaseAndGetAddressOf()), "Creating the path-traced lights' blend");
         beforeVolumeShader = pixelShader(device.Get(), BeforeVolumeSource, "light-before-volume");
         const auto volumeCode = compile(VolumeSource, "light-volume", "vs_5_0");
         check(device->CreateVertexShader(volumeCode->GetBufferPointer(), volumeCode->GetBufferSize(), nullptr, volumeShader.ReleaseAndGetAddressOf()),
@@ -723,6 +748,33 @@ void saveForRecord(const std::filesystem::path& folder, int batch, const char* w
 
 // The frame's lights so far, on the immediate context; call with resourceMutex held. The command lists
 // the immediate context runs next set their own state, so this only unbinds what it bound.
+// Path tracing's lamps into the light targets once, for every light the frame's kick traced (`traced`);
+// false while it does not light them.
+bool drawPathTracedLights()
+{
+    const auto traced = std::ranges::find_if(frameLights, &Light::traced);
+    if (traced == frameLights.end()) return false;
+
+    const auto [width, height] = sizeOf(traced->targets[0].Get());
+    const auto lamps = ray_tracing::lampLight(width, height);
+    if (!lamps) return false;
+
+    ID3D11RenderTargetView* targets[]{traced->targets[0].Get(), traced->targets[1].Get()};
+    ID3D11ShaderResourceView* inputs[]{lamps->first, lamps->second};
+    const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1};
+    immediate->VSSetShader(fullScreenShader.Get(), nullptr, 0);
+    immediate->PSSetShader(pathTracedShader.Get(), nullptr, 0);
+    immediate->PSSetShaderResources(0, 2, inputs);
+    immediate->OMSetRenderTargets(2, targets, nullptr);
+    immediate->OMSetBlendState(added.Get(), nullptr, 0xFFFFFFFF);
+    immediate->RSSetState(nullptr);
+    immediate->RSSetViewports(1, &viewport);
+    immediate->Draw(3, 0);
+    drawnPathTraced += std::ranges::count_if(frameLights, &Light::traced);
+
+    return true;
+}
+
 void drawFrameLights()
 {
     if (frameLights.empty()) return;
@@ -747,7 +799,10 @@ void drawFrameLights()
         if (record.empty()) recordBatch = 0;
         else saveForRecord(record, recordBatch, "before");
 
-        for (const auto& light : frameLights) drawAgain(light);
+        // Path tracing lit the lights the kick traced; the others are drawn again, unshadowed.
+        const bool pathTraced = drawPathTracedLights();
+        for (const auto& light : frameLights)
+            if (!pathTraced || !light.traced) drawAgain(light);
 
         measureVolumes();
         if (!record.empty()) saveForRecord(record, recordBatch++, "after");
@@ -789,7 +844,8 @@ void logLights()
     const auto withoutVolumeCount = drawnWithoutVolume.exchange(0);
     const auto otherCount = otherFrame.exchange(0), overCount = overCap.exchange(0), lostCount = lost.exchange(0);
     const auto expiredCount = expiredNotes.exchange(0);
-    if (shadowedCount + unshadowedCount + otherCount + overCount + lostCount + expiredCount == 0) return;
+    const auto pathTracedCount = drawnPathTraced.exchange(0);
+    if (shadowedCount + unshadowedCount + otherCount + overCount + lostCount + expiredCount + pathTracedCount == 0) return;
 
     std::size_t boundsCount{};
     {
@@ -797,7 +853,8 @@ void logLights()
         boundsCount = volumeBounds.size();
     }
 
-    log("Lights in ten seconds: " + std::to_string(shadowedCount) + " drawn with their ray-traced shadow, " + std::to_string(unshadowedCount)
+    log("Lights in ten seconds: " + std::to_string(pathTracedCount) + " path traced, " + std::to_string(shadowedCount) + " drawn with their ray-traced shadow, "
+        + std::to_string(unshadowedCount)
         + " without (recorded after the kick, or not traced), " + std::to_string(withoutVolumeCount)
         + " of all drawn without the game's volume; at the kicks " + std::to_string(otherCount) + " left for another frame's camera, "
         + std::to_string(overCount) + " over the " + std::to_string(GI_MAX_LOCAL_LIGHTS) + " the rays take; " + std::to_string(lostCount)
@@ -863,7 +920,10 @@ void detach() noexcept
 
 void configure(const Configuration& configuration) noexcept
 {
-    const bool running = configuration.effects.runs(Effect::RayTracedLights);
+    // Path tracing lights them from their records (ray_tracing::lampLight), with or without the ray-traced lights.
+    const auto& settings = configuration.settings;
+    const bool running = configuration.effects.runs(Effect::RayTracedLights)
+        || (settings.pathTracing.on && settings.upscaling.rayReconstruction && configuration.effects.runs(Effect::GlobalIllumination));
     wantedRunning = running;
     flashlightBrightness = configuration.settings.rayTracedLights.flashlightBrightness;
     beyondVolumes = static_cast<BeyondVolumes>(std::clamp(configuration.diagnostics.lightVolumes, 0, 2));
@@ -956,9 +1016,9 @@ void forget(std::uint64_t contextOrList) noexcept
     notes.forget(contextOrList);
 }
 
-std::vector<LocalLight> takeForTrace(const SceneConstants& camera) noexcept
+std::vector<TracedLight> takeForTrace(const SceneConstants& camera) noexcept
 {
-    std::vector<LocalLight> lights;
+    std::vector<TracedLight> lights;
     if (!active.load(std::memory_order_relaxed)) return lights;
 
     try
@@ -981,7 +1041,8 @@ std::vector<LocalLight> takeForTrace(const SceneConstants& camera) noexcept
             {
                 auto& light = *untraced[index];
                 light.traced = true;
-                lights.push_back(light_choice::forRays(light.drawn, volumeBoundsOf(light.drawn)));
+                auto rays = light_choice::forRays(light.drawn, volumeBoundsOf(light.drawn));
+                lights.push_back({rays, rays.isMasked ? light.resources[MaskSlot] : nullptr});
             }
         });
     }

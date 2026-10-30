@@ -11,6 +11,7 @@
 #include "features/lamp_contact_shadows/settings.hpp"
 #include "features/lamp_soft_shadows/settings.hpp"
 #include "features/motion_blur/settings.hpp"
+#include "features/path_tracing/settings.hpp"
 #include "features/photo_mode/settings.hpp"
 #include "features/ray_traced_lights/settings.hpp"
 #include "features/ray_traced_shadows/settings.hpp"
@@ -42,6 +43,7 @@ struct Settings
     LampSoftShadows lampSoftShadows;
     ContactShadowShape contactShadowShape;
     GlobalIllumination globalIllumination;
+    PathTracing pathTracing;
     AmbientOcclusion ambientOcclusion;
     IndirectLight indirectLight;
     VolumetricFog volumetricFog;
@@ -67,6 +69,7 @@ template<class Visit> void forEachFeature(Settings& settings, Visit&& visit)
     visit(settings.lampContactShadows);
     visit(settings.contactShadowShape);
     visit(settings.globalIllumination);
+    visit(settings.pathTracing);
     visit(settings.ambientOcclusion);
     visit(settings.indirectLight);
     visit(settings.volumetricFog);

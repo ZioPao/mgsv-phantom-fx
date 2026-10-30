@@ -32,6 +32,8 @@ enum class GamePass : std::uint8_t
     LocalLight,      // A point or spot light: a draw that marks the stencil, then one that lights
     Resolve,         // The G-buffer and the light into the scene's colour, times the game's occlusion
     Sky,
+    ReflectionMask,  // The screen-space reflections' mask from the depth, normals and roughness; reads the scene's depth at t0
+    ReflectionAdd,   // The screen-space reflections blended over the scene
     Reduce,          // The scene's quarter-size copy that bloom and the lens flares start from
     Copy,            // A plain copy the game makes anywhere
     DofComposite,    // The depth of field over its copy of the scene
@@ -101,6 +103,8 @@ inline constexpr GameShader GameShaders[]{
     {.pass = GamePass::Resolve, .name = "DR_VolFog_TppTonemap_MD", .checksum = "79c001e295254d8a749e41d1d7e49de7", .hasTppTonemap = true},
     {.pass = GamePass::Resolve, .name = "DR_TonemapRainFilter", .checksum = "9a4abc815afc5f121572d695f07af5af", .hasTppTonemap = true},
     {.pass = GamePass::Resolve, .name = "DR_TonemapRainFilter_NoIR", .checksum = "47f52852eaccaa83c25745ce790a212c", .hasTppTonemap = true},
+    {GamePass::ReflectionMask, "LocalReflectionMask", "2d9cb6c5e467cff5e9c6401b4aafebb7"},
+    {GamePass::ReflectionAdd, "LocalReflectionAddBuffer", "97a9ad7e0faca7b1594a38c331826a94"},
     {GamePass::Resolve, "DeferredRendering", "df87979884e90877ee0337c13e01664f"},
     {GamePass::Resolve, "DeferredRendering_VolFog", "322890810465ee05f4895bc69e80a187"},
     {GamePass::Resolve, "DeferredRenderingTone", "47256d38f45b59b6c46cf32bf29564f0"},

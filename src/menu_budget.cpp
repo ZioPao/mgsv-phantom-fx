@@ -70,7 +70,8 @@ const EffectLine EffectLines[]{
     {.effect = Effect::SunContactShadows, .passes = {{Pass::SunTrace, "Contact shadow trace"}}, .health = sun_contact_shadows::health},
     {.effect = Effect::LampContactShadows, .passes = {{Pass::LampShadows, "Shadow draws"}}, .health = lamp_contact_shadows::health},
     {.effect = Effect::GlobalIllumination, .passes = {{Pass::GiRays, "Rays and the light cache"}, {Pass::GiDenoiser, "Denoiser and render size"},
-            {Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}},
+            {Pass::GiProbeLight, "The game's probe light, copied"}, {Pass::GiCombine, "Adding the light"}, {Pass::Reflections, "Path-traced reflections"},
+            {Pass::LampLight, "Path-traced lamps"}},
         .health = light_combine::health},
     {.effect = Effect::AmbientOcclusion, .passes = {{Pass::OcclusionPrefilter, "Depth prefilter"}, {Pass::OcclusionMarch, "March"}, {Pass::OcclusionDenoise, "Denoise"},
             {Pass::OcclusionApply, "Applying to the indirect light"}},
@@ -187,7 +188,7 @@ fxui::Budget budget(Settings& wanted, const performance::Costs& costs)
 
     float traced{};
     for (const auto pass : {Pass::RayTracedScene, Pass::SunShadowRays, Pass::SunShadowDenoiser, Pass::LightShadowRays, Pass::LightShadowFilter, Pass::GiRays,
-             Pass::GiDenoiser})
+             Pass::GiDenoiser, Pass::Reflections, Pass::LampLight})
         traced += timed(pass);
 
     const float handOver = std::max(0.0f, timed(Pass::GiInputs) + timed(Pass::GiWait) - traced);

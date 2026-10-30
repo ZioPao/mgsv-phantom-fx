@@ -41,7 +41,7 @@ enum class Pass : std::size_t
     GiInputs, GiProbeLight, GiCombine, GiWait, LocalLights,
 
     // On Direct3D 12
-    RayTracedScene, SunShadowRays, SunShadowDenoiser, LightShadowRays, LightShadowFilter, GiRays, GiDenoiser,
+    RayTracedScene, SunShadowRays, SunShadowDenoiser, LightShadowRays, LightShadowFilter, GiRays, GiDenoiser, Reflections, LampLight,
     HdrEncode, HdrDecode, HdrGrade,
     Count
 };

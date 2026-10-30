@@ -63,6 +63,7 @@ struct Options
     // A cost measurement leaves the light passes out (the output keeps its last light).
     bool light = true;
     bool reconstructionGuides{}; // DLSS Ray Reconstruction is asked for: the kick makes its guides (reconstructionGuides)
+    bool pathTracing{};          // And path tracing: while Ray Reconstruction denoises, the reflections are traced (reflection)
 };
 
 // MotionBlurCameraVelocity reads the game's velocity for its moving meshes here, right after the
@@ -131,6 +132,8 @@ Texture2D<float4> g_Materials : register(t5); // g_MaterialTexture: u the materi
 RWTexture2D<float4> g_NormalRoughness : register(u0);
 RWTexture2D<float4> g_DiffuseAlbedo : register(u1);
 RWTexture2D<float4> g_SpecularAlbedo : register(u2);
+RWTexture2D<float4> g_Material : register(u3); // Path tracing's: rgb the specular colour at normal incidence; a the translucency
+RWTexture2D<float> g_Wrap : register(u4);      // And the light through the leaves' floor: the translucency times the material's
 
 cbuffer Parameters : register(b0)
 {
@@ -190,6 +193,8 @@ void main(uint2 id : SV_DispatchThreadID)
         g_NormalRoughness[id] = 0;
         g_DiffuseAlbedo[id] = float4(0.5, 0.5, 0.5, 1);
         g_SpecularAlbedo[id] = 0;
+        g_Material[id] = 0;
+        g_Wrap[id] = 0;
         return;
     }
 
@@ -209,18 +214,49 @@ void main(uint2 id : SV_DispatchThreadID)
     float4 specular = g_HasSpecular ? g_Specular.Load(int3(id, 0)) : float4(1, 0, 0, 0);
     float roughness = specular.x;
     float3 specularColor = specular.y * 0.04;
+    float translucencyScale = 0; // The material's (its table's row 0.25, w)
     if (g_HasTables)
     {
-        float3 color = PointAt(g_Materials, specular.z, 0.25).rgb;
+        float4 color = PointAt(g_Materials, specular.z, 0.25);
         float F0 = PointAt(g_Materials, specular.z, 0.75).x;
-        specularColor = specular.y * color * FresnelAtNormal(F0);
+        specularColor = specular.y * color.rgb * FresnelAtNormal(F0);
+        translucencyScale = color.w;
     }
 
     g_NormalRoughness[id] = float4(world, roughness);
     g_DiffuseAlbedo[id] = float4(g_HasAlbedo ? g_Albedo.Load(int3(id, 0)).rgb : 0.5, 1);
     g_SpecularAlbedo[id] = float4(saturate(EnvBRDFApprox2(specularColor, roughness * roughness, dot(normal, eye))), 1);
+    g_Material[id] = float4(saturate(specularColor), specular.w);
+    g_Wrap[id] = saturate(specular.w * translucencyScale);
 }
 )";
+
+// Path tracing's masks (direct_light.hlsl): a masked spot's mask (the game's t4) into its tile of the atlas,
+// sampled as the game samples it (bilinear, wrapped) at the tile's texels.
+constexpr char MaskCopySource[] = R"(
+Texture2D<float4> g_Mask : register(t0);
+SamplerState g_LinearWrap : register(s0);
+RWTexture2D<unorm float4> g_Atlas : register(u0);
+
+cbuffer Parameters : register(b0)
+{
+    uint g_Tile;
+    uint3 g_Padding;
+};
+
+[numthreads(8, 8, 1)]
+void main(uint2 id : SV_DispatchThreadID)
+{
+    if (any(id >= GI_LAMP_MASK_SIZE)) return;
+
+    g_Atlas[uint2(g_Tile * GI_LAMP_MASK_SIZE + id.x, id.y)] = g_Mask.SampleLevel(g_LinearWrap, (id + 0.5) / GI_LAMP_MASK_SIZE, 0);
+}
+)";
+
+struct MaskCopyParameters
+{
+    std::uint32_t tile, padding[3];
+};
 
 struct GuideParameters
 {
@@ -307,10 +343,14 @@ std::optional<Sun> sun;
 bool sunSincePresent{};
 std::array<float, 4> shadowRange{};
 ComPtr<ID3D11ShaderResourceView> normals, albedo;
-ComPtr<ID3D11ComputeShader> packShader, guideShader;
-ComPtr<ID3D11Buffer> packParameters, guideParameters;
-// DLSS Ray Reconstruction's guides at the render size, and the kick that made them.
-ComputeTexture guideNormals, guideDiffuse, guideSpecular;
+ComPtr<ID3D11ComputeShader> packShader, guideShader, maskCopyShader;
+ComPtr<ID3D11Buffer> packParameters, guideParameters, maskCopyParameters;
+ComPtr<ID3D11SamplerState> maskSampler;
+// DLSS Ray Reconstruction's guides at the render size, and the kick that made them; path tracing's material
+// guides (guideMaterial, guideWrap) with them, shared like the others.
+ComputeTexture guideNormals, guideDiffuse, guideSpecular, guideMaterial, guideWrap;
+// Path tracing's masks: GI_LAMP_MASK_TILES tiles across.
+ComputeTexture maskAtlas;
 std::uint32_t guidesKick{};
 // The frames Ray Reconstruction denoised, counted by reconstructed(), and the count the last kick saw.
 std::atomic<std::uint64_t> reconstructions{};
@@ -340,7 +380,13 @@ std::atomic<std::uint64_t> kicksFromSmallerView{}, expiredNotes{}, expiredCamera
 // whichever thread asks first. Taken after executionMutex when both are.
 std::mutex lightMutex;
 ComPtr<ID3D11Device> lightDevice;
-SharedTexture output, shadowOutput, shadowDebugOutput, localLightOutput, lightDebugOutput;
+SharedTexture output, shadowOutput, shadowDebugOutput, localLightOutput, lightDebugOutput, reflectionOutput, reflectionDistanceOutput, lampDiffuseOutput,
+    lampSpecularOutput;
+// The last kick traced the reflections into reflectionOutput and reflectionDistanceOutput, and the lamps into
+// lampDiffuseOutput and lampSpecularOutput.
+std::atomic<bool> reflectionsTraced{}, lampsTraced{};
+// depthOut's view, for the recording threads (surfaceDepth).
+ComPtr<ID3D11ShaderResourceView> publishedDepth;
 bool shadowWritten{}, shadowDebugWritten{}; // Direct3D 12 has traced into shadowOutput, shadowDebugOutput
 bool lightDebugWritten{}; // And into lightDebugOutput
 bool localLightWritten{};                  // This frame's kick traced the point and spot lights into localLightOutput
@@ -380,6 +426,15 @@ void ensurePipeline()
     packParameters = makeConstantBuffer(device.Get(), sizeof(PackParameters), "Creating the G-buffer pack's constants");
     guideShader = computeShader(device.Get(), GuideSource, "reconstruction-guides");
     guideParameters = makeConstantBuffer(device.Get(), sizeof(GuideParameters), "Creating the Ray Reconstruction guides' constants");
+    const auto tiles = std::to_string(GI_LAMP_MASK_TILES), size = std::to_string(GI_LAMP_MASK_SIZE);
+    const D3D_SHADER_MACRO maskDefines[]{{"GI_LAMP_MASK_TILES", tiles.c_str()}, {"GI_LAMP_MASK_SIZE", size.c_str()}, {}};
+    maskCopyShader = computeShader(device.Get(), MaskCopySource, "path-tracing-masks", maskDefines);
+    maskCopyParameters = makeConstantBuffer(device.Get(), sizeof(MaskCopyParameters), "Creating the masks' constants");
+    D3D11_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampler.MaxLOD = D3D11_FLOAT32_MAX;
+    check(device->CreateSamplerState(&sampler, maskSampler.GetAddressOf()), "Creating the masks' sampler");
 
     check(device->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence)), "Creating the shared fence");
     check(fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &fenceHandle), "Sharing the fence");
@@ -393,6 +448,11 @@ void pack(ID3D11ShaderResourceView* depth, const SceneConstants& scene)
     if (depthOut.width != width || depthOut.height != height)
     {
         depthOut = makeShared(device.Get(), width, height, DXGI_FORMAT_R32_FLOAT, "Creating the shared depth");
+        {
+            std::lock_guard lock(lightMutex);
+            publishedDepth = depthOut.view;
+        }
+
         normalOut = makeShared(device.Get(), width, height, DXGI_FORMAT_R10G10B10A2_UNORM, "Creating the shared normals");
         albedoOut = makeShared(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the shared albedo");
         log("Global illumination at " + std::to_string(width) + "x" + std::to_string(height) + ".");
@@ -433,6 +493,8 @@ void makeGuides(ID3D11ShaderResourceView* depth, const SceneConstants& scene)
         guideNormals = makeShared(device.Get(), width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the Ray Reconstruction normals");
         guideDiffuse = makeShared(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the Ray Reconstruction diffuse albedo");
         guideSpecular = makeShared(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating the Ray Reconstruction specular albedo");
+        guideMaterial = makeShared(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM, "Creating path tracing's material guide");
+        guideWrap = makeShared(device.Get(), width, height, DXGI_FORMAT_R8_UNORM, "Creating path tracing's translucency guide");
     }
 
     const auto specular = indirect_light_pass::specularTarget(width, height);
@@ -451,7 +513,8 @@ void makeGuides(ID3D11ShaderResourceView* depth, const SceneConstants& scene)
     check(write(immediate.Get(), guideParameters.Get(), parameters), "Writing the Ray Reconstruction guides' constants");
 
     ID3D11ShaderResourceView* inputs[]{depth, normals.Get(), hasAlbedo ? albedo.Get() : nullptr, specular.Get(), tables.fresnel.Get(), tables.materials.Get()};
-    ID3D11UnorderedAccessView* outputs[]{guideNormals.access.Get(), guideDiffuse.access.Get(), guideSpecular.access.Get()};
+    ID3D11UnorderedAccessView* outputs[]{guideNormals.access.Get(), guideDiffuse.access.Get(), guideSpecular.access.Get(), guideMaterial.access.Get(),
+        guideWrap.access.Get()};
     immediate->CSSetShader(guideShader.Get(), nullptr, 0);
     immediate->CSSetConstantBuffers(0, 1, guideParameters.GetAddressOf());
     immediate->CSSetShaderResources(0, static_cast<UINT>(std::size(inputs)), inputs);
@@ -461,6 +524,33 @@ void makeGuides(ID3D11ShaderResourceView* depth, const SceneConstants& scene)
     ID3D11UnorderedAccessView* noOutputs[std::size(outputs)]{};
     immediate->CSSetShaderResources(0, static_cast<UINT>(std::size(noInputs)), noInputs);
     immediate->CSSetUnorderedAccessViews(0, static_cast<UINT>(std::size(noOutputs)), noOutputs, nullptr);
+    immediate->CSSetShader(nullptr, nullptr, 0);
+}
+
+// Path tracing's masks into the atlas, a tile each (MaskCopySource); call with executionMutex held.
+void copyMasks(const std::vector<ID3D11ShaderResourceView*>& masks)
+{
+    if (!maskAtlas.texture)
+        maskAtlas = makeShared(device.Get(), GI_LAMP_MASK_TILES * GI_LAMP_MASK_SIZE, GI_LAMP_MASK_SIZE, DXGI_FORMAT_R8G8B8A8_UNORM,
+            "Creating path tracing's mask atlas");
+
+    immediate->CSSetShader(maskCopyShader.Get(), nullptr, 0);
+    immediate->CSSetConstantBuffers(0, 1, maskCopyParameters.GetAddressOf());
+    immediate->CSSetSamplers(0, 1, maskSampler.GetAddressOf());
+    immediate->CSSetUnorderedAccessViews(0, 1, maskAtlas.access.GetAddressOf(), nullptr);
+    for (std::uint32_t tile = 0; tile < masks.size(); ++tile)
+    {
+        check(write(immediate.Get(), maskCopyParameters.Get(), MaskCopyParameters{tile}), "Writing the masks' constants");
+        immediate->CSSetShaderResources(0, 1, &masks[tile]);
+        immediate->Dispatch(groups(GI_LAMP_MASK_SIZE), groups(GI_LAMP_MASK_SIZE), 1);
+    }
+
+    ID3D11ShaderResourceView* noMask{};
+    ID3D11UnorderedAccessView* noAtlas{};
+    ID3D11SamplerState* noSampler{};
+    immediate->CSSetShaderResources(0, 1, &noMask);
+    immediate->CSSetUnorderedAccessViews(0, 1, &noAtlas, nullptr);
+    immediate->CSSetSamplers(0, 1, &noSampler);
     immediate->CSSetShader(nullptr, nullptr, 0);
 }
 
@@ -684,14 +774,61 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
         }
     }
 
-    // The point and spot lights recorded for this frame, a bit each in their shadow mask.
+    // Path tracing while Ray Reconstruction denoises (reconstructed()), with the light's cache.
+    const auto reconstructedFrames = reconstructions.load(std::memory_order_relaxed);
+    const bool denoisedByReconstruction = reconstructedFrames != reconstructionsAtKick;
+    const bool pathTraced = options.pathTracing && options.reconstructionGuides && denoisedByReconstruction && options.enabled && options.light;
+    ID3D11Texture2D* reflection{};
+    ID3D11Texture2D* reflectionDistance{};
+    if (pathTraced)
+    {
+        std::lock_guard lock(lightMutex);
+        resizeShared(reflectionOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the reflections");
+        resizeShared(reflectionDistanceOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16_FLOAT, "Creating the reflections' hit distance");
+        reflection = reflectionOutput.texture.Get();
+        reflectionDistance = reflectionDistanceOutput.texture.Get();
+    }
+
+    // The point and spot lights recorded for this frame, a bit each in their shadow mask. Path tracing lights
+    // them itself, with their masks in the atlas, a tile each, each mask once.
     std::vector<gi_renderer::LocalLight> localLightsToTrace;
-    if (options.localLights) localLightsToTrace = local_lights::takeForTrace(*sceneCamera);
+    std::vector<ID3D11ShaderResourceView*> masks;
+    std::vector<ComPtr<ID3D11ShaderResourceView>> heldMasks;
+    if (options.localLights || pathTraced)
+        for (auto& traced : local_lights::takeForTrace(*sceneCamera))
+        {
+            auto lamp = traced.light;
+            if (pathTraced && traced.mask)
+            {
+                const auto resource = resourceOf(traced.mask.Get());
+                const auto found = std::ranges::find_if(masks, [&](ID3D11ShaderResourceView* mask) { return resourceOf(mask) == resource; });
+                if (found != masks.end()) lamp.maskTile = static_cast<std::uint32_t>(found - masks.begin()) + 1;
+                else if (masks.size() < GI_LAMP_MASK_TILES)
+                {
+                    masks.push_back(traced.mask.Get());
+                    heldMasks.push_back(traced.mask);
+                    lamp.maskTile = static_cast<std::uint32_t>(masks.size());
+                }
+            }
+
+            localLightsToTrace.push_back(lamp);
+        }
+
+    if (!masks.empty()) copyMasks(masks);
     ID3D11Texture2D* localLightShadow{};
+    ID3D11Texture2D* lampDiffuse{};
+    ID3D11Texture2D* lampSpecular{};
     {
         std::lock_guard lock(lightMutex);
         localLightWritten = false;
-        if (!localLightsToTrace.empty())
+        if (!localLightsToTrace.empty() && pathTraced)
+        {
+            resizeShared(lampDiffuseOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the lamps' diffuse light");
+            resizeShared(lampSpecularOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the lamps' specular light");
+            lampDiffuse = lampDiffuseOutput.texture.Get();
+            lampSpecular = lampSpecularOutput.texture.Get();
+        }
+        else if (!localLightsToTrace.empty())
         {
             resizeShared(localLightOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16_FLOAT, "Creating the lights' shadow");
             localLightShadow = localLightOutput.texture.Get();
@@ -726,7 +863,10 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     endStep(SignalStep);
 
     frame.textures = {depthOut.texture.Get(), normalOut.texture.Get(), albedoOut.texture.Get(), light, shadow, shadowDebug,
-        velocityCopied ? objectVelocityCopy.Get() : nullptr, velocityFormat, localLightShadow, lightDebug};
+        velocityCopied ? objectVelocityCopy.Get() : nullptr, velocityFormat, localLightShadow, lightDebug,
+        pathTraced ? guideNormals.texture.Get() : nullptr, pathTraced ? guideSpecular.texture.Get() : nullptr, reflection, reflectionDistance,
+        pathTraced ? guideMaterial.texture.Get() : nullptr, pathTraced ? guideWrap.texture.Get() : nullptr, masks.empty() ? nullptr : maskAtlas.texture.Get(),
+        lampDiffuse, lampSpecular};
     frame.width = depthOut.width;
     frame.height = depthOut.height;
     const auto view = camera::viewOf(*sceneCamera);
@@ -770,16 +910,19 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     if (options.reconstructionGuides) guidesKick = kicks;
     // Noisy for Ray Reconstruction only while it denoised the frame before: a frame it left to DLSS, or none,
     // turns the denoisers back on.
-    const auto denoised = reconstructions.load(std::memory_order_relaxed);
-    frame.forReconstruction = options.reconstructionGuides && denoised != reconstructionsAtKick;
-    reconstructionsAtKick = denoised;
+    frame.forReconstruction = options.reconstructionGuides && denoisedByReconstruction;
+    frame.pathTracing = pathTraced;
+    reconstructionsAtKick = reconstructedFrames;
+    reflectionsTraced = pathTraced;
+    lampsTraced = lampDiffuse != nullptr;
     frame.showScene = options.showScene;
     frame.logOften = options.logOften;
     frame.traceLight = options.enabled && options.light;
     // The rays need the sun's direction, which the first sun pass gives.
     frame.traceShadows = shadow && sun;
     // Without the shadow map's shadow the rays have no range to leave anything to (BeyondShadowMap).
-    frame.shadowRange = options.withShadowMap ? shadowRange : std::array<float, 4>{};
+    // Path tracing's sun reads the rays' shadow alone (sun_light_pass.cpp): nothing is left to the shadow map.
+    frame.shadowRange = options.withShadowMap && !pathTraced ? shadowRange : std::array<float, 4>{};
     frame.sunTangent = std::tan(options.sunSize * 0.5f * 3.14159265f / 180);
     frame.debugShadows = shadowDebug != nullptr;
     frame.shadowStarts = options.shadowStarts;
@@ -851,7 +994,10 @@ void detach() noexcept
         packParameters.Reset();
         guideShader.Reset();
         guideParameters.Reset();
-        guideNormals = guideDiffuse = guideSpecular = {};
+        guideNormals = guideDiffuse = guideSpecular = guideMaterial = guideWrap = maskAtlas = {};
+        maskCopyShader.Reset();
+        maskCopyParameters.Reset();
+        maskSampler.Reset();
         guidesKick = 0;
         terrainPages.Reset();
         terrainHeights.Reset();
@@ -880,7 +1026,11 @@ void detach() noexcept
 
     {
         std::lock_guard lock(lightMutex);
-        output = shadowOutput = shadowDebugOutput = localLightOutput = lightDebugOutput = {};
+        output = shadowOutput = shadowDebugOutput = localLightOutput = lightDebugOutput = reflectionOutput = reflectionDistanceOutput = lampDiffuseOutput =
+            lampSpecularOutput = {};
+        lampsTraced = false;
+        publishedDepth.Reset();
+        reflectionsTraced = false;
         shadowWritten = shadowDebugWritten = localLightWritten = lightDebugWritten = false;
         lightDevice.Reset();
     }
@@ -894,9 +1044,13 @@ void configure(const Configuration& configuration) noexcept
     const auto& diagnostics = configuration.diagnostics;
     const Options options{
         .enabled = configuration.effects.runs(Effect::GlobalIllumination),
-        .shadows = configuration.effects.runs(Effect::RayTracedShadows),
+        // Path tracing shades the sun with the rays' shadow (sun_light_pass.cpp), whether or not the shadows are on.
+        .shadows = configuration.effects.runs(Effect::RayTracedShadows)
+            || (settings.pathTracing.on && settings.upscaling.rayReconstruction && configuration.effects.runs(Effect::GlobalIllumination)),
         .withShadowMap = settings.rayTracedShadows.withGameShadows,
-        .localLights = configuration.effects.runs(Effect::RayTracedLights),
+        // Path tracing lights the point and spot lights itself, from their records (local_lights.hpp).
+        .localLights = configuration.effects.runs(Effect::RayTracedLights)
+            || (settings.pathTracing.on && settings.upscaling.rayReconstruction && configuration.effects.runs(Effect::GlobalIllumination)),
         .lightRays = settings.rayTracedLights.shadowRaysPerPixel,
         .sunSize = settings.sun.diameterDegrees,
         .lightPixelRays = settings.globalIllumination.raysPerLightPixel,
@@ -911,6 +1065,7 @@ void configure(const Configuration& configuration) noexcept
         .light = !configuration.leftOut.globalLight,
         .reconstructionGuides = settings.upscaling.upscaler == upscaler::Upscaler::Dlss && settings.upscaling.mode != upscaler::Mode::Off
             && settings.upscaling.rayReconstruction,
+        .pathTracing = settings.pathTracing.on,
     };
 
     latch.set(options);
@@ -1164,6 +1319,43 @@ std::optional<ReconstructionGuides> reconstructionGuides(UINT width, UINT height
 void reconstructed() noexcept
 {
     reconstructions.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool pathTracingRuns() noexcept
+{
+    return reflectionsTraced.load(std::memory_order_relaxed) && !failed && sinceKick() < 1000;
+}
+
+ID3D11ShaderResourceView* reflection(UINT width, UINT height) noexcept
+{
+    if (!pathTracingRuns()) return nullptr;
+
+    std::lock_guard lock(lightMutex);
+    return reflectionOutput.width == width && reflectionOutput.height == height ? reflectionOutput.view.Get() : nullptr;
+}
+
+std::optional<std::pair<ID3D11ShaderResourceView*, ID3D11ShaderResourceView*>> lampLight(UINT width, UINT height) noexcept
+{
+    if (!lampsTraced.load(std::memory_order_relaxed) || !pathTracingRuns()) return std::nullopt;
+
+    std::lock_guard lock(lightMutex);
+    if (lampDiffuseOutput.width != width || lampDiffuseOutput.height != height) return std::nullopt;
+
+    return std::pair{lampDiffuseOutput.view.Get(), lampSpecularOutput.view.Get()};
+}
+
+Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> surfaceDepth(UINT width, UINT height) noexcept
+{
+    std::lock_guard lock(lightMutex);
+    return sizeOf(publishedDepth.Get()) == std::pair{width, height} ? publishedDepth : nullptr;
+}
+
+ID3D11Texture2D* reflectionDistance(UINT width, UINT height) noexcept
+{
+    if (!pathTracingRuns()) return nullptr;
+
+    std::lock_guard lock(lightMutex);
+    return reflectionDistanceOutput.width == width && reflectionDistanceOutput.height == height ? reflectionDistanceOutput.texture.Get() : nullptr;
 }
 
 bool active() noexcept

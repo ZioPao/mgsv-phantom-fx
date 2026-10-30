@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace phantom_fx::ray_reconstruction
 {
@@ -56,7 +57,7 @@ struct State
     NVSDK_NGX_Parameter* parameters{};
     NVSDK_NGX_Handle* feature{};
     FeatureKey key;
-    OpenedTexture color, depth, motion, output, normalRoughness, diffuseAlbedo, specularAlbedo;
+    OpenedTexture color, depth, motion, output, normalRoughness, diffuseAlbedo, specularAlbedo, specularHitDistance;
 };
 std::unique_ptr<State> state;
 
@@ -249,11 +250,13 @@ bool evaluate(const Inputs& inputs)
             open(s, s.diffuseAlbedo, inputs.diffuseAlbedo, "Opening the Ray Reconstruction diffuse albedo"),
             open(s, s.specularAlbedo, inputs.specularAlbedo, "Opening the Ray Reconstruction specular albedo")};
         auto* written = open(s, s.output, inputs.output, "Opening the Ray Reconstruction output");
-        std::array<D3D12_RESOURCE_BARRIER, std::size(reads) + 1> barriers{};
-        for (std::size_t i = 0; i < std::size(reads); ++i)
-            barriers[i] = transition(reads[i], D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-        barriers.back() = transition(written, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        auto* hitDistance = inputs.specularHitDistance
+            ? open(s, s.specularHitDistance, inputs.specularHitDistance, "Opening the Ray Reconstruction specular hit distance")
+            : nullptr;
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        for (auto* read : reads) barriers.push_back(transition(read, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+        if (hitDistance) barriers.push_back(transition(hitDistance, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+        barriers.push_back(transition(written, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
         s.list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
 
         // NGX keeps the matrices' pointers only for the call.
@@ -267,6 +270,7 @@ bool evaluate(const Inputs& inputs)
         evaluation.pInDiffuseAlbedo = reads[4];
         evaluation.pInSpecularAlbedo = reads[5];
         evaluation.pInOutput = written;
+        evaluation.pInSpecularHitDistance = hitDistance;
         evaluation.InJitterOffsetX = inputs.jitter[0];
         evaluation.InJitterOffsetY = inputs.jitter[1];
         evaluation.InRenderSubrectDimensions = {color.Width, color.Height};

@@ -9,7 +9,9 @@ namespace phantom_fx::sun_light_pass::shaders
 // the sky reflection (SKY_REFLECTION 0). Plus the add-on's options in b6: soft shadows filter the
 // shadow map, the screen-space shadow in t7 multiplies the sun's shadow, and the ray-traced shadow in
 // t6 takes the place of the game's. With all off they give the game's output bit for bit (checked on
-// WARP with random inputs). Split into literals, as MSVC limits each to 16 KB.
+// WARP with random inputs). For path tracing (PATH_TRACED 1, path_tracing.hpp), the rays' shadow alone,
+// the clouds' inside the shadow range (CLOUD_SHADOW 1), and GGX's specular, as the traced reflections and
+// Ray Reconstruction's guides have it. Split into literals, as MSVC limits each to 16 KB.
 inline constexpr char SunLight[] = R"(
 cbuffer cPSScene : register(b2)
 {
@@ -258,6 +260,46 @@ float3 Tangent(float3 center, float3 before, float3 after)
     return abs(after.z - center.z) < abs(center.z - before.z) ? after - center : center - before;
 }
 #endif
+
+#if PATH_TRACED
+// The rays' shadow, which path tracing leaves raw for Ray Reconstruction; inside the game's shadow range
+// the clouds' shadow and the height fade as SunShadow gives them.
+float PathTracedShadow(float3 viewPosition, float rayTraced)
+{
+    float shadow = rayTraced;
+#if CLOUD_SHADOW
+    float4 position = float4(viewPosition, 1);
+    float2 cloudPosition = float2(dot(m_objectParams[9], position), dot(m_objectParams[10], position));
+    float cloud = g_CloudTexture.Sample(g_samplerLinear_Wrap, cloudPosition).x;
+    float cloudAmount = saturate((1 / (m_objectParams[12].z - 0)) * (cloud - 0));
+    cloudAmount = cloudAmount * cloudAmount * (cloudAmount * -2 + 3);
+    shadow = saturate(m_objectParams[12].w * cloudAmount) * shadow;
+
+    float heightFade = 1 - saturate((viewPosition.z - m_objectParams[11].x) * m_objectParams[11].y);
+    shadow *= heightFade * heightFade;
+#endif
+    return shadow;
+}
+
+// GGX's specular for a light of `lightColor` (the diffuse light's units, the game's irradiance over pi) from
+// `toLight`: the Trowbridge-Reitz distribution, Smith's height-correlated visibility and Schlick's Fresnel,
+// of roughness squared and the specular colour at normal incidence.
+float3 GgxSpecular(float3 lightColor, float3 normal, float3 toEye, float3 toLight, float roughness, float3 specularColor)
+{
+    float3 halfway = normalize(toEye + toLight);
+    float NoL = saturate(dot(normal, toLight));
+    float NoV = max(dot(normal, toEye), 1e-4);
+    float NoH = saturate(dot(normal, halfway));
+    float VoH = saturate(dot(toEye, halfway));
+    float alpha = max(roughness * roughness, 1e-3);
+    float a2 = alpha * alpha;
+    float d = (NoH * a2 - NoH) * NoH + 1;
+    float distribution = a2 / (3.14159265 * d * d);
+    float visibility = 0.5 / max(NoL * sqrt(NoV * NoV * (1 - a2) + a2) + NoV * sqrt(NoL * NoL * (1 - a2) + a2), 1e-6);
+    float3 fresnel = specularColor + (1 - specularColor) * pow(1 - VoH, 5);
+    return 3.14159265 * lightColor * (NoL * distribution * visibility) * fresnel;
+}
+#endif
 )" R"(
 
 void main(float4 position : SV_Position, float4 clipPosition : TEXCOORD0, float4 samplingPosition : TEXCOORD1,
@@ -310,6 +352,11 @@ void main(float4 position : SV_Position, float4 clipPosition : TEXCOORD0, float4
     shadow *= rayTraced;
     float specularShadow = shadow < 1 ? max(shadow, m_lightParams[7].x) : 1;
 #endif
+#if PATH_TRACED
+    // The rays' shadow on the specular too: no floor.
+    shadow = PathTracedShadow(viewPosition, rayTraced);
+    specularShadow = shadow;
+#endif
 
     // The sun as a disc: the light direction moves towards the reflection by its angular size.
     float LN = dot(lightDirection, normal);
@@ -336,6 +383,10 @@ void main(float4 position : SV_Position, float4 clipPosition : TEXCOORD0, float4
     lutValue *= lutValue;
     float specularPower = saturate(LN * 4) * (lutValue.x / lutValue.y * lookupFresnel);
     float3 specular = specularPower * (lightColor.xyz * specularColor);
+#if PATH_TRACED
+    float3 normalSpecular = specularColor * g_lut1.Sample(g_samplerLinear_Clamp, float2(1, F0)).x;
+    specular = GgxSpecular(lightColor.xyz, normal, toEye, discDirection, roughness, normalSpecular);
+#endif
     float3 diffuse = lightColor.xyz * (LNTranslucent * 1 * 1);
 
 #if SKY_REFLECTION

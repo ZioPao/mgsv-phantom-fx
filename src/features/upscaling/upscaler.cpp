@@ -1285,6 +1285,7 @@ bool upscale(const FxaaPass& pass, const Frame& current)
             inputs.normalRoughness = guides->normalRoughness.Get();
             inputs.diffuseAlbedo = guides->diffuseAlbedo.Get();
             inputs.specularAlbedo = guides->specularAlbedo.Get();
+            inputs.specularHitDistance = ray_tracing::reflectionDistance(width, height);
             inputs.worldToView = camera.worldToView;
             inputs.viewToClip = camera.viewToClip;
             inputs.jitter[0] = current.jitter[0];

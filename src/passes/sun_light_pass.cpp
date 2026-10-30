@@ -44,11 +44,13 @@ static_assert(sizeof(ShaderOptions) % 16 == 0);
 struct Composition
 {
     bool softShadows{}, contactShadows{}, rayTracedShadows{};
+    // Path tracing traces the reflections in place of the sky's (path_tracing.hpp), while it runs.
+    bool pathTracing{};
     Sun sun;
     RayTracedShadows rayTraced;
     bool onlyContactShadows{}; // Diagnostics: the sun is shadowed by its contact shadows alone
 
-    bool any() const { return softShadows || contactShadows || rayTracedShadows; }
+    bool any() const { return softShadows || contactShadows || rayTracedShadows || pathTracing; }
 };
 
 FrameLatch<Composition> latch;
@@ -61,13 +63,20 @@ std::atomic<bool> turnPattern{};
 std::mutex resourceMutex;
 ComPtr<ID3D11Device> device;
 // The game's sun shaders rebuilt: with and without the shadow map, each with and without the sky's
-// reflection (game_shaders::GameShader).
-std::array<ComPtr<ID3D11PixelShader>, 4> replacements;
+// reflection (game_shaders::GameShader); then path tracing's, inside the shadow range and beyond it
+// (pathTracedOf).
+std::array<ComPtr<ID3D11PixelShader>, 6> replacements;
 ComPtr<ID3D11Buffer> optionsBuffer;
 
 std::size_t replacementOf(bool isShadowMapped, bool reflectsSky)
 {
     return (isShadowMapped ? 2 : 0) + (reflectsSky ? 1 : 0);
+}
+
+// Path tracing's: the game's pass inside the shadow range has the clouds' shadow, beyond it none.
+std::size_t pathTracedOf(bool isShadowMapped)
+{
+    return 4 + (isShadowMapped ? 1 : 0);
 }
 
 // Compiles the shaders once; call with resourceMutex held. Returns false when they are unavailable.
@@ -84,6 +93,12 @@ bool ensurePipeline()
                 const D3D_SHADER_MACRO defines[]{{"SHADOW_MAP", isShadowMapped ? "1" : "0"}, {"SKY_REFLECTION", reflectsSky ? "1" : "0"}, {}};
                 replacements[replacementOf(isShadowMapped, reflectsSky)] = pixelShader(device.Get(), shaders::SunLight, "sun-light", defines);
             }
+
+        for (const bool inShadowRange : {true, false})
+        {
+            const D3D_SHADER_MACRO defines[]{{"SHADOW_MAP", "0"}, {"SKY_REFLECTION", "0"}, {"PATH_TRACED", "1"}, {"CLOUD_SHADOW", inShadowRange ? "1" : "0"}, {}};
+            replacements[pathTracedOf(inShadowRange)] = pixelShader(device.Get(), shaders::SunLight, "sun-light-path-traced", defines);
+        }
 
         // Last, so it marks a complete pipeline.
         optionsBuffer = makeConstantBuffer(device.Get(), sizeof(ShaderOptions), "Creating the sun shadow options");
@@ -121,15 +136,17 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, co
 
     // The ray-traced shadow at the depth's size, once Direct3D 12 has traced one; until then the
     // game's shadows stay. The rays trace the main view only, not a smaller camera's (a mirror's).
+    // Path tracing shades the sun with the rays' shadow alone (path_tracing.hpp).
+    const bool pathTraced = composition.pathTracing && ray_tracing::pathTracingRuns() && viewportFillsTarget(context);
     ID3D11ShaderResourceView* rayTraced{};
-    if (composition.rayTracedShadows && depth && viewportFillsTarget(context))
+    if ((composition.rayTracedShadows || pathTraced) && depth && viewportFillsTarget(context))
     {
         const auto size = contact_shadow_trace::depthSize(depth.Get());
         rayTraced = ray_tracing::sunShadow(static_cast<UINT>(size[0]), static_cast<UINT>(size[1]));
     }
 
     // Beyond the shadow range there is no shadow map to soften.
-    if (!composition.contactShadows && !(composition.softShadows && sun.isShadowMapped) && !rayTraced) return false;
+    if (!composition.contactShadows && !(composition.softShadows && sun.isShadowMapped) && !rayTraced && !pathTraced) return false;
 
     const auto scene = constant_capture::pixelShaderReads<game_constants::SceneConstants>(context);
     const auto light = constant_capture::pixelShaderReads<game_constants::SunLightConstants>(context);
@@ -163,7 +180,10 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, co
     context->PSGetShaderResources(ContactShadowSlot, 1, gameView.GetAddressOf());
     context->PSGetShaderResources(RayTracedSlot, 1, gameRayTracedView.GetAddressOf());
     context->PSGetConstantBuffers(OptionsSlot, 1, gameOptions.GetAddressOf());
-    context->PSSetShader(replacements[replacementOf(isShadowMapped, sun.reflectsSky)].Get(), nullptr, 0);
+    // Path tracing reflects the sky itself (ray_tracing::reflection): its pass leaves the sky's reflection out,
+    // and while the rays have no shadow yet the game's pass draws without it.
+    const auto replacement = pathTraced && rayTraced ? pathTracedOf(sun.isShadowMapped) : replacementOf(isShadowMapped, sun.reflectsSky && !pathTraced);
+    context->PSSetShader(replacements[replacement].Get(), nullptr, 0);
     context->PSSetShaderResources(ContactShadowSlot, 1, &contactShadow);
     context->PSSetShaderResources(RayTracedSlot, 1, &rayTraced);
     context->PSSetConstantBuffers(OptionsSlot, 1, optionsBuffer.GetAddressOf());
@@ -205,6 +225,7 @@ void configure(const Configuration& configuration) noexcept
         .softShadows = configuration.effects.runs(Effect::SoftShadows),
         .contactShadows = configuration.effects.runs(Effect::SunContactShadows),
         .rayTracedShadows = configuration.effects.runs(Effect::RayTracedShadows),
+        .pathTracing = configuration.settings.pathTracing.on && configuration.effects.runs(Effect::GlobalIllumination),
         .sun = configuration.settings.sun,
         .rayTraced = configuration.settings.rayTracedShadows,
         .onlyContactShadows = configuration.diagnostics.onlyScreenSpaceShadows,
@@ -244,9 +265,12 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
     try
     {
         const auto* sun = shader.row();
-        if (!sun || sun->pass != GamePass::Sun) return false;
+        if (!sun || (sun->pass != GamePass::Sun && sun->pass != GamePass::SkySpecular)) return false;
 
         const auto composition = latch.frame();
+        // Indoors, the sky's specular alone: path tracing's reflections take its place.
+        if (sun->pass == GamePass::SkySpecular)
+            return composition.pathTracing && ray_tracing::pathTracingRuns() && viewportFillsTarget(context);
 
         return drawSun(context, call, *sun, shader.object(), composition);
     }

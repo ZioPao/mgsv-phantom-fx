@@ -87,7 +87,7 @@ struct LampLightConstants
     float axis[3], padding2;                                   // c5: the way a spot points
     float falloff[4];                                          // c6: see game_lights::Falloff
     float cutOffCosine, penumbraScale, coneExponent, padding3; // c7: a spot's cone; y 1 / its penumbra
-    float specularScale, padding4[3];                          // c8
+    float specularScale, diffuseScale, padding4[2];            // c8: z the shadow's strength
     float padding5[2][4];                                      // c9-c10
 };
 
