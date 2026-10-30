@@ -10,13 +10,13 @@ cmake --preset release
 cmake --build --preset release
 ```
 
-CMake downloads MinHook, the DLSS SDK v310.9.1 headers, loader and `nvngx_dlss.dll`, and the
+CMake downloads MinHook, the DLSS SDK v310.9.1 headers, loader, `nvngx_dlss.dll` and `nvngx_dlssd.dll`, and the
 ReShade 6.8.0 add-on headers with the Dear ImGui header, each pinned by commit and checked by
 SHA-256. Frame generation needs the Streamline SDK 2.14.1, which only its release archive carries:
 the first configure downloads it once (about 280 MB, checked by SHA-256) and keeps the headers,
 license and x64 runtime files. FSR needs the AMD FSR SDK 2.3.0's API headers and AMD's signed
 Direct3D 12 DLLs, pinned by commit and checked by SHA-256 like the rest (about 66 MB). The add-on is
-written to `build/release/PhantomFX.addon64` together with `nvngx_dlss.dll`, Streamline's `sl.*.dll`
+written to `build/release/PhantomFX.addon64` together with `nvngx_dlss.dll`, `nvngx_dlssd.dll`, Streamline's `sl.*.dll`
 and `nvngx_dlssg.dll`, and AMD's `amd_fidelityfx_*_dx12.dll`.
 It builds with `/W4 /WX`. The version comes from `project()` in `CMakeLists.txt`: it fills the
 add-on's version resource (`src/version.rc.in`), which ReShade shows and logs, and the first line
@@ -107,7 +107,7 @@ This produces `build/release/PhantomFX-<version>.zip` and its `.sha256` checksum
 
 | Path in the ZIP | What |
 | --- | --- |
-| `PhantomFX.addon64`, `nvngx_dlss.dll` | The add-on and the DLSS model, beside `mgsvtpp.exe` |
+| `PhantomFX.addon64`, `nvngx_dlss.dll`, `nvngx_dlssd.dll` | The add-on and the DLSS and Ray Reconstruction models, beside `mgsvtpp.exe` |
 | `sl.interposer.dll`, `sl.common.dll`, `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`, `nvngx_dlssg.dll` | NVIDIA Streamline and the frame generation model |
 | `amd_fidelityfx_loader_dx12.dll`, `amd_fidelityfx_upscaler_dx12.dll`, `amd_fidelityfx_framegeneration_dx12.dll` | AMD FSR upscaling and frame generation |
 | `PhantomFX/README.md`, `CHANGELOG.md`, `LICENSE` | Player documentation and the add-on's license |
@@ -276,7 +276,7 @@ Into the game folder (`steamapps\common\MGS_TPP`), beside `mgsvtpp.exe`:
 | `dxgi.dll` | `ReShade64.dll` from the official `ReShade_Setup_6.8.0_Addon.exe` (6.8.0.2155, add-on build; the setup is a zip) |
 | `ReShade.ini` | Minimal: no effects, Generic Depth and Effect Runtime Sync disabled |
 | `PhantomFX.addon64` | This build |
-| `nvngx_dlss.dll` | This build (the DLSS SDK's, copied beside the add-on) |
+| `nvngx_dlss.dll`, `nvngx_dlssd.dll` | This build (the DLSS SDK's, copied beside the add-on) |
 
 ReShade writes `ReShade.log`, the add-on `PhantomFX.log` and `PhantomFX.ini`. Uninstall by deleting
 these files.
@@ -1544,6 +1544,52 @@ works with either upscaler, and switching between DLSS and FSR frame generation 
   one; a gap resets it. Frames without upscaling turn generation off. The generation context follows
   the back buffer's size, format and HDR, and is made again after a resize.
 
+## Ray Reconstruction
+
+With **Ray Reconstruction** (`ray_reconstruction=1`, under the upscaler, DLSS only) NVIDIA's DLSS Ray
+Reconstruction takes DLSS's place: one model that denoises the ray-traced light and upscales, as NVIDIA's
+DLSS-RR Integration Guide (DLSS SDK 310.9.1) describes it. It runs for a frame when it is asked for, the
+scene is float (see "HDR"), NGX says this PC runs it, and the ray-traced scene's kick made its guides
+that frame, so with the global illumination, the ray-traced shadows or the ray-traced lights on;
+otherwise DLSS runs, and the upscaler's status line says why.
+
+- **On Direct3D 12** (`src/features/upscaling/ray_reconstruction.cpp`). NGX's Direct3D 11 path for it
+  crashed on its first evaluation, inside NVIDIA's code, in both the SDK's 310.9.1 and the driver's
+  310.9.16 (2026-10-30): `NGXCubinD3D11::MarkBufferResourceAsAccessWrittenD3D11` (its
+  `ngx_cubin_d3d11.cpp`, line 950) reads a dispatch's list of written resources, which only a later
+  virtual call sets, through a null pointer (an access violation reading `0x34`). Neither the camera's
+  matrices nor another add-on following NGX made a difference. So, as FSR, it runs on a native Direct3D 12
+  device on the game's GPU: the upscaler's colour, depth, motion and output and the guides are shared
+  textures, Direct3D 12 waits on a shared fence for Direct3D 11's inputs and Direct3D 11 for its output.
+  The colour is the float scene's linear light (`IsHDR`), the depth the hardware's (reversed-Z), the
+  motion per render pixel; NVIDIA's default preset; world-to-view and view-to-clip matrices for row
+  vectors (`camera::StreamlineCamera`), which Streamline always passes; at least 32 jitter phases, as the
+  guide asks. Turning it off releases the feature and keeps NGX: shutting NGX down on Direct3D 12 broke
+  frame generation's feature on the presenter's device (Streamline: "NGX evaluate feature failed
+  0xbad00004" from that moment). A PC it cannot start on keeps DLSS for the session; the release ships
+  NVIDIA's release `nvngx_dlssd.dll` beside the add-on.
+- **Guides** (`GuideSource` in `ray_tracing.cpp`, at the kick, from the G-buffer at the render size): the
+  world-space normal with the roughness (the specular target's `x`) in `w`, `R16G16B16A16_FLOAT`, NGX's
+  packed roughness; the diffuse albedo, linear, `R8G8B8A8_UNORM`; the specular albedo, NVIDIA's
+  `EnvBRDFApprox2` of the game's specular colour at normal incidence (the material table's colour,
+  `g_MaterialTexture` row 0.25, times the specular target's intensity `y`, times the Fresnel table `g_lut1`
+  at a cosine of 1 for the material's F0, row 0.75), the roughness squared and the view angle, as the sun
+  pass works the angle out. Where the sky is: no normal or roughness, albedo 0.5, no specular albedo. The
+  sun pass's `t9` and `t10` give the tables (`indirect_light_pass::materialTables`).
+- **Noisy light for it** (`gi_renderer::Frame::forReconstruction`, `GIFrameConstants::reconstruction`).
+  Ray Reconstruction asks for samples apart at every render pixel, without other denoisers. While it
+  denoised the frame before (the upscaler counts its frames, `ray_tracing::reconstructed`), the kick
+  leaves the light and the shadows to it: the global illumination takes a sample a render pixel, one ray
+  (two on foliage) whatever the ray quality, its grid the render size, without NRD (not even made) or
+  `PrepareGuides`, and `CompositeLight` passes each render pixel's own rays' light on (`PerRenderPixel` in
+  `gi_light.hlsl`); the sun's shadow is each pixel's ray as it found the sun (`TraceSunShadows` writes the
+  output, AMD's denoiser is left out and starts over after); the lights' shadows are each pixel's rays'
+  share (`TraceLocalLightShadows` writes the output, the filter is left out). A frame it left to DLSS, or
+  none, turns the denoisers back on for the next. The global illumination's light is made again when its
+  grid changes. Its denoiser's debug views are off meanwhile. Measured on a 2560x1440 render (a base,
+  2026-10-30): the light 2.1 ms with NRD at half size, 1.8 ms a render pixel; the sun's shadows 2.8 to
+  3.4 ms with the denoiser, 1.4 ms without.
+
 ## HDR
 
 With `hdr=1` in `PhantomFX.ini` (a restart applies it) the game outputs HDR10 (`src/features/hdr/`). The
@@ -1952,6 +1998,9 @@ noise a pixel at a time (Epic's MegaLights left ReSTIR out for the same reason).
 Next step planned, once measured as needed: a history confidence for the denoiser from samples traced
 again with the last frame's random numbers (NRD's `IN_DIFF_CONFIDENCE`).
 
+With DLSS Ray Reconstruction denoising, the light takes a sample a render pixel and goes out without
+NRD (see "Ray Reconstruction").
+
 ### Smaller views
 
 The rays trace the main view only, one kick a frame. The intro's mirror is a camera of its own, drawn
@@ -2189,7 +2238,8 @@ With **Ray-traced shadows** on, the sun's shadow comes from rays traced through 
 shadow map, soft shadows and sun contact shadows. The scene runs for them with the global
 illumination's light on or off; its `Options::shadows` (`src/passes/ray_tracing/ray_tracing.cpp`) turns them on, and the
 light passes run only with `enabled`. Lamp contact shadows stay as they are: lamps are not ray
-traced here (see "Ray-traced lights").
+traced here (see "Ray-traced lights"). With DLSS Ray Reconstruction denoising, the rays go out without the
+denoiser (see "Ray Reconstruction").
 
 - **Rays** (`TraceSunShadows` in `src/features/ray_traced_shadows/gi_shadow.hlsl`). One ray a pixel at the render
   size, from the depth's world position towards a point on the sun's disc (uniform over the disc of
@@ -2386,6 +2436,7 @@ With **Ray-traced lights** on, the game's point and spot lights (lamps, floodlig
 the soldiers' flashlights) cast shadows from rays traced through the ray-traced scene, in place of
 their shadow maps or of none, and lights without specular get the game's. The scene runs for them on
 its own if neither the light nor the sun's shadows run. Lamp contact shadows are off while it is on.
+With DLSS Ray Reconstruction denoising, the rays go out without the filter (see "Ray Reconstruction").
 
 - **The game's lights** (24 pixel shaders, `SSLighting2_*` and `Lighting_*_NA`, point or spot, with or
   without a mask, specular and a shadow map; their checksums in `game_lights.hpp`). Two draws a light

@@ -42,6 +42,7 @@ More comparisons: [Previews](docs/PREVIEWS.md)
 ### Upscaling and frame rate
 
 - **DLSS:** DLAA and upscaling
+- **DLSS Ray Reconstruction:** denoises the ray-traced lighting and upscales, with any ray-traced effect on
 - **FSR:** Native AA and upscaling, FSR 4 on Radeon RX 7000 and 9000, FSR 3.1 elsewhere
 - **DLSS Frame Generation:** 2x to 6x, with NVIDIA Reflex
 - **FSR frame generation:** 2x, on any GPU
@@ -104,7 +105,7 @@ Photo mode: <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> to move, mouse t
 
 ## Uninstall
 
-Delete `PhantomFX.*`, the `PhantomFX` folder, `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `sl.*.dll` and `amd_fidelityfx_*.dll`. Uninstall ReShade.
+Delete `PhantomFX.*`, the `PhantomFX` folder, `nvngx_dlss.dll`, `nvngx_dlssd.dll`, `nvngx_dlssg.dll`, `sl.*.dll` and `amd_fidelityfx_*.dll`. Uninstall ReShade.
 
 ## Bugs
 
