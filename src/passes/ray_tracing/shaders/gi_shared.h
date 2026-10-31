@@ -203,9 +203,6 @@ struct GIFrameConstants
     // Ray cones for the textures' levels of detail (gi_common.hlsli, TextureLod): x the angle a pixel
     // spans, radians.
     float4 rayCone;
-    // How much of the traced reflection a forward surface keeps (the menu's Water and glass reflections): the
-    // water's own shader adds a sky reflection the trace cannot take out, so a full one would double.
-    float4 forwardReflections;
     // The upscaler's jitter in NDC as the depth was drawn (cPSScene c28, m_cameraCenterOffset): xy this
     // frame's, zw the last frame's.
     float4 jitter;
