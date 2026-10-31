@@ -1773,9 +1773,11 @@ the game's lights) is left alone until it runs.
   `R8G8B8A8_UNORM`). `g_lut2`, 64 x 16 x 16, goes to Direct3D 12 as 64 x 256, its slices one below the other
   (`SpecularTableAt`, `direct_light.hlsl`).
 - **What stays the game's.** Its shadow maps: 85 of its pixel shaders sample them (its lit particles,
-  glass, rivers and liquids, decals, forward models, the terrain's self-shadow), and the volumetric fog the
-  sun's for its light shafts. Its screen-space reflections' march, for water and glass. Its probe light in
-  the diffuse light target, which its exposure measures.
+  decals, forward models, the terrain's self-shadow; its glass and rivers take the rays' shadow
+  at their draws instead — see "Forward shadows"), and the volumetric fog the sun's for its light shafts.
+  Its screen-space reflections' march still runs on water and glass, where the traced reflection is added
+  over it and the game's cube map is bound black at the draw. Its probe light in the diffuse light target,
+  which its exposure measures.
 - **Cost** (2026-10-30, 2228x1254 rendered for 3840x2160): the light's line in the log,
   which holds the reflections and the lights, 4 to 5.7 ms, against about 2.4 ms with Ray Reconstruction
   alone. The budget has its own line: the reflections, the lights and adding their light.
@@ -2098,7 +2100,11 @@ Now, each frame:
 
 - **Rays** (`TraceLight`). 1, 2 or 4 (the global illumination's ray quality; Medium, 2, by default) from
   each pixel of a grid half the render size each way, cosine-weighted from the depth buffer's surface,
-  past copies of it. A ray that gets away takes the sky's light (`SkyRadiance`). A light pixel samples one
+  past copies of it. The surface's normal for the rays is the traced scene's own, from a ray from the eye
+  at the depth's point (`RayNormal`, the trace `ShadowSurfaceAt` makes for the shadow rays), and the
+  G-buffer's only where the scene lacks it: the G-buffer's normal carries the normal map, which the
+  render pixel's light is resolved against (`CompositeLight`), and sampling around it too bent the light
+  twice — a bump on a wall no light reached lit itself, in the direction it faced (2026-10-30). A ray that gets away takes the sky's light (`SkyRadiance`). A light pixel samples one
   render pixel of its 2 x 2, by depth (`DepthPickOf`): the nearest on one checkerboard colour, the
   farthest on the other, as half-resolution effects downsample depth. With the top left, as first built,
   a wire, a fence or a grass blade under a pixel wide had it one frame and what lay behind the next as the
@@ -2126,6 +2132,11 @@ Now, each frame:
   shadows' rays; a leaf lets half through from its far side) and one to a point or spot light picked in
   proportion to its light there (weighted reservoir sampling over the frame's lights, flashlights among
   them), times the hit's albedo (`HitAlbedo`).
+  The hit's normal is the G-buffer's where the camera sees it (`HitShadingNormal`), which carries the
+  normal map's detail the traced scene's triangles leave out, so the light turns on a bump as it does
+  for the game's own; elsewhere, and where that normal faces the other way, the triangle's own. Before,
+  every hit was lit with the flat triangle normal, and a normal-mapped surface's light read as coming
+  from the wrong side (`gi_hit_light.hlsli`; the path-traced reflections take it too).
   Nothing of the hit's own light comes from a history.
 - **Its bounce.** A cosine-weighted ray from the hit (a leaf's to its far side a third of the time,
   counting 1.5): the sky's light where it gets away, else the hash grid cell's where it lands, direct and
@@ -2485,7 +2496,8 @@ denoiser (see "Ray Reconstruction").
   inside the coarser rock behind for some, so the hidden bush's leaves showed as shadows on what lay
   behind (the shadow probe, 2026-10-24: the camera's ray met leaves 0.1 to 1.4 m away, the game's
   surface 2.4 to 5.9 m). Found, the shadow ray leaves its exact
-  point on the triangle, from the side facing the light, lifted off it along the normal by 16 float
+  point on the triangle, lifted off it towards the eye (thin cut-out and leaves keep the light's side,
+  so they do not shadow themselves) by 16 float
   steps of the point's largest coordinate (`LiftOffTriangle`; coordinates under 128 m count as 128),
   and nothing near it is skipped. That is about 2 mm at 1,200 m from the map's origin, where the game's
   maps reach. The point comes from the triangle's corners and the ray is traced in the instance's own
@@ -2500,7 +2512,17 @@ denoiser (see "Ray Reconstruction").
   other frame, black blotches flickering on his face. Where the game
   drew something the scene lacks, or holds at another level of detail too far off, it leaves from
   the depth's point along the G-buffer's normal, offset by 2 cm plus 0.2% of the distance, skipping
-  copies of the surface just above it ("Copies of a surface" in `gi_common.hlsli`). Until 2026-10-24
+  copies of the surface just above it ("Copies of a surface" in `gi_common.hlsli`). A triangle that only
+   shares the depth's point is not the surface the game drew, and its rays are not the game's shade
+   either: a wall's dimples, drawn as a normal map, have the flat wall's facets in the scene, and a facet
+   turned towards a distant opening's sun lit the dimple's rim where the game has shade (2026-10-30). So a
+   surface must also face within 60 degrees of the G-buffer's normal (`SceneSurfaceNormalCosine`, the
+   shadow ray starts view's blue) to be the one the rays leave from. The fallback's offset goes towards
+   the eye, never along the side facing the light: facing flips the normal where the light is behind the
+   surface, and the start 2 cm behind the wall then met its back, which the sun's rays pass
+   (`StopsShadowRay`), so a wall's dimples with their normals turned from the sun took its light where the
+   game has shade — the sun's map has the wall's outside lit, so nothing else darkened them (2026-10-30).
+   Until 2026-10-24
   every ray left that way: a lamp's hard shadow showed the skip taking a character pressed to a wall
   for a copy of the wall, light through his back in patches ragged along the wall's bumpy normals.
 - **Cut-out meshes.** A model mesh the game alpha-tests (FMDL alpha bits 5 and 7, see "Scene objects",
@@ -2616,9 +2638,9 @@ denoiser (see "Ray Reconstruction").
 - **Shadow ray starts debug view** (Diagnostics, Debug view "Shadow ray starts"; needs the ray-traced
   shadows and an upscaler, with the probe). `ShadowStartColor` colours where each pixel's shadow rays
   leave (`ShadowSurfaceAt`) against the depth's point and the G-buffer's normal: grey from the depth's
-  point (no scene surface near), blue on a scene surface facing over 60 degrees away from the game's
-  normal, red where the scene's surface lies nearer the eye than the game's, cyan where farther (clear
-  up to 5 mm, full from 3 cm); clear on the game's surface. Built 2026-10-25 for the detached shelf
+  point (no scene surface near, or one facing over 60 degrees away from the game's normal and so not
+  the surface the game drew), red where the scene's surface lies nearer the eye than the game's, cyan
+  where farther (clear up to 5 mm, full from 3 cm); clear on the game's surface. Built 2026-10-25 for the detached shelf
   shadow ("Ray-traced scene", "Characters").
 - **Open: terrain blocking for one refresh** (2026-10-23, after the copy race was fixed). With the camera
   still, the probe showed a pixel's sun ray blocked by the terrain 140 m away (66 m above the pixel) for
@@ -2636,6 +2658,66 @@ Not handled:
   outside its visibility managers, the object brush and the model list.
 - Decals all cast as cut-out geometry until the game's own per-mesh pass masks are read (see "Scene
   objects", mesh flags): some decals the game never casts may shadow the surface under them.
+
+### Forward shadows
+
+The forward pass's reflective surfaces — rivers and other liquids (`Prim_TppRiverModelShHnmRpl`) and glass
+(`fox3dfw_glass`) — blend over the lit scene after the resolve (`src/features/forward_shadows/`). They are in
+neither the G-buffer nor the ray-traced scene, and their own pixel shaders sample the game's shadow atlas
+(`inShadowTexture`, `t14` for the river and `t8` for glass; the comparison sampler `s15`), so with the
+ray-traced shadows on they kept the map's shadow while the rays' lit everything else: a character's soft
+shadow stood on a river where the ground had the rays'.
+
+At such a draw the add-on leaves the map's shadow out and puts the rays' in its place. It binds a 1x1 white
+texture to the shadow map's slot and a comparison sampler that always passes (`COMPARISON_ALWAYS`) to `s15`,
+draws the game's surface as it was, and then draws it once more with its own pixel shader, which reads the
+traced shadow at the pixel (`ray_tracing::sunShadow`) and multiplies the scene by it (a blend of `ZERO` and
+`SRC_COLOR`) where the surface's depth just passed. The pass takes no setting: it runs while the ray-traced
+shadows or path tracing do, and the map's shadow it replaces is the one those already replaced elsewhere.
+
+The glass is not one shader: a run's frame log holds fourteen glass pixel shaders, and only `fox3dfw_glass`
+spells "glass" that the row's name test looked for. `forwardRow` matches the three families the game has - the
+forward glass (`fox3dfw_glass…`), the effects' glass (`Prim_TppFxGlassMat…`) and the metallic bacteria glass
+(`tpp3dfw_MetalicBacteriaGlass…`) - by their source names. The last two share one row whose slots are not
+named, since no shader of theirs was ever dumped: at their draws the pass finds the shadow map as the largest
+square depth texture the draw binds and the reflection as its only cube view, logs what it found once, and
+keeps the game's shadow where it finds neither.
+
+Path tracing's reflections take the cube map's place: at the same draw the game's cube map is bound black (a
+1x1 black cube at its slot) and the traced reflection (`ray_tracing::reflection`) is added over the pixels
+the surface drew (an additive blend, depth tested where the surface's depth just passed; not scaled by the
+rays' shadow, since what the surface mirrors is the scene's light, not the sun's alone).
+
+The reflection and the shadow at a water pixel are the water's own, traced off the water's surface: at each
+such draw the pass also writes the pixel's depth and a mask (`forwardDepth`, `forwardSurface`, 1 for a river
+or a liquid, 0.5 for glass) into its own targets, and the kick copies last frame's into the ray tracing's
+shared textures (`t23`/`t24`), at the same pixels. `TraceReflections` (reflections.hlsl) overrides the
+G-buffer's surface where the mask is set: the world position from the forward depth, reconstructed with last
+frame's projection-view because the guides are a frame old, the normal of its slope (from the depth's
+neighbours), the roughness (0.1 water, 0.15 glass) and the sea's `WaterReflectance` at the eye's angle,
+scaled. The water's own normal map is not in the trace: the surface the reflection leaves from is the plane
+its depth gives, so the reflection does not ripple with the water.
+
+Two shadows: the frame's shadow texture (`sunShadow`) stays the G-buffer's surface — the bed under a river —
+so the deferred lighting over the water keeps shadows under it; the water's own sun shadow is a ray from the
+water surface traced in the same pass (`forwardShadow`, `u97`), one sample a pixel seeded by the pixel alone,
+and the forward multiply reads that one, dimming the surface only to 0.95: a water surface is mostly the sky
+reflected in it, so blocking the sun hardly changes it — the shadow is the bed's, a dark patch through the
+water column.
+
+Caustics: where the mask is set, `TraceSunShadows` (gi_shadow.hlsl) also multiplies the bed's sun by a
+procedural pattern of two wave sets crossing in world space, scrolling with the frame, faded by how deep the
+water is (`CausticPattern`, up to 1.8 the sun). The trace has no ripples to focus the light, and the bed's
+shadow otherwise reads as the sharp one the rays give.
+
+The guides are a frame old at the same pixels, and the water is drawn after the upscaler, so nothing downstream
+can move its reflection: the draw rebuilds the water point that was at the pixel, takes where this frame's ray
+meets that point's plane, and samples the traced reflection where that point was on the last frame's screen
+(`Reflection` in `forward_shadows_shaders.hpp`, with both cameras the kick hands over). A scatter over a few
+pixels was tried and dropped; the plane is a single tap.
+The water's reflection is one sample a pixel, with no denoiser before the forward pass reads it, and it is
+not averaged: the whole of its grain comes from that. The water's ripple normals stay the game's own, not in
+the trace.
 
 ## Ray-traced lights
 
@@ -2948,7 +3030,10 @@ the add-on only checks a flag on each full-screen draw.
 - **Options** apply from the frame after the next present. A resolve without normals, with sizes
   that differ or without `cPSScene` keeps the game's diffuse light and logs the reason once.
 - **Diagnostics.** "SSILVB only" writes the light without the game's diffuse light and draws the
-  resolve with `shaders::Show`: the bounce alone, as light before the albedo. Both views write the
+  resolve with `shaders::Show`: the bounce alone, as light before the albedo. "Reflections only" draws the same
+  resolve the same way with the traced reflection in that slot instead: what the rays reflected at each pixel,
+  which the resolve otherwise adds to the specular light — the water and the glass included, so a surface that
+  reflects nothing is black. Both views write the
   resolve's alpha, `sqrt(luminance / 32)`, which exposure, bloom and depth of field read from the
   scene target (`CopyReductionX4`, `DOF_ScatterBakeFirst`); with 1 there, they blurred the view.
 

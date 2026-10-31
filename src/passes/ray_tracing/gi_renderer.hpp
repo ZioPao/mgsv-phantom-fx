@@ -49,6 +49,7 @@ struct Textures
     ID3D11Texture2D* reflection{};
     ID3D11Texture2D* reflectionDistance{};
     ID3D11Texture2D* reflectionMap{};
+    ID3D11Texture2D* forwardShadow{}; // R16_FLOAT, the sun's shadow on the forward surfaces themselves (u97)
     // And its lamps (direct_light.hlsl): the material guides (the specular colour and the translucency; the light
     // through the leaves' floor, F0 and the anisotropy; R8G8B8A8_UNORM), the game's specular table (64 x 256,
     // R8G8B8A8_UNORM), the masks' atlas (null without masks) and the lamps' diffuse and specular light
@@ -59,6 +60,12 @@ struct Textures
     ID3D11Texture2D* lampMasks{};
     ID3D11Texture2D* lampDiffuse{};
     ID3D11Texture2D* lampSpecular{};
+    // The forward pass's reflective surfaces' guides, one frame old (forward_shadows): their depth
+    // (R32_FLOAT, reversed-Z) and where one drew (R8_UNORM, 1 a river or a liquid, 0.5 glass); null without
+    // them. TraceReflections overrides the G-buffer's guides with them at the mask's pixels (roughness, and
+    // the specular albedo by Schlick's fresnel).
+    ID3D11Texture2D* forwardDepth{};
+    ID3D11Texture2D* forwardSurface{};
     // And its hits (gi_hit_light.hlsli): each row of the game's material table as its specular colour (256 x 1,
     // R16G16B16A16_FLOAT), and the sky from every side (sky_capture.hpp), null until captured.
     ID3D11Texture2D* materialSpecular{};
@@ -122,6 +129,7 @@ struct Frame
     bool isPathTraced{};
     // Self-lit meshes' light: its scale from the game's units, and the most radiance one lights others with, so scaled.
     float emissionScale{}, emissionCap{};
+    float forwardReflections{0.6f}; // How much of the traced reflection a river, a liquid or a glass keeps
     // The sun's ray-traced shadow into textures.shadow; the game's shadow map range (cPSLight c8.x,
     // c8.y, c6.x, and 1 once known) and the tangent of the sun's angular radius.
     bool traceShadows{};

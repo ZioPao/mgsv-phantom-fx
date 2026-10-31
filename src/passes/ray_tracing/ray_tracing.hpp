@@ -104,6 +104,10 @@ ID3D11ShaderResourceView* reflection(UINT width, UINT height) noexcept;
 ID3D11ShaderResourceView* reflectionMap(UINT width, UINT height) noexcept;
 // Their hit distance, R16_FLOAT, for Ray Reconstruction (ray_reconstruction.hpp). Null while off.
 ID3D11Texture2D* reflectionDistance(UINT width, UINT height) noexcept;
+// The sun's shadow on the forward pass's reflective surfaces themselves (reflections.hlsl, g_ForwardShadow):
+// R16_FLOAT, 1 where the sun reaches the water. The shadow texture (sunShadow) holds the G-buffer's surface —
+// the bed under a river — which is what the deferred lighting over the water needs. Null while off.
+ID3D11ShaderResourceView* forwardShadow(UINT width, UINT height) noexcept;
 // The point and spot lights' light the last kick path traced (direct_light.hlsl), at the render size,
 // R16G16B16A16_FLOAT times the exposure.
 struct LampLight

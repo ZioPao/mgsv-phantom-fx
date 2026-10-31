@@ -2,17 +2,78 @@
 
 ## Unreleased
 
+- **Rivers, liquids and glass take the ray-traced sun shadow.** They are drawn forward, over the lit scene,
+  and sample the game's shadow map alone, so a character's shadow stood on a river where the ground had the
+  rays'. Their draws now leave the map's shadow out and multiply the surface by the traced shadow instead.
+- **Path-traced reflections on rivers, liquids and glass.** Their cube map is bound black at the draw and
+  the traced reflection is added in its place, at 0.3 of the water's and the glass's reflectance. It is traced
+  off the water's own surface: each forward draw writes its depth and a mask, the next frame's rays take them
+  up, and reflect from the water's position, its slope's normal and the sea's reflectance — so what reflects is
+  the scene around the surface, not the riverbed under it. The guide is a frame old, so the draw samples the
+  reflection where this frame's water point was on the last frame's screen: it follows the camera instead of
+  dragging a frame behind it.
+- **Every glass, not only `fox3dfw_glass`.** The game has fourteen glass pixel shaders, and the table matched
+  the eight whose source names spell "glass": the effects' glass (`Prim_TppFxGlassMat…`) and the metallic
+  bacteria glass (`tpp3dfw_MetalicBacteriaGlass…`) kept the map's shadow and the game's cube map, with nothing
+  traced at their pixels. All three families are matched now, and the ones whose slots the table does not name
+  have their shadow map and cube found in what their draw binds.
+- **Caustics on the bed under a river.** The water's waves focus the sun where their ridges meet, so the bed's
+  shade is a web of bright lines, not the sharp shadow the rays alone give. The rays have no ripples to form
+  them, so the bed's sun light takes a procedural pattern instead, animated and faded by the water's depth.
+- **The sun's shadow on rivers, liquids and glass leaves the water, and the bed under it keeps its own.** The
+  rays started from the G-buffer's surface behind the water — the bed — and at the sun's grazing angles met
+  the bed's own bumps: meter-wide patches of shade where the game has none. The water's surface now gets a
+  shadow ray of its own, traced with the reflections, but only dims to 0.95: a water surface is mostly the
+  sky reflected in it, and blocking the sun hardly changes that. The shadow you see is the bed's, a dark patch
+  through the water column: the frame's shadow texture stays the bed's, so the deferred lighting over the
+  water keeps its shadows under the surface instead of losing them to the water's.
+- **The sun's contact shadows run beside the ray-traced ones.** The rays alone leave a pixel here and there
+  reading lit where the game's shadow map has shade — thin lines where geometry meets the ground — and the
+  game had the sun's contact shadows for exactly that. They are forced on with ray-traced shadows, whatever
+  their switch says.
+- **Ray-traced shadows leave from the surface the game drew.** A triangle that only shares the depth's
+  point — a wall's dimples drawn as a normal map, a stand-in's facet, another level of detail — could take
+  the shadow ray off its own normal, and a facet turned towards a distant opening's sun came back lit where
+  the game has shade, so the dimples' rims glowed on a shadowed wall. A surface now also has to face within
+  60 degrees of the G-buffer's normal to be where the rays leave (the shadow ray starts view's blue).
+- **Ray-traced shadows leave from the depth's point when the scene's triangle lies off it.** A recessed
+  facet — a dimple the game draws as a normal map, another level of detail — could pass the depth's
+  tolerance and the normal check, and its ray left from behind the wall the camera sees, lit where the
+  game has shade. The ray now leaves the depth's point (skipping copies, as where the scene lacks the
+  surface) whenever the triangle lies more than a centimetre off it; a triangle on the same plane, as a
+  character's folds are, keeps its own point.
+- **Ray-traced shadows no longer start behind an opaque surface.** When the sun lay behind a surface, the
+  shadow ray's lift went along the light's side — a few millimetres behind the wall — so the ray never met
+  the wall and the spot read lit where the game's shadow map has shade. The lift now goes towards the eye
+  for opaque geometry (thin cut-out and leaves keep the light's side, so they don't shadow themselves).
+- **Ray-traced shadows start on the camera's side of the surface.** Where a surface's light is behind it,
+  the shadow ray start was offset 2 cm along the light's side — behind the wall — and the sun's rays passed
+  the wall's back face, lighting dents whose normals turned towards the sun. The offset now goes towards
+  the eye, so the wall's own front face is in the ray's way.
+- **Normal maps turn the traced light.** The ray-traced scene holds only the triangles' own normals, so a
+  hit on a normal-mapped surface was lit as if it were flat: its bounce and the reflections read as coming
+  from the wrong side of the bump. Where the camera sees the hit, the light now uses the G-buffer's normal,
+  normal map and all; elsewhere, and where that normal faces away, the triangle's as before.
+- **The global illumination no longer bends the light twice on a bump.** Its rays left around the G-buffer's
+  normal, which carries the normal map, and the render pixel's light was resolved against that normal too: a
+  bump on a wall no light reached lit itself from its own tilted hemisphere, so holes and dents in a shaded
+  wall glowed in the direction they faced. The rays now leave the traced scene's own surface (the triangle's
+  normal, as the shadow rays do), and the normal map turns the resolved light alone, once.
+- **Path tracing's sun shadow reaches the sun pass.** With path tracing on, the sun was still shadowed
+  by the game's shadow map: the traced shadow was drawn but the sun pass was not handed it, because the
+  handover was gated on the ray-traced shadows that path tracing replaces. The sun now takes the traced
+  shadow alone, as the path tracing tip says.
 - **The sea.** A new **Sea** switch under atmosphere replaces the sea around Mother Base: waves from a real
   ocean spectrum that rise and roll with the wind, bigger in rain, with foam where their crests break. It is
   lit like the rest of the world, so it reflects the sky, the sun and the platforms and takes their shadows;
   with path tracing its reflections are traced. The ray-traced light under the platforms now bounces off the
   water instead of the sky. A **Waves** slider sets the wind against the weather's. It costs about 0.3 ms.
-- **Path tracing.** A new **Path tracing** switch under lighting, with DLSS Ray Reconstruction and the
-  global illumination on: reflections are traced on every surface, sharp on smooth ones and spread on
-  rough ones, in place of the game's screen-space and sky reflections (water and glass keep the game's;
-  in rain, wet surfaces take the traced ones), and the sun and every lamp and flashlight light the scene
-  from the path tracer, each light with its own soft shadow where lights overlap, keeping the game's own
-  highlights on its materials. Each surface reflects
+- **Path tracing.** A new **Path tracing** switch under lighting, with the global illumination on: reflections
+  are traced on every surface, sharp on smooth ones and spread on rough ones, in place of the game's
+  screen-space and sky reflections (water and glass take their own, in place of the game's cube map; in rain,
+  wet surfaces take the traced ones), and the sun and every lamp and flashlight light the scene from the path
+  tracer, each light with its own soft shadow where lights overlap, keeping the game's own highlights on its
+  materials. Each surface reflects
   with the strength the game gives its material, and a **Reflections** slider makes them stronger or
   weaker. Rays now see what the camera sees: surfaces they hit keep their roughness, shine and normal maps,
   so shiny things stay shiny in reflections and reflections show other reflections. Glowing bulbs and signs
