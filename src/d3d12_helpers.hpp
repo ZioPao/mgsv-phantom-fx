@@ -7,6 +7,8 @@
 #include <d3d12.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
+#include <cstdlib>
+#include <string>
 #include <utility>
 
 // Direct3D 12 helpers shared by the global illumination, FSR and the presenter: barriers, and the
@@ -52,8 +54,40 @@ struct Device12
     Microsoft::WRL::ComPtr<ID3D12Device> wrapper, native;
 };
 
+// Development only: an Agility SDK runtime for this process, chosen from the environment (the game's exe
+// cannot export the two symbols the Agility SDK reads). `PHANTOM_FX_D3D12_CORE` is the folder holding
+// `D3D12Core.dll`, relative to the game's exe (".\\D3D12\\619\\"); `PHANTOM_FX_D3D12_VERSION` is its
+// D3D12SDKVersion (619). ID3D12SDKConfiguration::SetSDKVersion needs Windows Developer Mode, must run
+// before the process's first Direct3D 12 device (a later call removes it), and leaves the OS runtime in
+// place when it fails. Players never set either variable; the add-on's own gate decides on the runtime
+// the OS gives it. `log` says what happened; returns whether the runtime was asked for.
+inline bool selectRuntime()
+{
+    static bool done{};
+    if (std::exchange(done, true)) return false;
+
+    char path[512]{}, version[16]{};
+    if (!GetEnvironmentVariableA("PHANTOM_FX_D3D12_CORE", path, sizeof(path))) return false;
+    if (!GetEnvironmentVariableA("PHANTOM_FX_D3D12_VERSION", version, sizeof(version))) return false;
+
+    const CLSID sdkConfiguration{0x7cda6aca, 0xa03e, 0x49c8, {0x94, 0x58, 0x03, 0x34, 0xd2, 0x0e, 0x07, 0xce}};
+    ID3D12SDKConfiguration* configuration{};
+    if (FAILED(D3D12GetInterface(sdkConfiguration, IID_PPV_ARGS(&configuration))) || !configuration)
+    {
+        log(std::string("Direct3D 12 runtime ") + version + " not selected: this Direct3D 12 has no SDK configuration interface.");
+        return false;
+    }
+
+    const auto result = configuration->SetSDKVersion(static_cast<UINT>(std::atoi(version)), path);
+    configuration->Release();
+    log(std::string("Direct3D 12 runtime ") + version + " at " + path + (SUCCEEDED(result) ? " selected." : " not selected (0x" + hex(static_cast<std::uint32_t>(result)) + "): Developer Mode is off?"));
+    return SUCCEEDED(result);
+}
+
 inline Device12 createDevice12(ID3D11Device* device11)
 {
+    selectRuntime();
+
     Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;
     check(device11->QueryInterface(IID_PPV_ARGS(&dxgi)), "Finding the DXGI device");
     Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
