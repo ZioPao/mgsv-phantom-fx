@@ -276,6 +276,12 @@ if(BUILD_TESTING)
     target_compile_options(scene_contents_tests PRIVATE /W4 /WX /permissive- /utf-8)
     add_test(NAME scene_contents COMMAND scene_contents_tests)
 
+    add_executable(omm_layout_tests tests/omm_layout_tests.cpp src/passes/ray_tracing/omm_layout.cpp)
+    target_include_directories(omm_layout_tests PRIVATE src)
+    target_compile_features(omm_layout_tests PRIVATE cxx_std_20)
+    target_compile_options(omm_layout_tests PRIVATE /W4 /WX /permissive- /utf-8)
+    add_test(NAME omm_layout COMMAND omm_layout_tests)
+
     add_executable(light_choice_tests tests/light_choice_tests.cpp src/features/ray_traced_lights/light_choice.cpp)
     target_include_directories(light_choice_tests PRIVATE src)
     target_compile_features(light_choice_tests PRIVATE cxx_std_20)

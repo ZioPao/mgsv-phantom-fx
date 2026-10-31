@@ -157,16 +157,22 @@ the D3D12 sRGB view the shader samples. A compute kernel can write the OC1 bitst
 the OMM array's `InputBuffer`:
 
 1. CPU, at BLAS creation (`gi_scene.cpp:323`): per triangle, compute UV area x texture size to pick a
-   subdivision level, e.g. `level = clamp(floor(log4(texelsPerTriangle / 2)), 0, 6)` — about two
-   texels per micro-triangle, capped at level 6 (4096 micro-triangles, 512 B per 2-state block,
-   1 KB per 4-state block) and at a per-mesh budget;
-2. CPU: hash the triangle's three UVs + level + format and dedupe. Grass and bush cards in this game
-   reuse UVs heavily, so most blocks are shared; a triangle whose three corners are all above the
-   threshold gets the `FULLY_OPAQUE` special index and no block at all, all below gets
-   `FULLY_TRANSPARENT`;
-3. GPU kernel: per block, per micro-triangle, sample the alpha at the micro-triangle's centroid at
-   the mip whose footprint matches the micro-triangle, write the bit at its OC1 (barycentric
-   space-filling curve) position;
+   subdivision level, `level = clamp(floor(log4(texels / 2)), 0, 6)` — about two texels per
+   micro-triangle, capped at level 6 (4096 micro-triangles, 1 KB per 4-state block). Over the
+   mesh's byte budget every level drops by one until it fits, or the mesh keeps the shader test
+   (`omm_layout.cpp`, `levelOf` and `layOut`);
+2. CPU: dedupe on the exact bits of the triangle's three UVs, in their order, plus its level: grass
+   and bush cards reuse UVs heavily, so most blocks are shared. A reordered triangle maps
+   barycentrics to the texture differently and gets its own block. Blocks go finest first, each on
+   a 4-byte boundary, so the kernel writes whole words of one block. The CPU never sees a texel, so it
+   cannot tell a fully clear or fully solid triangle from its corners: every textured triangle gets a
+   block here, and the special indices are the kernel's to write (3);
+3. GPU kernel: a thread per micro-triangle walks the level's N x N cells (`OmmCellMicroTriangle` in
+   `shaders/gi_omm.h`, shared with the layout's tests), samples the alpha at the micro-triangle's
+   centroid at the mip whose footprint matches it, and writes its two bits at its place on the curve
+   (`OmmIndex`, the Vulkan spec's reference code; LSB first within each byte). A block whose states all
+   come out transparent or all opaque then has its triangles' index entries rewritten to
+   `FULLY_TRANSPARENT` (-1) or `FULLY_OPAQUE` (-2); its bytes stay in the array, unused;
 4. barrier, then build the OMM array (`BuildRaytracingAccelerationStructure`) and then the BLAS in
    the same list, before the BLAS build.
 
