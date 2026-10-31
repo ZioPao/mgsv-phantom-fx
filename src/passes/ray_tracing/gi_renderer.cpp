@@ -527,6 +527,8 @@ void start(ID3D11Device* device11, HANDLE sharedFence, bool allowMicromaps)
     if (state) return;
 
     auto s = std::make_unique<State>();
+    // The runtime first: selecting another one discards the debug layer and DRED set on the one before.
+    selectRuntime();
     // PHANTOM_FX_D3D12_DEBUG asks the Direct3D 12 debug layer for its messages, which dumpMessages writes
     // when a failure stops the renderer (a development aid; the layer must sit beside D3D12Core.dll).
     if (GetEnvironmentVariableA("PHANTOM_FX_D3D12_DEBUG", nullptr, 0))
@@ -535,6 +537,15 @@ void start(ID3D11Device* device11, HANDLE sharedFence, bool allowMicromaps)
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))) && debug)
         {
             debug->EnableDebugLayer();
+            // PHANTOM_FX_D3D12_GBV adds GPU-based validation: resource states and out-of-bounds reads
+            // checked as the GPU runs, at a large cost in frame time.
+            ID3D12Debug1* debug1{};
+            if (GetEnvironmentVariableA("PHANTOM_FX_D3D12_GBV", nullptr, 0) && SUCCEEDED(debug->QueryInterface(IID_PPV_ARGS(&debug1))))
+            {
+                debug1->SetEnableGPUBasedValidation(TRUE);
+                debug1->Release();
+                log("Direct3D 12 GPU-based validation enabled.");
+            }
             debug->Release();
             log("Direct3D 12 debug layer enabled.");
         }
@@ -556,6 +567,18 @@ void start(ID3D11Device* device11, HANDLE sharedFence, bool allowMicromaps)
     const auto d3d12 = createDevice12(device11);
     s->wrapper = d3d12.wrapper;
     check(d3d12.native.As(&s->device), "Finding Direct3D 12 ray tracing");
+    // The debug layer's messages kept until a failure dumps them: room for a long session's, without the
+    // informational ones that would crowd out the error.
+    if (ID3D12InfoQueue* queue{}; GetEnvironmentVariableA("PHANTOM_FX_D3D12_DEBUG", nullptr, 0) && SUCCEEDED(s->device->QueryInterface(IID_PPV_ARGS(&queue))))
+    {
+        queue->SetMessageCountLimit(1u << 20);
+        D3D12_MESSAGE_SEVERITY quiet[]{D3D12_MESSAGE_SEVERITY_INFO, D3D12_MESSAGE_SEVERITY_MESSAGE};
+        D3D12_INFO_QUEUE_FILTER filter{};
+        filter.DenyList.NumSeverities = static_cast<UINT>(std::size(quiet));
+        filter.DenyList.pSeverityList = quiet;
+        queue->AddStorageFilterEntries(&filter);
+        queue->Release();
+    }
     D3D12_FEATURE_DATA_D3D12_OPTIONS5 options{};
     s->device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options, sizeof(options));
     if (options.RaytracingTier < D3D12_RAYTRACING_TIER_1_1) throw std::runtime_error("The GPU or its driver cannot trace rays from compute shaders (DXR 1.1).");
@@ -610,8 +633,13 @@ void dumpMessages()
     log("Direct3D 12 device removed reason: 0x" + hex(static_cast<std::uint32_t>(state->device->GetDeviceRemovedReason())) + ".");
 
     ID3D12InfoQueue* queue{};
-    if (FAILED(state->device->QueryInterface(IID_PPV_ARGS(&queue)))) return;
-    for (UINT64 i = 0; i < queue->GetNumStoredMessages(); ++i)
+    if (FAILED(state->device->QueryInterface(IID_PPV_ARGS(&queue))))
+    {
+        log("Direct3D 12 debug: no info queue (the debug layer is not on this device).");
+        queue = nullptr;
+    }
+    else log("Direct3D 12 debug: " + std::to_string(queue->GetNumStoredMessages()) + " messages stored.");
+    for (UINT64 i = 0; queue && i < queue->GetNumStoredMessages(); ++i)
     {
         SIZE_T size{};
         if (FAILED(queue->GetMessage(i, nullptr, &size))) continue;
@@ -627,15 +655,31 @@ void dumpMessages()
     ID3D12DeviceRemovedExtendedData* dred{};
     if (SUCCEEDED(state->device->QueryInterface(IID_PPV_ARGS(&dred))) && dred)
     {
-        D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT crumbs{};
-        if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&crumbs)))
+        // Each list's operations (D3D12_AUTO_BREADCRUMB_OP numbers) and, where the list was left
+        // unfinished, the labels gi_scene's builds carry near the operation the GPU never completed.
+        ID3D12DeviceRemovedExtendedData1* dred1{};
+        D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 crumbs{};
+        if (SUCCEEDED(dred->QueryInterface(IID_PPV_ARGS(&dred1))) && SUCCEEDED(dred1->GetAutoBreadcrumbsOutput1(&crumbs)))
             for (auto* node = crumbs.pHeadAutoBreadcrumbNode; node; node = node->pNext)
             {
-                const auto last = node->pLastBreadcrumbValue && *node->pLastBreadcrumbValue < node->BreadcrumbCount ? *node->pLastBreadcrumbValue : 0;
+                const auto last = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+                const bool unfinished = last < node->BreadcrumbCount;
                 std::string ops;
-                for (UINT i = last; i < node->BreadcrumbCount && i < last + 8; ++i) ops += std::to_string(node->pCommandHistory[i]) + " ";
-                log("Direct3D 12 DRED: breadcrumb " + std::to_string(last) + " of " + std::to_string(node->BreadcrumbCount) + ", ops " + ops);
+                for (UINT i = 0; i < node->BreadcrumbCount && i < 400; ++i) ops += (i == last ? "[" : "") + std::to_string(node->pCommandHistory[i]) + (i == last ? "] " : " ");
+                log("Direct3D 12 DRED: list " + hex(reinterpret_cast<std::uintptr_t>(node->pCommandList)) + (unfinished ? " UNFINISHED" : " done") + ", completed "
+                    + std::to_string(last) + " of " + std::to_string(node->BreadcrumbCount) + ", ops " + ops);
+                if (!unfinished) continue;
+                for (UINT k = 0; k < node->BreadcrumbContextsCount; ++k)
+                {
+                    const auto& context = node->pBreadcrumbContexts[k];
+                    if (context.BreadcrumbIndex + 12 < last || context.BreadcrumbIndex > last + 6 || !context.pContextString) continue;
+                    std::string text;
+                    for (const auto* c = context.pContextString; *c; ++c) text += static_cast<char>(*c);
+                    log("Direct3D 12 DRED:   at " + std::to_string(context.BreadcrumbIndex) + ": " + text);
+                }
             }
+        else log("Direct3D 12 DRED: no breadcrumbs.");
+        if (dred1) dred1->Release();
 
         D3D12_DRED_PAGE_FAULT_OUTPUT fault{};
         if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&fault)))
@@ -648,7 +692,8 @@ void dumpMessages()
 
         dred->Release();
     }
-    queue->Release();
+    else log("Direct3D 12 DRED: not on this device.");
+    if (queue) queue->Release();
 }
 
 void stop() noexcept

@@ -200,6 +200,7 @@ private:
     };
 
     // The frame's recorded work.
+    static constexpr std::uint32_t NoPostbuild = ~0u;
     struct Build
     {
         BlasId id{};
@@ -241,10 +242,10 @@ private:
 
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputsOf(const Blas& blas, bool update) const;
     // Bakes the structure's micromaps from its textures as they are now (or unlinks them when none takes
-    // any) and moves it to the room its new inputs need, its build recorded this frame with
-    // `postbuild` (a queued one keeps waiting for its first); false when this frame has no room for it.
+    // any) and moves it to the room its new inputs need, its build recorded this frame without a
+    // compacted size; false when this frame has no room for it.
     bool prepareMicromaps(BlasId id);
-    bool finishMicromaps(BlasId id, std::uint32_t postbuild);
+    bool finishMicromaps(BlasId id);
     void releaseMicromaps(const LinkedMicromaps& linked);
     D3D12_GPU_VIRTUAL_ADDRESS micromapAddress(std::uint64_t offset) const;
     D3D12_GPU_VIRTUAL_ADDRESS address(const Blas& blas) const;
