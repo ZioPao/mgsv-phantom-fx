@@ -34,11 +34,16 @@ enum class GamePass : std::uint8_t
     Sky,
     SkyDome,         // The sky's painted dome and its clouds, drawn over it
     Sea,             // The game's sea, drawn over the lit scene after the sky (Primitive_TppFourierOcean*)
-    ForwardWater,    // Rivers and liquids: the forward pass's water, blended over the lit scene; its shadow at `shadowSlot`
+    ForwardWater,    // Rivers and other liquids, drawn forward over the lit scene (glass and mirrors are Glass, Mirror)
     ReflectionMask,  // The screen-space reflections' mask from the depth, normals and roughness; reads the scene's depth at t0
     ReflectionAdd,   // The screen-space reflections blended over the scene
+    Glass,           // Glass, drawn forward, some before ReflectionAdd, most among the particles after it
+    Mirror,          // A mirror, drawn forward: a painted picture of the room, or the mirror camera's
+    Exposure,        // The exposure's measure, in the list that follows the scene
     Reduce,          // The scene's quarter-size copy that bloom and the lens flares start from
     Copy,            // A plain copy the game makes anywhere
+    DofBake,         // The depth of field's first half-size pass: colour and blur radii from the scene and the depth
+    DofFar,          // The depth of field's far layer, blended under the near layer
     DofComposite,    // The depth of field over its copy of the scene
     MotionBlurBake,  // The velocity and depth the motion blur's gathers read, baked at half size
     MotionBlur,      // The motion blur's gather, twice at half size; a copy then blends it over the scene
@@ -63,11 +68,14 @@ struct GameShader
     bool hasRainReflection{};
     bool hasSprite{};     // Sky: the sun's or the moon's sprite
     bool isFarSea{};      // Sea: the far sea, a plane 5 m below the near sea (its material constants' c0.z)
-    std::uint32_t shadowSlot{}; // ForwardWater: the game's shadow map's texture slot (t14, t8 for glass)
-    std::uint32_t cubeSlot{};   // ForwardWater: its reflection cube map's slot (t2, t11 for glass)
-    // ForwardWater: what its guide's mask writes for the rays traced at its pixels: 1 a river or a
-    // liquid, 0.5 glass (TraceReflections reads it for the surface's roughness and specular albedo)
+    // ForwardWater: the game's shadow map's texture slot (t14 for the rivers and the liquids) and their
+    // reflection cube map's slot (t2), with the value the rays' guide writes (1 a river or a liquid).
+    std::uint32_t shadowSlot{};
+    std::uint32_t cubeSlot{};
     float guideValue{1.0f};
+    // Glass, Mirror: the texture slot of what it reflects with: a cube map, or a mirror's picture.
+    std::uint8_t reflectionSlot{};
+    bool hasColorTexture{}; // Glass: its t0 is a colour with its cover in alpha, not a cover in red
 };
 
 inline constexpr GameShader GameShaders[]{
@@ -139,15 +147,22 @@ inline constexpr GameShader GameShaders[]{
     {.pass = GamePass::Sea, .name = "Primitive_TppFourierOceanFill", .checksum = "51218f2d1ccc9d0f9cf159653ed41f5d", .isFarSea = true},
     {.pass = GamePass::Sea, .name = "Primitive_TppFourierOceanFill", .checksum = "9291bd0ac69ab6cdeae6244f778c4ddb", .isFarSea = true},
 
-    // The forward pass's reflective surfaces: rivers and other liquids ("Prim_TppRiverModelShHnmRpl"),
-    // and glass ("fox3dfw_glass"). They blend over the lit scene and keep the game's shadow map, whose
-    // light the rays' replaces (`shadowSlot`, "Forward shadows" in docs/DEVELOPMENT.md).
-    {.pass = GamePass::ForwardWater, .name = "Prim_TppRiverModelShHnmRpl", .checksum = "1f6f0ff669cc08d207f827ce3133a98c", .shadowSlot = 14, .cubeSlot = 2},
-    {.pass = GamePass::ForwardWater, .name = "fox3dfw_glass", .checksum = "79fd24a8572a82381e6520e817c7b9f3", .shadowSlot = 8, .cubeSlot = 11,
-        .guideValue = 0.5f},
+    {.pass = GamePass::Glass, .name = "fox3dfw_glass", .checksum = "03b2d74787e2defc6676a36051d3d81f", .reflectionSlot = 2},
+    {.pass = GamePass::Glass, .name = "fox3dfw_glass_color", .checksum = "8e6578bdefc44955cd0ab5cccc22c81f", .reflectionSlot = 2, .hasColorTexture = true},
+    {.pass = GamePass::Glass, .name = "fox3dfw_glass_commonref", .checksum = "00abb586fa0a2df41655a4065c133e5d", .reflectionSlot = 11},
+    {.pass = GamePass::Glass, .name = "fox3dfw_glass_commonref_color", .checksum = "85ac1703bd4b64d492078bfdc7413cb0", .reflectionSlot = 11, .hasColorTexture = true},
+    {.pass = GamePass::Glass, .name = "fox3dfw_glass_prim", .checksum = "450ae12fe44e642628bb821cb30518f5", .reflectionSlot = 2},
+    {.pass = GamePass::Glass, .name = "fox3dfw_glass_color_prim", .checksum = "80103d7646750f789a2cdfe40a0ade2c", .reflectionSlot = 2, .hasColorTexture = true},
+    {.pass = GamePass::Glass, .name = "fox3dfw_glass_commonref_prim", .checksum = "046923d579a4abbf7ad6317a48127cf2", .reflectionSlot = 11},
+    {.pass = GamePass::Glass, .name = "fox3dfw_glass_cnmref_col_prim", .checksum = "fd324a37839b9c695a91f0d73aac7331", .reflectionSlot = 11, .hasColorTexture = true},
+    {.pass = GamePass::Mirror, .name = "fox3dfw_parallax_refrection", .checksum = "46a340cbba1237547c5e162312a59f1d", .reflectionSlot = 0},
+    {.pass = GamePass::Mirror, .name = "fox3dfw_parallax_refrection_prim", .checksum = "1b3f595b05c25f9b4be89e8c4429ad07", .reflectionSlot = 0},
 
+    {GamePass::Exposure, "Tonemap_Lum_Lacc", "e86626849058330a6cb46dc3c7e405d8"},
     {GamePass::Reduce, "CopyReductionX4", "e5b80b0a4d737e50533f9a058ffdca42"},
     {GamePass::Copy, "CopyRenderBuffer", "9f93a957f1e21656e0d86bf112b71d6d"},
+    {GamePass::DofBake, "DOF_ScatterBakeFirst", "2ef2adeb0c715ce006f6d9fab08b3737"},
+    {GamePass::DofFar, "DOF_ScatterCompositeFar", "052b3dcbe0ef2e6160ac6580f868e057"},
     {GamePass::DofComposite, "DOF_ScatterCompositeFinal", "d1462a415f8e79dba14db617c576407d"},
     {GamePass::MotionBlurBake, "MotionBlurBakeVelocityDepth", "d89d8bcef5a286dee3f697d3aae068fa"},
     {GamePass::MotionBlur, "MotionBlurMcGuire", "475283f0d10c84d3c1b47e2ba153c916"},

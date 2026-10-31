@@ -23,8 +23,8 @@
 
 // The forward pass's reflective surfaces' guides (forward_shadows): where water drew, and how near it is, a
 // frame old. The bed under it takes the sun through the water's waves, which the trace has no ripples for.
-Texture2D<float> g_Forward_Depth : register(t26);
-Texture2D<float> g_Forward_Surface : register(t27);
+Texture2D<float> g_Forward_Depth : register(t28);
+Texture2D<float> g_Forward_Surface : register(t29);
 
 // Two wave sets crossing in world space, scrolling apart: the light a water surface focuses where their
 // ridges meet. Narrow, since a focus is. A stand-in for the caustics the trace cannot form, scaled by how

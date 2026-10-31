@@ -23,10 +23,13 @@ struct Textures
     ID3D12Resource* reflectionMap{};
     ID3D12Resource* lampDiffuse{};
     ID3D12Resource* lampSpecular{};
-    // The forward surfaces' guides (t23, t24 in reflections.hlsl), one frame old; null without them.
-    ID3D12Resource* forwardDepth{};   // R32_FLOAT, reversed-Z
-    ID3D12Resource* forwardSurface{}; // R8_UNORM, where one drew: 1 a river or a liquid, 0.5 glass
-    ID3D12Resource* forwardShadow{};  // R16_FLOAT, the sun's shadow on the surfaces themselves (u97)
+    ID3D12Resource* surfaceDepth{}; // Glass and mirrors (glass.hpp); null while not traced
+    ID3D12Resource* surfaceNormal{};
+    ID3D12Resource* surfaceReflection{};
+    // The rivers' and liquids' guides (forward_shadows) and their own sun shadow, a frame old; null without.
+    ID3D12Resource* forwardDepth{};   // R32_FLOAT, the surface's reversed-Z depth
+    ID3D12Resource* forwardSurface{}; // R8_UNORM, where a river or a liquid drew
+    ID3D12Resource* forwardShadow{};  // R16_FLOAT, the sun's shadow on the surface itself (u97)
 };
 
 // Their views in the frame's tables, by the slots reflections.hlsl and direct_light.hlsl give them.
@@ -35,4 +38,6 @@ void describe(gi_d3d12::Descriptors& descriptors, const Textures& textures);
 void recordLamps(gi_d3d12::Recorder& recorder, std::uint32_t width, std::uint32_t height);
 // The reflections, which read the light's cache: after its passes.
 void recordReflections(gi_d3d12::Recorder& recorder, std::uint32_t width, std::uint32_t height);
+// Those of glass and mirrors: in the frame's tables, after the game drew them.
+void recordSurfaceReflections(gi_d3d12::Recorder& recorder, std::uint32_t width, std::uint32_t height);
 }
