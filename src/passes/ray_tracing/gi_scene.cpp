@@ -696,12 +696,21 @@ Scene::Stats Scene::stats() const
     result.blasCapacity = blasAllocator.capacity();
     result.geometriesUsed = static_cast<std::uint32_t>(rowAllocator.usedSize());
     result.micromapStructures = result.micromapBlocks = 0;
+    result.micromapTriangles = result.micromapBlockBytes = 0;
     for (const auto& blas : structures)
         if (blas.live && blas.micromaps)
         {
             ++result.micromapStructures;
             result.micromapBlocks += blas.micromaps->blocks;
+            result.micromapTriangles += blas.micromaps->triangleCount;
+            for (std::size_t level = 0; level < result.micromapLevels.size(); ++level)
+            {
+                result.micromapLevels[level] += blas.micromaps->levels[level];
+                result.micromapBlockBytes += std::uint64_t{blas.micromaps->levels[level]} * omm_layout::blockBytes(static_cast<std::uint32_t>(level));
+            }
         }
+    result.micromapLinks = micromapLinks;
+    result.micromapRelinks = micromapRelinks;
     result.micromapPoolUsed = micromapAllocator.usedSize();
     return result;
 }
@@ -869,7 +878,14 @@ bool Scene::prepareMicromaps(BlasId id)
     // The array is built this frame; the structure links it in the next (finishMicromaps), so the array
     // build never shares a frame with the structure it belongs to.
     if (blas.micromaps) releaseMicromaps(*blas.micromaps);
-    if (blocks) blas.micromaps = std::move(linked);
+    if (blocks)
+    {
+        linked.triangleCount = triangles;
+        linked.levels = array.histogram;
+        if (blas.micromaps) ++micromapRelinks;
+        ++micromapLinks;
+        blas.micromaps = std::move(linked);
+    }
     else blas.micromaps.reset();
     blas.pendingLink = true;
     return true;

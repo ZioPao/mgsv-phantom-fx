@@ -1079,6 +1079,11 @@ Health health()
     return {};
 }
 
+std::string micromapStatus()
+{
+    return gi_renderer::micromapStatus();
+}
+
 std::string status()
 {
     std::string text = engine_scene::status() + "; " + gi_textures::status();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "passes/ray_tracing/gi_d3d12.hpp"
+#include "passes/ray_tracing/omm_layout.hpp"
 #include "passes/ray_tracing/scene_memory.hpp"
 #include "passes/ray_tracing/shaders/gi_shared.h"
 #include "range_allocator.hpp"
@@ -130,7 +131,11 @@ public:
         std::uint64_t poolUsed{}, poolCapacity{}, blasUsed{}, blasCapacity{};
         std::uint32_t geometriesUsed{};
         std::uint32_t micromapStructures{}, micromapBlocks{}; // Structures with micromaps, and their blocks
+        std::uint64_t micromapTriangles{};                   // Triangles the blocks cover
         std::uint64_t micromapPoolUsed{};
+        std::uint64_t micromapBlockBytes{};                  // The blocks' own bytes, padding included
+        std::array<std::uint32_t, omm_layout::MaxLevel + 1> micromapLevels{};
+        std::uint32_t micromapLinks{}, micromapRelinks{};     // This session
     };
     Stats stats() const;
 
@@ -148,6 +153,8 @@ private:
         std::uint64_t poolOffset{}, poolBytes{};
         std::uint64_t arrayOffset{}, arraySize{};
         std::uint32_t blocks{};
+        std::uint32_t triangleCount{};
+        std::array<std::uint32_t, omm_layout::MaxLevel + 1> levels{}; // Blocks at each level
         std::vector<D3D12_RAYTRACING_GEOMETRY_TRIANGLES_DESC> triangles;
         std::vector<D3D12_RAYTRACING_GEOMETRY_OMM_LINKAGE_DESC> linkages;
         std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries;
@@ -274,7 +281,7 @@ private:
     bool micromapsOn{};
     bool micromapLogged{}; // The first link's line is in the log
     bool micromapLinked{};  // A structure has linked micromaps this session (PHANTOM_FX_OMM_ONCE)
-    std::uint32_t micromapLinks{}; // Links made this session, relinks included
+    std::uint32_t micromapLinks{}, micromapRelinks{}; // Links made this session, relinks included
     ComPtr<ID3D12Resource> micromaps;
     // The array builds' own scratch, never the scene's: their place among the scene's builds is what
     // the in-game hang pointed at (docs/opacity-micromaps.md).

@@ -157,6 +157,9 @@ void stop() noexcept;
 // asked for (PHANTOM_FX_D3D12_DEBUG) and a failure is about to stop the renderer.
 void dumpMessages();
 bool started() noexcept;
+// The micromaps' state and coverage for the diagnostics menu: whether they run, why not, and what the
+// blocks cost. Empty before the renderer starts.
+std::string micromapStatus();
 
 // Records and submits the frame: waits for frame.waitValue on the shared fence, signals
 // frame.signalValue when the output is written. Throws on Direct3D 12 errors.

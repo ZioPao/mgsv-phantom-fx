@@ -508,6 +508,7 @@ void drawDiagnostics(const upscaler::Status& state)
             "Where the GPU and Direct3D 12 run them (DXR 1.2, Shader Model 6.9), cut-out meshes such as leaves and fences carry opacity "
             "micromaps baked from their textures, and the hardware decides most of each ray's alpha test. This leaves the whole test to "
             "the shaders, for comparison. Switching it rebuilds the ray-traced scene. The scene view's line says whether micromaps run.");
+        if (const auto micromaps = ray_tracing::micromapStatus(); !micromaps.empty()) fxui::note(Tone::Dim, micromaps);
     }
     if (changed) core::applyDiagnostics(options);
 

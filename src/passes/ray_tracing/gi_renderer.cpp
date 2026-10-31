@@ -1489,6 +1489,30 @@ std::string lightProbe()
     return lightProbeText;
 }
 
+std::string micromapStatus()
+{
+    if (!state) return {};
+
+    const auto& s = *state;
+    const auto stats = s.scene->stats();
+    const auto kilobytes = [](std::uint64_t bytes) { return std::to_string((bytes + 512) / 1024) + " KB"; };
+    const auto share = [&](std::uint64_t part, std::uint64_t whole) {
+        return whole ? std::to_string(part * 1000 / whole / 10) + "." + std::to_string(part * 1000 / whole % 10) + "%" : std::string("-");
+    };
+
+    std::string text = s.micromapState;
+    if (!s.micromaps) return text;
+
+    text += "\nstructures " + std::to_string(stats.micromapStructures) + " (" + std::to_string(stats.micromapLinks) + " linked, "
+        + std::to_string(stats.micromapRelinks) + " relinked)";
+    text += "\ntriangles " + std::to_string(stats.micromapTriangles) + " of " + std::to_string(s.triangles) + " traced (" + share(stats.micromapTriangles, s.triangles) + ")";
+    text += "\nblocks " + std::to_string(stats.micromapBlocks) + ":";
+    for (std::size_t level = 0; level < stats.micromapLevels.size(); ++level)
+        if (stats.micromapLevels[level]) text += " L" + std::to_string(level) + " " + std::to_string(stats.micromapLevels[level]);
+    text += "\nblocks' bytes " + kilobytes(stats.micromapBlockBytes) + ", pool " + kilobytes(stats.micromapPoolUsed) + " of "
+        + kilobytes(gi_scene::Scene::MicromapPoolBytes) + ", mean " + (stats.micromapBlocks ? std::to_string(stats.micromapBlockBytes / stats.micromapBlocks) : "0") + " B";
+    return text;
+}
 std::string status()
 {
     if (!state) return {};
