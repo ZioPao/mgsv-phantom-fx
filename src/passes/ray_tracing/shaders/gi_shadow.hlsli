@@ -149,10 +149,11 @@ float FFX_DNSR_Shadows_ReadHistory(float2 uv)
 // The scene's own surface where a ray from the eye through the pixel meets it near the depth's point: its
 // exact point and its triangle's normal, from which a ray leaves past that very surface (LiftOffTriangle),
 // so nothing near it needs skipping.
-// Where the game drew something the scene lacks or holds at another level of detail, the depth's point
-// and the G-buffer's normal, with copies of the surface skipped (gi_common.hlsli). Until 2026-10-24
-// every ray left that way: the skip took a character pressed to a wall for a copy of the wall, and
-// light went through him, ragged along the wall's bumpy normals.
+// Where the game drew something the scene lacks, holds at another level of detail, or only shares a depth
+// with (a hole the game draws as a normal map, a stand-in's facet), the depth's point and the G-buffer's
+// normal, with copies of the surface skipped (gi_common.hlsli). Until 2026-10-24 every ray left that way:
+// the skip took a character pressed to a wall for a copy of the wall, and light went through him, ragged
+// along the wall's bumpy normals.
 struct ShadowSurface
 {
     float3 position;
@@ -160,6 +161,19 @@ struct ShadowSurface
     bool exact;    // On the scene's own surface
     SceneHit hit;  // Diagnostics (the probe): the eye's ray's hit on it
 };
+
+// How far the scene's surface may face from the game's normal and still be the surface the rays leave:
+// the shadow ray starts view's blue, 60 degrees (ShadowStartColor). A triangle that only shares the depth's
+// point is not what the game drew there, and its rays left lit where the game has shade: a wall's dimples,
+// drawn as a normal map, glowed from their own facets (2026-10-30).
+static const float SceneSurfaceNormalCosine = 0.5f;
+
+// How far off the depth's point the scene's triangle may lie and still be the surface the game drew
+// there. Recessed facets (a dimple the game draws as a normal map, another level of detail) pass the
+// depth's tolerance but let the ray out from behind the surface, lit where the game has shade.
+static const float SceneSurfacePointDistance = 0.01f;
+
+
 
 ShadowSurface ShadowSurfaceAt(float3 position, float3 gbufferNormal)
 {
@@ -189,9 +203,19 @@ ShadowSurface ShadowSurfaceAt(float3 position, float3 gbufferNormal)
     if (!(lengthSquared > 0.0f)) return surface;
 
     normal *= rsqrt(lengthSquared);
-    surface.normal = dot(normal, direction) > 0.0f ? -normal : normal;
-    surface.position = TrianglePoint(t, hit.barycentrics);
-    surface.exact = true;
+    float3 facing = dot(normal, direction) > 0.0f ? -normal : normal;
+    if (dot(facing, gbufferNormal) < SceneSurfaceNormalCosine) return surface;
+
+    // The ray leaves the triangle's own point only where that point is the depth's, as on a character's
+    // folds (the fold fix of 2026-10-24 rests on it). A triangle off it is a facet recessed in the surface
+    // the game drew — a dimple's wall, another level of detail — and its ray left from behind that
+    // surface, lit where the game has shade (2026-10-30). It keeps the triangle's normal, and the ray
+    // leaves the depth's point, skipping copies as where the scene lacks the surface.
+    float3 trianglePoint = TrianglePoint(t, hit.barycentrics);
+    bool onDepthPoint = distance(trianglePoint, position) <= SceneSurfacePointDistance;
+    surface.position = onDepthPoint ? trianglePoint : position;
+    surface.normal = facing;
+    surface.exact = onDepthPoint;
     surface.hit = hit;
     return surface;
 }
@@ -215,12 +239,30 @@ float3 LiftOffTriangle(float3 position, float3 normal)
     return position + normal * (steps * step * largest);
 }
 
-// A shadow ray's start towards `toLight`: from the surface's side facing the light, as leaves lit from
-// behind take light through them.
+// A shadow ray's start towards `toLight`: from the surface's side facing the light (`facing`), as leaves
+// lit from behind take light through them. Its point, though, is offset towards the eye, never along that
+// side's normal: where the light is behind the surface, facing flips away from the eye, and the start then
+// lay behind the wall the camera sees — where the sun's rays met its back, which they pass (StopsShadowRay)
+// — and a wall's dimples, whose normals point away from the sun, took sun the game has shade there
+// (2026-10-30). On the scene's own surface the lift does the same, unless the geometry is thin (cut-out,
+// leaves), which keeps the light's side so it does not shadow itself.
 void ShadowRayStart(ShadowSurface surface, float3 toLight, out float3 origin, out float3 facing, out float tolerance)
 {
     facing = dot(surface.normal, toLight) >= 0.0f ? surface.normal : -surface.normal;
-    origin = surface.exact ? LiftOffTriangle(surface.position, facing) : OffsetFromScreenSurface(surface.position, facing);
+    // Towards the eye, where a normal map has turned the fallback's normal past the camera.
+    float3 startSide = dot(surface.normal, surface.position - g_Frame.eye.xyz) > 0.0f ? -surface.normal : surface.normal;
+    if (surface.exact)
+    {
+        // An opaque surface the light lies behind blocks its own ray: lift towards the eye, so the ray
+        // meets the surface's front and is stopped — the shade a wall gives its own far side. Before, the
+        // lift went along the light's side, 2.8 mm behind the wall, and with nothing between it and the
+        // light the spot read lit where the game has shade (the shadow probe, 2026-10-30). Thin geometry —
+        // cut-out, leaves — keeps the light's side, so it does not shadow itself.
+        bool thin = surface.hit.hit
+            && (g_Geometries[FirstGeometry(g_Instances[surface.hit.instance]) + surface.hit.geometry].flags & (GI_GEOMETRY_CUT_OUT | GI_GEOMETRY_LEAF)) != 0;
+        origin = LiftOffTriangle(surface.position, thin ? facing : startSide);
+    }
+    else origin = OffsetFromScreenSurface(surface.position, startSide);
     tolerance = surface.exact ? 0.0f : CopyTolerance(surface.position);
 }
 
