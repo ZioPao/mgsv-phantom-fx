@@ -5,6 +5,7 @@
 #include "passes/ray_tracing/shaders/gi_omm.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -305,7 +306,7 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
         desc.DestAccelerationStructureData = address(blas);
         desc.SourceAccelerationStructureData = build.update ? address(blas) : 0;
         desc.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress() + build.scratch;
-        if (blas.use == Use::Static)
+        if (blas.use == Use::Static && !blas.micromaps)
         {
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC info{postbuildSizes->GetGPUVirtualAddress() + std::uint64_t{build.postbuild} * 8,
                 D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE};
@@ -746,6 +747,10 @@ bool Scene::linkMicromaps(BlasId id, std::uint32_t postbuild)
         linkage.OpacityMicromapArray = blasPool->GetGPUVirtualAddress() + linked.arrayOffset;
         linked.linkages.push_back(linkage);
 
+        // PHANTOM_FX_OMM_NOLINK builds the array and leaves the structure unlinked: tells a fault in the
+        // array's build from one in a structure that links it.
+        if (GetEnvironmentVariableA("PHANTOM_FX_OMM_NOLINK", nullptr, 0)) continue;
+
         const auto flags = geometry.Flags;
         geometry = {};
         geometry.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_OMM_TRIANGLES;
@@ -802,6 +807,14 @@ bool Scene::linkMicromaps(BlasId id, std::uint32_t postbuild)
         scratchUsed += arrayScratch;
     }
 
+    // The first structured linked, once, in the log: what micromaps cost and where they run.
+    if (blocks && !micromapLogged)
+    {
+        micromapLogged = true;
+        log("Opacity micromaps: the first structure linked, " + std::to_string(blocks) + " blocks for " + std::to_string(triangles)
+            + " triangles of " + std::to_string(layouts.size()) + " meshes, " + std::to_string(poolBytes / 1024) + " KB of the pool.");
+    }
+
     releases.push_back({signalValue, Pool::Structures, blas.offset, blas.size});
     if (blas.micromaps) releaseMicromaps(*blas.micromaps);
     if (blocks) blas.micromaps = std::move(linked);
@@ -837,8 +850,12 @@ D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS Scene::inputsOf(const Blas&
 {
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
     inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-    inputs.Flags = blas.use == Use::Static ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION
-                                           : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+    // A structure with micromaps is not compacted: a copy of it would keep pointing at its array, and the
+    // copies are a path the driver has to get right for both.
+    inputs.Flags = blas.use == Use::Static && !blas.micromaps
+        ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION
+        : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE
+            | (blas.use == Use::Static ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE);
     if (update) inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
     inputs.NumDescs = static_cast<UINT>(blas.geometries.size());
     inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;

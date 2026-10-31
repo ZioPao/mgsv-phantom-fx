@@ -1274,7 +1274,8 @@ Result render(const Frame& frame)
 
         // The opacity micromaps linked this frame: their states baked (a thread group a block, in runs
         // under the dispatch limit), then their triangles' indices, before their arrays and structures.
-        if (const auto& bakes = scene.micromapBakes(); !bakes.empty())
+        // PHANTOM_FX_OMM_NOBAKE skips both, for telling a fault in the kernels from one in the arrays.
+        if (const auto& bakes = scene.micromapBakes(); !bakes.empty() && !GetEnvironmentVariableA("PHANTOM_FX_OMM_NOBAKE", nullptr, 0))
         {
             constexpr std::uint32_t MaxGroups = D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
             for (const auto& bake : bakes)

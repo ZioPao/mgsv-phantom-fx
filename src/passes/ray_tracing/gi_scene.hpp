@@ -270,6 +270,7 @@ private:
 
     // Opacity micromaps: off until enableMicromaps; the pool, the frame's writes into it, bakes and arrays.
     bool micromapsOn{};
+    bool micromapLogged{}; // The first link's line is in the log
     ComPtr<ID3D12Resource> micromaps;
     RangeAllocator micromapAllocator{MicromapPoolBytes};
     std::vector<Upload> micromapUploads;
