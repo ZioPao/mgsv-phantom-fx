@@ -298,7 +298,7 @@ Mitigations in place: one link a frame, the array built a frame before its struc
 array build on its own scratch, no compaction of linked structures, no special indices, and
 `PHANTOM_FX_OMM_MAX_LINKS` to cap the links a session makes.
 
-**Open**: why a handful of linked structures is fine in isolation but a dozen or two is not. On Ampere
+**The dev build's per-pass timings settle what kind of fault it is**: the frame before the fault logs a normal 5.65 ms total (rays and hits' light 2.56, shadow rays 0.91, reflections 0.65), so it is not a pass that got slower — it is one frame that never finishes, a hang inside a single dispatch or build. A standalone shader with the add-on's exact flags (ACCEPT_FIRST_HIT_AND_END_SEARCH, FORCE_NON_OPAQUE) over 32 linked structures still survives, so the loop is not the plain one.\n\n**Open**: why a handful of linked structures is fine in isolation but a dozen or two is not. On Ampere
 OMM is emulated (only Ada has the engine), so the emulation degrading with linked structures is the
 working hypothesis. Next tool: PIX capture of the failing frame (not installed here), or a soak with a
 hard cap of four links per area, which is the shipping shape if the cap holds.
