@@ -26,7 +26,7 @@ resolves a ray/triangle hit as one of:
 | unknown-transparent / unknown-opaque (4-state only) | candidate returned, as a non-opaque hit is today |
 
 So every micro-triangle the mask can decide stops costing this project an `asm`-heavy shader
-iteration (`CutOutBlocks` in `src/passes/ray_tracing/shaders/gi_common.hlsli:426`), a texture
+iteration (`CutOutBlocks` in `src/passes/ray_tracing/shaders/gi_common.hlsli:455`), a texture
 fetch, a `TextureLod` (a cross product, a 2x2 determinant and a `log2`), and a loop round the
 `RayQuery`. That is the whole win: fewer SM iterations per hit, and the RTCore does the coverage
 test. NVIDIA measures roughly a 30% cut in traversal cost in alpha-test-heavy scenes and up to 2.3x
@@ -42,8 +42,8 @@ commit or carry on.
 | Today | With OMM |
 | --- | --- |
 | `GI_GEOMETRY_CUT_OUT` geometry is non-opaque in the BLAS (`gi_scene.cpp:335`), so its triangles reach the candidate loop | Same geometry, but built as `D3D12_RAYTRACING_GEOMETRY_TYPE_OMM_TRIANGLES` with an OMM index buffer and an OMM array |
-| `CutOutBlocks` samples the base texture's alpha at the cone's mip and compares to `alphaThreshold` (`gi_common.hlsli:426`) | Runs only for **unknown** micro-triangles; known ones never reach the shader |
-| `TraceClosest` / `SurfaceRayBlocked` loops over candidates (`gi_common.hlsli:486`, `:779`) | Unchanged, minus most iterations |
+| `CutOutBlocks` samples the base texture's alpha at the cone's mip and compares to `alphaThreshold` (`gi_common.hlsli:455`) | Runs only for **unknown** micro-triangles; known ones never reach the shader |
+| `TraceClosest` / `SurfaceRayBlocked` loops over candidates (`gi_common.hlsli:515`, `:817`) | Unchanged, minus most iterations |
 | Cut-out geometry without a texture blocks stochastically (`untextured`, `blocking`) | Unchanged: no texture, no OMM, no linkage |
 
 Nothing in `gi_renderer.cpp`'s passes changes beyond the shader template argument.
@@ -76,7 +76,7 @@ Windows SDK 10.0.26100 headers.
   shadows where precision does not matter.
 - OMM only turns transparent into a miss; **`RAY_FLAG_FORCE_OPAQUE` cannot turn it back into a
   hit.** Worth knowing because `TraceClosest(..., alphaTest = false, ...)` uses that path
-  (`gi_common.hlsli:517`); today no caller passes `false`, so nothing changes, but that branch would
+  (`gi_common.hlsli:546`); today no caller passes `false`, so nothing changes, but that branch would
   stop meaning "every triangle is opaque".
 
 ## 4. The blocker: which D3D12 runtime runs
@@ -146,9 +146,9 @@ per hit, so the ceiling is far lower.
 No asset pipeline, no offline tooling: OMMs have to be generated inside the add-on from what the
 scene already has. Everything needed is there:
 
-- vertices and `UV0` (`scene_description.hpp:65`, two halves in each pool vertex);
+- vertices and `UV0` (`scene_description.hpp:72`, two halves in each pool vertex);
 - the base texture already copied to D3D12, cut-out copies at up to 512 px
-  (`gi_textures.hpp:18`, `MaxCutOutSize`), in the game's own BC format;
+  (`gi_textures.hpp:13`, `MaxCutOutSize`), in the game's own BC format;
 - the threshold: `CutOutThreshold` 0.5 for rays (`GIGeometry::alphaThreshold`).
 
 **GPU bake, not CPU.** The textures are already BC-compressed and on the GPU (D3D11->D3D11 copy,
@@ -182,7 +182,7 @@ conservative variant; it lowers the known/unknown ratio but cannot lose the thin
 both; expose no knob, pick one.
 
 **Invalidation.** Cut-out textures are re-copied every 300 frames when the game streams a better mip
-(`gi_textures.cpp:22`). Bake against the 512-px copy the rays already see and do not re-bake on
+(`gi_textures.cpp:21`). Bake against the 512-px copy the rays already see and do not re-bake on
 finer streaming; if a copy is *replaced* (different source), mark the mesh's OMM dirty and rebuild
 that BLAS. With `PREFER_FAST_TRACE | ALLOW_COMPACTION` statics cannot be updated, so rebuild; the
 scene already has a build budget and a compaction queue for exactly this.
@@ -200,7 +200,7 @@ and fall back to the shader test per mesh above it.
 - `CutOutBlocks` stays as the unknown resolver, unchanged. Its `untextured`/`blocking` behaviour
   only ever applies to geometry with no OMM linkage, so it is untouched.
 - **Hair must not get OMMs.** `PassHair` already dims a ray by a fixed share for each hair layer it
-  crosses (`gi_common.hlsli:812`, `:842`); if an opaque micro-triangle commits without returning a
+  crosses (`gi_common.hlsli:850`, `:880`); if an opaque micro-triangle commits without returning a
   candidate, that partial transmittance silently disappears and hair goes hard-edged under lights.
   `GI_GEOMETRY_HAIR` geometry therefore gets no linkage (or `ALLOW_DISABLE_OMMS` + a disabled
   instance, which is worse: per-instance, not per-ray).
@@ -210,7 +210,7 @@ and fall back to the shader test per mesh above it.
 
 ## 7. Compile and build changes
 
-- DXC: the Windows SDK's `dxc` (1.8.2502 here) cannot compile SM 6.9; `CMakeLists.txt:165-179`
+- DXC: the Windows SDK's `dxc` (1.8.2502 here) cannot compile SM 6.9; `CMakeLists.txt:167-179`
   would need DXC 1.9+ (NuGet `Microsoft.Direct3D.DXC` or a GitHub release), pinned by SHA-256 like
   every other dependency, with `-T cs_6_9`. Mixed shader models are fine: only the shaders that
   declare OMM `RayQuery`s need 6.9, so the rest can stay `cs_6_5` while the change is validated.
