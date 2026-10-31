@@ -93,9 +93,10 @@ uint MicroTriangleState(GIOmmBlock block, Texture2D<float4> texture, float lod, 
         highest = max(highest, alpha);
     }
 
+    // 2-state: the centroid decides, with the corners only able to make it agree sooner.
     if (lowest >= block.threshold + GI_OMM_KNOWN_MARGIN) return GI_OMM_OPAQUE;
     if (highest < block.threshold - GI_OMM_KNOWN_MARGIN) return GI_OMM_TRANSPARENT;
-    return centre >= block.threshold ? GI_OMM_UNKNOWN_OPAQUE : GI_OMM_UNKNOWN_TRANSPARENT;
+    return centre >= block.threshold ? GI_OMM_OPAQUE : GI_OMM_TRANSPARENT;
 }
 
 // A thread group a block: its threads walk the level's cells, gather the states in shared memory and

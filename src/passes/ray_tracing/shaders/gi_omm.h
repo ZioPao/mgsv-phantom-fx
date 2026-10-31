@@ -31,7 +31,9 @@ using uint = std::uint32_t;
 #define GI_OMM_OPAQUE              1u
 #define GI_OMM_UNKNOWN_TRANSPARENT 2u
 #define GI_OMM_UNKNOWN_OPAQUE      3u
-#define GI_OMM_STATE_BITS          2u
+// 2-state: a micro-triangle is opaque or transparent, nothing left for the shader, which is what the
+// emulated path on pre-Ada hardware handles without hanging (docs/opacity-micromaps.md).
+#define GI_OMM_STATE_BITS          1u
 
 // A micro-triangle is known (opaque or transparent) only when every sample of it is this far from the
 // threshold; within it, the shader's own test decides (an unknown state).

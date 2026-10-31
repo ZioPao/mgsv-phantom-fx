@@ -760,7 +760,7 @@ bool Scene::prepareMicromaps(BlasId id)
         linked.poolOffset = *poolOffset;
         linked.poolBytes = poolBytes;
         for (std::uint32_t level = 0; level < array.histogram.size(); ++level)
-            if (array.histogram[level]) histogram.push_back({array.histogram[level], level, D3D12_RAYTRACING_OPACITY_MICROMAP_FORMAT_OC1_4_STATE});
+            if (array.histogram[level]) histogram.push_back({array.histogram[level], level, D3D12_RAYTRACING_OPACITY_MICROMAP_FORMAT_OC1_2_STATE});
 
         D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC arrayDesc{};
         arrayDesc.NumOmmHistogramEntries = static_cast<UINT>(histogram.size());
@@ -831,7 +831,7 @@ bool Scene::prepareMicromaps(BlasId id)
             const auto& block = array.blocks[b];
             descs[b].ByteOffset = block.byteOffset;
             descs[b].SubdivisionLevel = block.level;
-            descs[b].Format = D3D12_RAYTRACING_OPACITY_MICROMAP_FORMAT_OC1_4_STATE;
+            descs[b].Format = D3D12_RAYTRACING_OPACITY_MICROMAP_FORMAT_OC1_2_STATE;
             const auto& row = rows[blas.firstGeometry + linkedGeometries[array.blockMesh[b]]];
             records[b] = {block.uvs[0], block.uvs[1], block.uvs[2], block.level, row.texture, block.byteOffset, row.alphaThreshold, 0};
         }
