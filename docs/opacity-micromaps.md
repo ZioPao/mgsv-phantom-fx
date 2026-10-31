@@ -102,6 +102,27 @@ So the inbox 616 runtime has OMM for `TraceRay` (the 2025 release) but not SM 6.
 tier check alone over-promises: a device can report tier 1.2 and still refuse every shader that
 could use an OMM with inline tracing.
 
+**OMM needs no Developer Mode and no redistributable of its own.** A newer runtime was needed only
+because inline `RayQuery` met OMM late (SM 6.9), and selecting a runtime is what the Agility SDK
+mechanics govern. Developer Mode came up solely because `ID3D12SDKConfiguration::SetSDKVersion` — the
+only way to choose a runtime from inside someone else's process — requires it; the plan never needs it
+for players.
+
+**And the SM 6.9 requirement itself is now removable, on newer runtimes.** The specs added, in their
+v1.47 (26 Aug 2026), a pre-SM 6.9 opt-in: `D3D12_PIPELINE_STATE_FLAG_RAYQUERY_ALLOW_OPACITY_MICROMAPS_ON_PRE_SM69_SHADERS`
+(0x80; its state-object form `..._STATE_OBJECT_FLAG_...` is 0x800). Measured 2026-10-31 with a `cs_6_5`
+RayQuery pipeline:
+
+| runtime | `SHADER_MODEL` | flags `0x80` |
+| --- | --- | --- |
+| 616 (inbox) | 6.8 | **refused, `0x80070057`** |
+| 619 (retail, Feb 2026) | 6.9 | **refused, `0x80070057`** |
+| 620 (retail, Oct 2026) | 6.9 | **accepted** |
+
+So the flag is a 1.620 feature: it cannot rescue today's inbox 616, but it means the second `cs_6_9`
+kernel set and the DXC 1.9 download can be dropped once 1.620 is the floor. Until then the shipped
+build keeps both sets, and the gate stays as measured above.
+
 Also measured: the Windows SDK's DXC (1.8.2502) rejects `-T cs_6_9`, and `d3d12.h` in SDK 26100 is
 the pre-retail OMM shape (`ALLOW_OMM_UPDATE`, separate OMM postbuild info), with no
 `RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS`. DXC 1.9.2609 from the GitHub release compiles the shader
@@ -256,7 +277,7 @@ needs a second machine, not this one.
 | 1 | Bake: layout (`omm_layout.cpp`), the curve shared with HLSL (`shaders/gi_omm.h`), the kernels `BakeMicromaps` and `ResolveMicromapIndices` (`shaders/omm_bake.hlsl`, on the renderer's root signature: one raw view of the micromap pool at `u40`, byte offsets in the dispatch constants), tested on the CPU and on WARP (`omm_layout_tests`, `omm_bake_tests`) | done |
 | 2 | Scene (`gi_scene.cpp`): a 64 MB micromap pool made by `enableMicromaps`; a static structure keeps its cut-out meshes' coordinates and indices, and when their textures come or change (`setMaterial`) `linkMicromaps` lays them out, uploads the records, has the renderer dispatch the bake, builds the array and builds the structure again in new room, within the frame's budget (16 a frame); dormant until step 3 calls `enableMicromaps` | done |
 | 3 | Shaders: every ray query through `GI_RAY_QUERY` (`gi_common.hlsli`), which declares `RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS` with `GI_OPACITY_MICROMAPS`; every kernel built twice, the second set by DXC 1.9.2609 (pinned in `CMakeLists.txt`) at `cs_6_9`; `gi_renderer::start` takes that set and calls `enableMicromaps` only with DXR 1.2, Shader Model 6.9 and every kernel of the set built, else the first set and a reason in the scene view's line; diagnostics "No opacity micromaps" restarts the scene without. Checked 2026-10-31 on the RTX 3090: the inbox runtime refuses all 29 kernels of the second set, Agility 1.619.6 builds them all | done |
-| 4 | Dev probe exe with the Agility exports + `D3D12\D3D12Core.dll`, so the path can be exercised before the OS ships it | 0.5 day |
+| 4 | Test executable (not the add-on) with the Agility exports + `D3D12\D3D12Core.dll`, creating the device itself and running the scene code: bake, array, linked structure, one traced frame. No Developer Mode and no change to the game; the in-game path still needs either Developer Mode or an OS runtime at 619+ | 1 day |
 | 5 | In-game validation, quality tuning (4-state conservative mip), Ada timing | 2-4 days |
 
 The bake work is worth starting because the runtime gate is now measured and the DX12 API shape is
