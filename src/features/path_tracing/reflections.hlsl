@@ -15,9 +15,7 @@ Texture2D<float4> g_Guide_NormalRoughness : register(t18); // The world-space no
 Texture2D<float4> g_Guide_SpecularAlbedo : register(t19);  // The share of light the surface reflects towards the eye
 // The forward pass's rivers and liquids (forward_shadows), one frame old: where one drew, the trace below is
 // its own surface, not the riverbed's behind it.
-Texture2D<float> g_Forward_Depth : register(t28);   // Their depth (reversed-Z)
-Texture2D<float> g_Forward_Surface : register(t29); // Where one drew: 1 a river or a liquid
-// The sun's shadow on the surface itself, for the forward pass's multiply.
+// The sun's shadow on a surface itself, for the forward pass's multiply and the glass composite.
 RWTexture2D<float> g_ForwardShadow : register(u97);
 RWTexture2D<float4> g_Reflection : register(u93);          // The reflected light times the specular albedo and the exposure; a: how far across the screen its hit is
 RWTexture2D<float> g_ReflectionDistance : register(u94);   // The ray's hit distance; FP16's largest where it got away
@@ -25,13 +23,6 @@ RWTexture2D<float4> g_ReflectionMap : register(u98);       // The hit as the gam
 Texture2D<float> g_SurfaceDepth : register(t26);           // The nearest glass or mirror the game drew at each pixel (glass.hpp); 0 without
 Texture2D<float4> g_SurfaceNormal : register(t27);         // Its world-space normal, its roughness in w
 RWTexture2D<float4> g_SurfaceReflection : register(u99);   // What it reflects, times the exposure; a: the ray's hit distance
-
-// The world position of a render pixel's centre at a forward surface's depth: the forward pass wrote it last
-// frame, so it is reconstructed with last frame's projection-view.
-float3 ForwardDepthPosition(uint2 pixel, float depth)
-{
-    return transformPointProjection((pixel + 0.5f) / g_Frame.dimensions.xy, depth, g_Frame.previousViewProjectionInverse);
-}
 
 // Water's reflectance (F0 0.02) at the eye's angle over GGX's lobe: Karis' fit of the split sum ("Physically
 // Based Shading on Mobile", 2014), as the sea's guides use it. A water surface with its ripples' roughness,
@@ -264,39 +255,6 @@ void TraceReflections(uint2 did : SV_DispatchThreadID)
     float depth = g_Depth.Load(int3(did, 0));
     float4 specularAlbedo = g_Guide_SpecularAlbedo.Load(int3(did, 0));
     float4 normalRoughness = g_Guide_NormalRoughness.Load(int3(did, 0));
-
-    // Where a forward-drawn river or liquid drew, its own guides: its world position from its depth, the normal
-    // of its depth's slope, and what it reflects. The guides are a frame old (the forward pass runs after the
-    // kick), so their positions come from last frame's projection-view.
-    const float surface = g_Forward_Surface.Load(int3(did, 0));
-    const float forwardDepth = g_Forward_Depth.Load(int3(did, 0));
-    const bool forward = surface > 0.0f && forwardDepth > 0.0f;
-    if (forward)
-    {
-        depth = forwardDepth;
-        // The water's ripples are not in the trace (its own normal map), so its roughness stands in for them.
-        normalRoughness.w = 0.1f;
-        const uint2 last = g_BufferDimensions - 1;
-        const uint2 rightPixel = min(did + uint2(1, 0), last);
-        const uint2 downPixel = min(did + uint2(0, 1), last);
-        const float rightDepth = g_Forward_Depth.Load(int3(rightPixel, 0));
-        const float downDepth = g_Forward_Depth.Load(int3(downPixel, 0));
-        // A neighbour counts only where a surface drew there too; at its edge the G-buffer's normal stands in.
-        const bool hasRight = g_Forward_Surface.Load(int3(rightPixel, 0)) > 0.0f && rightDepth > 0.0f;
-        const bool hasDown = g_Forward_Surface.Load(int3(downPixel, 0)) > 0.0f && downDepth > 0.0f;
-        const float3 centre = ForwardDepthPosition(did, depth);
-        const float3 toEye = normalize(g_Frame.eye.xyz - centre);
-        float3 slope = normalize(normalRoughness.xyz);
-        if (hasRight && hasDown)
-            slope = normalize(cross(ForwardDepthPosition(rightPixel, rightDepth) - centre, ForwardDepthPosition(downPixel, downDepth) - centre));
-        if (dot(slope, toEye) < 0.0f) slope = -slope;
-        normalRoughness.xyz = slope;
-        // What the surface reflects towards the eye, as the sea's own water does: its reflectance at the eye's
-        // angle, over the lobe the roughness gives, at the share the menu keeps.
-        const float cosine = max(dot(slope, toEye), 0.0f);
-        specularAlbedo = float4((WaterReflectance(cosine, normalRoughness.w) * ForwardReflectionStrength).xxx, 0.0f);
-    }
-
     if (depth <= 0.0f || all(specularAlbedo.rgb < 1e-3f))
     {
         g_Reflection[did] = 0.0f;
@@ -326,16 +284,9 @@ void TraceReflections(uint2 did : SV_DispatchThreadID)
     g_ReflectionMap[did] = isGameBlended ? float4(min(exposed, BrightestHit) * fresnel, GameReflectionFade(world, normal, direction, normalRoughness.w, fresnel)) : 0.0f;
     g_ReflectionDistance[did] = hitDistance;
 
-    // A forward surface's own sun shadow, for the forward pass's multiply: a ray from the water, towards a
-    // point on the sun's disc. One sample, seeded by the pixel alone, so it does not flicker.
-    float forwardShadow = 1.0f;
-    if (forward)
-    {
-        Random sunRandom = MakeRandom(did.x + did.y * g_BufferDimensions.x, 0u);
-        forwardShadow = VisibilityFromSurface(origin, normal, CopyTolerance(world), SunSample(sunRandom.rand2()), 1e4f,
-            ShadowRayTowards(RayTowardsSun));
-    }
-    g_ForwardShadow[did] = forwardShadow;
+    // The sun's shadow on a surface itself is the surface trace's (TraceSurfaceReflections): here only the
+    // pixels it does not cover get the lit value, which the forward multiply and the glass composite skip.
+    g_ForwardShadow[did] = 1.0f;
 }
 
 // What glass and mirrors reflect, from the surfaces the game drew in front of the rest (glass.hpp): as a mirror does, spread

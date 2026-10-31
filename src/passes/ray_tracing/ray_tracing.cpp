@@ -380,7 +380,6 @@ std::atomic<std::uint64_t> kicksFromSmallerView{}, expiredNotes{}, expiredCamera
 // whichever thread asks first. Taken after executionMutex when both are.
 std::mutex lightMutex;
 ComPtr<ID3D11Device> lightDevice;
-ComPtr<ID3D11Texture2D> forwardDepthCopy, forwardSurfaceCopy; // The forward surfaces' guides, one frame old
 SharedTexture output, shadowOutput, shadowDebugOutput, lightDebugOutput, reflectionMapOutput, reflectionOutput, reflectionDistanceOutput, forwardShadowOutput, lampDiffuseOutput,
     lampSpecularOutput;
 // What the last kick traced, for the threads that read its results.
@@ -713,28 +712,6 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
 
     if (!sceneCamera || !depth || !normals) return;
 
-    // The forward pass draws the rivers with this camera, from guides the previous one wrote: it reprojects
-    // its reflection with both, so both go over (forward_shadows::setCameras).
-    if (previousCamera)
-    {
-        const auto invert = [](const std::array<float, 16>& matrix, float (&out)[16]) {
-            camera::Matrix source{};
-            for (int index = 0; index < 16; ++index) source[static_cast<std::size_t>(index)] = matrix[static_cast<std::size_t>(index)];
-            const auto inverse = camera::inverse(source);
-            for (int index = 0; index < 16; ++index) out[index] = static_cast<float>(inverse[static_cast<std::size_t>(index)]);
-        };
-        forward_shadows::Cameras cameras{};
-        const auto currentProjectionView = matrixOf(sceneCamera->projectionView);
-        const auto previousProjectionView = matrixOf(previousCamera->projectionView);
-        std::memcpy(cameras.viewProjection, currentProjectionView.data(), sizeof(cameras.viewProjection));
-        std::memcpy(cameras.previousViewProjection, previousProjectionView.data(), sizeof(cameras.previousViewProjection));
-        invert(currentProjectionView, cameras.viewProjectionInverse);
-        invert(previousProjectionView, cameras.previousViewProjectionInverse);
-        std::memcpy(cameras.eye, sceneCamera->eye, sizeof(cameras.eye));
-        cameras.dimensions[0] = static_cast<float>(depthOut.width);
-        cameras.dimensions[1] = static_cast<float>(depthOut.height);
-        forward_shadows::setCameras(cameras);
-    }
 
     if constexpr (DiagnosticLog)
     {
@@ -853,17 +830,6 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     const bool velocityCopied = wantsVelocity && objectVelocityDrawn && objectVelocity && sizeOf(objectVelocity.Get()) == sizeOf(depth)
         && copyShared(objectVelocity.Get(), objectVelocityCopy, velocityFormat);
     if (wantsVelocity) ++(velocityCopied ? kicksWithObjectVelocity : kicksWithoutObjectVelocity);
-
-    // The rivers' and liquids' guides, for the reflections traced at their pixels: last frame's, at last
-    // frame's pixels. The forward pass writes this frame's afterwards.
-    DXGI_FORMAT forwardDepthFormat{}, forwardSurfaceFormat{};
-    auto* forwardDepthView = forward_shadows::forwardDepth();
-    auto* forwardSurfaceView = forward_shadows::forwardSurface();
-    const bool forwardCopied = traces.isPathTraced && forwardDepthView && forwardSurfaceView && sizeOf(forwardDepthView) == sizeOf(depth)
-        && sizeOf(forwardSurfaceView) == sizeOf(depth) && copyShared(forwardDepthView, forwardDepthCopy, forwardDepthFormat)
-        && copyShared(forwardSurfaceView, forwardSurfaceCopy, forwardSurfaceFormat);
-    if (traces.isPathTraced) forward_shadows::clearGuides(immediate.Get());
-
     endStep(TerrainStep);
     const auto inputsReady = ++fenceValue;
     check(immediate->Signal(fence.Get(), inputsReady), "Signalling the global illumination's inputs");
@@ -899,8 +865,6 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
         textures.surfaceNormal = surfaces.normal;
         textures.surfaceReflection = surfaces.reflection;
         textures.forwardShadow = forwardShadowTexture;
-        textures.forwardDepth = forwardCopied ? forwardDepthCopy.Get() : nullptr;
-        textures.forwardSurface = forwardCopied ? forwardSurfaceCopy.Get() : nullptr;
     }
 
     frame.width = depthOut.width;

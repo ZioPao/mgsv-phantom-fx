@@ -15,31 +15,6 @@ namespace phantom_fx::forward_shadows
 void configure(const Configuration& configuration) noexcept;
 bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_shaders::DrawnShader& shader) noexcept;
 
-// Where the forward surfaces drew: their depth (the game's reversed-Z) and the surface's kind where one
-// drew (1 a river or a liquid, 0.5 glass), for the rays traced at their pixels (`ray_tracing::forwardSurface`).
-// Null until a river or glass drew a frame.
-ID3D11ShaderResourceView* forwardDepth() noexcept;
-ID3D11ShaderResourceView* forwardSurface() noexcept;
-
-// Empties the guide targets, for the forward pass to write this frame's into. The ray tracing's kick calls
-// it after copying them (once a frame, before the forward pass runs), so what it copies is the last frame's.
-void clearGuides(ID3D11DeviceContext* context) noexcept;
-
-// The cameras the forward pass reprojects its reflection with: `viewProjection` is the one the water is drawn
-// with this frame, `previousViewProjection` the one its guides were written with (the kick's). Filled by the
-// kick, so the forward draw reads them without a lock of its own.
-struct Cameras
-{
-    float viewProjection[16];
-    float viewProjectionInverse[16];
-    float previousViewProjection[16];
-    float previousViewProjectionInverse[16];
-    float eye[4];
-    float dimensions[2];
-    float padding[2];
-};
-void setCameras(const Cameras& cameras) noexcept;
-
 // A forward surface drawn by another module (glass) leaves the game's shadow map out the same way: the 1x1
 // white map shadow and the sampler that always passes, for its shadow slot and s15. False when unavailable.
 bool tracedShadowResources(ID3D11DeviceContext* context, ID3D11ShaderResourceView** whiteMap, ID3D11SamplerState** alwaysPass) noexcept;
