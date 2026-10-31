@@ -161,6 +161,7 @@ struct State
     Pipelines pipelines;
     // Opacity micromaps: whether the kernels are MicromapBytecode's and the scene links them, and why not.
     bool micromaps{};
+    bool captured{}; // A programmatic PIX capture was asked for and taken
     std::string micromapState;
     ComPtr<ID3D12CommandSignature> dispatchSignature;
     ComPtr<ID3D12DescriptorHeap> heap;
@@ -1056,6 +1057,35 @@ Result render(const Frame& frame)
     lap(WaitStep);
     auto& scene = *s.scene;
     scene.beginFrame(slot, s.fence->GetCompletedValue(), frame.signalValue);
+
+    // Development only: PHANTOM_FX_PIX_CAPTURE names a .wpix, captured once micromaps are linked. It goes
+    // through WinPixEventRuntime, next to the game's exe, so PIX never injects anything (PIXGpuCaptureNextFrames).
+    if (!s.captured)
+    {
+        char path[MAX_PATH]{};
+        if (GetEnvironmentVariableA("PHANTOM_FX_PIX_CAPTURE", path, MAX_PATH) && scene.stats().micromapStructures > 0)
+        {
+            s.captured = true;
+            wchar_t module[MAX_PATH]{};
+            GetModuleFileNameW(nullptr, module, MAX_PATH);
+            std::wstring directory(module);
+            directory = directory.substr(0, directory.find_last_of(L"\\") + 1);
+            HMODULE runtime = LoadLibraryW((directory + L"WinPixEventRuntime.dll").c_str());
+            wchar_t wide[MAX_PATH]{};
+            MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, MAX_PATH);
+            using LoadCapturer = HMODULE (*)();
+            using Capture = HRESULT (*)(PCWSTR, UINT32);
+            const auto load = runtime ? reinterpret_cast<LoadCapturer>(GetProcAddress(runtime, "PIXLoadLatestWinPixGpuCapturerLibrary")) : nullptr;
+            const auto capture = runtime ? reinterpret_cast<Capture>(GetProcAddress(runtime, "PIXGpuCaptureNextFrames")) : nullptr;
+            // The capturer has to be in the process: PIX's own loader looks only in its install folder, so
+            // load the copy beside the game's exe first.
+            auto capturer = LoadLibraryW((directory + L"WinPixGpuCapturer.dll").c_str());
+            if (!capturer && load) capturer = load();
+            log(std::string("PIX runtime ") + (runtime ? "loaded" : "missing") + ", capturer " + (capturer ? "loaded" : "missing"));
+            const auto captureResult = capture ? capture(wide, 20) : E_FAIL;
+            log(std::string("PIX capture ") + (SUCCEEDED(captureResult) ? "started: " : "failed: ") + hex(static_cast<std::uint32_t>(captureResult)) + ", " + path);
+        }
+    }
     if constexpr (DiagnosticLog) logStats(s);
     readTimes(s, slot);
     readProbe(s, slot);

@@ -31,6 +31,9 @@ constexpr std::uint64_t MicromapBytesPerMesh = 4ull << 20;
 // One structure a frame, as the batch of them (6 at once, 7 in the tests) faulted the GPU with the
 // micromaps disabled at traversal too (docs/opacity-micromaps.md).
 constexpr std::uint32_t MicromapLinksPerFrame = 1;
+// How many structures may carry micromaps at once: beyond that the emulated path stops finishing
+// frames (docs/opacity-micromaps.md, section 8a). Everything else keeps the shader's own alpha test.
+constexpr std::uint32_t MicromapStructures = 8;
 // D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_BYTE_ALIGNMENT, which the Windows SDK's 26100 headers lack: an
 // array's input starts on it.
 constexpr std::uint64_t MicromapArrayAlignment = 128;
@@ -167,9 +170,28 @@ void Scene::planBuilds()
                 continue;
             }
 
+            // A structure that has none only takes micromaps while fewer than the cap carry them;
+            // relinking one that has them costs nothing (PHANTOM_FX_OMM_MAX_STRUCTURES overrides).
+            if (!blas.micromaps)
+            {
+                char capText[16]{};
+                const auto cap = GetEnvironmentVariableA("PHANTOM_FX_OMM_MAX_STRUCTURES", capText, sizeof(capText))
+                    ? static_cast<std::uint32_t>(std::atoi(capText))
+                    : MicromapStructures;
+                std::uint32_t carrying{};
+                for (const auto& other : structures)
+                    if (other.live && (other.micromaps || other.pendingLink)) ++carrying;
+                if (carrying >= cap)
+                {
+                    blas.micromapsDirty = false;
+                    continue;
+                }
+            }
+
             if (!prepareMicromaps(id)) continue;
             blas.micromapsDirty = false;
             ++prepared;
+            ++micromapLinks;
         }
     }
 

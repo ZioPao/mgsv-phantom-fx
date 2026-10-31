@@ -84,6 +84,21 @@ inline bool selectRuntime()
     return SUCCEEDED(result);
 }
 
+// Development only: PIX's GPU capturer, loaded before the process's first Direct3D 12 device (it hooks
+// device creation, so loading it later makes PIXGpuCaptureNextFrames fail). PHANTOM_FX_PIX_CAPTURE asks
+// for it; gi_renderer takes the capture itself.
+inline void loadGpuCapturer()
+{
+    if (!GetEnvironmentVariableA("PHANTOM_FX_PIX_CAPTURE", nullptr, 0)) return;
+
+    wchar_t module[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, module, MAX_PATH);
+    std::wstring directory(module);
+    directory = directory.substr(0, directory.find_last_of(L"\\\\") + 1);
+    const auto capturer = LoadLibraryW((directory + L"WinPixGpuCapturer.dll").c_str());
+    log(capturer ? "PIX's GPU capturer loaded at start." : "PIX's GPU capturer could not be loaded.");
+}
+
 inline Device12 createDevice12(ID3D11Device* device11)
 {
     selectRuntime();

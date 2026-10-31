@@ -595,6 +595,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     self = addon;
     const auto directory = dataDirectory();
     openLog(directory / "PhantomFX.log");
+    loadGpuCapturer();
     log(DiagnosticLog ? "Phantom FX " PHANTOM_FX_VERSION ", with the diagnostic log." : "Phantom FX " PHANTOM_FX_VERSION ".");
     logGameBuild();
     log(passDeviceCheck());

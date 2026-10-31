@@ -274,6 +274,7 @@ private:
     bool micromapsOn{};
     bool micromapLogged{}; // The first link's line is in the log
     bool micromapLinked{};  // A structure has linked micromaps this session (PHANTOM_FX_OMM_ONCE)
+    std::uint32_t micromapLinks{}; // Links made this session, relinks included
     ComPtr<ID3D12Resource> micromaps;
     // The array builds' own scratch, never the scene's: their place among the scene's builds is what
     // the in-game hang pointed at (docs/opacity-micromaps.md).
