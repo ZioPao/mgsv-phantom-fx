@@ -233,6 +233,19 @@ void unusableMeshes()
     expect(!omm_layout::layOut({uvs, outOfRange, 64, 64, 1u << 20}), "an index past the vertices gave a layout");
     expect(!omm_layout::layOut({uvs, {}, 64, 64, 1u << 20}), "no triangles gave a layout");
 }
+
+void opacitySplitSortsTriangles()
+{
+    // Five triangles over four blocks: opaque, transparent, unsure, both states, and one past the states.
+    const std::vector<std::uint16_t> indices{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+    const std::vector<std::uint32_t> triangleBlocks{0, 1, 2, 3, 7};
+    const std::vector<std::uint32_t> states{GI_OMM_SOME_NOT_TRANSPARENT, GI_OMM_SOME_NOT_OPAQUE,
+        GI_OMM_SOME_NOT_TRANSPARENT | GI_OMM_SOME_UNKNOWN, GI_OMM_SOME_NOT_TRANSPARENT | GI_OMM_SOME_NOT_OPAQUE};
+    const auto split = omm_layout::splitByOpacity(indices, triangleBlocks, states);
+    expect(split.opaque == std::vector<std::uint16_t>{0, 1, 2}, "the opaque triangle was not kept alone as opaque");
+    expect(split.transparent == 1, "the transparent triangle was not dropped");
+    expect(split.mixed == std::vector<std::uint16_t>{6, 7, 8, 9, 10, 11, 12, 13, 14}, "an unsure, mixed or unbaked triangle lost its alpha test");
+}
 }
 
 int main()
@@ -252,6 +265,7 @@ int main()
         budgetLowersLevels();
         meshesCombineIntoOneArray();
         unusableMeshes();
+        opacitySplitSortsTriangles();
         std::cout << "Opacity micromap layout tests passed.\n";
 
         return 0;

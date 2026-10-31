@@ -114,6 +114,12 @@ public:
     ID3D12Resource* micromapPool() const { return micromaps.Get(); }
     static constexpr std::uint64_t MicromapPoolBytes = 64ull << 20;
 
+    // ---- The opacity split, where there are no micromaps ----
+    // From now on, static structures' textured cut-out meshes are classified by the micromaps' bake,
+    // triangle by triangle, and built again as up to two geometries: the wholly opaque triangles flagged
+    // opaque (no alpha test), the rest as before; wholly transparent ones are dropped. Not with enableMicromaps.
+    void enableOpacitySplit();
+
     // ---- For the kernels ----
     ID3D12Resource* pool() const { return geometryPool.Get(); }
     ID3D12Resource* geometryTable() const { return table.Get(); }
@@ -136,6 +142,8 @@ public:
         std::uint64_t micromapBlockBytes{};                  // The blocks' own bytes, padding included
         std::array<std::uint32_t, omm_layout::MaxLevel + 1> micromapLevels{};
         std::uint32_t micromapLinks{}, micromapRelinks{};     // This session
+        std::uint32_t splitStructures{};                      // Built again with their meshes split, this session
+        std::uint64_t splitOpaque{}, splitTransparent{}, splitMixed{}; // Their triangles, this session
     };
     Stats stats() const;
 
@@ -169,10 +177,37 @@ private:
         std::uint64_t offset{}, size{}; // In the structure pool
         std::uint64_t scratch{}, updateScratch{}; // Bytes a build and a refit need
         bool built{}, compacted{}, queued{};
+        std::uint32_t serial{}; // Changes with its room and geometry: a compacted size read back is for one serial
         std::vector<MicromapSource> sources; // By geometry; empty without any
         bool micromapsDirty{};               // A source's texture changed since its micromaps were baked
         bool pendingLink{};                  // Its array was built last frame: the structure links it now
         std::optional<LinkedMicromaps> micromaps;
+        // The opacity split: the game's meshes (the first geometries; split ones' opaque parts follow), the
+        // rows held for them, each mesh's opaque part's row (NoRow without), the index lists made for the
+        // parts in the geometry pool, each mesh's split done, and a classification on its way back.
+        std::uint32_t meshes{}, rowCount{};
+        std::vector<std::uint32_t> splitRows;
+        std::vector<std::array<std::uint64_t, 2>> splitIndices;
+        std::vector<bool> meshSplit;
+        bool classifying{};
+    };
+    static constexpr std::uint32_t NoRow = ~0u;
+    // A structure's meshes classified this frame: their blocks' states come back in the slot's readback.
+    struct Classification
+    {
+        BlasId id{};
+        std::uint32_t generation{};
+        std::uint64_t readbackOffset{};
+        std::uint32_t blocks{};
+        std::vector<std::uint32_t> meshes, firstTriangle, triangleBlocks;
+    };
+    // A classification read back: the structure is built again with its meshes split.
+    struct SplitDue
+    {
+        BlasId id{};
+        std::uint32_t generation{};
+        std::vector<std::uint32_t> meshes;
+        std::vector<omm_layout::OpacitySplit> parts;
     };
     // An array the frame builds, before the bottom levels: its inputs in the micromap pool, its histogram.
     struct ArrayBuild
@@ -218,7 +253,7 @@ private:
     struct Due
     {
         BlasId id{};
-        std::uint32_t generation{};
+        std::uint32_t generation{}, serial{};
         std::uint64_t size{};
     };
     struct Upload
@@ -229,7 +264,7 @@ private:
     struct Built
     {
         BlasId id{};
-        std::uint32_t generation{};
+        std::uint32_t generation{}, serial{};
     };
     // A texture slot, and the texture it views, the GPU may still use: free again once it is past the
     // frame that signalled `fenceValue`.
@@ -246,6 +281,16 @@ private:
     // compacted size; false when this frame has no room for it.
     bool prepareMicromaps(BlasId id);
     bool finishMicromaps(BlasId id);
+    // Records the bake of the structure's meshes ready to classify; false when the frame has no room.
+    bool classify(BlasId id);
+    // Builds the structure again with its meshes split, this frame, `postbuild` its compacted size's place.
+    enum class SplitResult : std::uint8_t
+    {
+        Built,
+        Later,
+        Dropped
+    };
+    SplitResult applySplit(SplitDue& due, std::uint32_t postbuild);
     void releaseMicromaps(const LinkedMicromaps& linked);
     D3D12_GPU_VIRTUAL_ADDRESS micromapAddress(std::uint64_t offset) const;
     D3D12_GPU_VIRTUAL_ADDRESS address(const Blas& blas) const;
@@ -295,6 +340,18 @@ private:
     std::vector<ArrayBuild> arrayBuilds;
     // The size of the copy each texture slot views, for the micromaps' levels.
     std::vector<std::array<std::uint32_t, 2>> textureSizes = std::vector<std::array<std::uint32_t, 2>>(GI_MAX_TEXTURES);
+
+    // The opacity split: on instead of micromaps; the classifications in flight by slot, read back into
+    // the slot's buffer; the frame's copies into it; those read back, waiting to be built.
+    bool splitsOn{};
+    std::array<ComPtr<ID3D12Resource>, FramesInFlight> splitReadback;
+    std::array<std::vector<Classification>, FramesInFlight> classifying;
+    std::vector<Upload> splitCopies; // poolOffset: the micromap pool's; uploadOffset: the readback's
+    std::uint64_t splitReadbackUsed{};
+    std::vector<SplitDue> splitsDue;
+    static constexpr std::uint64_t SplitReadbackBytes = 1ull << 20;
+    std::uint32_t splitStructures{};
+    std::uint64_t splitOpaque{}, splitTransparent{}, splitMixed{};
 
     // The game's textures by slot, a descriptor each from `textureDescriptors`; the free slots, and those
     // the GPU may still read.

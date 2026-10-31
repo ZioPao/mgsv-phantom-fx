@@ -44,6 +44,9 @@ using uint = std::uint32_t;
 // triangles take a special index (ResolveMicromapIndices).
 #define GI_OMM_SOME_NOT_TRANSPARENT 1u
 #define GI_OMM_SOME_NOT_OPAQUE      2u
+// And a bit when any micro-triangle's samples straddled the threshold's margin: its state is a guess, so
+// the opacity split keeps the block's triangles alpha-tested.
+#define GI_OMM_SOME_UNKNOWN         4u
 
 // The linkage's special indices (D3D12_RAYTRACING_OPACITY_MICROMAP_SPECIAL_INDEX), as unsigned.
 #define GI_OMM_INDEX_FULLY_TRANSPARENT 0xFFFFFFFFu

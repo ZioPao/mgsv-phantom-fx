@@ -62,8 +62,8 @@ float MicroTriangleLod(GIOmmBlock block, float2 size)
 }
 
 // A micro-triangle's state from its three corners and its centroid: known where all four agree past the
-// margin, else unknown, leaning as its centroid does.
-uint MicroTriangleState(GIOmmBlock block, Texture2D<float4> texture, float lod, float u, float v, uint level)
+// margin, else unknown (unsure), leaning as its centroid does.
+uint MicroTriangleState(GIOmmBlock block, Texture2D<float4> texture, float lod, float u, float v, uint level, out bool unsure)
 {
     // The centroid sits a third of a step in from an upright micro-triangle's corner, two thirds in
     // from a flipped one's (OmmCellMicroTriangle).
@@ -94,8 +94,10 @@ uint MicroTriangleState(GIOmmBlock block, Texture2D<float4> texture, float lod, 
     }
 
     // 2-state: the centroid decides, with the corners only able to make it agree sooner.
+    unsure = false;
     if (lowest >= block.threshold + GI_OMM_KNOWN_MARGIN) return GI_OMM_OPAQUE;
     if (highest < block.threshold - GI_OMM_KNOWN_MARGIN) return GI_OMM_TRANSPARENT;
+    unsure = true;
     return centre >= block.threshold ? GI_OMM_OPAQUE : GI_OMM_TRANSPARENT;
 }
 
@@ -125,10 +127,12 @@ void BakeMicromaps(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
     {
         float u, v;
         uint index = OmmCellMicroTriangle(cell, level, u, v);
-        uint state = MicroTriangleState(block, texture, lod, u, v, level);
+        bool unsure;
+        uint state = MicroTriangleState(block, texture, lod, u, v, level, unsure);
         uint bit = index * GI_OMM_STATE_BITS;
         InterlockedOr(g_Words[bit >> 5], state << (bit & 31u));
-        found |= (state != GI_OMM_TRANSPARENT ? GI_OMM_SOME_NOT_TRANSPARENT : 0u) | (state != GI_OMM_OPAQUE ? GI_OMM_SOME_NOT_OPAQUE : 0u);
+        found |= (state != GI_OMM_TRANSPARENT ? GI_OMM_SOME_NOT_TRANSPARENT : 0u) | (state != GI_OMM_OPAQUE ? GI_OMM_SOME_NOT_OPAQUE : 0u)
+            | (unsure ? GI_OMM_SOME_UNKNOWN : 0u);
     }
     InterlockedOr(g_Found, found);
     GroupMemoryBarrierWithGroupSync();

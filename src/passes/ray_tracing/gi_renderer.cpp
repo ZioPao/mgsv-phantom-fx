@@ -607,7 +607,14 @@ void start(ID3D11Device* device11, HANDLE sharedFence, bool allowMicromaps)
 
     createPipelines(*s);
     createResources(*s);
+    // Without micromaps, the opacity split gives the rays what it can of theirs (PHANTOM_FX_NO_SPLIT
+    // leaves every cut-out mesh alpha-tested, for measuring it).
     if (s->micromaps) s->scene->enableMicromaps();
+    else if (!GetEnvironmentVariableA("PHANTOM_FX_NO_SPLIT", nullptr, 0))
+    {
+        s->scene->enableOpacitySplit();
+        s->micromapState += "; opacity split on";
+    }
 
     log("Global illumination started on Direct3D 12; opacity micromaps " + s->micromapState + ".");
     state = std::move(s);
@@ -1433,8 +1440,10 @@ Result render(const Frame& frame)
                     recorder.dispatch(Kernel::BakeMicromaps, std::min(bake.blocks - first, MaxGroups), 1,
                         {bake.records + first * static_cast<std::uint32_t>(sizeof(GIOmmBlock)), bake.blocks - first, bake.states + 4 * first, bake.data});
             recorder.barrier();
+            // The opacity split's bakes have no linkage to resolve (no triangles).
             for (const auto& bake : bakes)
-                recorder.dispatch(Kernel::ResolveMicromapIndices, groups(bake.triangles, 64), 1, {bake.triangleBlocks, bake.triangles, bake.states, bake.indices});
+                if (bake.triangles)
+                    recorder.dispatch(Kernel::ResolveMicromapIndices, groups(bake.triangles, 64), 1, {bake.triangleBlocks, bake.triangles, bake.states, bake.indices});
         }
 
         recorder.mark("bottom-level structures", performance::Pass::RayTracedScene);
@@ -1546,7 +1555,15 @@ std::string micromapStatus()
     };
 
     std::string text = s.micromapState;
-    if (!s.micromaps) return text;
+    if (!s.micromaps)
+    {
+        if (!stats.splitStructures) return text;
+
+        const auto split = stats.splitOpaque + stats.splitTransparent + stats.splitMixed;
+        return text + "\nsplit structures " + std::to_string(stats.splitStructures) + ", their cut-out triangles " + std::to_string(split) + ": opaque "
+            + std::to_string(stats.splitOpaque) + " (" + share(stats.splitOpaque, split) + "), dropped " + std::to_string(stats.splitTransparent) + " ("
+            + share(stats.splitTransparent, split) + "), alpha-tested " + std::to_string(stats.splitMixed) + " (" + share(stats.splitMixed, split) + ")";
+    }
 
     text += "\nstructures " + std::to_string(stats.micromapStructures) + " (" + std::to_string(stats.micromapLinks) + " linked, "
         + std::to_string(stats.micromapRelinks) + " relinked)";
@@ -1577,6 +1594,7 @@ std::string status()
         + ", shadows " + milliseconds(s.shadowMilliseconds) + "; " + s.contents->status() + "; opacity micromaps " + s.micromapState
         + (s.micromaps ? " (" + std::to_string(stats.micromapStructures) + " structures, " + std::to_string(stats.micromapBlocks) + " blocks, pool "
                 + percentOf(stats.micromapPoolUsed, gi_scene::Scene::MicromapPoolBytes) + ")"
-                          : std::string());
+                          : " (" + std::to_string(stats.splitStructures) + " split: " + std::to_string(stats.splitOpaque) + " opaque, "
+                              + std::to_string(stats.splitTransparent) + " dropped, " + std::to_string(stats.splitMixed) + " alpha-tested triangles)");
 }
 }
