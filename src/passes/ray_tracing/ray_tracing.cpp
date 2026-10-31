@@ -6,6 +6,7 @@
 #include "command_list_notes.hpp"
 #include "constant_capture.hpp"
 #include "d3d11_helpers.hpp"
+#include "features/forward_shadows/forward_shadows.hpp"
 #include "features/global_illumination/gi_lighting.hpp"
 #include "features/path_tracing/path_tracing.hpp"
 #include "features/path_tracing/sky_capture.hpp"
@@ -68,6 +69,7 @@ struct Options
     bool reconstructionGuides{}; // DLSS Ray Reconstruction is asked for: the kick makes its guides (reconstructionGuides)
     bool isPathTracing{};        // The plan runs path tracing: while Ray Reconstruction denoises, it traces (isPathTracing)
     float emission{1};           // The menu's strength of self-lit meshes' light
+    float forwardReflections{0.3f}; // How much of the traced reflection a forward surface keeps
 };
 
 // MotionBlurCameraVelocity reads the game's velocity for its moving meshes here, right after the
@@ -141,6 +143,7 @@ Texture2D<float4> g_Fresnel : register(t4);   // g_lut1: u the cosine, v F0
 Texture2D<float4> g_Materials : register(t5); // g_MaterialTexture: u the material, row 0.25 its colour, 0.75 its F0
 Texture2D<float> g_SeaDepth : register(t6);   // The sea's depth where it drew (sea::surfaceDepth)
 Texture3D<float4> g_SpecularLobe : register(t7); // g_lut2: x the halfway vector's angle, y the roughness, z the anisotropy
+Texture2D<float> g_ForwardSurface : register(t8); // Where a forward surface drew: 1 a river or a liquid, 0.5 glass
 RWTexture2D<float4> g_NormalRoughness : register(u0);
 RWTexture2D<float4> g_DiffuseAlbedo : register(u1);
 RWTexture2D<float4> g_SpecularAlbedo : register(u2);
@@ -160,6 +163,8 @@ cbuffer Parameters : register(b0)
     uint g_HasTables;
     float g_SkyReflectionFloor; // The sun pass's cPSLight c2.z, the frame before
     uint g_HasSea;
+    float g_ForwardReflections; // The menu's share of the traced reflection a forward surface keeps
+    float2 g_Padding;
 };
 
 // The texel a point sampler takes at (u, v), as the sun pass reads the material table.
@@ -250,9 +255,27 @@ void main(uint2 id : SV_DispatchThreadID)
     g_NormalRoughness[id] = float4(world, roughness);
     g_DiffuseAlbedo[id] = float4(g_HasAlbedo ? g_Albedo.Load(int3(id, 0)).rgb : 0.5, 1);
     bool isSea = g_HasSea && g_SeaDepth.Load(int3(id, 0)) == depth;
-    g_SpecularAlbedo[id] = float4(isSea ? WaterReflectance(toEyeN, roughness) : saturate(reflected * ((1 - roughness) * 0.5)), isSea ? 0 : 1);
+    // The game's own weight: its Fresnel table at the view angle, times half the smoothness. That half keeps
+    // a dielectric from reflecting like a mirror, but it halves a metal too, and MGSV's materials carry each
+    // one's F0 in its table: a metal keeps the full smoothness weight, a dielectric stays as the game has it.
+    float metal = saturate((F0 - 0.04f) * 2.0f);
+    float weight = (1 - roughness) * lerp(0.5f, 1.0f, metal);
+    g_SpecularAlbedo[id] = float4(isSea ? WaterReflectance(toEyeN, roughness) : saturate(reflected * weight), isSea ? 0 : 1);
     g_Material[id] = float4(saturate(specularColor), specular.w);
     g_Lobe[id] = float4(saturate(specular.w * translucencyScale), F0, anisotropy, 0);
+
+    // A forward surface (a river, a liquid, a glass) is not in the G-buffer: the guides here are the surface
+    // behind it, and the denoiser would filter a sharp water reflection as that rough surface. Only what is
+    // safe to state is taken from it - its roughness and what it reflects; the normal stays the G-buffer's,
+    // which no depth reconstruction can corrupt.
+    const float forwardSurface = g_ForwardSurface.Load(int3(id, 0));
+    if (forwardSurface > 0.0f)
+    {
+        const float forwardRoughness = forwardSurface < 0.75f ? 0.15f : 0.1f;
+        const float reflectance = WaterReflectance(toEyeN, forwardRoughness) * g_ForwardReflections;
+        g_NormalRoughness[id] = float4(world, forwardRoughness);
+        g_SpecularAlbedo[id] = float4(reflectance, reflectance, reflectance, 0.0f);
+    }
 }
 )";
 
@@ -263,7 +286,9 @@ struct GuideParameters
     float jitter[2];
     std::uint32_t width, height, hasAlbedo, hasSpecular, hasTables;
     float skyReflectionFloor;
-    std::uint32_t hasSea, padding[3];
+    std::uint32_t hasSea;
+    float forwardReflections;
+    float padding[2];
 };
 
 // The light the global illumination keeps in its caches is the game's before exposure, scaled by
@@ -340,6 +365,10 @@ std::optional<SceneConstants> sceneCamera, previousCamera;
 ComPtr<ID3D11ShaderResourceView> objectVelocity;
 bool objectVelocityDrawn{};
 ComPtr<ID3D11Texture2D> objectVelocityCopy;
+// The forward pass's reflective surfaces' guides (forward_shadows::forwardDepth/forwardSurface), and their
+// shared copies for the reflections traced at their pixels. One frame old: the forward pass runs after the
+// kick, so the kick takes what the last frame's drew.
+ComPtr<ID3D11Texture2D> forwardDepthCopy, forwardSurfaceCopy;
 std::optional<Sky> sky;
 // The last sun pass's sun, while each frame has one: a frame without (indoors) has no sun. Until
 // 2026-10-26 it was kept, and the main menu's daytime sun lit a night-time hospital through its windows.
@@ -383,9 +412,9 @@ std::atomic<std::uint64_t> kicksFromSmallerView{}, expiredNotes{}, expiredCamera
 std::mutex lightMutex;
 ComPtr<ID3D11Device> lightDevice;
 SharedTexture output, shadowOutput, shadowDebugOutput, localLightOutput, lightDebugOutput, reflectionMapOutput, reflectionOutput, reflectionDistanceOutput, lampDiffuseOutput,
-    lampSpecularOutput;
-// The last kick traced the reflections into reflectionOutput, reflectionDistanceOutput and reflectionMapOutput, and the lamps into
-// lampDiffuseOutput and lampSpecularOutput.
+    lampSpecularOutput, forwardShadowOutput;
+// The last kick traced the reflections into reflectionOutput, reflectionDistanceOutput and reflectionMapOutput, the
+// sun's shadow on the forward surfaces into forwardShadowOutput, and the lamps into lampDiffuseOutput and lampSpecularOutput.
 std::atomic<bool> wereReflectionsTraced{}, wereLampsTraced{};
 // depthOut's view, for the recording threads (surfaceDepth).
 ComPtr<ID3D11ShaderResourceView> publishedDepth;
@@ -477,7 +506,7 @@ void pack(ID3D11ShaderResourceView* depth, const SceneConstants& scene)
 
 // DLSS Ray Reconstruction's guides from the G-buffer, at the depth's size; on the immediate context, call
 // with executionMutex held.
-void makeGuides(ID3D11ShaderResourceView* depth, const SceneConstants& scene, float skyReflectionFloor)
+void makeGuides(ID3D11ShaderResourceView* depth, const SceneConstants& scene, float skyReflectionFloor, float forwardReflections)
 {
     const auto [width, height] = sizeOf(depth);
     if (guideNormals.width != width || guideNormals.height != height)
@@ -508,10 +537,11 @@ void makeGuides(ID3D11ShaderResourceView* depth, const SceneConstants& scene, fl
     parameters.skyReflectionFloor = skyReflectionFloor;
     const auto seaDepth = sea::surfaceDepth(width, height);
     parameters.hasSea = seaDepth != nullptr;
+    parameters.forwardReflections = forwardReflections;
     check(write(immediate.Get(), guideParameters.Get(), parameters), "Writing the Ray Reconstruction guides' constants");
 
     ID3D11ShaderResourceView* inputs[]{depth, normals.Get(), hasAlbedo ? albedo.Get() : nullptr, specular.Get(), tables.fresnel.Get(), tables.materials.Get(),
-        seaDepth.Get(), tables.lobe.Get()};
+        seaDepth.Get(), tables.lobe.Get(), forward_shadows::forwardSurface()};
     ID3D11UnorderedAccessView* outputs[]{guideNormals.access.Get(), guideDiffuse.access.Get(), guideSpecular.access.Get(), guideMaterial.access.Get(),
         guideLobe.access.Get(), materialSpecular.access.Get(), specularTable.access.Get()};
     immediate->CSSetShader(guideShader.Get(), nullptr, 0);
@@ -709,6 +739,29 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
 
     if (!sceneCamera || !depth || !normals) return;
 
+    // The forward pass draws the water with this camera, from guides the previous one wrote: it reprojects
+    // its reflection with both, so both go over (forward_shadows::setCameras).
+    if (previousCamera)
+    {
+        const auto invert = [](const std::array<float, 16>& matrix, float (&out)[16]) {
+            camera::Matrix source{};
+            for (int index = 0; index < 16; ++index) source[static_cast<std::size_t>(index)] = matrix[static_cast<std::size_t>(index)];
+            const auto inverse = camera::inverse(source);
+            for (int index = 0; index < 16; ++index) out[index] = static_cast<float>(inverse[static_cast<std::size_t>(index)]);
+        };
+        forward_shadows::Cameras cameras{};
+        const auto currentProjectionView = matrixOf(sceneCamera->projectionView);
+        const auto previousProjectionView = matrixOf(previousCamera->projectionView);
+        std::memcpy(cameras.viewProjection, currentProjectionView.data(), sizeof(cameras.viewProjection));
+        std::memcpy(cameras.previousViewProjection, previousProjectionView.data(), sizeof(cameras.previousViewProjection));
+        invert(currentProjectionView, cameras.viewProjectionInverse);
+        invert(previousProjectionView, cameras.previousViewProjectionInverse);
+        std::memcpy(cameras.eye, sceneCamera->eye, sizeof(cameras.eye));
+        cameras.dimensions[0] = static_cast<float>(depthOut.width);
+        cameras.dimensions[1] = static_cast<float>(depthOut.height);
+        forward_shadows::setCameras(cameras);
+    }
+
     if constexpr (DiagnosticLog)
     {
         const auto [width, height] = sizeOf(depth);
@@ -716,7 +769,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     }
 
     pack(depth, *sceneCamera);
-    if (options.reconstructionGuides) makeGuides(depth, *sceneCamera, sun ? sun->skyReflectionFloor : 0);
+    if (options.reconstructionGuides) makeGuides(depth, *sceneCamera, sun ? sun->skyReflectionFloor : 0, options.forwardReflections);
     // Path tracing while Ray Reconstruction denoises (reconstructed()), with the light's cache. Its sun is
     // lit by the rays' shadow (sun_light_pass.cpp), whether or not the ray-traced shadows are on.
     const auto reconstructedFrames = reconstructions.load(std::memory_order_relaxed);
@@ -754,15 +807,18 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     ID3D11Texture2D* reflection{};
     ID3D11Texture2D* reflectionDistance{};
     ID3D11Texture2D* reflectionMap{};
+    ID3D11Texture2D* forwardShadow{};
     if (isPathTraced)
     {
         std::lock_guard lock(lightMutex);
         resizeShared(reflectionOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the reflections");
         resizeShared(reflectionDistanceOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16_FLOAT, "Creating the reflections' hit distance");
         resizeShared(reflectionMapOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16G16B16A16_FLOAT, "Creating the reflection map");
+        resizeShared(forwardShadowOutput, device.Get(), depthOut.width, depthOut.height, DXGI_FORMAT_R16_FLOAT, "Creating the forward surfaces' shadow");
         reflection = reflectionOutput.texture.Get();
         reflectionDistance = reflectionDistanceOutput.texture.Get();
         reflectionMap = reflectionMapOutput.texture.Get();
+        forwardShadow = forwardShadowOutput.texture.Get();
     }
 
     // The point and spot lights recorded for this frame, a bit each in their shadow mask. Path tracing lights
@@ -823,6 +879,16 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
         && copyShared(objectVelocity.Get(), objectVelocityCopy, velocityFormat);
     if (wantsVelocity) ++(velocityCopied ? kicksWithObjectVelocity : kicksWithoutObjectVelocity);
 
+    // The forward surfaces' guides, for the reflections traced at their pixels, at the render size: last
+    // frame's, at last frame's pixels.
+    DXGI_FORMAT forwardDepthFormat{}, forwardSurfaceFormat{};
+    auto* forwardDepthView = forward_shadows::forwardDepth();
+    auto* forwardSurfaceView = forward_shadows::forwardSurface();
+    const bool forwardCopied = isPathTraced && forwardDepthView && forwardSurfaceView && sizeOf(forwardDepthView) == sizeOf(depth)
+        && sizeOf(forwardSurfaceView) == sizeOf(depth) && copyShared(forwardDepthView, forwardDepthCopy, forwardDepthFormat)
+        && copyShared(forwardSurfaceView, forwardSurfaceCopy, forwardSurfaceFormat);
+    if (isPathTraced) forward_shadows::clearGuides(immediate.Get());
+
     endStep(TerrainStep);
     const auto inputsReady = ++fenceValue;
     check(immediate->Signal(fence.Get(), inputsReady), "Signalling the global illumination's inputs");
@@ -847,12 +913,15 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
         textures.reflection = reflection;
         textures.reflectionDistance = reflectionDistance;
         textures.reflectionMap = reflectionMap;
+        textures.forwardShadow = forwardShadow;
         textures.guideMaterial = guideMaterial.texture.Get();
         textures.guideLobe = guideLobe.texture.Get();
         textures.specularTable = specularTable.texture.Get();
         textures.lampMasks = lampMasks;
         textures.lampDiffuse = lampDiffuse;
         textures.lampSpecular = lampSpecular;
+        textures.forwardDepth = forwardCopied ? forwardDepthCopy.Get() : nullptr;
+        textures.forwardSurface = forwardCopied ? forwardSurfaceCopy.Get() : nullptr;
         textures.materialSpecular = materialSpecular.texture.Get();
         textures.skyCube = skyCube;
     }
@@ -903,6 +972,7 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     frame.forReconstruction = options.reconstructionGuides && denoisedByReconstruction;
     frame.isPathTraced = isPathTraced;
     frame.emissionScale = isPathTraced ? options.emission * LightScale : 0;
+    frame.forwardReflections = options.forwardReflections;
     frame.emissionCap = MostEmission * LightScale;
     reconstructionsAtKick = reconstructedFrames;
     wereReflectionsTraced = isPathTraced;
@@ -997,6 +1067,8 @@ void detach() noexcept
         objectVelocity.Reset();
         objectVelocityCopy.Reset();
         objectVelocityDrawn = false;
+        forwardDepthCopy.Reset();
+        forwardSurfaceCopy.Reset();
         fence.Reset();
         if (fenceHandle) CloseHandle(fenceHandle);
         fenceHandle = nullptr;
@@ -1016,7 +1088,7 @@ void detach() noexcept
     {
         std::lock_guard lock(lightMutex);
         output = shadowOutput = shadowDebugOutput = localLightOutput = lightDebugOutput = reflectionOutput = reflectionDistanceOutput = reflectionMapOutput = lampDiffuseOutput =
-            lampSpecularOutput = {};
+            lampSpecularOutput = forwardShadowOutput = {};
         wereReflectionsTraced = wereLampsTraced = false;
         publishedDepth.Reset();
         shadowWritten = shadowDebugWritten = localLightWritten = lightDebugWritten = false;
@@ -1050,6 +1122,7 @@ void configure(const Configuration& configuration) noexcept
         .reconstructionGuides = settings.upscaling.isRayReconstructionAsked(),
         .isPathTracing = configuration.effects.runs(Effect::PathTracing),
         .emission = settings.pathTracing.emission,
+        .forwardReflections = settings.pathTracing.forwardReflections,
     };
 
     latch.set(options);
@@ -1058,7 +1131,7 @@ void configure(const Configuration& configuration) noexcept
 Health health()
 {
     const auto wanted = latch.latest();
-    if (!wanted.enabled && !wanted.shadows && !wanted.localLights) return {};
+    if (!wanted.enabled && !wanted.shadows && !wanted.localLights && !wanted.isPathTracing) return {};
 
     std::lock_guard lock(executionMutex);
     if (failed) return Health::unavailable("Ray tracing is unavailable: " + failure);
@@ -1327,6 +1400,14 @@ ID3D11ShaderResourceView* reflectionMap(UINT width, UINT height) noexcept
     return reflectionMapOutput.width == width && reflectionMapOutput.height == height ? reflectionMapOutput.view.Get() : nullptr;
 }
 
+ID3D11ShaderResourceView* forwardShadow(UINT width, UINT height) noexcept
+{
+    if (!isPathTracing()) return nullptr;
+
+    std::lock_guard lock(lightMutex);
+    return forwardShadowOutput.width == width && forwardShadowOutput.height == height ? forwardShadowOutput.view.Get() : nullptr;
+}
+
 std::optional<LampLight> lampLight(UINT width, UINT height) noexcept
 {
     if (!wereLampsTraced.load(std::memory_order_relaxed) || !isPathTracing()) return std::nullopt;
@@ -1442,7 +1523,9 @@ void present() noexcept
 
     const auto options = latch.present();
 
-    const bool on = (options.enabled || options.shadows || options.localLights) && !failed;
+    // Path tracing traces the sun's shadow itself and replaces the ray-traced shadows, so the shadow
+    // is handed over while either runs: without this the sun pass falls back to the game's shadow map.
+    const bool on = (options.enabled || options.shadows || options.localLights || options.isPathTracing) && !failed;
     lighting = on && options.enabled;
     // Path tracing's sun and lamps read the rays as the ray-traced shadows and lights do, in their place.
     shadowing = on && (options.shadows || options.isPathTracing);

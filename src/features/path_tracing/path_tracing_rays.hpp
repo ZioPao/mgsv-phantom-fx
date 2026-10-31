@@ -23,6 +23,10 @@ struct Textures
     ID3D12Resource* reflectionMap{};
     ID3D12Resource* lampDiffuse{};
     ID3D12Resource* lampSpecular{};
+    // The forward surfaces' guides (t23, t24 in reflections.hlsl), one frame old; null without them.
+    ID3D12Resource* forwardDepth{};   // R32_FLOAT, reversed-Z
+    ID3D12Resource* forwardSurface{}; // R8_UNORM, where one drew: 1 a river or a liquid, 0.5 glass
+    ID3D12Resource* forwardShadow{};  // R16_FLOAT, the sun's shadow on the surfaces themselves (u97)
 };
 
 // Their views in the frame's tables, by the slots reflections.hlsl and direct_light.hlsl give them.

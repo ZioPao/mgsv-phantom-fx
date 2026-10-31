@@ -154,6 +154,7 @@ struct GIFrameConstants
     GI_ROW_MAJOR float4x4 viewProjection; // World to clip, jittered as the depth was drawn
     GI_ROW_MAJOR float4x4 viewProjectionInverse;
     GI_ROW_MAJOR float4x4 previousViewProjection;
+    GI_ROW_MAJOR float4x4 previousViewProjectionInverse; // The forward surfaces' guides are a frame old
     // The light's motion (CameraMotionOf in gi_common.hlsli): the last frame's clip position from this frame's,
     // both unjittered, built in double from the projections and views apart (camera::previousFromCurrentByParts);
     // and the w row of this frame's unjittered clip to view.
@@ -200,6 +201,9 @@ struct GIFrameConstants
     // Ray cones for the textures' levels of detail (gi_common.hlsli, TextureLod): x the angle a pixel
     // spans, radians.
     float4 rayCone;
+    // How much of the traced reflection a forward surface keeps (the menu's Water and glass reflections): the
+    // water's own shader adds a sky reflection the trace cannot take out, so a full one would double.
+    float4 forwardReflections;
     // The upscaler's jitter in NDC as the depth was drawn (cPSScene c28, m_cameraCenterOffset): xy this
     // frame's, zw the last frame's.
     float4 jitter;

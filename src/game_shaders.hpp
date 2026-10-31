@@ -34,6 +34,7 @@ enum class GamePass : std::uint8_t
     Sky,
     SkyDome,         // The sky's painted dome and its clouds, drawn over it
     Sea,             // The game's sea, drawn over the lit scene after the sky (Primitive_TppFourierOcean*)
+    ForwardWater,    // Rivers and liquids: the forward pass's water, blended over the lit scene; its shadow at `shadowSlot`
     ReflectionMask,  // The screen-space reflections' mask from the depth, normals and roughness; reads the scene's depth at t0
     ReflectionAdd,   // The screen-space reflections blended over the scene
     Reduce,          // The scene's quarter-size copy that bloom and the lens flares start from
@@ -62,6 +63,11 @@ struct GameShader
     bool hasRainReflection{};
     bool hasSprite{};     // Sky: the sun's or the moon's sprite
     bool isFarSea{};      // Sea: the far sea, a plane 5 m below the near sea (its material constants' c0.z)
+    std::uint32_t shadowSlot{}; // ForwardWater: the game's shadow map's texture slot (t14, t8 for glass)
+    std::uint32_t cubeSlot{};   // ForwardWater: its reflection cube map's slot (t2, t11 for glass)
+    // ForwardWater: what its guide's mask writes for the rays traced at its pixels: 1 a river or a
+    // liquid, 0.5 glass (TraceReflections reads it for the surface's roughness and specular albedo)
+    float guideValue{1.0f};
 };
 
 inline constexpr GameShader GameShaders[]{
@@ -132,6 +138,13 @@ inline constexpr GameShader GameShaders[]{
     {GamePass::Sea, "Primitive_TppFourierOceanLQ", "536ed28c18bb66d2828795bdcf5fc3d5"},
     {.pass = GamePass::Sea, .name = "Primitive_TppFourierOceanFill", .checksum = "51218f2d1ccc9d0f9cf159653ed41f5d", .isFarSea = true},
     {.pass = GamePass::Sea, .name = "Primitive_TppFourierOceanFill", .checksum = "9291bd0ac69ab6cdeae6244f778c4ddb", .isFarSea = true},
+
+    // The forward pass's reflective surfaces: rivers and other liquids ("Prim_TppRiverModelShHnmRpl"),
+    // and glass ("fox3dfw_glass"). They blend over the lit scene and keep the game's shadow map, whose
+    // light the rays' replaces (`shadowSlot`, "Forward shadows" in docs/DEVELOPMENT.md).
+    {.pass = GamePass::ForwardWater, .name = "Prim_TppRiverModelShHnmRpl", .checksum = "1f6f0ff669cc08d207f827ce3133a98c", .shadowSlot = 14, .cubeSlot = 2},
+    {.pass = GamePass::ForwardWater, .name = "fox3dfw_glass", .checksum = "79fd24a8572a82381e6520e817c7b9f3", .shadowSlot = 8, .cubeSlot = 11,
+        .guideValue = 0.5f},
 
     {GamePass::Reduce, "CopyReductionX4", "e5b80b0a4d737e50533f9a058ffdca42"},
     {GamePass::Copy, "CopyRenderBuffer", "9f93a957f1e21656e0d86bf112b71d6d"},
