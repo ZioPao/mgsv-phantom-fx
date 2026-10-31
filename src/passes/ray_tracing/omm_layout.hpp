@@ -15,8 +15,9 @@ namespace phantom_fx::omm_layout
 // About this many texels to a micro-triangle.
 constexpr float TexelsPerMicroTriangle = 2.0f;
 
-// Every block starts on a 4-byte boundary, so a block owns whole words and the bake kernel writes
-// one block's words without touching another's.
+// Every block starts on a 4-byte boundary, so a block owns whole words and the bake kernel writes one
+// block's words without touching another's. (128 was tried for the in-game hang; it changed nothing and
+// cost 31 bytes a block.)
 constexpr std::uint32_t BlockAlignment = 4;
 
 // The finest level the bake makes (GI_OMM_MAX_LEVEL in shaders/gi_omm.h).

@@ -35,9 +35,11 @@ constexpr std::uint32_t MicromapLinksPerFrame = 1;
 // frames (docs/opacity-micromaps.md, section 8a). Everything else keeps the shader's own alpha test.
 // Every structure that takes micromaps may carry them: at a few thousand triangles out of millions the
 // alpha test it replaces is 0.06% of the scene, so capping the count hides any gain (docs/opacity-micromaps.md).
-// Eight is the most the device has been observed to link and stay up (2026-10-31: 10-33 links hang
-// it, whatever else changes); beyond that the rays keep the shader's own alpha test.
-constexpr std::uint32_t MicromapStructures = 8;
+// The blocks the scene may carry at once, not the structures: a mask is worth its memory when it
+// covers a mesh the rays hit, and the many small ones (grass cards, fences, nets) cost a handful of
+// blocks each. A structure is only linked while 	riangles more keep the total under this, and the
+// smallest meshes go first (docs/opacity-micromaps.md).
+constexpr std::uint32_t MicromapBlocks = 2500;
 // D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_BYTE_ALIGNMENT, which the Windows SDK's 26100 headers lack: an
 // array's input starts on it.
 constexpr std::uint64_t MicromapArrayAlignment = 128;
@@ -145,9 +147,9 @@ void Scene::planBuilds()
     // the renderer; the rest are here.
     static const bool once = GetEnvironmentVariableA("PHANTOM_FX_OMM_ONCE", nullptr, 0) != 0;
     static const bool keepFirstLink = GetEnvironmentVariableA("PHANTOM_FX_OMM_NO_RELINK", nullptr, 0) != 0;
-    static const auto structureCap = [] {
+    static const auto blockBudget = [] {
         char text[16]{};
-        return GetEnvironmentVariableA("PHANTOM_FX_OMM_MAX_STRUCTURES", text, sizeof(text)) ? static_cast<std::uint32_t>(std::atoi(text)) : MicromapStructures;
+        return GetEnvironmentVariableA("PHANTOM_FX_OMM_MAX_BLOCKS", text, sizeof(text)) ? static_cast<std::uint32_t>(std::atoi(text)) : MicromapBlocks;
     }();
 
     // Structures whose cut-out meshes' textures changed take micromaps baked from them first: a built one
@@ -167,11 +169,32 @@ void Scene::planBuilds()
             }
         }
 
-        std::uint32_t prepared{};
-        for (BlasId id = 0; id < structures.size() && prepared < MicromapLinksPerFrame; ++id)
+        // The smallest meshes first: the budget goes to the many small cut-outs the rays meet, not to one
+        // 600-block monster that would spend it alone.
+        std::vector<BlasId> candidates;
+        for (BlasId id = 0; id < structures.size(); ++id)
         {
-            auto& blas = structures[id];
+            const auto& blas = structures[id];
             if (!blas.live || !blas.micromapsDirty || blas.pendingLink || blas.use != Use::Static) continue;
+            candidates.push_back(id);
+        }
+        // Biggest first, and eight at most: the experiment that tells an array-count limit from a block
+        // budget (2026-10-31: 29 arrays of 28 blocks hung, 8 arrays of thousands may not).
+        std::sort(candidates.begin(), candidates.end(), [&](BlasId a, BlasId b) { return structures[a].triangles > structures[b].triangles; });
+        constexpr std::uint32_t MaxStructures = 8;
+        std::uint32_t carrying{};
+        for (const auto& other : structures)
+            if (other.live && (other.micromaps || other.pendingLink)) ++carrying;
+
+        std::uint32_t liveBlocks{};
+        for (const auto& other : structures)
+            if (other.live && other.micromaps) liveBlocks += other.micromaps->blocks;
+
+        std::uint32_t prepared{};
+        for (const auto id : candidates)
+        {
+            if (prepared >= MicromapLinksPerFrame) break;
+            auto& blas = structures[id];
 
             // PHANTOM_FX_OMM_ONCE links one structure a session, for telling one link from a batch of them.
             if (once && micromapLinked) return;
@@ -183,24 +206,22 @@ void Scene::planBuilds()
                 continue;
             }
 
-            // A structure that has none only takes micromaps while fewer than the cap carry them;
-            // relinking one that has them costs nothing (PHANTOM_FX_OMM_MAX_STRUCTURES overrides).
-            if (!blas.micromaps)
+            // Its triangles bound its blocks (a block a triangle at most), so the budget cannot overshoot.
+            if (!blas.micromaps && (carrying >= MaxStructures || liveBlocks + blas.triangles > blockBudget))
             {
-                std::uint32_t carrying{};
-                for (const auto& other : structures)
-                    if (other.live && (other.micromaps || other.pendingLink)) ++carrying;
-                if (carrying >= structureCap)
-                {
-                    blas.micromapsDirty = false;
-                    continue;
-                }
+                blas.micromapsDirty = false;
+                continue;
             }
 
             if (!prepareMicromaps(id)) continue;
             blas.micromapsDirty = false;
             ++prepared;
             ++micromapLinks;
+            if (blas.micromaps)
+            {
+                liveBlocks += blas.micromaps->blocks;
+                ++carrying;
+            }
         }
     }
 
@@ -859,6 +880,22 @@ bool Scene::prepareMicromaps(BlasId id)
             descs[b].Format = D3D12_RAYTRACING_OPACITY_MICROMAP_FORMAT_OC1_2_STATE;
             const auto& row = rows[blas.firstGeometry + linkedGeometries[array.blockMesh[b]]];
             records[b] = {block.uvs[0], block.uvs[1], block.uvs[2], block.level, row.texture, block.byteOffset, row.alphaThreshold, 0};
+        }
+
+        // What the array build is handed, for the first few links: the numbers either add up or name the bug.
+        static int dumps{};
+        if (dumps++ < 3)
+        {
+            std::string levels;
+            for (const auto& entry : histogram)
+                levels += " L" + std::to_string(entry.SubdivisionLevel) + "x" + std::to_string(entry.Count) + "f" + std::to_string(static_cast<int>(entry.Format));
+            std::uint64_t largest{};
+            for (const auto& block : array.blocks) largest = std::max(largest, std::uint64_t{block.byteOffset} + omm_layout::blockBytes(block.level));
+            log("Opacity micromaps: array for structure " + std::to_string(id) + ": " + std::to_string(blocks) + " blocks, " + std::to_string(triangles)
+                + " triangles, input " + std::to_string(array.bytes) + " B, largest end " + std::to_string(largest) + " B, descs " + std::to_string(descsAt)
+                + " stride " + std::to_string(sizeof(descs[0])) + ", histogram" + levels + ", first desc " + std::to_string(descs[0].ByteOffset) + " L"
+                + std::to_string(descs[0].SubdivisionLevel) + " f" + std::to_string(static_cast<int>(descs[0].Format)) + ", last desc "
+                + std::to_string(descs.back().ByteOffset) + " L" + std::to_string(descs.back().SubdivisionLevel));
         }
 
         const auto stage = [&](std::uint64_t poolAt, const void* data, std::uint64_t bytes) {
