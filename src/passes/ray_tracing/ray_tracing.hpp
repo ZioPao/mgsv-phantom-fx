@@ -39,6 +39,8 @@ void configure(const Configuration& configuration) noexcept;
 Health health();
 // What the scene holds, for the overlay's diagnostics.
 std::string status();
+// The opacity micromaps' state and coverage, for the diagnostics menu.
+std::string micromapStatus();
 
 // ---- Recording, on the game's render and worker threads ----
 void vertexShaderBound(ID3D11DeviceContext* context, game_shaders::VertexShader kind) noexcept;

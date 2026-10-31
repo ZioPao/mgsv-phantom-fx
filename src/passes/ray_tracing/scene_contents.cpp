@@ -176,6 +176,11 @@ std::vector<Geometry> SceneContents::stageModel(const Model& model, std::uint64_
         geometry.indexOffset = poolOffset + at;
         geometry.indexCount = static_cast<std::uint32_t>(part.indices.size());
         std::memcpy(bytes.data() + at, part.indices.data(), part.indices.size() * 2);
+        if (part.uvs.size() == part.vertices.size())
+        {
+            geometry.uvs = part.uvs;
+            geometry.indices = part.indices;
+        }
         at += layout.indices;
         if (!part.normals.empty()) geometry.normalOffset = poolOffset + at + layout.skin;
         geometries.push_back(geometry);

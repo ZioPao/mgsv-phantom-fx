@@ -32,35 +32,69 @@
 #include <string>
 #include <utility>
 
-// The kernels, compiled by DXC at build time (CMakeLists.txt).
+#include "passes/ray_tracing/shaders/gi_omm.h"
+
+// The kernels, compiled by DXC at build time (CMakeLists.txt): each twice, the second with opacity micromaps.
+#include "BakeMicromaps.h"
+#include "BakeMicromapsMicromaps.h"
 #include "ClassifyShadowTiles.h"
+#include "ClassifyShadowTilesMicromaps.h"
 #include "ClearCounters.h"
+#include "ClearCountersMicromaps.h"
 #include "ClearNewGeometries.h"
+#include "ClearNewGeometriesMicromaps.h"
 #include "CompositeLight.h"
+#include "CompositeLightMicromaps.h"
 #include "DebugScene.h"
+#include "DebugSceneMicromaps.h"
 #include "DebugShadows.h"
+#include "DebugShadowsMicromaps.h"
 #include "FilterLocalLightShadows.h"
+#include "FilterLocalLightShadowsMicromaps.h"
 #include "FilterShadows.h"
+#include "FilterShadowsMicromaps.h"
 #include "GenerateDispatch.h"
+#include "GenerateDispatchMicromaps.h"
 #include "LearnAlbedo.h"
+#include "LearnAlbedoMicromaps.h"
 #include "PopulateCells.h"
+#include "PopulateCellsMicromaps.h"
 #include "PopulateMultibounceCells.h"
+#include "PopulateMultibounceCellsMicromaps.h"
 #include "PrepareGuides.h"
+#include "PrepareGuidesMicromaps.h"
 #include "ProbeLocalLights.h"
+#include "ProbeLocalLightsMicromaps.h"
 #include "ProbeShadows.h"
+#include "ProbeShadowsMicromaps.h"
 #include "PurgeTiles.h"
+#include "PurgeTilesMicromaps.h"
 #include "ResolveLight.h"
+#include "ResolveLightMicromaps.h"
+#include "ResolveMicromapIndices.h"
+#include "ResolveMicromapIndicesMicromaps.h"
 #include "Skin.h"
+#include "SkinMicromaps.h"
 #include "TerrainGrid.h"
+#include "TerrainGridMicromaps.h"
 #include "TraceLampLight.h"
+#include "TraceLampLightMicromaps.h"
 #include "TraceLight.h"
+#include "TraceLightMicromaps.h"
 #include "TraceLocalLightShadows.h"
+#include "TraceLocalLightShadowsMicromaps.h"
 #include "TraceReflections.h"
+#include "TraceReflectionsMicromaps.h"
 #include "TraceSunShadows.h"
+#include "TraceSunShadowsMicromaps.h"
 #include "TraceSurfaceReflections.h"
+#include "TraceSurfaceReflectionsMicromaps.h"
 #include "UpdateFoliageMemory.h"
+#include "UpdateFoliageMemoryMicromaps.h"
 #include "UpdateMultibounceCells.h"
+#include "UpdateMultibounceCellsMicromaps.h"
 #include "UpdateTiles.h"
+#include "UpdateTilesMicromaps.h"
 
 namespace phantom_fx::gi_renderer
 {
@@ -92,8 +126,20 @@ constexpr std::uint32_t MaxMarks = 32;
 constexpr std::span<const unsigned char> Bytecode[]{GI_ClearNewGeometries, GI_DebugScene, GI_TerrainGrid, GI_Skin,
     GI_ClearCounters, GI_GenerateDispatch, GI_PrepareGuides, GI_TraceLight, GI_LearnAlbedo, GI_PurgeTiles, GI_PopulateMultibounceCells,
     GI_PopulateCells, GI_UpdateTiles, GI_UpdateMultibounceCells, GI_ResolveLight, GI_UpdateFoliageMemory, GI_CompositeLight, GI_TraceSunShadows, GI_ClassifyShadowTiles,
-    GI_FilterShadows, GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows, GI_ProbeLocalLights, GI_TraceReflections, GI_TraceSurfaceReflections, GI_TraceLampLight};
+    GI_FilterShadows, GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows, GI_ProbeLocalLights, GI_TraceReflections,
+    GI_TraceSurfaceReflections, GI_TraceLampLight, GI_BakeMicromaps, GI_ResolveMicromapIndices};
 static_assert(std::size(Bytecode) == static_cast<std::size_t>(Kernel::Count));
+// The same kernels built with GI_OPACITY_MICROMAPS (Shader Model 6.9): every ray query declares that structures may
+// link opacity micromaps. Used, and micromaps linked, only where the device runs them (start).
+constexpr std::span<const unsigned char> MicromapBytecode[]{
+    GI_ClearNewGeometriesMicromaps, GI_DebugSceneMicromaps, GI_TerrainGridMicromaps, GI_SkinMicromaps, GI_ClearCountersMicromaps,
+    GI_GenerateDispatchMicromaps, GI_PrepareGuidesMicromaps, GI_TraceLightMicromaps, GI_LearnAlbedoMicromaps, GI_PurgeTilesMicromaps,
+    GI_PopulateMultibounceCellsMicromaps, GI_PopulateCellsMicromaps, GI_UpdateTilesMicromaps, GI_UpdateMultibounceCellsMicromaps,
+    GI_ResolveLightMicromaps, GI_UpdateFoliageMemoryMicromaps, GI_CompositeLightMicromaps, GI_TraceSunShadowsMicromaps,
+    GI_ClassifyShadowTilesMicromaps, GI_FilterShadowsMicromaps, GI_DebugShadowsMicromaps, GI_ProbeShadowsMicromaps,
+    GI_TraceLocalLightShadowsMicromaps, GI_FilterLocalLightShadowsMicromaps, GI_ProbeLocalLightsMicromaps, GI_TraceReflectionsMicromaps,
+    GI_TraceSurfaceReflectionsMicromaps, GI_TraceLampLightMicromaps, GI_BakeMicromapsMicromaps, GI_ResolveMicromapIndicesMicromaps};
+static_assert(std::size(MicromapBytecode) == static_cast<std::size_t>(Kernel::Count));
 
 using Shared = OpenedTexture;
 
@@ -133,6 +179,10 @@ struct State
 
     ComPtr<ID3D12RootSignature> rootSignature;
     Pipelines pipelines;
+    // Opacity micromaps: whether the kernels are MicromapBytecode's and the scene links them, and why not.
+    bool micromaps{};
+    bool captured{}; // A programmatic PIX capture was asked for and taken
+    std::string micromapState;
     ComPtr<ID3D12CommandSignature> dispatchSignature;
     ComPtr<ID3D12DescriptorHeap> heap;
     UINT descriptorSize{};
@@ -257,13 +307,26 @@ void createPipelines(State& s)
 
     check(s.device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&s.rootSignature)), "Creating the root signature");
 
-    for (std::size_t kernel = 0; kernel < s.pipelines.size(); ++kernel)
-    {
-        D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};
-        pipeline.pRootSignature = s.rootSignature.Get();
-        pipeline.CS = {Bytecode[kernel].data(), Bytecode[kernel].size()};
-        check(s.device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&s.pipelines[kernel])), "Creating a kernel");
-    }
+    const auto createSet = [&](std::span<const std::span<const unsigned char>> bytecode) {
+        for (std::size_t kernel = 0; kernel < s.pipelines.size(); ++kernel)
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};
+            pipeline.pRootSignature = s.rootSignature.Get();
+            pipeline.CS = {bytecode[kernel].data(), bytecode[kernel].size()};
+            if (const auto result = s.device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&s.pipelines[kernel])); FAILED(result)) return result;
+        }
+        return S_OK;
+    };
+
+    // The micromaps' set where the device reported it can run it; a refusal of any of its kernels takes
+    // the set without, and no micromaps.
+    if (s.micromaps)
+        if (const auto refused = createSet(MicromapBytecode); FAILED(refused))
+        {
+            s.micromaps = false;
+            s.micromapState = "off: the device refused the kernels with micromaps (" + hex(static_cast<std::uint32_t>(refused)) + ")";
+        }
+    if (!s.micromaps) check(createSet(Bytecode), "Creating a kernel");
 
     D3D12_INDIRECT_ARGUMENT_DESC argument{};
     argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
@@ -459,17 +522,58 @@ gi_denoiser::Camera denoiserCamera(const Frame& frame)
 }
 }
 
-void start(ID3D11Device* device11, HANDLE sharedFence)
+void start(ID3D11Device* device11, HANDLE sharedFence, bool allowMicromaps)
 {
     if (state) return;
 
     auto s = std::make_unique<State>();
+    // PHANTOM_FX_D3D12_DEBUG asks the Direct3D 12 debug layer for its messages, which dumpMessages writes
+    // when a failure stops the renderer (a development aid; the layer must sit beside D3D12Core.dll).
+    if (GetEnvironmentVariableA("PHANTOM_FX_D3D12_DEBUG", nullptr, 0))
+    {
+        ID3D12Debug* debug{};
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))) && debug)
+        {
+            debug->EnableDebugLayer();
+            debug->Release();
+            log("Direct3D 12 debug layer enabled.");
+        }
+        else log("Direct3D 12 debug layer not available.");
+    }
+    if (GetEnvironmentVariableA("PHANTOM_FX_D3D12_DRED", nullptr, 0))
+    {
+        ID3D12DeviceRemovedExtendedDataSettings1* settings{};
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&settings))) && settings)
+        {
+            settings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            settings->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            settings->Release();
+            log("Direct3D 12 DRED enabled.");
+        }
+    }
+
     const auto d3d12 = createDevice12(device11);
     s->wrapper = d3d12.wrapper;
     check(d3d12.native.As(&s->device), "Finding Direct3D 12 ray tracing");
     D3D12_FEATURE_DATA_D3D12_OPTIONS5 options{};
     s->device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options, sizeof(options));
     if (options.RaytracingTier < D3D12_RAYTRACING_TIER_1_1) throw std::runtime_error("The GPU or its driver cannot trace rays from compute shaders (DXR 1.1).");
+
+    // Opacity micromaps with ray queries need DXR 1.2 and Shader Model 6.9: a runtime reporting the tier
+    // alone (Windows' own D3D12Core 616) refuses every 6.9 kernel (docs/opacity-micromaps.md, section 4).
+    D3D12_FEATURE_DATA_SHADER_MODEL shaderModel{D3D_SHADER_MODEL_6_9};
+    if (FAILED(s->device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel)))) shaderModel.HighestShaderModel = D3D_SHADER_MODEL_5_1;
+    if (!allowMicromaps) s->micromapState = "off (diagnostics)";
+    else if (options.RaytracingTier < D3D12_RAYTRACING_TIER_1_2) s->micromapState = "off: the GPU or its driver has no DXR 1.2";
+    else if (shaderModel.HighestShaderModel < D3D_SHADER_MODEL_6_9)
+        s->micromapState = "off: Direct3D 12 runs Shader Model " + std::to_string(shaderModel.HighestShaderModel >> 4) + "." + std::to_string(shaderModel.HighestShaderModel & 0xF)
+            + ", not 6.9";
+    else
+    {
+        s->micromaps = true;
+        s->micromapState = "on";
+    }
 
     const D3D12_COMMAND_QUEUE_DESC queue{D3D12_COMMAND_LIST_TYPE_COMPUTE};
     check(s->device->CreateCommandQueue(&queue, IID_PPV_ARGS(&s->queue)), "Creating the Direct3D 12 queue");
@@ -493,9 +597,58 @@ void start(ID3D11Device* device11, HANDLE sharedFence)
 
     createPipelines(*s);
     createResources(*s);
+    if (s->micromaps) s->scene->enableMicromaps();
 
+    log("Global illumination started on Direct3D 12; opacity micromaps " + s->micromapState + ".");
     state = std::move(s);
-    log("Global illumination started on Direct3D 12.");
+}
+
+void dumpMessages()
+{
+    if (!state || !state->device) return;
+
+    log("Direct3D 12 device removed reason: 0x" + hex(static_cast<std::uint32_t>(state->device->GetDeviceRemovedReason())) + ".");
+
+    ID3D12InfoQueue* queue{};
+    if (FAILED(state->device->QueryInterface(IID_PPV_ARGS(&queue)))) return;
+    for (UINT64 i = 0; i < queue->GetNumStoredMessages(); ++i)
+    {
+        SIZE_T size{};
+        if (FAILED(queue->GetMessage(i, nullptr, &size))) continue;
+
+        auto* message = static_cast<D3D12_MESSAGE*>(std::malloc(size));
+        if (SUCCEEDED(queue->GetMessage(i, message, &size)))
+            log(std::string("Direct3D 12 debug: ") + std::to_string(static_cast<int>(message->Severity)) + ": " + std::string(message->pDescription, message->DescriptionByteLength));
+        std::free(message);
+    }
+
+    // Device Removed Extended Data (PHANTOM_FX_D3D12_DRED): the last GPU operations and the address a
+    // page fault took, which the debug layer alone does not give.
+    ID3D12DeviceRemovedExtendedData* dred{};
+    if (SUCCEEDED(state->device->QueryInterface(IID_PPV_ARGS(&dred))) && dred)
+    {
+        D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT crumbs{};
+        if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&crumbs)))
+            for (auto* node = crumbs.pHeadAutoBreadcrumbNode; node; node = node->pNext)
+            {
+                const auto last = node->pLastBreadcrumbValue && *node->pLastBreadcrumbValue < node->BreadcrumbCount ? *node->pLastBreadcrumbValue : 0;
+                std::string ops;
+                for (UINT i = last; i < node->BreadcrumbCount && i < last + 8; ++i) ops += std::to_string(node->pCommandHistory[i]) + " ";
+                log("Direct3D 12 DRED: breadcrumb " + std::to_string(last) + " of " + std::to_string(node->BreadcrumbCount) + ", ops " + ops);
+            }
+
+        D3D12_DRED_PAGE_FAULT_OUTPUT fault{};
+        if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&fault)))
+        {
+            log("Direct3D 12 DRED: page fault at 0x" + hex(fault.PageFaultVA));
+            for (auto* allocation = fault.pHeadExistingAllocationNode; allocation; allocation = allocation->pNext)
+                log("Direct3D 12 DRED: allocation type " + std::to_string(static_cast<int>(allocation->AllocationType)) + " "
+                    + (allocation->ObjectNameA ? allocation->ObjectNameA : ""));
+        }
+
+        dred->Release();
+    }
+    queue->Release();
 }
 
 void stop() noexcept
@@ -860,6 +1013,35 @@ Result render(const Frame& frame)
     lap(WaitStep);
     auto& scene = *s.scene;
     scene.beginFrame(slot, s.fence->GetCompletedValue(), frame.signalValue);
+
+    // Development only: PHANTOM_FX_PIX_CAPTURE names a .wpix, captured once micromaps are linked. It goes
+    // through WinPixEventRuntime, next to the game's exe, so PIX never injects anything (PIXGpuCaptureNextFrames).
+    if (!s.captured)
+    {
+        char path[MAX_PATH]{};
+        if (GetEnvironmentVariableA("PHANTOM_FX_PIX_CAPTURE", path, MAX_PATH) && scene.stats().micromapStructures > 0)
+        {
+            s.captured = true;
+            wchar_t module[MAX_PATH]{};
+            GetModuleFileNameW(nullptr, module, MAX_PATH);
+            std::wstring directory(module);
+            directory = directory.substr(0, directory.find_last_of(L"\\") + 1);
+            HMODULE runtime = LoadLibraryW((directory + L"WinPixEventRuntime.dll").c_str());
+            wchar_t wide[MAX_PATH]{};
+            MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, MAX_PATH);
+            using LoadCapturer = HMODULE (*)();
+            using Capture = HRESULT (*)(PCWSTR, UINT32);
+            const auto load = runtime ? reinterpret_cast<LoadCapturer>(GetProcAddress(runtime, "PIXLoadLatestWinPixGpuCapturerLibrary")) : nullptr;
+            const auto capture = runtime ? reinterpret_cast<Capture>(GetProcAddress(runtime, "PIXGpuCaptureNextFrames")) : nullptr;
+            // The capturer has to be in the process: PIX's own loader looks only in its install folder, so
+            // load the copy beside the game's exe first.
+            auto capturer = LoadLibraryW((directory + L"WinPixGpuCapturer.dll").c_str());
+            if (!capturer && load) capturer = load();
+            log(std::string("PIX runtime ") + (runtime ? "loaded" : "missing") + ", capturer " + (capturer ? "loaded" : "missing"));
+            const auto captureResult = capture ? capture(wide, 20) : E_FAIL;
+            log(std::string("PIX capture ") + (SUCCEEDED(captureResult) ? "started: " : "failed: ") + hex(static_cast<std::uint32_t>(captureResult)) + ", " + path);
+        }
+    }
     if constexpr (DiagnosticLog) logStats(s);
     readTimes(s, slot);
     readProbe(s, slot);
@@ -1052,6 +1234,7 @@ Result render(const Frame& frame)
         descriptors.outputBuffer(4, s.counters.Get(), 4, GI_COUNTER_COUNT);
         descriptors.outputBuffer(5, s.dispatchArguments.Get(), 16, GI_DISPATCH_SLOTS);
         descriptors.outputBuffer(6, s.geometryAlbedo.Get(), 16, MaxGeometries);
+        if (scene.micromapPool()) descriptors.outputRawBuffer(40, scene.micromapPool(), gi_scene::Scene::MicromapPoolBytes);
         if (terrain)
         {
             descriptors.texture(14, terrainPages, frame.terrain->pagesFormat);
@@ -1117,6 +1300,22 @@ Result render(const Frame& frame)
             if (update.terrain[r].isRemade) recorder.dispatch(Kernel::TerrainGrid, groups(GI_TERRAIN_CELLS, 8), groups(GI_TERRAIN_CELLS, 8), {r});
 
         if (skinCount) recorder.dispatch(Kernel::Skin, groups(skinVertices, 64), 1, {skinVertices, skinCount});
+
+        // The opacity micromaps linked this frame: their states baked (a thread group a block, in runs
+        // under the dispatch limit), then their triangles' indices, before their arrays and structures.
+        // PHANTOM_FX_OMM_NOBAKE skips both, for telling a fault in the kernels from one in the arrays.
+        static const bool baking = GetEnvironmentVariableA("PHANTOM_FX_OMM_NOBAKE", nullptr, 0) == 0;
+        if (const auto& bakes = scene.micromapBakes(); !bakes.empty() && baking)
+        {
+            constexpr std::uint32_t MaxGroups = D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
+            for (const auto& bake : bakes)
+                for (std::uint32_t first = 0; first < bake.blocks; first += MaxGroups)
+                    recorder.dispatch(Kernel::BakeMicromaps, std::min(bake.blocks - first, MaxGroups), 1,
+                        {bake.records + first * static_cast<std::uint32_t>(sizeof(GIOmmBlock)), bake.blocks - first, bake.states + 4 * first, bake.data});
+            recorder.barrier();
+            for (const auto& bake : bakes)
+                recorder.dispatch(Kernel::ResolveMicromapIndices, groups(bake.triangles, 64), 1, {bake.triangleBlocks, bake.triangles, bake.states, bake.indices});
+        }
 
         recorder.mark("bottom-level structures", performance::Pass::RayTracedScene);
         scene.recordBottomLevels(list);
@@ -1243,6 +1442,30 @@ std::string shadowProbe()
     return probeText;
 }
 
+std::string micromapStatus()
+{
+    if (!state) return {};
+
+    const auto& s = *state;
+    const auto stats = s.scene->stats();
+    const auto kilobytes = [](std::uint64_t bytes) { return std::to_string((bytes + 512) / 1024) + " KB"; };
+    const auto share = [&](std::uint64_t part, std::uint64_t whole) {
+        return whole ? std::to_string(part * 1000 / whole / 10) + "." + std::to_string(part * 1000 / whole % 10) + "%" : std::string("-");
+    };
+
+    std::string text = s.micromapState;
+    if (!s.micromaps) return text;
+
+    text += "\nstructures " + std::to_string(stats.micromapStructures) + " (" + std::to_string(stats.micromapLinks) + " linked, "
+        + std::to_string(stats.micromapRelinks) + " relinked)";
+    text += "\ntriangles " + std::to_string(stats.micromapTriangles) + " of " + std::to_string(s.triangles) + " traced (" + share(stats.micromapTriangles, s.triangles) + ")";
+    text += "\nblocks " + std::to_string(stats.micromapBlocks) + ":";
+    for (std::size_t level = 0; level < stats.micromapLevels.size(); ++level)
+        if (stats.micromapLevels[level]) text += " L" + std::to_string(level) + " " + std::to_string(stats.micromapLevels[level]);
+    text += "\nblocks' bytes " + kilobytes(stats.micromapBlockBytes) + ", pool " + kilobytes(stats.micromapPoolUsed) + " of "
+        + kilobytes(gi_scene::Scene::MicromapPoolBytes) + ", mean " + (stats.micromapBlocks ? std::to_string(stats.micromapBlockBytes / stats.micromapBlocks) : "0") + " B";
+    return text;
+}
 std::string status()
 {
     if (!state) return {};
@@ -1259,6 +1482,9 @@ std::string status()
         + percentOf(stats.poolUsed, stats.poolCapacity) + ", structures " + percentOf(stats.blasUsed, stats.blasCapacity) + " (" + std::to_string(stats.structures)
         + ", " + std::to_string(stats.compacted) + " compacted to " + compactedShare + " of their size, " + std::to_string(stats.waiting) + " waiting), "
         + std::to_string(stats.geometriesUsed) + " geometries; GPU: scene " + milliseconds(s.sceneMilliseconds) + ", light " + milliseconds(s.lightMilliseconds)
-        + ", shadows " + milliseconds(s.shadowMilliseconds) + "; " + s.contents->status();
+        + ", shadows " + milliseconds(s.shadowMilliseconds) + "; " + s.contents->status() + "; opacity micromaps " + s.micromapState
+        + (s.micromaps ? " (" + std::to_string(stats.micromapStructures) + " structures, " + std::to_string(stats.micromapBlocks) + " blocks, pool "
+                + percentOf(stats.micromapPoolUsed, gi_scene::Scene::MicromapPoolBytes) + ")"
+                          : std::string());
 }
 }

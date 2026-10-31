@@ -2,6 +2,7 @@
 
 #include "d3d12_helpers.hpp"
 #include "log.hpp"
+#include "trace.hpp"
 #include "performance.hpp"
 
 #include <d3d12.h>
@@ -10,6 +11,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -34,8 +36,19 @@ enum class Kernel : std::uint8_t
     TraceSunShadows, ClassifyShadowTiles, FilterShadows, DebugShadows, ProbeShadows, TraceLocalLightShadows, FilterLocalLightShadows, ProbeLocalLights,
     // reflections.hlsl and direct_light.hlsl (path tracing)
     TraceReflections, TraceSurfaceReflections, TraceLampLight,
+    // omm_bake.hlsl (opacity micromaps)
+    BakeMicromaps, ResolveMicromapIndices,
     Count
 };
+
+// The kernels' names, for the trace a lost device dumps.
+constexpr const char* KernelNames[] = {
+    "ClearNewGeometries", "DebugScene", "TerrainGrid", "Skin", "ClearCounters", "GenerateDispatch", "PrepareGuides", "TraceLight", "LearnAlbedo",
+    "PurgeTiles", "PopulateMultibounceCells", "PopulateCells", "UpdateTiles", "UpdateMultibounceCells", "ResolveLight", "UpdateFoliageMemory",
+    "CompositeLight", "TraceSunShadows", "ClassifyShadowTiles", "FilterShadows", "DebugShadows", "ProbeShadows", "TraceLocalLightShadows",
+    "FilterLocalLightShadows", "ProbeLocalLights", "TraceReflections", "TraceSurfaceReflections", "TraceLampLight", "BakeMicromaps",
+    "ResolveMicromapIndices"};
+static_assert(std::size(KernelNames) == static_cast<std::size_t>(Kernel::Count));
 
 using Pipelines = std::array<ComPtr<ID3D12PipelineState>, static_cast<std::size_t>(Kernel::Count)>;
 
@@ -211,6 +224,9 @@ public:
     {
         if (!x || !y) return;
 
+        if (trace::on())
+            trace::add(std::string("dispatch ") + KernelNames[static_cast<std::size_t>(kernel)] + " " + std::to_string(x) + "x" + std::to_string(y)
+                + " (" + std::to_string(parameters[0]) + ", " + std::to_string(parameters[1]) + ", " + std::to_string(parameters[2]) + ")");
         bind(kernel, parameters);
         list.Dispatch(x, y, 1);
     }
@@ -220,6 +236,7 @@ public:
     void indirect(Kernel kernel, std::uint32_t counter, std::uint32_t perGroup, std::array<std::uint32_t, 4> parameters = {},
         std::uint32_t second = 0xFFFFFFFFu)
     {
+        if (trace::on()) trace::add(std::string("indirect ") + KernelNames[static_cast<std::size_t>(kernel)] + " counter " + std::to_string(counter));
         const auto slot = nextSlot++ % 16;
         dispatch(Kernel::GenerateDispatch, 1, 1, {counter, perGroup, slot, second});
         D3D12_RESOURCE_BARRIER ready[]{uavBarrier(), gi_d3d12::transition(arguments, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -241,6 +258,8 @@ public:
 
     void transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
     {
+        if (trace::on())
+            trace::add("transition " + std::to_string(static_cast<std::uint32_t>(before)) + " -> " + std::to_string(static_cast<std::uint32_t>(after)));
         const auto barrier = gi_d3d12::transition(resource, before, after);
         list.ResourceBarrier(1, &barrier);
     }

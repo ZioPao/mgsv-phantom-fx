@@ -147,10 +147,17 @@ struct Result
     std::vector<std::uint64_t> releasedModels, releasedTextures;
 };
 
-// Throws when the GPU cannot trace rays (DXR 1.1) or Direct3D 12 fails.
-void start(ID3D11Device* device, HANDLE sharedFence);
+// Throws when the GPU cannot trace rays (DXR 1.1) or Direct3D 12 fails. With llowMicromaps, where the device runs
+// them (DXR 1.2 and Shader Model 6.9), the kernels and the scene take opacity micromaps (docs/opacity-micromaps.md).
+void start(ID3D11Device* device, HANDLE sharedFence, bool allowMicromaps);
 void stop() noexcept;
+// Development only: writes the Direct3D 12 debug layer's stored messages to the log, when the layer was
+// asked for (PHANTOM_FX_D3D12_DEBUG) and a failure is about to stop the renderer.
+void dumpMessages();
 bool started() noexcept;
+// The micromaps' state and coverage for the diagnostics menu: whether they run, why not, and what the
+// blocks cost. Empty before the renderer starts.
+std::string micromapStatus();
 
 // Records and submits the frame: waits for frame.waitValue on the shared fence, signals
 // frame.signalValue when the output is written. Throws on Direct3D 12 errors.

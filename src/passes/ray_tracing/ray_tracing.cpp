@@ -1,5 +1,6 @@
 // The ray-traced scene's frame on Direct3D 11; ray_tracing.hpp describes the route.
 #include "passes/ray_tracing/ray_tracing.hpp"
+#include "trace.hpp"
 
 #include "camera.hpp"
 #include "clock.hpp"
@@ -61,6 +62,7 @@ struct Options
     bool debugShadows{}; // Diagnostics: the shadow debug view and probe (shadowDebug, shadowProbe), with the shadows
     bool shadowStarts{}; // Diagnostics: the debug view shows where the shadow rays leave each pixel
     bool twoSidedShadows{}; // Diagnostics: every surface blocks rays towards lights from both sides, as until 2026-10-26
+    bool micromaps = true;  // Opacity micromaps where the device runs them; off from the diagnostics restarts the scene
     gi_renderer::LightDebugView lightDebugView{}; // Diagnostics: over the image (lightDebug)
 
     bool logOften{};   // Diagnostics: the light's statistics logged every few frames (as each readback returns), not every ten seconds
@@ -319,6 +321,8 @@ FrameLatch<Options> latch;
 // The scene runs (for the light, the shadows or the point and spot lights), the light runs, the sun's
 // shadows run, the point and spot lights' shadows run.
 std::atomic<bool> enabled{}, lighting{}, shadowing{}, localShadowing{}, asksPathTracing{}, failed{};
+// Whether the renderer is to start with opacity micromaps allowed, and whether the one running did.
+std::atomic<bool> micromapsAllowed{true}, startedWithMicromaps{};
 
 CommandListNotes<Notes> notes;
 
@@ -405,6 +409,8 @@ void fail(const std::string& reason)
     failed = true;
     failure = reason;
     log("Global illumination stopped: " + reason);
+    trace::dump();
+    gi_renderer::dumpMessages();
     gi_inputs::setActive(false);
     engine_scene::setActive(false);
     gi_renderer::stop();
@@ -414,9 +420,14 @@ void fail(const std::string& reason)
 // Call with executionMutex held.
 void ensurePipeline()
 {
+    const auto start = [] {
+        const bool micromaps = micromapsAllowed.load();
+        gi_renderer::start(device.Get(), fenceHandle, micromaps);
+        startedWithMicromaps = micromaps;
+    };
     if (packShader)
     {
-        if (!gi_renderer::started()) gi_renderer::start(device.Get(), fenceHandle);
+        if (!gi_renderer::started()) start();
         return;
     }
 
@@ -427,7 +438,7 @@ void ensurePipeline()
 
     check(device->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence)), "Creating the shared fence");
     check(fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &fenceHandle), "Sharing the fence");
-    gi_renderer::start(device.Get(), fenceHandle);
+    start();
 }
 
 // The G-buffer into the shared textures, on the immediate context; call with executionMutex held.
@@ -1032,6 +1043,7 @@ void configure(const Configuration& configuration) noexcept
         .debugShadows = diagnostics.debugView == DebugView::ShadowRays || diagnostics.debugView == DebugView::ShadowStarts,
         .shadowStarts = diagnostics.debugView == DebugView::ShadowStarts,
         .twoSidedShadows = diagnostics.twoSidedShadows,
+        .micromaps = !diagnostics.noOpacityMicromaps,
         .lightDebugView = diagnostics.debugView == DebugView::LightHistory      ? gi_renderer::LightDebugView::History
                           : diagnostics.debugView == DebugView::LightValidation ? gi_renderer::LightDebugView::Validation
                                                                                 : gi_renderer::LightDebugView::None,
@@ -1051,6 +1063,11 @@ Health health()
     if (sinceKick() > 1000) return Health::waiting("Ray tracing is waiting for the game's 3D view.");
 
     return {};
+}
+
+std::string micromapStatus()
+{
+    return gi_renderer::micromapStatus();
 }
 
 std::string status()
@@ -1462,13 +1479,19 @@ void present() noexcept
     shadowing = on && asked.needsSunRays();
     localShadowing = on && asked.needsLampRays();
     asksPathTracing = asked.runsPathTracing;
-    if (enabled.exchange(on) && !on)
+    // The micromaps switched while running: the renderer starts again with or without them, as the kernels
+    // and every structure's links depend on it.
+    micromapsAllowed = options.micromaps;
+    const bool micromapsSwitched = on && gi_renderer::started() && startedWithMicromaps != options.micromaps;
+    if ((enabled.exchange(on) && !on) || micromapsSwitched)
     {
         // Off gives the GPU memory back.
         std::lock_guard lock(executionMutex);
         gi_renderer::stop();
         gi_textures::reset();
         lightSignalled = lightWaited = 0;
+        // A restart's new scene reads the game's models again, as after off (engine_scene::setActive).
+        if (micromapsSwitched) engine_scene::setActive(false);
     }
 
     gi_inputs::setActive(on);

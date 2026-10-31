@@ -171,6 +171,26 @@ set(GI_SHADER_INCLUDES "${GI_SHADER_SHARED}/gi_shared.h" "${GI_SHADER_SHARED}/gi
     "${GI_SHADER_SHARED}/ggx_specular.hlsli" "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_filter.h"
     "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_tileclassification.h"
     "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_util.h" "${nrd_SOURCE_DIR}/Shaders/NRD.hlsli")
+# The kernels' second set, for opacity micromaps (docs/opacity-micromaps.md): Shader Model 6.9, whose ray
+# queries declare RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS, which the Windows SDK's DXC cannot compile. DXC
+# 1.9.2609's release archive, checked by SHA-256; its x64 compiler and licences are kept.
+set(DXC_OMM_VERSION 1.9.2609)
+set(DXC_OMM_DIR "${CMAKE_BINARY_DIR}/_deps/dxc-${DXC_OMM_VERSION}")
+if(NOT EXISTS "${DXC_OMM_DIR}/bin/x64/dxc.exe")
+    set(archive "${CMAKE_BINARY_DIR}/_deps/dxc-${DXC_OMM_VERSION}.zip")
+    message(STATUS "Downloading DXC ${DXC_OMM_VERSION}")
+    file(DOWNLOAD "https://github.com/microsoft/DirectXShaderCompiler/releases/download/v${DXC_OMM_VERSION}/dxc_2026_09_29.zip"
+        "${archive}" EXPECTED_HASH SHA256=ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1 TLS_VERIFY ON STATUS status)
+    list(GET status 0 code)
+    if(NOT code EQUAL 0)
+        message(FATAL_ERROR "Could not download DXC ${DXC_OMM_VERSION}: ${status}")
+    endif()
+    file(ARCHIVE_EXTRACT INPUT "${archive}" DESTINATION "${DXC_OMM_DIR}"
+        PATTERNS bin/x64/dxc.exe bin/x64/dxcompiler.dll bin/x64/dxil.dll LICENCE-MIT.txt LICENSE-LLVM.txt LICENSE-MS.txt)
+    file(REMOVE "${archive}")
+endif()
+set(DXC_OMM_EXECUTABLE "${DXC_OMM_DIR}/bin/x64/dxc.exe")
+
 set(GI_SHADER_HEADERS)
 function(add_gi_kernels source)
     foreach(entry IN LISTS ARGN)
@@ -181,7 +201,14 @@ function(add_gi_kernels source)
                 "${CMAKE_SOURCE_DIR}/src/${source}"
             DEPENDS "${CMAKE_SOURCE_DIR}/src/${source}" ${GI_SHADER_INCLUDES}
             COMMENT "DXC ${source}: ${entry}")
-        list(APPEND GI_SHADER_HEADERS "${output}")
+        set(micromaps "${GI_SHADER_DIR}/${entry}Micromaps.h")
+        add_custom_command(OUTPUT "${micromaps}"
+            COMMAND "${DXC_OMM_EXECUTABLE}" -nologo -T cs_6_9 -E ${entry} -HV 2021 -O3 -WX -D GI_OPACITY_MICROMAPS -I "${GI_SHADER_SHARED}" -I "${CMAKE_SOURCE_DIR}/third_party"
+                -I "${nrd_SOURCE_DIR}/Shaders" -Fh "${micromaps}" -Vn GI_${entry}Micromaps
+                "${CMAKE_SOURCE_DIR}/src/${source}"
+            DEPENDS "${CMAKE_SOURCE_DIR}/src/${source}" ${GI_SHADER_INCLUDES}
+            COMMENT "DXC ${DXC_OMM_VERSION} ${source}: ${entry}, with micromaps")
+        list(APPEND GI_SHADER_HEADERS "${output}" "${micromaps}")
     endforeach()
     set(GI_SHADER_HEADERS ${GI_SHADER_HEADERS} PARENT_SCOPE)
 endfunction()
@@ -194,6 +221,7 @@ add_gi_kernels(features/ray_traced_shadows/gi_shadow_filter.hlsl FilterShadows)
 add_gi_kernels(features/ray_traced_lights/light_shadows.hlsl TraceLocalLightShadows FilterLocalLightShadows ProbeLocalLights)
 add_gi_kernels(features/path_tracing/reflections.hlsl TraceReflections TraceSurfaceReflections)
 add_gi_kernels(features/path_tracing/direct_light.hlsl TraceLampLight)
+add_gi_kernels(passes/ray_tracing/shaders/omm_bake.hlsl BakeMicromaps ResolveMicromapIndices)
 add_custom_target(gi_kernels DEPENDS ${GI_SHADER_HEADERS})
 
 # Each feature's settings and their description (src/features/).
@@ -211,7 +239,7 @@ add_library(phantom_fx SHARED src/addon.cpp src/core.cpp src/modules.cpp src/fea
     src/features/depth_of_field/depth_of_field.cpp src/passes/indirect_light_pass.cpp src/passes/visibility_bitmask.cpp src/features/ambient_occlusion/gtvbao.cpp
     src/features/indirect_light/ssilvb.cpp src/features/global_illumination/light_combine.cpp src/features/photo_mode/photo_mode.cpp src/features/photo_mode/focus.cpp src/features/hdr/hdr.cpp src/weather.cpp src/character.cpp src/game_lua.cpp src/travel.cpp src/features/volumetric_fog/atmosphere.cpp src/features/sea/sea.cpp src/sun_movement.cpp
     src/fidelityfx.cpp src/features/upscaling/fsr_upscaler.cpp src/features/upscaling/ray_reconstruction.cpp src/features/path_tracing/path_tracing.cpp src/features/path_tracing/glass.cpp src/features/path_tracing/path_tracing_rays.cpp src/features/path_tracing/sky_capture.cpp src/features/frame_generation/fsr_frame_generation.cpp src/performance.cpp src/performance_menu.cpp
-    src/passes/ray_tracing/ray_tracing.cpp src/passes/ray_tracing/kick_traces.cpp src/passes/ray_tracing/trace.cpp src/passes/ray_tracing/shared_textures.cpp src/passes/ray_tracing/engine_scene.cpp src/passes/ray_tracing/scene_description.cpp src/passes/ray_tracing/engine_brush.cpp src/passes/ray_tracing/gi_inputs.cpp src/features/ray_traced_lights/local_lights.cpp src/features/ray_traced_lights/light_choice.cpp src/features/ray_traced_lights/lamp_shadow_rays.cpp src/passes/ray_tracing/gi_renderer.cpp src/passes/ray_tracing/gi_scene.cpp src/passes/ray_tracing/scene_contents.cpp src/passes/ray_tracing/gi_textures.cpp src/features/global_illumination/gi_light.cpp src/features/global_illumination/gi_denoiser.cpp src/features/global_illumination/gi_lighting.cpp src/features/ray_traced_shadows/gi_shadow.cpp
+    src/passes/ray_tracing/ray_tracing.cpp src/passes/ray_tracing/kick_traces.cpp src/passes/ray_tracing/trace.cpp src/passes/ray_tracing/shared_textures.cpp src/passes/ray_tracing/engine_scene.cpp src/passes/ray_tracing/scene_description.cpp src/passes/ray_tracing/engine_brush.cpp src/passes/ray_tracing/gi_inputs.cpp src/features/ray_traced_lights/local_lights.cpp src/features/ray_traced_lights/light_choice.cpp src/features/ray_traced_lights/lamp_shadow_rays.cpp src/passes/ray_tracing/gi_renderer.cpp src/passes/ray_tracing/gi_scene.cpp src/passes/ray_tracing/omm_layout.cpp src/passes/ray_tracing/scene_contents.cpp src/passes/ray_tracing/gi_textures.cpp src/features/global_illumination/gi_light.cpp src/features/global_illumination/gi_denoiser.cpp src/features/global_illumination/gi_lighting.cpp src/features/ray_traced_shadows/gi_shadow.cpp
     "${CMAKE_BINARY_DIR}/version.rc")
 add_dependencies(phantom_fx gi_kernels)
 target_include_directories(phantom_fx PRIVATE src "${GI_SHADER_DIR}")
@@ -290,6 +318,21 @@ if(BUILD_TESTING)
     target_compile_definitions(shared_textures_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(shared_textures_tests PRIVATE /W4 /WX /permissive- /utf-8)
     add_test(NAME shared_textures COMMAND shared_textures_tests)
+
+    add_executable(omm_layout_tests tests/omm_layout_tests.cpp src/passes/ray_tracing/omm_layout.cpp)
+    target_include_directories(omm_layout_tests PRIVATE src)
+    target_compile_features(omm_layout_tests PRIVATE cxx_std_20)
+    target_compile_options(omm_layout_tests PRIVATE /W4 /WX /permissive- /utf-8)
+    add_test(NAME omm_layout COMMAND omm_layout_tests)
+
+    add_executable(omm_bake_tests tests/omm_bake_tests.cpp src/passes/ray_tracing/omm_layout.cpp)
+    add_dependencies(omm_bake_tests gi_kernels)
+    target_include_directories(omm_bake_tests PRIVATE src "${GI_SHADER_DIR}")
+    target_link_libraries(omm_bake_tests PRIVATE d3d12 dxgi)
+    target_compile_features(omm_bake_tests PRIVATE cxx_std_20)
+    target_compile_definitions(omm_bake_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(omm_bake_tests PRIVATE /W4 /WX /permissive- /utf-8)
+    add_test(NAME omm_bake COMMAND omm_bake_tests)
 
     add_executable(light_choice_tests tests/light_choice_tests.cpp src/features/ray_traced_lights/light_choice.cpp)
     target_include_directories(light_choice_tests PRIVATE src)

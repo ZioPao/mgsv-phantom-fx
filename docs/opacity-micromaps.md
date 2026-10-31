@@ -26,7 +26,7 @@ resolves a ray/triangle hit as one of:
 | unknown-transparent / unknown-opaque (4-state only) | candidate returned, as a non-opaque hit is today |
 
 So every micro-triangle the mask can decide stops costing this project an `asm`-heavy shader
-iteration (`CutOutBlocks` in `src/passes/ray_tracing/shaders/gi_common.hlsli:426`), a texture
+iteration (`CutOutBlocks` in `src/passes/ray_tracing/shaders/gi_common.hlsli:455`), a texture
 fetch, a `TextureLod` (a cross product, a 2x2 determinant and a `log2`), and a loop round the
 `RayQuery`. That is the whole win: fewer SM iterations per hit, and the RTCore does the coverage
 test. NVIDIA measures roughly a 30% cut in traversal cost in alpha-test-heavy scenes and up to 2.3x
@@ -42,8 +42,8 @@ commit or carry on.
 | Today | With OMM |
 | --- | --- |
 | `GI_GEOMETRY_CUT_OUT` geometry is non-opaque in the BLAS (`gi_scene.cpp:335`), so its triangles reach the candidate loop | Same geometry, but built as `D3D12_RAYTRACING_GEOMETRY_TYPE_OMM_TRIANGLES` with an OMM index buffer and an OMM array |
-| `CutOutBlocks` samples the base texture's alpha at the cone's mip and compares to `alphaThreshold` (`gi_common.hlsli:426`) | Runs only for **unknown** micro-triangles; known ones never reach the shader |
-| `TraceClosest` / `SurfaceRayBlocked` loops over candidates (`gi_common.hlsli:486`, `:779`) | Unchanged, minus most iterations |
+| `CutOutBlocks` samples the base texture's alpha at the cone's mip and compares to `alphaThreshold` (`gi_common.hlsli:455`) | Runs only for **unknown** micro-triangles; known ones never reach the shader |
+| `TraceClosest` / `SurfaceRayBlocked` loops over candidates (`gi_common.hlsli:515`, `:817`) | Unchanged, minus most iterations |
 | Cut-out geometry without a texture blocks stochastically (`untextured`, `blocking`) | Unchanged: no texture, no OMM, no linkage |
 
 Nothing in `gi_renderer.cpp`'s passes changes beyond the shader template argument.
@@ -76,7 +76,7 @@ Windows SDK 10.0.26100 headers.
   shadows where precision does not matter.
 - OMM only turns transparent into a miss; **`RAY_FLAG_FORCE_OPAQUE` cannot turn it back into a
   hit.** Worth knowing because `TraceClosest(..., alphaTest = false, ...)` uses that path
-  (`gi_common.hlsli:517`); today no caller passes `false`, so nothing changes, but that branch would
+  (`gi_common.hlsli:546`); today no caller passes `false`, so nothing changes, but that branch would
   stop meaning "every triangle is opaque".
 
 ## 4. The blocker: which D3D12 runtime runs
@@ -101,6 +101,27 @@ cs_6_7, ... Shader version provided: cs_6_9"* (debug layer, `ID3D12Device::Creat
 So the inbox 616 runtime has OMM for `TraceRay` (the 2025 release) but not SM 6.9 at all, and the
 tier check alone over-promises: a device can report tier 1.2 and still refuse every shader that
 could use an OMM with inline tracing.
+
+**OMM needs no Developer Mode and no redistributable of its own.** A newer runtime was needed only
+because inline `RayQuery` met OMM late (SM 6.9), and selecting a runtime is what the Agility SDK
+mechanics govern. Developer Mode came up solely because `ID3D12SDKConfiguration::SetSDKVersion` — the
+only way to choose a runtime from inside someone else's process — requires it; the plan never needs it
+for players.
+
+**And the SM 6.9 requirement itself is now removable, on newer runtimes.** The specs added, in their
+v1.47 (26 Aug 2026), a pre-SM 6.9 opt-in: `D3D12_PIPELINE_STATE_FLAG_RAYQUERY_ALLOW_OPACITY_MICROMAPS_ON_PRE_SM69_SHADERS`
+(0x80; its state-object form `..._STATE_OBJECT_FLAG_...` is 0x800). Measured 2026-10-31 with a `cs_6_5`
+RayQuery pipeline:
+
+| runtime | `SHADER_MODEL` | flags `0x80` |
+| --- | --- | --- |
+| 616 (inbox) | 6.8 | **refused, `0x80070057`** |
+| 619 (retail, Feb 2026) | 6.9 | **refused, `0x80070057`** |
+| 620 (retail, Oct 2026) | 6.9 | **accepted** |
+
+So the flag is a 1.620 feature: it cannot rescue today's inbox 616, but it means the second `cs_6_9`
+kernel set and the DXC 1.9 download can be dropped once 1.620 is the floor. Until then the shipped
+build keeps both sets, and the gate stays as measured above.
 
 Also measured: the Windows SDK's DXC (1.8.2502) rejects `-T cs_6_9`, and `d3d12.h` in SDK 26100 is
 the pre-retail OMM shape (`ALLOW_OMM_UPDATE`, separate OMM postbuild info), with no
@@ -146,9 +167,9 @@ per hit, so the ceiling is far lower.
 No asset pipeline, no offline tooling: OMMs have to be generated inside the add-on from what the
 scene already has. Everything needed is there:
 
-- vertices and `UV0` (`scene_description.hpp:65`, two halves in each pool vertex);
+- vertices and `UV0` (`scene_description.hpp:72`, two halves in each pool vertex);
 - the base texture already copied to D3D12, cut-out copies at up to 512 px
-  (`gi_textures.hpp:18`, `MaxCutOutSize`), in the game's own BC format;
+  (`gi_textures.hpp:13`, `MaxCutOutSize`), in the game's own BC format;
 - the threshold: `CutOutThreshold` 0.5 for rays (`GIGeometry::alphaThreshold`).
 
 **GPU bake, not CPU.** The textures are already BC-compressed and on the GPU (D3D11->D3D11 copy,
@@ -157,16 +178,22 @@ the D3D12 sRGB view the shader samples. A compute kernel can write the OC1 bitst
 the OMM array's `InputBuffer`:
 
 1. CPU, at BLAS creation (`gi_scene.cpp:323`): per triangle, compute UV area x texture size to pick a
-   subdivision level, e.g. `level = clamp(floor(log4(texelsPerTriangle / 2)), 0, 6)` — about two
-   texels per micro-triangle, capped at level 6 (4096 micro-triangles, 512 B per 2-state block,
-   1 KB per 4-state block) and at a per-mesh budget;
-2. CPU: hash the triangle's three UVs + level + format and dedupe. Grass and bush cards in this game
-   reuse UVs heavily, so most blocks are shared; a triangle whose three corners are all above the
-   threshold gets the `FULLY_OPAQUE` special index and no block at all, all below gets
-   `FULLY_TRANSPARENT`;
-3. GPU kernel: per block, per micro-triangle, sample the alpha at the micro-triangle's centroid at
-   the mip whose footprint matches the micro-triangle, write the bit at its OC1 (barycentric
-   space-filling curve) position;
+   subdivision level, `level = clamp(floor(log4(texels / 2)), 0, 6)` — about two texels per
+   micro-triangle, capped at level 6 (4096 micro-triangles, 1 KB per 4-state block). Over the
+   mesh's byte budget every level drops by one until it fits, or the mesh keeps the shader test
+   (`omm_layout.cpp`, `levelOf` and `layOut`);
+2. CPU: dedupe on the exact bits of the triangle's three UVs, in their order, plus its level: grass
+   and bush cards reuse UVs heavily, so most blocks are shared. A reordered triangle maps
+   barycentrics to the texture differently and gets its own block. Blocks go finest first, each on
+   a 4-byte boundary, so the kernel writes whole words of one block. The CPU never sees a texel, so it
+   cannot tell a fully clear or fully solid triangle from its corners: every textured triangle gets a
+   block here, and the special indices are the kernel's to write (3);
+3. GPU kernel: a thread per micro-triangle walks the level's N x N cells (`OmmCellMicroTriangle` in
+   `shaders/gi_omm.h`, shared with the layout's tests), samples the alpha at the micro-triangle's
+   centroid at the mip whose footprint matches it, and writes its two bits at its place on the curve
+   (`OmmIndex`, the Vulkan spec's reference code; LSB first within each byte). A block whose states all
+   come out transparent or all opaque then has its triangles' index entries rewritten to
+   `FULLY_TRANSPARENT` (-1) or `FULLY_OPAQUE` (-2); its bytes stay in the array, unused;
 4. barrier, then build the OMM array (`BuildRaytracingAccelerationStructure`) and then the BLAS in
    the same list, before the BLAS build.
 
@@ -182,7 +209,7 @@ conservative variant; it lowers the known/unknown ratio but cannot lose the thin
 both; expose no knob, pick one.
 
 **Invalidation.** Cut-out textures are re-copied every 300 frames when the game streams a better mip
-(`gi_textures.cpp:22`). Bake against the 512-px copy the rays already see and do not re-bake on
+(`gi_textures.cpp:21`). Bake against the 512-px copy the rays already see and do not re-bake on
 finer streaming; if a copy is *replaced* (different source), mark the mesh's OMM dirty and rebuild
 that BLAS. With `PREFER_FAST_TRACE | ALLOW_COMPACTION` statics cannot be updated, so rebuild; the
 scene already has a build budget and a compaction queue for exactly this.
@@ -200,7 +227,7 @@ and fall back to the shader test per mesh above it.
 - `CutOutBlocks` stays as the unknown resolver, unchanged. Its `untextured`/`blocking` behaviour
   only ever applies to geometry with no OMM linkage, so it is untouched.
 - **Hair must not get OMMs.** `PassHair` already dims a ray by a fixed share for each hair layer it
-  crosses (`gi_common.hlsli:812`, `:842`); if an opaque micro-triangle commits without returning a
+  crosses (`gi_common.hlsli:850`, `:880`); if an opaque micro-triangle commits without returning a
   candidate, that partial transmittance silently disappears and hair goes hard-edged under lights.
   `GI_GEOMETRY_HAIR` geometry therefore gets no linkage (or `ALLOW_DISABLE_OMMS` + a disabled
   instance, which is worse: per-instance, not per-ray).
@@ -210,7 +237,7 @@ and fall back to the shader test per mesh above it.
 
 ## 7. Compile and build changes
 
-- DXC: the Windows SDK's `dxc` (1.8.2502 here) cannot compile SM 6.9; `CMakeLists.txt:165-179`
+- DXC: the Windows SDK's `dxc` (1.8.2502 here) cannot compile SM 6.9; `CMakeLists.txt:167-179`
   would need DXC 1.9+ (NuGet `Microsoft.Direct3D.DXC` or a GitHub release), pinned by SHA-256 like
   every other dependency, with `-T cs_6_9`. Mixed shader models are fine: only the shaders that
   declare OMM `RayQuery`s need 6.9, so the rest can stay `cs_6_5` while the change is validated.
@@ -242,15 +269,48 @@ Measurement plan: A/B in three places with the scene view (F10) and the existing
 range — plus a PIX capture with the OMM viewer to check unknown coverage. Ada hardware validation
 needs a second machine, not this one.
 
+## 8a. In game (2026-10-31)
+
+The dev runtime selector works: `SetSDKVersion(619, ".\D3D12\619\")` loads 1.619 in the game's process
+(Developer Mode on, `run-with-micromaps.bat`), the gate opens, and cut-out meshes link. Then the GPU
+faults: `DXGI_ERROR_DEVICE_HUNG` (0x887A0006, a TDR, not a page fault — DRED reports nothing) a few
+seconds after linking, `nvlddmkm` event 153, and the next texture or mask creation fails with
+0x887A0005. Frequency scales with the **number of linked structures**: 1–10 links fail soon, the
+two-frame split below doubled it to ~21.
+
+Excluded by direct test in game, each with micromaps still linked:
+
+- **traversal**: `DISABLE_OMMS` on every instance still faults, so reading the masks is innocent;
+- **the bake kernels**: `NOBAKE` still faults;
+- **Ray Reconstruction and path tracing**: both off in `PhantomFX.ini`, still faults;
+- **batching** (one link a frame), **relinking** (`NO_RELINK`), the queue type, and the array build's
+  scratch (its own buffer) — each only moved the count;
+- **scale, pool sharing, special indices**: a standalone exe on 1.619 builds 32 arrays and 32 linked
+  structures in one shared pool, twice, on a compute queue, and traces correctly through every
+  transparent quad. It also proves the OC1 bit order and the 4-state encoding on hardware.
+
+Found and fixed on the way, all real regardless of the TDR: **a linked structure must never be
+compacted** (it is built without `ALLOW_COMPACTION`; the compaction loop was copying it), **this driver
+ignores OMM special indices** (`FULLY_TRANSPARENT` still blocks a ray), and the bake's per-block words
+must not overlap the array's descriptor region.
+
+Mitigations in place: one link a frame, the array built a frame before its structure links it, the
+array build on its own scratch, no compaction of linked structures, no special indices, and
+`PHANTOM_FX_OMM_MAX_LINKS` to cap the links a session makes.
+
+**The dev build's per-pass timings settle what kind of fault it is**: the frame before the fault logs a normal 5.65 ms total (rays and hits' light 2.56, shadow rays 0.91, reflections 0.65), so it is not a pass that got slower — it is one frame that never finishes, a hang inside a single dispatch or build. A standalone shader with the add-on's exact flags (ACCEPT_FIRST_HIT_AND_END_SEARCH, FORCE_NON_OPAQUE) over 32 linked structures still survives, so the loop is not the plain one.\n\n**Tracing it from inside the add-on** (src/trace.hpp): with PHANTOM_FX_TRACE set, every dispatch, indirect dispatch and barrier the recorder issues, and every structure, array and top-level build, goes into a ring of 1024 entries; a fence timeout or a lost device dumps the last 64 to the log. That stands in for PIX's event list, since PIX cannot run this game (injection blocked; its capturer crashes the process in d3d12.dll beside the 619 runtime).\n\n**2-state masks hold where 4-state did not** (2026-10-31): with every micro-triangle resolved to opaque or transparent at bake time (no unknown states for the emulation to hand back through the shader), 25 linked structures ran ~6 minutes in the field without a hang, where 4-state failed within 1–3 minutes at similar counts. The cost is quality: the mask no longer follows the ray cone's mip, so distant cut-out shadows are sharper and slightly darker than the shader's own cone test.\n\n**Open**: whether 2-state is a real fix or a slower failure (still to be soaked), and why unknown micro-triangles would make the emulated path stop finishing frames. On Ampere
+OMM is emulated (only Ada has the engine), so the emulation degrading with linked structures is the
+working hypothesis. Next tool: PIX capture of the failing frame (not installed here), or a soak with a
+hard cap of four links per area, which is the shipping shape if the cap holds.
 ## 9. Order of work
 
 | # | Step | Time |
 | --- | --- | --- |
 | 0 | Runtime probe: tier 1.2, SM 6.9, `cs_6_9` RayQuery-OMM PSO on inbox and on a 619 probe exe (done 2026-10-30, see 4) | done |
-| 1 | Bake kernel + level heuristic + dedupe + tests (bit packing round-trips, level heuristic, special-index selection) | 3-4 days |
-| 2 | Scene: OMM pool (128-byte alignment, budget), linkage per BLAS, dirtiness on texture replacement | 2-3 days |
-| 3 | Shaders: the template flag, hair exclusion, `cs_6_9` build wiring, menu toggle, gate (tier + SM 6.9 + trial PSO) | 2 days |
-| 4 | Dev probe exe with the Agility exports + `D3D12\D3D12Core.dll`, so the path can be exercised before the OS ships it | 0.5 day |
+| 1 | Bake: layout (`omm_layout.cpp`), the curve shared with HLSL (`shaders/gi_omm.h`), the kernels `BakeMicromaps` and `ResolveMicromapIndices` (`shaders/omm_bake.hlsl`, on the renderer's root signature: one raw view of the micromap pool at `u40`, byte offsets in the dispatch constants), tested on the CPU and on WARP (`omm_layout_tests`, `omm_bake_tests`) | done |
+| 2 | Scene (`gi_scene.cpp`): a 64 MB micromap pool made by `enableMicromaps`; a static structure keeps its cut-out meshes' coordinates and indices, and when their textures come or change (`setMaterial`) `linkMicromaps` lays them out, uploads the records, has the renderer dispatch the bake, builds the array and builds the structure again in new room, within the frame's budget (16 a frame); dormant until step 3 calls `enableMicromaps` | done |
+| 3 | Shaders: every ray query through `GI_RAY_QUERY` (`gi_common.hlsli`), which declares `RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS` with `GI_OPACITY_MICROMAPS`; every kernel built twice, the second set by DXC 1.9.2609 (pinned in `CMakeLists.txt`) at `cs_6_9`; `gi_renderer::start` takes that set and calls `enableMicromaps` only with DXR 1.2, Shader Model 6.9 and every kernel of the set built, else the first set and a reason in the scene view's line; diagnostics "No opacity micromaps" restarts the scene without. Checked 2026-10-31 on the RTX 3090: the inbox runtime refuses all 29 kernels of the second set, Agility 1.619.6 builds them all | done |
+| 4 | Test executable (not the add-on) with the Agility exports + `D3D12\D3D12Core.dll`, creating the device itself and running the scene code: bake, array, linked structure, one traced frame. No Developer Mode and no change to the game; the in-game path still needs either Developer Mode or an OS runtime at 619+ | 1 day |
 | 5 | In-game validation, quality tuning (4-state conservative mip), Ada timing | 2-4 days |
 
 The bake work is worth starting because the runtime gate is now measured and the DX12 API shape is
