@@ -269,6 +269,39 @@ Measurement plan: A/B in three places with the scene view (F10) and the existing
 range — plus a PIX capture with the OMM viewer to check unknown coverage. Ada hardware validation
 needs a second machine, not this one.
 
+## 8a. In game (2026-10-31)
+
+The dev runtime selector works: `SetSDKVersion(619, ".\D3D12\619\")` loads 1.619 in the game's process
+(Developer Mode on, `run-with-micromaps.bat`), the gate opens, and cut-out meshes link. Then the GPU
+faults: `DXGI_ERROR_DEVICE_HUNG` (0x887A0006, a TDR, not a page fault — DRED reports nothing) a few
+seconds after linking, `nvlddmkm` event 153, and the next texture or mask creation fails with
+0x887A0005. Frequency scales with the **number of linked structures**: 1–10 links fail soon, the
+two-frame split below doubled it to ~21.
+
+Excluded by direct test in game, each with micromaps still linked:
+
+- **traversal**: `DISABLE_OMMS` on every instance still faults, so reading the masks is innocent;
+- **the bake kernels**: `NOBAKE` still faults;
+- **Ray Reconstruction and path tracing**: both off in `PhantomFX.ini`, still faults;
+- **batching** (one link a frame), **relinking** (`NO_RELINK`), the queue type, and the array build's
+  scratch (its own buffer) — each only moved the count;
+- **scale, pool sharing, special indices**: a standalone exe on 1.619 builds 32 arrays and 32 linked
+  structures in one shared pool, twice, on a compute queue, and traces correctly through every
+  transparent quad. It also proves the OC1 bit order and the 4-state encoding on hardware.
+
+Found and fixed on the way, all real regardless of the TDR: **a linked structure must never be
+compacted** (it is built without `ALLOW_COMPACTION`; the compaction loop was copying it), **this driver
+ignores OMM special indices** (`FULLY_TRANSPARENT` still blocks a ray), and the bake's per-block words
+must not overlap the array's descriptor region.
+
+Mitigations in place: one link a frame, the array built a frame before its structure links it, the
+array build on its own scratch, no compaction of linked structures, no special indices, and
+`PHANTOM_FX_OMM_MAX_LINKS` to cap the links a session makes.
+
+**Open**: why a handful of linked structures is fine in isolation but a dozen or two is not. On Ampere
+OMM is emulated (only Ada has the engine), so the emulation degrading with linked structures is the
+working hypothesis. Next tool: PIX capture of the failing frame (not installed here), or a soak with a
+hard cap of four links per area, which is the shipping shape if the cap holds.
 ## 9. Order of work
 
 | # | Step | Time |
