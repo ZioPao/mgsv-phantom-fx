@@ -412,6 +412,7 @@ void fail(const std::string& reason)
     failed = true;
     failure = reason;
     log("Global illumination stopped: " + reason);
+    gi_renderer::dumpMessages();
     gi_inputs::setActive(false);
     engine_scene::setActive(false);
     gi_renderer::stop();

@@ -521,6 +521,20 @@ void start(ID3D11Device* device11, HANDLE sharedFence, bool allowMicromaps)
     if (state) return;
 
     auto s = std::make_unique<State>();
+    // PHANTOM_FX_D3D12_DEBUG asks the Direct3D 12 debug layer for its messages, which dumpMessages writes
+    // when a failure stops the renderer (a development aid; the layer must sit beside D3D12Core.dll).
+    if (GetEnvironmentVariableA("PHANTOM_FX_D3D12_DEBUG", nullptr, 0))
+    {
+        ID3D12Debug* debug{};
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))) && debug)
+        {
+            debug->EnableDebugLayer();
+            debug->Release();
+            log("Direct3D 12 debug layer enabled.");
+        }
+        else log("Direct3D 12 debug layer not available.");
+    }
+
     const auto d3d12 = createDevice12(device11);
     s->wrapper = d3d12.wrapper;
     check(d3d12.native.As(&s->device), "Finding Direct3D 12 ray tracing");
@@ -561,6 +575,26 @@ void start(ID3D11Device* device11, HANDLE sharedFence, bool allowMicromaps)
 
     log("Global illumination started on Direct3D 12; opacity micromaps " + s->micromapState + ".");
     state = std::move(s);
+}
+
+void dumpMessages()
+{
+    if (!state || !state->device) return;
+
+    ID3D12InfoQueue* queue{};
+    if (FAILED(state->device->QueryInterface(IID_PPV_ARGS(&queue)))) return;
+    for (UINT64 i = 0; i < queue->GetNumStoredMessages(); ++i)
+    {
+        SIZE_T size{};
+        if (FAILED(queue->GetMessage(i, nullptr, &size))) continue;
+
+        auto* message = static_cast<D3D12_MESSAGE*>(std::malloc(size));
+        if (SUCCEEDED(queue->GetMessage(i, message, &size)))
+            log(std::string("Direct3D 12 debug: ") + std::to_string(static_cast<int>(message->Severity)) + ": " + std::string(message->pDescription, message->DescriptionByteLength));
+        std::free(message);
+    }
+
+    queue->Release();
 }
 
 void stop() noexcept

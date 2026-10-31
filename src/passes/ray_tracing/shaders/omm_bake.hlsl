@@ -142,10 +142,8 @@ void ResolveMicromapIndices(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= g_Dispatch.y) return;
 
+    // The block's index, always: a fully transparent or opaque block promoted to a special index is
+    // ignored by the driver this was tested on (docs/opacity-micromaps.md), so blocks stay referenced.
     uint block = g_OmmPool.Load(g_Dispatch.x + 4u * id.x);
-    uint found = g_OmmPool.Load(g_Dispatch.z + 4u * block);
-    uint index = block;
-    if (found == GI_OMM_SOME_NOT_TRANSPARENT) index = GI_OMM_INDEX_FULLY_OPAQUE;
-    else if (found == GI_OMM_SOME_NOT_OPAQUE) index = GI_OMM_INDEX_FULLY_TRANSPARENT;
-    g_OmmPool.Store(g_Dispatch.w + 4u * id.x, index);
+    g_OmmPool.Store(g_Dispatch.w + 4u * id.x, block);
 }

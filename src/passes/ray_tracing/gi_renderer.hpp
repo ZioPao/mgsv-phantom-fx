@@ -153,6 +153,9 @@ struct Result
 // them (DXR 1.2 and Shader Model 6.9), the kernels and the scene take opacity micromaps (docs/opacity-micromaps.md).
 void start(ID3D11Device* device, HANDLE sharedFence, bool allowMicromaps);
 void stop() noexcept;
+// Development only: writes the Direct3D 12 debug layer's stored messages to the log, when the layer was
+// asked for (PHANTOM_FX_D3D12_DEBUG) and a failure is about to stop the renderer.
+void dumpMessages();
 bool started() noexcept;
 
 // Records and submits the frame: waits for frame.waitValue on the shared fence, signals
