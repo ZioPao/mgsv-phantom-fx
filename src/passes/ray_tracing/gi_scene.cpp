@@ -141,8 +141,11 @@ void Scene::planBuilds()
             auto& blas = structures[id];
             if (!blas.live || !blas.micromapsDirty || blas.use != Use::Static) continue;
 
+            // PHANTOM_FX_OMM_ONCE links one structure a session, for telling one link from a batch of them.
+            if (GetEnvironmentVariableA("PHANTOM_FX_OMM_ONCE", nullptr, 0) && micromapLogged) return;
             const bool rebuildsNow = !blas.queued;
             if (!linkMicromaps(id, staticBuilds)) continue;
+            micromapLogged = true;
 
             blas.micromapsDirty = false;
             ++linked;
@@ -807,13 +810,9 @@ bool Scene::linkMicromaps(BlasId id, std::uint32_t postbuild)
         scratchUsed += arrayScratch;
     }
 
-    // The first structured linked, once, in the log: what micromaps cost and where they run.
-    if (blocks && !micromapLogged)
-    {
-        micromapLogged = true;
-        log("Opacity micromaps: the first structure linked, " + std::to_string(blocks) + " blocks for " + std::to_string(triangles)
-            + " triangles of " + std::to_string(layouts.size()) + " meshes, " + std::to_string(poolBytes / 1024) + " KB of the pool.");
-    }
+    if (blocks)
+        log("Opacity micromaps: structure " + std::to_string(id) + " linked, " + std::to_string(blocks) + " blocks for " + std::to_string(triangles)
+            + " triangles of " + std::to_string(layouts.size()) + " meshes, " + std::to_string(poolBytes / 1024) + " KB " + (blas.micromaps ? "relinking" : "first") + ".");
 
     releases.push_back({signalValue, Pool::Structures, blas.offset, blas.size});
     if (blas.micromaps) releaseMicromaps(*blas.micromaps);
