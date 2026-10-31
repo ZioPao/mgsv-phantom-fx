@@ -291,7 +291,7 @@ void createPipelines(State& s)
     desc.NumStaticSamplers = static_cast<UINT>(std::size(samplers));
     desc.pStaticSamplers = samplers;
     ComPtr<ID3DBlob> blob, errors;
-    const auto result = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, blob.GetAddressOf(), errors.GetAddressOf());
+    const auto result = d3d12_loader::serializeRootSignature()(&desc, D3D_ROOT_SIGNATURE_VERSION_1, blob.GetAddressOf(), errors.GetAddressOf());
     if (FAILED(result))
         throw std::runtime_error("Serializing the root signature failed: "
             + (errors ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize()) : hex(static_cast<std::uint32_t>(result))));
@@ -522,14 +522,14 @@ void start(ID3D11Device* device11, HANDLE sharedFence, bool allowMicromaps)
     if (state) return;
 
     auto s = std::make_unique<State>();
-    // The runtime first: selecting another one discards the debug layer and DRED set on the one before.
-    selectRuntime();
+    // The runtime is chosen once, when the process's Direct3D 12 is loaded (d3d12_loader.hpp); the debug
+    // layer and DRED below belong to whichever one that is.
     // PHANTOM_FX_D3D12_DEBUG asks the Direct3D 12 debug layer for its messages, which dumpMessages writes
     // when a failure stops the renderer (a development aid; the layer must sit beside D3D12Core.dll).
     if (GetEnvironmentVariableA("PHANTOM_FX_D3D12_DEBUG", nullptr, 0))
     {
         ID3D12Debug* debug{};
-        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))) && debug)
+        if (SUCCEEDED(d3d12_loader::getDebugInterface()(IID_PPV_ARGS(&debug))) && debug)
         {
             debug->EnableDebugLayer();
             // PHANTOM_FX_D3D12_GBV adds GPU-based validation: resource states and out-of-bounds reads
@@ -549,7 +549,7 @@ void start(ID3D11Device* device11, HANDLE sharedFence, bool allowMicromaps)
     if (GetEnvironmentVariableA("PHANTOM_FX_D3D12_DRED", nullptr, 0))
     {
         ID3D12DeviceRemovedExtendedDataSettings1* settings{};
-        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&settings))) && settings)
+        if (SUCCEEDED(d3d12_loader::getDebugInterface()(IID_PPV_ARGS(&settings))) && settings)
         {
             settings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
             settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
