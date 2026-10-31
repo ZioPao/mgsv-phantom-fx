@@ -504,6 +504,10 @@ void drawDiagnostics(const upscaler::Status& state)
             "Ray-traced shadows of the sun and lamps: every surface in the scene blocks light, from both sides, as before. By default they take "
             "what the game's shadow maps hold: an opaque surface casts only from its back as the light sees it, and meshes the game shows in the "
             "main view only cast nothing, so windows let light through as the game's do.");
+        changed |= fxui::checkbox("No opacity micromaps", options.noOpacityMicromaps,
+            "Where the GPU and Direct3D 12 run them (DXR 1.2, Shader Model 6.9), cut-out meshes such as leaves and fences carry opacity "
+            "micromaps baked from their textures, and the hardware decides most of each ray's alpha test. This leaves the whole test to "
+            "the shaders, for comparison. Switching it rebuilds the ray-traced scene. The scene view's line says whether micromaps run.");
     }
     if (changed) core::applyDiagnostics(options);
 

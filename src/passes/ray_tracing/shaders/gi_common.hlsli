@@ -481,6 +481,17 @@ bool CutOutBlocks(uint row, uint primitive, float2 barycentrics, bool untextured
 // instance is seen from both sides (D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE).
 #define GI_RAY_FLAGS RAY_FLAG_CULL_BACK_FACING_TRIANGLES
 
+// Every ray query of the scene. Built with GI_OPACITY_MICROMAPS (Shader Model 6.9, the kernels' second set:
+// gi_renderer.cpp), they declare that structures may link opacity micromaps (docs/opacity-micromaps.md):
+// micro-triangles the micromap knows are opaque commit without a candidate, those it knows are transparent are
+// skipped, and only the unknown ones reach CutOutBlocks. A query without the declaration that meets a micromap
+// is undefined, so the scene links none unless every kernel is built so.
+#ifdef GI_OPACITY_MICROMAPS
+#define GI_RAY_QUERY(flags) RayQuery<flags, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS>
+#else
+#define GI_RAY_QUERY(flags) RayQuery<flags>
+#endif
+
 struct SceneHit
 {
     bool hit;
@@ -523,7 +534,7 @@ SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float 
     SceneHit result;
     if (alphaTest)
     {
-        RayQuery<RAY_FLAG_NONE> query;
+        GI_RAY_QUERY(RAY_FLAG_NONE) query;
         query.TraceRayInline(g_Scene, GI_RAY_FLAGS, mask, ray);
         while (query.Proceed())
         {
@@ -543,7 +554,7 @@ SceneHit TraceClosest(float3 origin, float3 direction, float minDistance, float 
         return result;
     }
 
-    RayQuery<RAY_FLAG_FORCE_OPAQUE> query;
+    GI_RAY_QUERY(RAY_FLAG_FORCE_OPAQUE) query;
     query.TraceRayInline(g_Scene, GI_RAY_FLAGS, mask, ray);
     query.Proceed();
 
@@ -835,7 +846,7 @@ bool SurfaceRayBlocked(float3 origin, float3 normal, float tolerance, float3 dir
 
     // What the near stretch let through, for the second look below.
     float nearTransmittance = transmittance, nearHair = nearestHair;
-    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> query;
+    GI_RAY_QUERY(RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER) query;
     query.TraceRayInline(g_Scene, GI_RAY_FLAGS, GI_MASK_SCENE, ray);
     // Only cut-out geometry is non-opaque, so only it comes here.
     while (query.Proceed())
@@ -861,7 +872,7 @@ bool SurfaceRayBlocked(float3 origin, float3 normal, float tolerance, float3 dir
 
     transmittance = nearTransmittance;
     nearestHair = nearHair;
-    RayQuery<RAY_FLAG_FORCE_NON_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> every;
+    GI_RAY_QUERY(RAY_FLAG_FORCE_NON_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER) every;
     every.TraceRayInline(g_Scene, GI_RAY_FLAGS, GI_MASK_SCENE, ray);
     while (every.Proceed())
     {

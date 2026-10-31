@@ -171,6 +171,26 @@ set(GI_SHADER_INCLUDES "${GI_SHADER_SHARED}/gi_shared.h" "${GI_SHADER_SHARED}/gi
     "${GI_SHADER_SHARED}/ggx_specular.hlsli" "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_filter.h"
     "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_tileclassification.h"
     "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_util.h" "${nrd_SOURCE_DIR}/Shaders/NRD.hlsli")
+# The kernels' second set, for opacity micromaps (docs/opacity-micromaps.md): Shader Model 6.9, whose ray
+# queries declare RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS, which the Windows SDK's DXC cannot compile. DXC
+# 1.9.2609's release archive, checked by SHA-256; its x64 compiler and licences are kept.
+set(DXC_OMM_VERSION 1.9.2609)
+set(DXC_OMM_DIR "${CMAKE_BINARY_DIR}/_deps/dxc-${DXC_OMM_VERSION}")
+if(NOT EXISTS "${DXC_OMM_DIR}/bin/x64/dxc.exe")
+    set(archive "${CMAKE_BINARY_DIR}/_deps/dxc-${DXC_OMM_VERSION}.zip")
+    message(STATUS "Downloading DXC ${DXC_OMM_VERSION}")
+    file(DOWNLOAD "https://github.com/microsoft/DirectXShaderCompiler/releases/download/v${DXC_OMM_VERSION}/dxc_2026_09_29.zip"
+        "${archive}" EXPECTED_HASH SHA256=ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1 TLS_VERIFY ON STATUS status)
+    list(GET status 0 code)
+    if(NOT code EQUAL 0)
+        message(FATAL_ERROR "Could not download DXC ${DXC_OMM_VERSION}: ${status}")
+    endif()
+    file(ARCHIVE_EXTRACT INPUT "${archive}" DESTINATION "${DXC_OMM_DIR}"
+        PATTERNS bin/x64/dxc.exe bin/x64/dxcompiler.dll bin/x64/dxil.dll LICENCE-MIT.txt LICENSE-LLVM.txt LICENSE-MS.txt)
+    file(REMOVE "${archive}")
+endif()
+set(DXC_OMM_EXECUTABLE "${DXC_OMM_DIR}/bin/x64/dxc.exe")
+
 set(GI_SHADER_HEADERS)
 function(add_gi_kernels source)
     foreach(entry IN LISTS ARGN)
@@ -181,7 +201,14 @@ function(add_gi_kernels source)
                 "${CMAKE_SOURCE_DIR}/src/${source}"
             DEPENDS "${CMAKE_SOURCE_DIR}/src/${source}" ${GI_SHADER_INCLUDES}
             COMMENT "DXC ${source}: ${entry}")
-        list(APPEND GI_SHADER_HEADERS "${output}")
+        set(micromaps "${GI_SHADER_DIR}/${entry}Micromaps.h")
+        add_custom_command(OUTPUT "${micromaps}"
+            COMMAND "${DXC_OMM_EXECUTABLE}" -nologo -T cs_6_9 -E ${entry} -HV 2021 -O3 -WX -D GI_OPACITY_MICROMAPS -I "${GI_SHADER_SHARED}" -I "${CMAKE_SOURCE_DIR}/third_party"
+                -I "${nrd_SOURCE_DIR}/Shaders" -Fh "${micromaps}" -Vn GI_${entry}Micromaps
+                "${CMAKE_SOURCE_DIR}/src/${source}"
+            DEPENDS "${CMAKE_SOURCE_DIR}/src/${source}" ${GI_SHADER_INCLUDES}
+            COMMENT "DXC ${DXC_OMM_VERSION} ${source}: ${entry}, with micromaps")
+        list(APPEND GI_SHADER_HEADERS "${output}" "${micromaps}")
     endforeach()
     set(GI_SHADER_HEADERS ${GI_SHADER_HEADERS} PARENT_SCOPE)
 endfunction()

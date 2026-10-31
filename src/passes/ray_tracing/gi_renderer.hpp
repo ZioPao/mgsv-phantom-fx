@@ -149,8 +149,9 @@ struct Result
     std::vector<std::uint64_t> releasedModels, releasedTextures;
 };
 
-// Throws when the GPU cannot trace rays (DXR 1.1) or Direct3D 12 fails.
-void start(ID3D11Device* device, HANDLE sharedFence);
+// Throws when the GPU cannot trace rays (DXR 1.1) or Direct3D 12 fails. With llowMicromaps, where the device runs
+// them (DXR 1.2 and Shader Model 6.9), the kernels and the scene take opacity micromaps (docs/opacity-micromaps.md).
+void start(ID3D11Device* device, HANDLE sharedFence, bool allowMicromaps);
 void stop() noexcept;
 bool started() noexcept;
 

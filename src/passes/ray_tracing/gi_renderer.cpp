@@ -34,36 +34,65 @@
 
 #include "passes/ray_tracing/shaders/gi_omm.h"
 
-// The kernels, compiled by DXC at build time (CMakeLists.txt).
+// The kernels, compiled by DXC at build time (CMakeLists.txt): each twice, the second with opacity micromaps.
 #include "BakeMicromaps.h"
+#include "BakeMicromapsMicromaps.h"
 #include "ClassifyShadowTiles.h"
+#include "ClassifyShadowTilesMicromaps.h"
 #include "ClearCounters.h"
+#include "ClearCountersMicromaps.h"
 #include "ClearNewGeometries.h"
+#include "ClearNewGeometriesMicromaps.h"
 #include "CompositeLight.h"
+#include "CompositeLightMicromaps.h"
 #include "DebugScene.h"
+#include "DebugSceneMicromaps.h"
 #include "DebugShadows.h"
+#include "DebugShadowsMicromaps.h"
 #include "FilterLocalLightShadows.h"
+#include "FilterLocalLightShadowsMicromaps.h"
 #include "FilterShadows.h"
+#include "FilterShadowsMicromaps.h"
 #include "GenerateDispatch.h"
+#include "GenerateDispatchMicromaps.h"
 #include "LearnAlbedo.h"
+#include "LearnAlbedoMicromaps.h"
 #include "PopulateCells.h"
+#include "PopulateCellsMicromaps.h"
 #include "PopulateMultibounceCells.h"
+#include "PopulateMultibounceCellsMicromaps.h"
 #include "PrepareGuides.h"
+#include "PrepareGuidesMicromaps.h"
 #include "ProbeLocalLights.h"
+#include "ProbeLocalLightsMicromaps.h"
 #include "ProbeShadows.h"
+#include "ProbeShadowsMicromaps.h"
 #include "PurgeTiles.h"
+#include "PurgeTilesMicromaps.h"
 #include "ResolveLight.h"
+#include "ResolveLightMicromaps.h"
 #include "ResolveMicromapIndices.h"
+#include "ResolveMicromapIndicesMicromaps.h"
 #include "Skin.h"
+#include "SkinMicromaps.h"
 #include "TerrainGrid.h"
+#include "TerrainGridMicromaps.h"
 #include "TraceLampLight.h"
+#include "TraceLampLightMicromaps.h"
 #include "TraceLight.h"
+#include "TraceLightMicromaps.h"
 #include "TraceLocalLightShadows.h"
+#include "TraceLocalLightShadowsMicromaps.h"
 #include "TraceReflections.h"
+#include "TraceReflectionsMicromaps.h"
 #include "TraceSunShadows.h"
+#include "TraceSunShadowsMicromaps.h"
 #include "UpdateFoliageMemory.h"
+#include "UpdateFoliageMemoryMicromaps.h"
 #include "UpdateMultibounceCells.h"
+#include "UpdateMultibounceCellsMicromaps.h"
 #include "UpdateTiles.h"
+#include "UpdateTilesMicromaps.h"
 
 namespace phantom_fx::gi_renderer
 {
@@ -98,6 +127,17 @@ constexpr std::span<const unsigned char> Bytecode[]{GI_ClearNewGeometries, GI_De
     GI_FilterShadows, GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows, GI_ProbeLocalLights, GI_TraceReflections, GI_TraceLampLight,
     GI_BakeMicromaps, GI_ResolveMicromapIndices};
 static_assert(std::size(Bytecode) == static_cast<std::size_t>(Kernel::Count));
+// The same kernels built with GI_OPACITY_MICROMAPS (Shader Model 6.9): every ray query declares that structures may
+// link opacity micromaps. Used, and micromaps linked, only where the device runs them (start).
+constexpr std::span<const unsigned char> MicromapBytecode[]{
+    GI_ClearNewGeometriesMicromaps, GI_DebugSceneMicromaps, GI_TerrainGridMicromaps, GI_SkinMicromaps, GI_ClearCountersMicromaps,
+    GI_GenerateDispatchMicromaps, GI_PrepareGuidesMicromaps, GI_TraceLightMicromaps, GI_LearnAlbedoMicromaps, GI_PurgeTilesMicromaps,
+    GI_PopulateMultibounceCellsMicromaps, GI_PopulateCellsMicromaps, GI_UpdateTilesMicromaps, GI_UpdateMultibounceCellsMicromaps,
+    GI_ResolveLightMicromaps, GI_UpdateFoliageMemoryMicromaps, GI_CompositeLightMicromaps, GI_TraceSunShadowsMicromaps,
+    GI_ClassifyShadowTilesMicromaps, GI_FilterShadowsMicromaps, GI_DebugShadowsMicromaps, GI_ProbeShadowsMicromaps,
+    GI_TraceLocalLightShadowsMicromaps, GI_FilterLocalLightShadowsMicromaps, GI_ProbeLocalLightsMicromaps, GI_TraceReflectionsMicromaps,
+    GI_TraceLampLightMicromaps, GI_BakeMicromapsMicromaps, GI_ResolveMicromapIndicesMicromaps};
+static_assert(std::size(MicromapBytecode) == static_cast<std::size_t>(Kernel::Count));
 
 using Shared = OpenedTexture;
 
@@ -119,6 +159,9 @@ struct State
 
     ComPtr<ID3D12RootSignature> rootSignature;
     Pipelines pipelines;
+    // Opacity micromaps: whether the kernels are MicromapBytecode's and the scene links them, and why not.
+    bool micromaps{};
+    std::string micromapState;
     ComPtr<ID3D12CommandSignature> dispatchSignature;
     ComPtr<ID3D12DescriptorHeap> heap;
     UINT descriptorSize{};
@@ -254,13 +297,26 @@ void createPipelines(State& s)
 
     check(s.device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&s.rootSignature)), "Creating the root signature");
 
-    for (std::size_t kernel = 0; kernel < s.pipelines.size(); ++kernel)
-    {
-        D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};
-        pipeline.pRootSignature = s.rootSignature.Get();
-        pipeline.CS = {Bytecode[kernel].data(), Bytecode[kernel].size()};
-        check(s.device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&s.pipelines[kernel])), "Creating a kernel");
-    }
+    const auto createSet = [&](std::span<const std::span<const unsigned char>> bytecode) {
+        for (std::size_t kernel = 0; kernel < s.pipelines.size(); ++kernel)
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};
+            pipeline.pRootSignature = s.rootSignature.Get();
+            pipeline.CS = {bytecode[kernel].data(), bytecode[kernel].size()};
+            if (const auto result = s.device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&s.pipelines[kernel])); FAILED(result)) return result;
+        }
+        return S_OK;
+    };
+
+    // The micromaps' set where the device reported it can run it; a refusal of any of its kernels takes
+    // the set without, and no micromaps.
+    if (s.micromaps)
+        if (const auto refused = createSet(MicromapBytecode); FAILED(refused))
+        {
+            s.micromaps = false;
+            s.micromapState = "off: the device refused the kernels with micromaps (" + hex(static_cast<std::uint32_t>(refused)) + ")";
+        }
+    if (!s.micromaps) check(createSet(Bytecode), "Creating a kernel");
 
     D3D12_INDIRECT_ARGUMENT_DESC argument{};
     argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
@@ -460,7 +516,7 @@ gi_denoiser::Camera denoiserCamera(const Frame& frame)
 }
 }
 
-void start(ID3D11Device* device11, HANDLE sharedFence)
+void start(ID3D11Device* device11, HANDLE sharedFence, bool allowMicromaps)
 {
     if (state) return;
 
@@ -471,6 +527,21 @@ void start(ID3D11Device* device11, HANDLE sharedFence)
     D3D12_FEATURE_DATA_D3D12_OPTIONS5 options{};
     s->device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options, sizeof(options));
     if (options.RaytracingTier < D3D12_RAYTRACING_TIER_1_1) throw std::runtime_error("The GPU or its driver cannot trace rays from compute shaders (DXR 1.1).");
+
+    // Opacity micromaps with ray queries need DXR 1.2 and Shader Model 6.9: a runtime reporting the tier
+    // alone (Windows' own D3D12Core 616) refuses every 6.9 kernel (docs/opacity-micromaps.md, section 4).
+    D3D12_FEATURE_DATA_SHADER_MODEL shaderModel{D3D_SHADER_MODEL_6_9};
+    if (FAILED(s->device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel)))) shaderModel.HighestShaderModel = D3D_SHADER_MODEL_5_1;
+    if (!allowMicromaps) s->micromapState = "off (diagnostics)";
+    else if (options.RaytracingTier < D3D12_RAYTRACING_TIER_1_2) s->micromapState = "off: the GPU or its driver has no DXR 1.2";
+    else if (shaderModel.HighestShaderModel < D3D_SHADER_MODEL_6_9)
+        s->micromapState = "off: Direct3D 12 runs Shader Model " + std::to_string(shaderModel.HighestShaderModel >> 4) + "." + std::to_string(shaderModel.HighestShaderModel & 0xF)
+            + ", not 6.9";
+    else
+    {
+        s->micromaps = true;
+        s->micromapState = "on";
+    }
 
     const D3D12_COMMAND_QUEUE_DESC queue{D3D12_COMMAND_LIST_TYPE_COMPUTE};
     check(s->device->CreateCommandQueue(&queue, IID_PPV_ARGS(&s->queue)), "Creating the Direct3D 12 queue");
@@ -486,9 +557,10 @@ void start(ID3D11Device* device11, HANDLE sharedFence)
 
     createPipelines(*s);
     createResources(*s);
+    if (s->micromaps) s->scene->enableMicromaps();
 
+    log("Global illumination started on Direct3D 12; opacity micromaps " + s->micromapState + ".");
     state = std::move(s);
-    log("Global illumination started on Direct3D 12.");
 }
 
 void stop() noexcept
@@ -1327,6 +1399,9 @@ std::string status()
         + percentOf(stats.poolUsed, stats.poolCapacity) + ", structures " + percentOf(stats.blasUsed, stats.blasCapacity) + " (" + std::to_string(stats.structures)
         + ", " + std::to_string(stats.compacted) + " compacted to " + compactedShare + " of their size, " + std::to_string(stats.waiting) + " waiting), "
         + std::to_string(stats.geometriesUsed) + " geometries; GPU: scene " + milliseconds(s.sceneMilliseconds) + ", light " + milliseconds(s.lightMilliseconds)
-        + ", shadows " + milliseconds(s.shadowMilliseconds) + "; " + s.contents->status();
+        + ", shadows " + milliseconds(s.shadowMilliseconds) + "; " + s.contents->status() + "; opacity micromaps " + s.micromapState
+        + (s.micromaps ? " (" + std::to_string(stats.micromapStructures) + " structures, " + std::to_string(stats.micromapBlocks) + " blocks, pool "
+                + percentOf(stats.micromapPoolUsed, gi_scene::Scene::MicromapPoolBytes) + ")"
+                          : std::string());
 }
 }
