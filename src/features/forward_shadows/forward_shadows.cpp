@@ -2,6 +2,7 @@
 
 #include "d3d11_helpers.hpp"
 #include "features/forward_shadows/forward_shadows_shaders.hpp"
+#include "features/path_tracing/glass.hpp"
 #include "hresult.hpp"
 #include "log.hpp"
 #include "passes/ray_tracing/ray_tracing.hpp"
@@ -353,25 +354,13 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
         drawCall(context, call);
     }
 
-    // The rays' reflection where the surface drew, shadowed by the rays' shadow: the cube map it replaced
-    // was bound black above. The guide is a frame old, so the reflection is read where this frame's water
-    // point was on the screen last frame (the kick's cameras and the guide's depth).
-    if (reflection)
+    // The rivers' and liquids' reflection: recorded as a surface for the glass module's second trace, which runs
+    // after the scene and adds what it reflected at the exposure (glass.hpp) - the current camera, so it cannot lag.
+    if (replacingCube)
     {
         static std::atomic<bool> loggedReflection{};
-        if (!loggedReflection.exchange(true)) log("Forward shadows: the rays' reflection takes the cube map's place.");
-        check(write(context, reflectionConstants.Get(), cameras), "Writing the forward shadows' reflection cameras");
-        ID3D11ShaderResourceView* guideViews[3]{reflection, guideDepthView.Get(), guideSurfaceView.Get()};
-        ID3D11SamplerState* samplers[]{linearSampler.Get()};
-        context->OMSetBlendState(addBlend.Get(), nullptr, 0xFFFFFFFF);
-        context->OMSetDepthStencilState(noWriteDepth.Get(), stencil);
-        context->PSSetShader(reflectionShader.Get(), nullptr, 0);
-        context->PSSetConstantBuffers(0, 1, reflectionConstants.GetAddressOf());
-        context->PSSetShaderResources(0, 3, guideViews);
-        context->PSSetSamplers(0, 1, samplers);
-        drawCall(context, call);
-        context->PSSetConstantBuffers(0, 1, guideConstants.GetAddressOf());
-        context->PSSetSamplers(0, 1, &samplers[0]);
+        if (!loggedReflection.exchange(true)) log("Forward shadows: the rivers' reflection leaves the cube map to the surface trace.");
+        glass::recordWater(context, call);
     }
 
     // The surface's depth and mask, for the reflections traced at its pixels.

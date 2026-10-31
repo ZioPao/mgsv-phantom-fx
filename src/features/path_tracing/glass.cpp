@@ -57,7 +57,7 @@ struct Target
 // ---- Direct3D, guarded by resourceMutex, never held through a Direct3D call on a recording thread ----
 std::mutex resourceMutex;
 ComPtr<ID3D11Device> device;
-ComPtr<ID3D11PixelShader> glassShader, colorGlassShader, mirrorShader, compositeShader;
+ComPtr<ID3D11PixelShader> glassShader, colorGlassShader, mirrorShader, waterShader, compositeShader;
 ComPtr<ID3D11VertexShader> fullScreenShader;
 ComPtr<ID3D11ComputeShader> guidesShader;
 ComPtr<ID3D11BlendState> surfaceBlend, colorOnly;
@@ -91,6 +91,7 @@ bool ensurePipeline()
         glassShader = surfaceShader(shaders::GlassSurface, "glass-surface");
         colorGlassShader = surfaceShader(shaders::GlassSurface, "glass-surface-color", color);
         mirrorShader = surfaceShader(shaders::MirrorSurface, "mirror-surface");
+        waterShader = surfaceShader(shaders::WaterSurface, "water-surface");
 
         const auto fullScreenCode = compile(path_tracing::shaders::FullScreen, "glass-full-screen", "vs_5_0");
         check(device->CreateVertexShader(fullScreenCode->GetBufferPointer(), fullScreenCode->GetBufferSize(), nullptr, fullScreenShader.ReleaseAndGetAddressOf()),
@@ -328,12 +329,49 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
     }
 }
 
+void recordWater(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call) noexcept
+{
+    try
+    {
+        ComPtr<ID3D11RenderTargetView> gameTarget;
+        ComPtr<ID3D11DepthStencilView> gameDepth;
+        context->OMGetRenderTargets(1, gameTarget.GetAddressOf(), gameDepth.GetAddressOf());
+        const auto [width, height] = sizeOf(gameTarget.Get());
+
+        ComPtr<ID3D11PixelShader> surface;
+        ComPtr<ID3D11BlendState> blend;
+        ComPtr<ID3D11DepthStencilState> depthTest;
+        ComPtr<ID3D11RenderTargetView> depth, normal, weight;
+        {
+            std::lock_guard lock(resourceMutex);
+            if (!waterShader || weightTarget.texture.width != width || weightTarget.texture.height != height) return;
+
+            surface = waterShader;
+            blend = surfaceBlend;
+            depthTest = behindGameDepth;
+            depth = depthTarget.renderTarget;
+            normal = normalTarget.renderTarget;
+            weight = weightTarget.renderTarget;
+        }
+
+        if (!viewportFillsTarget(context)) return;
+
+        ID3D11RenderTargetView* const targets[3]{depth.Get(), normal.Get(), weight.Get()};
+        drawSurface(context, call, surface.Get(), targets, blend.Get(), depthTest.Get(), gameTarget.Get(), gameDepth.Get());
+        notes.note(reinterpret_cast<std::uint64_t>(context), [&](Notes& contextNotes) {
+            contextNotes.hasSurfaces = true;
+            contextNotes.scene = gameTarget;
+        });
+    }
+    catch (...)
+    {
+    }
+}
+
 void recorded(std::uint64_t into, std::uint64_t from) noexcept
 {
     notes.recorded(into, from);
-}
-
-void forget(std::uint64_t contextOrList) noexcept
+}void forget(std::uint64_t contextOrList) noexcept
 {
     notes.forget(contextOrList);
 }

@@ -350,9 +350,27 @@ void TraceSurfaceReflections(uint2 did : SV_DispatchThreadID)
     if (depth <= 0.0f) return;
 
     float4 normalRoughness = g_SurfaceNormal.Load(int3(did, 0));
+    // A river or a liquid (WaterSurface, glass_shaders.hpp): its normal comes from its depth's slope, as the trace
+    // has no shader interface to read it from, and what it reflects is scaled by water's reflectance.
+    const bool isWater = all(normalRoughness.xyz == 0.0f);
+    float3 world = DepthPosition(did, depth);
+    if (isWater)
+    {
+        const uint2 last = g_BufferDimensions - 1;
+        const uint2 rightPixel = min(did + uint2(1, 0), last);
+        const uint2 downPixel = min(did + uint2(0, 1), last);
+        const float rightDepth = g_SurfaceDepth.Load(int3(rightPixel, 0));
+        const float downDepth = g_SurfaceDepth.Load(int3(downPixel, 0));
+        float3 slope = float3(0, 0, 1);
+        if (rightDepth > 0.0f && downDepth > 0.0f)
+            slope = cross(DepthPosition(rightPixel, rightDepth) - world, DepthPosition(downPixel, downDepth) - world);
+        if (!all(slope == 0.0f)) slope = normalize(slope);
+        const float3 toEyeNow = normalize(g_Frame.eye.xyz - world);
+        if (dot(slope, toEyeNow) < 0.0f) slope = -slope;
+        normalRoughness = float4(slope, normalRoughness.w);
+    }
     float3 normal = normalize(normalRoughness.xyz);
     float alpha = max(normalRoughness.w * normalRoughness.w, 1e-3f);
-    float3 world = DepthPosition(did, depth);
     float3 toEye = normalize(g_Frame.eye.xyz - world);
 
     // Apart from the rays from the surface behind it (TraceReflections).
@@ -363,5 +381,8 @@ void TraceSurfaceReflections(uint2 did : SV_DispatchThreadID)
     float hitDistance;
     bool isRough = normalRoughness.w >= RoughSurface;
     float3 light = ReflectedLight(origin, normal, CopyTolerance(world), direction, PixelCone(world, g_Frame.rayCone.x + alpha), isRough, random, hitDistance);
+    // A river or a liquid reflects as water does, not as glass: its reflectance at the eye's angle scales what it
+    // reflected (its weight, recorded at the draw, is the menu's share).
+    if (isWater) light *= WaterReflectance(saturate(dot(normal, toEye)), normalRoughness.w);
     g_SurfaceReflection[did] = float4(min(RemoveNaNs(light) * g_Frame.nearFar.w, BrightestHit), hitDistance);
 }
