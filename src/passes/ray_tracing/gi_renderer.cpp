@@ -173,8 +173,8 @@ struct State
     ComPtr<ID3D12Resource> statsReadback, statsCounters;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT statsFootprint{};
     std::uint64_t statsFence{}, lastStats{};
-    Shared depth, normal, albedo, output, shadow, shadowDebug, velocity, terrainPages, terrainHeights, localLightShadow, lightDebug, guideNormals,
-        guideSpecular, reflection, reflectionDistance, guideMaterial, guideTranslucency, lampMasks, lampDiffuse, lampSpecular;
+    Shared depth, normal, albedo, output, shadow, shadowDebug, velocity, terrainPages, terrainHeights, localLightShadow, lightDebug, materialSpecular, skyCube, guideNormals,
+        guideSpecular, reflection, reflectionDistance, reflectionMap, guideMaterial, guideLobe, specularTable, lampMasks, lampDiffuse, lampSpecular;
 
     ~State()
     {
@@ -407,7 +407,7 @@ GIFrameConstants constantsOf(const Frame& frame, std::uint32_t newGeometries, st
             {light.color[0], light.color[1], light.color[2], light.factor}, {light.sixteenth ? 1.0f : 0.0f, light.addedDistance, light.leastDistance, light.radius},
             {light.shadowStart, 0, 0, 0}, {light.volumeLowest[0], light.volumeLowest[1], light.volumeLowest[2], light.volumeKnown ? 1.0f : 0.0f},
             {light.volumeHighest[0], light.volumeHighest[1], light.volumeHighest[2], 0},
-            {light.specularScale, light.diffuseScale, 0, 0},
+            {light.specularScale, light.diffuseScale, light.size, 0},
             {{light.maskRows[0][0], light.maskRows[0][1], light.maskRows[0][2], light.maskRows[0][3]},
                 {light.maskRows[1][0], light.maskRows[1][1], light.maskRows[1][2], light.maskRows[1][3]},
                 {light.maskRows[2][0], light.maskRows[2][1], light.maskRows[2][2], light.maskRows[2][3]}},
@@ -954,10 +954,10 @@ Result render(const Frame& frame)
     const bool traceLocalLights = !frame.localLights.empty() && frame.textures.localLightShadow;
     // Path tracing lights the point and spot lights itself (direct_light.hlsl), with Ray Reconstruction's guides.
     const bool traceLamps = frame.isPathTraced && !frame.localLights.empty() && frame.textures.lampDiffuse && frame.textures.lampSpecular
-        && frame.textures.guideNormals && frame.textures.guideMaterial && frame.textures.guideTranslucency;
+        && frame.textures.guideNormals && frame.textures.guideMaterial && frame.textures.guideLobe;
     // The reflections read the light's cache.
     const bool traceReflections = frame.isPathTraced && traceLight && !frame.showScene && frame.textures.reflection
-        && frame.textures.reflectionDistance && frame.textures.guideNormals && frame.textures.guideSpecular;
+        && frame.textures.reflectionDistance && frame.textures.reflectionMap && frame.textures.guideNormals && frame.textures.guideSpecular;
     if (traceLocalLights && (s.localShadowWidth != frame.width || s.localShadowHeight != frame.height))
     {
         waitForAll();
@@ -980,6 +980,7 @@ Result render(const Frame& frame)
     // instances ----
     const bool terrain = frame.terrain.has_value();
     const scene_contents::GameScene game{.frameIndex = frame.frameIndex,
+        .eye = frame.eye,
         .newModels = frame.newModels,
         .hasNewLists = frame.modelInstancesUpdated,
         .placements = frame.modelInstances,
@@ -1029,15 +1030,21 @@ Result render(const Frame& frame)
             traced.guideSpecular = openShared(s, s.guideSpecular, frame.textures.guideSpecular, "Opening the specular albedo guide").Get();
             traced.reflection = openShared(s, s.reflection, frame.textures.reflection, "Opening the reflections").Get();
             traced.reflectionDistance = openShared(s, s.reflectionDistance, frame.textures.reflectionDistance, "Opening the reflections' hit distance").Get();
+            traced.reflectionMap = openShared(s, s.reflectionMap, frame.textures.reflectionMap, "Opening the reflection map").Get();
         }
         if (traceLamps)
         {
             traced.guideMaterial = openShared(s, s.guideMaterial, frame.textures.guideMaterial, "Opening the material guide").Get();
-            traced.guideTranslucency = openShared(s, s.guideTranslucency, frame.textures.guideTranslucency, "Opening the translucency guide").Get();
+            traced.guideLobe = openShared(s, s.guideLobe, frame.textures.guideLobe, "Opening the lobe guide").Get();
+            traced.specularTable = openShared(s, s.specularTable, frame.textures.specularTable, "Opening the game's specular table").Get();
             if (frame.textures.lampMasks) traced.lampMasks = openShared(s, s.lampMasks, frame.textures.lampMasks, "Opening the masks").Get();
             traced.lampDiffuse = openShared(s, s.lampDiffuse, frame.textures.lampDiffuse, "Opening the lamps' diffuse light").Get();
             traced.lampSpecular = openShared(s, s.lampSpecular, frame.textures.lampSpecular, "Opening the lamps' specular light").Get();
         }
+        auto* materialSpecular = frame.isPathTraced && frame.textures.materialSpecular
+            ? openShared(s, s.materialSpecular, frame.textures.materialSpecular, "Opening the materials' specular colours").Get()
+            : nullptr;
+        auto* skyCube = frame.isPathTraced && frame.textures.skyCube ? openShared(s, s.skyCube, frame.textures.skyCube, "Opening the sky's cube").Get() : nullptr;
         auto* terrainPages = terrain ? openShared(s, s.terrainPages, frame.terrain->pages, "Opening the terrain's page table").Get() : nullptr;
         auto* terrainHeights = terrain ? openShared(s, s.terrainHeights, frame.terrain->heights, "Opening the terrain's heights").Get() : nullptr;
 
@@ -1077,7 +1084,15 @@ Result render(const Frame& frame)
         constants.objectMotion = {velocity ? 1u : 0u, 0, 0, 0};
         constants.shadowDiagnostics = {frame.twoSidedShadows ? 1u : 0u, frame.shadowStarts ? 1u : 0u, 0, 0};
         constants.lightDiagnostics = {0, 0, lightDebug ? static_cast<std::uint32_t>(frame.lightDebugView) : 0u, 0};
-        constants.reconstruction = {frame.forReconstruction ? 1u : 0u, 0, 0, 0};
+        constants.reconstruction = {frame.forReconstruction ? 1u : 0u, materialSpecular ? 1u : 0u, skyCube ? 1u : 0u, 0};
+        constants.emission = {frame.emissionScale, frame.emissionCap, 0, 0};
+        if (frame.isPathTraced)
+        {
+            const auto emitters = std::min<std::size_t>(update.emitters.size(), GI_MAX_EMITTERS);
+            std::copy_n(update.emitters.begin(), emitters, constants.emitters);
+            constants.emitterCount = {static_cast<std::uint32_t>(emitters), 0, 0, 0};
+        }
+
         // A ray a render pixel for Ray Reconstruction, whatever the ray quality: as many rays as High's four a
         // 2 x 2, the most a sample can take apart.
         constants.lightRays = {frame.forReconstruction ? 1u : frame.lightRays, 0, 0, 0};
@@ -1105,6 +1120,8 @@ Result render(const Frame& frame)
             descriptors.texture(15, terrainHeights, frame.terrain->heightsFormat);
         }
         if (velocity) descriptors.texture(17, velocity, frame.textures.velocityFormat);
+        if (materialSpecular) descriptors.texture(23, materialSpecular, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        if (skyCube) descriptors.cube(24, skyCube, DXGI_FORMAT_R16G16B16A16_FLOAT);
         if (debugShadows)
         {
             descriptors.outputBuffer(77, s.probe.Get(), sizeof(GIShadowProbe), 1);
@@ -1152,8 +1169,8 @@ Result render(const Frame& frame)
         constexpr auto Read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, Write = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         const std::pair<ID3D12Resource*, D3D12_RESOURCE_STATES> shared[]{{depth, Read}, {normal, Read}, {albedo, Read}, {output, Write},
             {shadow, Write}, {shadowDebug, Write}, {lightDebug, Write}, {velocity, Read}, {localLightShadow, Write}, {terrainPages, Read},
-            {terrainHeights, Read}, {traced.guideNormals, Read}, {traced.guideSpecular, Read}, {traced.reflection, Write}, {traced.reflectionDistance, Write},
-            {traced.guideMaterial, Read}, {traced.guideTranslucency, Read}, {traced.lampMasks, Read}, {traced.lampDiffuse, Write}, {traced.lampSpecular, Write}};
+            {terrainHeights, Read}, {traced.guideNormals, Read}, {traced.guideSpecular, Read}, {traced.reflection, Write}, {traced.reflectionDistance, Write}, {traced.reflectionMap, Write},
+            {traced.guideMaterial, Read}, {traced.guideLobe, Read}, {traced.specularTable, Read}, {traced.lampMasks, Read}, {traced.lampDiffuse, Write}, {traced.lampSpecular, Write}};
         const auto transitionShared = [&](bool toCommon) {
             std::vector<D3D12_RESOURCE_BARRIER> barriers;
             if (toCommon) barriers.push_back(uavBarrier());

@@ -161,7 +161,7 @@ what draws it, when that is the feature's own.
 | `ray_traced_shadows/` | `gi_shadow.*`: the sun's shadow rays and the FidelityFX Shadow Denoiser on Direct3D 12. `gi_shadow.hlsl`, `gi_shadow_filter.hlsl`: the rays, the denoiser's temporal pass and filters |
 | `ray_traced_lights/` | `local_lights.*`: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights"). `light_choice.*`: which lights a kick gives the rays (each light's reach, the light cap) and each light as the rays take it. `light_shadow_rays.*`, `light_shadows.hlsl`: the lights' shadow rays and filter on Direct3D 12 |
 | `global_illumination/` | `gi_light.*`, `gi_light.hlsl`: the light on Direct3D 12, its rays, the denoiser's inputs and the render size (see "Global illumination"); their hits' light and the hash grid cache in `passes/ray_tracing/shaders/gi_hit_light.hlsli`. `gi_denoiser.*`: NVIDIA NRD's RELAX denoiser without NRI. `gi_lighting.*`: the game's sky and sun in the light's terms. `light_combine.*`: the traced light in place of the game's probe light at the resolve |
-| `path_tracing/` | `path_tracing.*`: path tracing on Direct3D 11: the traced reflections added at the resolve, the screen-space reflections kept on water and glass, the lamps' light added at the draw point, the masks' atlas (see "Path tracing"). `path_tracing_shaders.hpp`: those draws. `path_tracing_rays.*`: its passes on Direct3D 12. `reflections.hlsl`, `direct_light.hlsl`: the reflections and the point and spot lights |
+| `path_tracing/` | `path_tracing.*`: path tracing on Direct3D 11: the traced reflections added at the resolve and blended as the game blends its own, the lamps' light added at the draw point, the masks' atlas (see "Path tracing"). `path_tracing_shaders.hpp`: those draws. `sky_capture.*`: the game's sky drawn again for the rays. `path_tracing_rays.*`: its passes on Direct3D 12. `reflections.hlsl`, `direct_light.hlsl`: the reflections and the point and spot lights |
 | `ambient_occlusion/` | `gtvbao.*`: GTVBAO's occlusion multiplied into the indirect light at the upscale. `gtvbao_shaders.hpp`: that multiply |
 | `indirect_light/` | `ssilvb.*`: SSILVB's light, brought to the render size and added to the diffuse light the resolve reads. `ssilvb_shaders.hpp`: the upsample |
 | `volumetric_fog/` | `atmosphere.*`: the larger fog texture, the game's fog pass over all of it, the shadowed fill before the resolve. `atmosphere_shaders.hpp`: the game's fog formula per froxel with the sun shadowed; Hillaire's atmosphere tables, the physical fog and sky (Epic Games' reference, MIT) |
@@ -192,7 +192,7 @@ what draws it, when that is the feature's own.
 | `src/passes/ray_tracing/gi_inputs.*` | What the ray tracing takes from the game's draws: the main camera of the frame drawn, its skinned meshes' bones, the terrain's inputs |
 | `src/passes/ray_tracing/gi_textures.*` | Shared copies of the game's textures the ray-traced scene's meshes use, from its texture manager (see "Ray-traced scene") |
 | `src/passes/ray_tracing/gi_d3d12.hpp` | The kernels, root signature and descriptor tables every ray-traced feature shares |
-| `src/passes/ray_tracing/shaders/` | HLSL the ray-traced features share: `gi_shared.h` (also C++), `gi_common.hlsli`, `gi_shadow.hlsli` (where shadow rays leave a surface; the FidelityFX Shadow Denoiser's data access), `gi_hit_light.hlsli` (a ray's hit lit as the global illumination lights it, the hash grid cache), `ggx_specular.hlsli` (path tracing's specular, which CMake also copies into `ggx_specular.hpp` for Direct3D 11's shaders), `gi_scene.hlsl` |
+| `src/passes/ray_tracing/shaders/` | HLSL the ray-traced features share: `gi_shared.h` (also C++), `gi_common.hlsli`, `gi_shadow.hlsli` (where shadow rays leave a surface; the FidelityFX Shadow Denoiser's data access), `gi_hit_light.hlsli` (a ray's hit lit as the global illumination lights it, the hash grid cache), `ggx_specular.hlsli` (the specular of what path tracing's rays hit), `gi_scene.hlsl` |
 | `third_party/ffx_denoiser_shadows/` | AMD's FidelityFX Shadow Denoiser headers, unchanged (MIT; `licenses/AMD-FidelityFX-LICENSE.txt`) |
 
 ### Shared
@@ -1121,7 +1121,12 @@ level at Camp Omega's cliffs. No names in the exe: the class names here are desc
   headers by type number (`+0x38` of an object, a word; models are type 3, the global at RVA
   `0x29E51B4`), each header the last object, the first and the count; objects are linked first to last
   through `+0x10` (and back through `+0x18`). In Afghanistan the model list held 882 models: 566 rigid,
-  360 skinned. Characters are among them and in no visibility manager.
+  360 skinned. Characters are among them and in no visibility manager. So, at times, are a few rigid models, the
+  scene taking those from here: the helicopter's cabin between missions (`84a2d14c3f28beb5`, `84a3b06a43ea483f`, at
+  (0, 1200, 0), 71% of the frame there), 438 models in all there, and none at Mother Base or in Afghanistan. Arriving
+  from another map no visibility manager holds it; straight from Mother Base one can. Without them the rays had no
+  walls: the cabin was lit 4 times as brightly as the game's, and the sun's rays reached 76% of the frame the game's
+  shadow map has blocked.
 - **Characters** (found 2026-10-23): a skinned model (its file has bones) is an ordinary model object:
   its world matrix at `+0x40` (identity while unused), the passes it is hidden from at `+0x1A4`, its
   bone count at `+0xF8`, and at `[+0x188] + 0x78` its skinning palette: a 3x4 matrix (rows, translation
@@ -1629,23 +1634,93 @@ the game's lights) is left alone until it runs.
 
 - **Reflections** (`TraceReflections`, `src/features/path_tracing/reflections.hlsl`): a ray a render pixel
   along a reflection the surface's roughness spreads (GGX's visible normals, Heitz 2018, roughness squared,
-  from Ray Reconstruction's normal guide), lit where it hits as the global illumination's rays light theirs
-  (`gi_hit_light.hlsli`: the sun and a light afresh, its bounce from the sky or the light cache), with the
-  hit's normal from the G-buffer where the camera sees it (`HitShadingNormal`), normal map and all, so a
-  bump reflects from the side the game shades; the sky's
-  light where it gets away, without the sun's disc, which stays the sun's specular. Its light times the
+  from Ray Reconstruction's normal guide). On a surface of roughness 0.5 and up (`RoughSurface`), most of what
+  the game draws, a reflection is a faint blur: the ray's hit takes the light cache's light for its place (`CachedLight`),
+  one ray a pixel; where no ray has lit that cell yet, and at a self-lit mesh, it is shaded as below. On a glossy
+  surface the hit has its material (see "Hits" below) and takes the sun, a light and a self-lit mesh afresh, each
+  diffuse by its albedo. The sun and the light are specular by GGX too; a self-lit mesh's specular light is the
+  specular ray that meets it. One of its lobes then goes on, chosen by what each reflects: the
+  specular one, on a glossy hit, by GGX's visible normals again, so a reflection holds reflections, up to three
+  specular rays a path (`SpecularRays`), or the diffuse one, whose ray ends the path at the sky's light or the
+  light cache as the global illumination's rays do. A ray that gets away takes the
+  sky the game draws (see "The sky" below), as the disc of the sun stays the sun's specular. Its light times the
   specular albedo guide and the exposure goes to the resolve, which scales it by the menu's **Reflections**
   strength (`path_traced_reflections`, 1 by default) and adds it to the game's specular light
   (`path_tracing::addReflections`), and its hit distance to Ray Reconstruction (`pInSpecularHitDistance`,
-  65504 where it got away), which moves the reflections with what they reflect. The game's reflections
-  make way: the sun pass leaves its sky reflection out (`SKY_REFLECTION 0`), indoors the sky's specular
-  pass (`SunLight_ES`) is skipped, in rain the rain filter's sky reflection on wet surfaces goes (below),
-  and the screen-space reflections' blend (`LocalReflectionAddBuffer`, `97a9ad7e0faca7b1594a38c331826a94`,
-  rebuilt from its disassembly) keeps them only where a surface was drawn in front of the G-buffer's, water
-  and glass, which the G-buffer and so the traced reflections lack: where the depth the reflections' mask
-  read (`LocalReflectionMask`, `2d9cb6c5e467cff5e9c6401b4aafebb7`, `t0`) is nearer than the G-buffer's as
-  the kick packed it (`ray_tracing::surfaceDepth`). With the sun pass's shaders unavailable its sky
-  reflection stays, and so do the game's reflections (the budget line says so).
+  65504 where it got away), which moves the reflections with what they reflect. The game's sky reflections
+  make way: the sun pass leaves its own out (`SKY_REFLECTION 0`), indoors the sky's specular pass
+  (`SunLight_ES`) is skipped, and in rain the rain filter's on wet surfaces goes (below). With the sun pass's
+  shaders unavailable its sky reflection stays (the budget line says so).
+- **The game's reflection blend, from the rays.** The game's reflection of what is around a surface is not a
+  material's reflectance but a look of its own: `LocalReflectionTPP` and `LocalReflectionAddBuffer` give
+  `scene x (1 - w) + w x I x S x F x (1 - t) x hit`, with `I` the specular intensity, `S` the pass's strength
+  (`cPSObject` `c12.x`), `F = R + (1 - R)(1 - NV)`, `R = (1 - roughness)^4` whatever the material's F0, and
+  `w = I x S x (1 - t) x` the fades: the surface's distance (gone at 100 m) and the ray turning towards the eye
+  (gone at -0.5 towards it), `t` being how far across the screen the march went against its reach (`c12.z / 2`),
+  all times the fog to the 8th. On the sortie screen's floor (roughness 0.6, F0 0.1, seen at NV about 0.2, frames of
+  2026-10-30) `w` reaches 0.6 to 0.9 and `F` is 0.8, where GGX reflects 0.13 and the sky reflection's weight, which
+  `Reflection` carries, is 0.1: at that weight alone such floors lost the reflection of what stands on them. So the
+  blend stays, with the rays as its source. `TraceReflections` writes each hit into a map like the game's
+  (`g_ReflectionMap`, `ray_tracing::reflectionMap`: the light by `F`, capped at 4, and the fades; nothing on the sea,
+  which keeps water's reflectance, rougher than 0.9 or below an `F` of 0.1, as the game's mask) and the ray's way
+  across the screen (alpha of `Reflection`). `ReflectionBlend`, drawn for `LocalReflectionAddBuffer`, fades them by
+  `t` and the fog (`FogAt`), and takes the menu's **Reflections** strength. A ray lacks the screen-space march's
+  limits: what is off-screen or hidden reflects too, without a fade at the screen's edges. A hit behind the eye gives
+  the blend nothing. Only where a surface was drawn in front of the G-buffer's, water and glass, which the G-buffer
+  and so the rays lack, does the blend keep the screen-space map: where the depth the reflections' mask read
+  (`LocalReflectionMask`, `2d9cb6c5e467cff5e9c6401b4aafebb7`, `t0`) is nearer than the G-buffer's as the kick packed
+  it (`ray_tracing::surfaceDepth`).
+- **Hits** (`HitMaterialOf`, `gi_hit_light.hlsli`). The G-buffer's shaders (`fox3ddf_blin` and its family) take a
+  surface's look from three textures and one number, and the scene reads the same from the model file: the
+  material parameters `SpecularMap_Tex_LIN` (`g_tex_srm`: red the specular rate, green the roughness, the G-buffer's
+  `rt2` y and x), `NormalMap_Tex_NRM` (`g_tex_normal`: x in alpha, y in green, z what is left, on a frame of the
+  vertices' normal, their tangent and `cross(normal, tangent)` times the tangent's w) and the vector
+  `MatParamIndex_0` (x its row of the game's material table, `rt2` z, `cb4[0].x`). FMDL's vector parameters: block 4's
+  count at `+7` and first at `+10`, block 7's entries as a texture's (name, then index), each index four floats into
+  section 1's part 0. The textures are copied as the base textures are (`gi_textures.cpp`), as data, not sRGB. Each
+  row of the table becomes its specular colour at normal incidence in the guides' pass (`g_MaterialSpecular`,
+  256 x 1: the row's colour times the Fresnel table at a cosine of 1, as the sun pass and the guides work it out),
+  which the SRM's rate scales. The vertices' normals and tangents (usages 2 and 14, four halves each) go into the
+  pool after a mesh's other bytes, 16 bytes a vertex (`GIGeometry::normalOffset`); `Skin` turns a character's with its
+  pose. Normal maps and the SRM are read at the level of detail of the ray's cone; the reflections' cone spreads
+  with the surface's roughness, so a sharp reflection reads sharp textures. Only the reflections read all this: to
+  the global illumination's diffuse rays a hit stays a matte surface of its triangle's normal, as the materials cost
+  them 2.5 ms a frame and showed nothing (9.7 ms against 7.2, 2026-10-30), and the light cache stays diffuse.
+- **Self-lit meshes** (`SampledEmitterLight`, `gi_hit_light.hlsli`). Nothing in the G-buffer glows. What does is drawn
+  forward by `fox3dfw_constant*` (a bulb, a sign): its texture times the vector `SelfColor` times the x of
+  `SelfColorIntensity`, times the exposure, in the game's light units (seen 80 to 221,182, with the sun about 20,000).
+  The scene took these for glass and dropped them. A mesh whose colour times intensity reaches 10 is now
+  `MeshRole::Emissive`, whatever its alpha and shadow bytes (`0x10`, `0x25` on most), but for an additive one
+  (alpha bit 0): those are glow cards around lamps, four vertices, no surface. The sky's dome, the moon (intensity 1)
+  and a mesh painted black fall below it. Self-lit meshes give light and take none, and rays towards lights pass them
+  (`GI_GEOMETRY_EMISSIVE`, with `GI_GEOMETRY_NO_SHADOW`). While they give no light, without path tracing or with the
+  slider below at 0, every ray passes them, as a black hit would dim what is behind. A placed mesh within 200 m of the
+  eye is an emitter: the 64 strongest at the eye go in the frame's constants (`GIEmitter`), each with the reach of its own light past which a
+  surface does not consider it. Their diffuse light is sampled directly at the pixel
+  (`TraceLight`), at the rays' hits (`HitOwnLight`) and in the cache's cells (`HitDirectLight`): one chosen by its
+  light there (weighted reservoir sampling), a triangle of it and a point on that, with a shadow ray; it is an
+  unbiased estimate. A diffuse ray that meets an emitter takes none of its light, as that would count it twice; a
+  specular ray always does, which is how it shows in a reflection. A self-lit mesh left out of the 64, or on a
+  character, gives its light to the diffuse rays that meet it. The intensities are set for how a bulb looks, and
+  rooms are lit by the lamps placed beside them: a mesh lights others with at most the sun's radiance
+  (`MostEmission`), and the menu's **Self-lit surfaces** (`path_traced_emission`, 1 by default, 0 to 4) scales it.
+- **The sky** (`sky_capture.*`). The sky's light is nine numbers, without a horizon, clouds or the sun's glow, so a ray
+  that got away reflected a smooth blur. The sky reflection map cannot stand in: `TPPSunLightReflectMap` fills it
+  from baked cubes (`g_EnvSpecCubeTexture`), and the sun pass reads two levels of one rate from it. So the game's
+  own sky draws are drawn twice while path tracing runs: `Sky_Draw_*` (or the physical sky's shader in its place), then
+  `tpp3dfw_constant_sky` and `tpp3dfw_generativeClouds` (`GamePass::SkyDome`), each straight after itself into one
+  face of a 256 x 256 cube (`R16G16B16A16_FLOAT`), a face a frame, with the depth off and every state put back.
+  Their shaders read everything of the camera from constants, so a face takes copies with the camera turned to it:
+  `b2` (`m_view`, `m_projection` a right angle across without the jitter, `m_projectionParam`, the size in
+  `m_viewportSize`), `b0` (`m_renderInfo`, the fog's screen position), `b3` (`viewFar`, which only scales, and
+  `clipPlaneOfView` off), `b5` (`m_viewWorld` taken from the game's view to the face's) and `b7`, `cVSWork`
+  (`m_matrix[0]` clip to view, `m_matrix[1]` view to world). View space is x right, y up, z forward. Faces are
+  turned as Direct3D's cube faces are, so a ray's direction samples the cube as it is. At the next kick the last
+  frame's face is decoded (the scene's values are sRGB encoded, past 1 too), capped at 4 and divided by the exposure of
+  its frame into the rays' units, in a shared cube. Reflections read it (`SkySeen`); the diffuse rays keep the sky's
+  light, the level the game's ambient is tuned to. The fog these shaders read is the main view's, sampled at a
+  face's screen position: a small error far from the view. Until all six faces are drawn, and two seconds after the game
+  last drew a sky, reflections take the sky's light. It costs a few sky-sized draws at 256 x 256 a frame.
 - **Rain.** In rain the sun pass has no sky reflection (`SunLight_DL_CS`, `SunLight_DL`): the resolve
   (`DR_TonemapRainFilter`, `DR_TonemapRainFilter_NoIR`, from their disassembly, 2026-10-30) adds one on wet
   surfaces instead, after `occlusion x (diffuse x albedo + specular)`: a cube map (`t1`) along the
@@ -1657,19 +1732,21 @@ the game's lights) is left alone until it runs.
 - **The sun** (`PATH_TRACED` in `sun_light_pass_shaders.hpp`): the sun pass's own shader, lit by the rays'
   shadow alone, without the shadow map or the contact shadows, which it does not trace (and the rays leave
   nothing to the map: no shadow range for untextured cut-out meshes), inside the game's shadow range with
-  its clouds' shadow and height fade (`CLOUD_SHADOW`), and with GGX's specular (`ggx_specular.hlsli`,
-  Trowbridge-Reitz, Smith's height-correlated visibility, Schlick's Fresnel) from the specular colour at
-  normal incidence (the material table's colour times the specular target's intensity times the Fresnel
-  table at a cosine of 1), in place of the game's lookup tables, its specular shadow floor and its sky
-  reflection. The sun's rays are traced while path tracing runs, whether or not the ray-traced shadows are
-  on, and the sun pass is handed them (`ray_tracing::sunShadow`, whose handover is gated on either:
-  path tracing replaces the ray-traced shadows, so gating it on them alone left the game's shadow map).
+  its clouds' shadow and height fade (`CLOUD_SHADOW`), and without the game's specular shadow floor and sky
+  reflection. Its specular stays the game's tables (`g_lut2` by the halfway vector's angle, the roughness and
+  the anisotropy, `g_lut1` for Fresnel), not GGX: measured against the frames of 2026-10-30 on Snake's suit
+  (roughness 0.5 to 0.9), the game's lobe at the same roughness is up to 1.8 times GGX's at its peak and a tenth
+  of it on the flank, so GGX spread the highlights into a haze: the fine creases and fabric went, and the
+  sortie screen's floor took three times the specular light. The sun's rays are traced while path tracing
+  runs, whether or not the ray-traced shadows are on.
 - **Point and spot lights** (`TraceLampLight`, `direct_light.hlsl`), in place of the game's light shaders:
   each light's light as they work it out (`LocalLightReaching`: its falloff, a spot's cone, the game's
   volume for it; a masked spot's mask; the light through leaves, the game's `LN_trans`; its diffuse and
   specular scales, `cPSLight` `c8.y` and `c8.x`, 1 for the latter where its shader has none, as the
-  ray-traced lights draw them), times the exposure as theirs (`falloff x c4 x m_exposure.z`), with GGX's
-  specular. A pixel picks two lights in proportion to their light there without shadows (weighted
+  ray-traced lights draw them), times the exposure as theirs (`falloff x c4 x m_exposure.z`), with their
+  specular as the sun's: the game's tables, towards the light as a disc of its size (`c4.w`). Until the first sun
+  pass has given those tables, the game's shaders draw the lights, as a session can start where no sun shines. A
+  pixel picks two lights in proportion to their light there without shadows (weighted
   reservoir sampling over all the frame's lights, white noise) and traces a shadow ray to a point on each
   one's disc, as the ray-traced lights' rays leave (hair's share, the faces that cast); every light is
   shadowed in full, as the ray-traced lights shadow them. At the draw point (`path_tracing::addLampLight`,
@@ -1691,9 +1768,10 @@ the game's lights) is left alone until it runs.
   log says. The projection is the shader's (`cPSScene` `c16`, `c17`, `c19` on the light pass's view
   position, `uv = xy / w x 0.5 + 0.5`, v flipped), taken into the world through that view
   (`light_choice::maskRowsInWorld`).
-- **Guides.** Besides Ray Reconstruction's, the kick writes the specular colour at normal incidence with
-  the translucency (`R8G8B8A8_UNORM`) and the light through leaves' floor (the translucency times the
-  material's, `R8_UNORM`).
+- **Guides.** Besides Ray Reconstruction's, the kick writes the specular colour with the translucency, and
+  the light through leaves' floor (the translucency times the material's) with F0 and the anisotropy (both
+  `R8G8B8A8_UNORM`). `g_lut2`, 64 x 16 x 16, goes to Direct3D 12 as 64 x 256, its slices one below the other
+  (`SpecularTableAt`, `direct_light.hlsl`).
 - **What stays the game's.** Its shadow maps: 85 of its pixel shaders sample them (its lit particles,
   glass, rivers and liquids, decals, forward models, the terrain's self-shadow), and the volumetric fog the
   sun's for its light shafts. Its screen-space reflections' march, for water and glass. Its probe light in
@@ -2020,11 +2098,7 @@ Now, each frame:
 
 - **Rays** (`TraceLight`). 1, 2 or 4 (the global illumination's ray quality; Medium, 2, by default) from
   each pixel of a grid half the render size each way, cosine-weighted from the depth buffer's surface,
-  past copies of it. The surface's normal for the rays is the traced scene's own, from a ray from the eye
-  at the depth's point (`RayNormal`, the trace `ShadowSurfaceAt` makes for the shadow rays), and the
-  G-buffer's only where the scene lacks it: the G-buffer's normal carries the normal map, which the
-  render pixel's light is resolved against (`CompositeLight`), and sampling around it too bent the light
-  twice — a bump on a wall no light reached lit itself, in the direction it faced (2026-10-30). A ray that gets away takes the sky's light (`SkyRadiance`). A light pixel samples one
+  past copies of it. A ray that gets away takes the sky's light (`SkyRadiance`). A light pixel samples one
   render pixel of its 2 x 2, by depth (`DepthPickOf`): the nearest on one checkerboard colour, the
   farthest on the other, as half-resolution effects downsample depth. With the top left, as first built,
   a wire, a fence or a grass blade under a pixel wide had it one frame and what lay behind the next as the
@@ -2052,11 +2126,6 @@ Now, each frame:
   shadows' rays; a leaf lets half through from its far side) and one to a point or spot light picked in
   proportion to its light there (weighted reservoir sampling over the frame's lights, flashlights among
   them), times the hit's albedo (`HitAlbedo`).
-  The hit's normal is the G-buffer's where the camera sees it (`HitShadingNormal`), which carries the
-  normal map's detail the traced scene's triangles leave out, so the light turns on a bump as it does
-  for the game's own; elsewhere, and where that normal faces the other way, the triangle's own. Before,
-  every hit was lit with the flat triangle normal, and a normal-mapped surface's light read as coming
-  from the wrong side (`gi_hit_light.hlsli`; the path-traced reflections take it too).
   Nothing of the hit's own light comes from a history.
 - **Its bounce.** A cosine-weighted ray from the hit (a leaf's to its far side a third of the time,
   counting 1.5): the sky's light where it gets away, else the hash grid cell's where it lands, direct and
@@ -2188,7 +2257,7 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   1.0.3 of the name and its terminating zero, seeds `0x9AE16A3B2F90404F` and (first character << 16) +
   length, 48 bits kept (`Base_Tex_SRGB` = `0x41EA7BE81B61`). The game's loaded textures are in its
   texture manager ("Scene objects"); `gi_textures.cpp` copies each wanted one's levels of detail from the
-  first no larger than 512 pixels (a cut-out mesh's) or 128 (the others') into a shared texture of the
+  first no larger than 512 pixels (a cut-out mesh's) or 256 (the others') into a shared texture of the
   typeless format, viewed as sRGB on Direct3D 12, and looks again every 300 frames for the game's
   replacement as finer levels stream in. Checked in game against the G-buffer's `t0`: 370 of 377 meshes'
   base textures were the very texture the game drew with; 6 were missing from the manager's streaming
@@ -2416,8 +2485,7 @@ denoiser (see "Ray Reconstruction").
   inside the coarser rock behind for some, so the hidden bush's leaves showed as shadows on what lay
   behind (the shadow probe, 2026-10-24: the camera's ray met leaves 0.1 to 1.4 m away, the game's
   surface 2.4 to 5.9 m). Found, the shadow ray leaves its exact
-  point on the triangle, lifted off it towards the eye (thin cut-out and leaves keep the light's side,
-  so they do not shadow themselves) by 16 float
+  point on the triangle, from the side facing the light, lifted off it along the normal by 16 float
   steps of the point's largest coordinate (`LiftOffTriangle`; coordinates under 128 m count as 128),
   and nothing near it is skipped. That is about 2 mm at 1,200 m from the map's origin, where the game's
   maps reach. The point comes from the triangle's corners and the ray is traced in the instance's own
@@ -2432,17 +2500,7 @@ denoiser (see "Ray Reconstruction").
   other frame, black blotches flickering on his face. Where the game
   drew something the scene lacks, or holds at another level of detail too far off, it leaves from
   the depth's point along the G-buffer's normal, offset by 2 cm plus 0.2% of the distance, skipping
-  copies of the surface just above it ("Copies of a surface" in `gi_common.hlsli`). A triangle that only
-   shares the depth's point is not the surface the game drew, and its rays are not the game's shade
-   either: a wall's dimples, drawn as a normal map, have the flat wall's facets in the scene, and a facet
-   turned towards a distant opening's sun lit the dimple's rim where the game has shade (2026-10-30). So a
-   surface must also face within 60 degrees of the G-buffer's normal (`SceneSurfaceNormalCosine`, the
-   shadow ray starts view's blue) to be the one the rays leave from. The fallback's offset goes towards
-   the eye, never along the side facing the light: facing flips the normal where the light is behind the
-   surface, and the start 2 cm behind the wall then met its back, which the sun's rays pass
-   (`StopsShadowRay`), so a wall's dimples with their normals turned from the sun took its light where the
-   game has shade — the sun's map has the wall's outside lit, so nothing else darkened them (2026-10-30).
-   Until 2026-10-24
+  copies of the surface just above it ("Copies of a surface" in `gi_common.hlsli`). Until 2026-10-24
   every ray left that way: a lamp's hard shadow showed the skip taking a character pressed to a wall
   for a copy of the wall, light through his back in patches ragged along the wall's bumpy normals.
 - **Cut-out meshes.** A model mesh the game alpha-tests (FMDL alpha bits 5 and 7, see "Scene objects",
@@ -2558,9 +2616,9 @@ denoiser (see "Ray Reconstruction").
 - **Shadow ray starts debug view** (Diagnostics, Debug view "Shadow ray starts"; needs the ray-traced
   shadows and an upscaler, with the probe). `ShadowStartColor` colours where each pixel's shadow rays
   leave (`ShadowSurfaceAt`) against the depth's point and the G-buffer's normal: grey from the depth's
-  point (no scene surface near, or one facing over 60 degrees away from the game's normal and so not
-  the surface the game drew), red where the scene's surface lies nearer the eye than the game's, cyan
-  where farther (clear up to 5 mm, full from 3 cm); clear on the game's surface. Built 2026-10-25 for the detached shelf
+  point (no scene surface near), blue on a scene surface facing over 60 degrees away from the game's
+  normal, red where the scene's surface lies nearer the eye than the game's, cyan where farther (clear
+  up to 5 mm, full from 3 cm); clear on the game's surface. Built 2026-10-25 for the detached shelf
   shadow ("Ray-traced scene", "Characters").
 - **Open: terrain blocking for one refresh** (2026-10-23, after the copy race was fixed). With the camera
   still, the probe showed a pixel's sun ray blocked by the terrain 140 m away (66 m above the pixel) for

@@ -47,9 +47,13 @@
   global illumination on: reflections are traced on every surface, sharp on smooth ones and spread on
   rough ones, in place of the game's screen-space and sky reflections (water and glass keep the game's;
   in rain, wet surfaces take the traced ones), and the sun and every lamp and flashlight light the scene
-  from the path tracer, each light with its own soft shadow where lights overlap. Each surface reflects
+  from the path tracer, each light with its own soft shadow where lights overlap, keeping the game's own
+  highlights on its materials. Each surface reflects
   with the strength the game gives its material, and a **Reflections** slider makes them stronger or
-  weaker.
+  weaker. Rays now see what the camera sees: surfaces they hit keep their roughness, shine and normal maps,
+  so shiny things stay shiny in reflections and reflections show other reflections. Glowing bulbs and signs
+  light what is around them, with a **Self-lit surfaces** slider. Reflections of the sky show the game's real
+  sky, with its horizon, clouds, sun glow and weather.
 - **DLSS Ray Reconstruction.** A new **Ray Reconstruction** switch under the upscaler, for NVIDIA RTX GPUs,
   shown while a ray-traced effect is on: NVIDIA's model cleans up the ray-traced global illumination,
   shadows and lights and upscales in one step, in place of DLSS and the add-on's own denoisers, with a
@@ -73,6 +77,9 @@
 - **Diagnostics: the denoiser's own checks as a debug view.** **Global illumination denoiser (NRD)**
   shows NVIDIA's validation layer for the global illumination's denoiser: its view depth, normals,
   motion against a still scene and frames of history.
+- **Ray tracing: the helicopter's cabin has its walls.** Between missions the rays passed through the cabin's
+  walls, as it is held apart from the rest of the game's models: sunlight flooded in, and with path tracing the
+  cabin was about four times as bright as the game's own. It is now dark inside, with daylight through its windows.
 - **Ray-traced shadows: no lit halo around sunlit characters.** A character in the sun in front of a
   shaded wall left a lit band on the wall along their outline, wider the lower the render scale. The
   shadow denoiser no longer mixes a pixel's shadow with what lies in front of or behind it.

@@ -15,10 +15,12 @@ struct Textures
     ID3D12Resource* guideNormals{};
     ID3D12Resource* guideSpecular{};
     ID3D12Resource* guideMaterial{};
-    ID3D12Resource* guideTranslucency{};
+    ID3D12Resource* guideLobe{};
+    ID3D12Resource* specularTable{};
     ID3D12Resource* lampMasks{}; // Null without masked spots
     ID3D12Resource* reflection{};
     ID3D12Resource* reflectionDistance{};
+    ID3D12Resource* reflectionMap{};
     ID3D12Resource* lampDiffuse{};
     ID3D12Resource* lampSpecular{};
 };

@@ -92,12 +92,16 @@ std::optional<ReconstructionGuides> reconstructionGuides(UINT width, UINT height
 // shadows noisy for it: the light a sample a render pixel without its denoiser, the shadows unfiltered.
 void reconstructed() noexcept;
 // Path tracing (path_tracing.hpp): the last kick traced the reflections. The passes recorded meanwhile leave
-// them to it: the sun pass's sky reflection, the indoor sky specular, the screen-space reflections on the
+// them to it: the sun pass's sky reflection, the indoor sky specular, the screen-space reflections' march on the
 // G-buffer's surfaces.
 bool isPathTracing() noexcept;
 // The reflections the last kick traced, at the render size, for the resolve to add to the specular light:
-// R16G16B16A16_FLOAT, the reflected light times the specular albedo and the exposure. Null while off.
+// R16G16B16A16_FLOAT, the reflected light times the specular albedo and the exposure, and in alpha how far across
+// the screen a ray's hit is. Null while off.
 ID3D11ShaderResourceView* reflection(UINT width, UINT height) noexcept;
+// Their hits as the game's reflection map holds them, for its blend (path_tracing::draw): R16G16B16A16_FLOAT, rgb the
+// light by the game's Fresnel, alpha how much it blends. Null while off.
+ID3D11ShaderResourceView* reflectionMap(UINT width, UINT height) noexcept;
 // Their hit distance, R16_FLOAT, for Ray Reconstruction (ray_reconstruction.hpp). Null while off.
 ID3D11Texture2D* reflectionDistance(UINT width, UINT height) noexcept;
 // The point and spot lights' light the last kick path traced (direct_light.hlsl), at the render size,
