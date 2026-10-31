@@ -176,25 +176,4 @@ ArrayLayout combine(std::span<const Layout> layouts)
 
     return array;
 }
-
-OpacitySplit splitByOpacity(std::span<const std::uint16_t> indices, std::span<const std::uint32_t> triangleBlocks,
-    std::span<const std::uint32_t> blockStates)
-{
-    OpacitySplit split;
-    const auto triangles = indices.size() / 3;
-    for (std::size_t t = 0; t < triangles; ++t)
-    {
-        // A triangle without a block, or a block without its states, keeps the alpha test.
-        const auto block = t < triangleBlocks.size() ? triangleBlocks[t] : ~0u;
-        const auto found = block < blockStates.size() ? blockStates[block] : 0u;
-        const auto corners = indices.subspan(3 * t, 3);
-        if (found == GI_OMM_SOME_NOT_TRANSPARENT)
-            split.opaque.insert(split.opaque.end(), corners.begin(), corners.end());
-        else if (found == GI_OMM_SOME_NOT_OPAQUE)
-            ++split.transparent;
-        else
-            split.mixed.insert(split.mixed.end(), corners.begin(), corners.end());
-    }
-    return split;
-}
 }

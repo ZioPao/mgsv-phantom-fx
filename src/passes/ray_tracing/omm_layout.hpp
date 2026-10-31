@@ -81,17 +81,4 @@ struct ArrayLayout
 };
 
 ArrayLayout combine(std::span<const Layout> layouts);
-
-// A cut-out mesh's triangles sorted by what the bake found of their blocks (GI_OMM_SOME_* words, by block):
-// wholly opaque ones, which the rays may take as opaque geometry with no alpha test; wholly transparent
-// ones, which they never need to meet; and the rest, which keep the alpha test. Three indices a triangle,
-// in the mesh's order. For the scene without micromaps (gi_scene.cpp, "opacity split").
-struct OpacitySplit
-{
-    std::vector<std::uint16_t> opaque, mixed;
-    std::uint32_t transparent{};
-};
-// `triangleBlocks` holds the mesh's triangles' blocks, which index `blockStates`.
-OpacitySplit splitByOpacity(std::span<const std::uint16_t> indices, std::span<const std::uint32_t> triangleBlocks,
-    std::span<const std::uint32_t> blockStates);
 }

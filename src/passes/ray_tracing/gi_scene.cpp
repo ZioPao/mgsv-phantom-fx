@@ -31,10 +31,6 @@ constexpr std::uint64_t MicromapBytesPerMesh = 4ull << 20;
 // One structure a frame, as the batch of them (6 at once, 7 in the tests) faulted the GPU with the
 // micromaps disabled at traversal too (docs/opacity-micromaps.md).
 constexpr std::uint32_t MicromapLinksPerFrame = 1;
-// The opacity split's bakes a frame (their states share the slot's readback, SplitReadbackBytes).
-constexpr std::uint32_t SplitClassificationsPerFrame = 8;
-// An opacity split part without a list.
-constexpr std::uint64_t NoList = ~0ull;
 // The blocks the scene may carry at once (PHANTOM_FX_OMM_MAX_BLOCKS overrides): about 110 bytes each in
 // the micromap pool with their descriptors, records and states, so the pool, not the device, bounds it.
 // A structure is only linked while its triangles more keep the total under this. (The cap of eight
@@ -115,7 +111,7 @@ void Scene::beginFrame(std::uint32_t frameSlot, std::uint64_t completedFence, st
         {
             const auto* sizes = static_cast<const std::uint64_t*>(data);
             for (std::size_t i = 0; i < built.size(); ++i)
-                if (sizes[i]) compactionsDue.push_back({built[i].id, built[i].generation, built[i].serial, sizes[i]});
+                if (sizes[i]) compactionsDue.push_back({built[i].id, built[i].generation, sizes[i]});
 
             const D3D12_RANGE none{};
             postbuildReadback[slot]->Unmap(0, &none);
@@ -123,48 +119,6 @@ void Scene::beginFrame(std::uint32_t frameSlot, std::uint64_t completedFence, st
 
         built.clear();
     }
-
-    // The slot's last classifications: their blocks' states sort each mesh's triangles, and the structure
-    // is built again with them (planBuilds). One gone or remade since keeps nothing of it.
-    if (auto& classified = classifying[slot]; !classified.empty())
-    {
-        void* data{};
-        const D3D12_RANGE range{0, SplitReadbackBytes};
-        if (SUCCEEDED(splitReadback[slot]->Map(0, &range, &data)))
-        {
-            for (const auto& classification : classified)
-            {
-                auto& blas = structures[classification.id];
-                if (!blas.live || blas.generation != classification.generation) continue;
-
-                blas.classifying = false;
-                const std::span states(reinterpret_cast<const std::uint32_t*>(static_cast<const std::uint8_t*>(data) + classification.readbackOffset),
-                    classification.blocks);
-                SplitDue due{classification.id, classification.generation, classification.meshes, {}};
-                for (std::size_t k = 0; k < classification.meshes.size(); ++k)
-                {
-                    const auto& indices = blas.sources[classification.meshes[k]].indices;
-                    const std::span triangleBlocks(classification.triangleBlocks.data() + classification.firstTriangle[k], indices.size() / 3);
-                    due.parts.push_back(omm_layout::splitByOpacity(indices, triangleBlocks, states));
-                }
-                splitsDue.push_back(std::move(due));
-            }
-
-            const D3D12_RANGE none{};
-            splitReadback[slot]->Unmap(0, &none);
-        }
-        else
-            for (const auto& classification : classified)
-                if (auto& blas = structures[classification.id]; blas.generation == classification.generation)
-                {
-                    blas.classifying = false;
-                    blas.micromapsDirty = true;
-                }
-
-        classified.clear();
-    }
-    splitCopies.clear();
-    splitReadbackUsed = 0;
 
     poolUploads.clear();
     micromapUploads.clear();
@@ -270,40 +224,6 @@ void Scene::planBuilds()
             }
         }
     }
-    else if (splitsOn)
-    {
-        // Classifications read back: their structures built again, split, within the frame's builds.
-        std::vector<SplitDue> later;
-        for (auto& due : splitsDue)
-        {
-            const auto& blas = structures[due.id];
-            if (staticBuilds >= BuildsPerFrame || triangles >= BuildTrianglesPerFrame)
-            {
-                later.push_back(std::move(due));
-                continue;
-            }
-
-            const auto postbuild = static_cast<std::uint32_t>(builtInSlot[slot].size());
-            const auto result = applySplit(due, postbuild);
-            if (result == SplitResult::Later) later.push_back(std::move(due));
-            if (result != SplitResult::Built) continue;
-
-            builtInSlot[slot].push_back({due.id, blas.generation, blas.serial});
-            ++staticBuilds;
-            triangles += blas.triangles;
-        }
-        splitsDue = std::move(later);
-
-        // Then the structures whose meshes' textures came: a bake each, read back with the slot.
-        std::uint32_t classified{};
-        for (BlasId id = 0; id < structures.size() && classified < SplitClassificationsPerFrame; ++id)
-        {
-            auto& blas = structures[id];
-            if (!blas.live || !blas.micromapsDirty || blas.classifying || blas.use != Use::Static || !blas.built || blas.queued) continue;
-            if (!classify(id)) break;
-            ++classified;
-        }
-    }
 
     std::vector<BlasId> waiting;
     for (const auto id : buildQueue)
@@ -322,7 +242,7 @@ void Scene::planBuilds()
         // its neighbour's size, and the compaction overran its room: 2026-10-31, the device hangs).
         const auto postbuild = static_cast<std::uint32_t>(builtInSlot[slot].size());
         builds.push_back({id, blas.generation, false, scratchUsed, postbuild});
-        if (!blas.micromaps) builtInSlot[slot].push_back({id, blas.generation, blas.serial});
+        if (!blas.micromaps) builtInSlot[slot].push_back({id, blas.generation});
         ++staticBuilds;
         scratchUsed += blas.scratch;
         triangles += blas.triangles;
@@ -339,8 +259,7 @@ void Scene::planBuilds()
     {
         auto& blas = structures[due.id];
         // Never a structure with micromaps: see inputsOf.
-        // And never a size read back for a build before its last change of room and geometry (a split).
-        if (!blas.live || blas.generation != due.generation || blas.serial != due.serial || blas.compacted || blas.micromaps || due.size >= blas.size) continue;
+        if (!blas.live || blas.generation != due.generation || blas.compacted || blas.micromaps || due.size >= blas.size) continue;
 
         const auto to = blasAllocator.allocate(due.size, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT);
         if (!to) continue;
@@ -430,17 +349,7 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
     list.ResourceBarrier(static_cast<UINT>(std::size(readable)), readable);
 
     // The baked micromaps' arrays, which the bottom levels built after link to.
-    // The opacity split's classifications: what the bake found of each block, into the slot's readback.
-    if (!bakes.empty() && !splitCopies.empty())
-    {
-        auto barrier = transition(micromaps.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        list.ResourceBarrier(1, &barrier);
-        for (const auto& copy : splitCopies)
-            list.CopyBufferRegion(splitReadback[slot].Get(), copy.uploadOffset, micromaps.Get(), copy.poolOffset, copy.bytes);
-        barrier = transition(micromaps.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        list.ResourceBarrier(1, &barrier);
-    }
-    else if (!bakes.empty())
+    if (!bakes.empty())
     {
         const auto baked = transition(micromaps.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         list.ResourceBarrier(1, &baked);
@@ -621,9 +530,8 @@ std::optional<BlasId> Scene::createBlas(Use use, const std::vector<Geometry>& ge
         blas.triangles += (geometry.indexCount ? geometry.indexCount : geometry.vertexCount) / 3;
     }
 
-    // A static structure's cut-out meshes keep what their micromaps (or their opacity split) are baked
-    // from once their textures come.
-    if ((micromapsOn || splitsOn) && use == Use::Static)
+    // A static structure's cut-out meshes keep what their micromaps are baked from once their textures come.
+    if (micromapsOn && use == Use::Static)
         for (std::uint32_t i = 0; i < geometries.size(); ++i)
         {
             const auto& geometry = geometries[i];
@@ -640,24 +548,13 @@ std::optional<BlasId> Scene::createBlas(Use use, const std::vector<Geometry>& ge
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild{};
     device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuild);
 
-    // A row more for each mesh the opacity split may give an opaque part.
-    blas.meshes = static_cast<std::uint32_t>(geometries.size());
-    blas.rowCount = blas.meshes;
-    if (splitsOn)
-    {
-        for (const auto& source : blas.sources)
-            if (!source.uvs.empty()) ++blas.rowCount;
-        blas.splitRows.assign(blas.meshes, NoRow);
-        blas.meshSplit.assign(blas.meshes, false);
-    }
-
-    const auto first = rowAllocator.allocate(blas.rowCount);
+    const auto first = rowAllocator.allocate(geometries.size());
     if (!first) return std::nullopt;
 
     const auto offset = blasAllocator.allocate(prebuild.ResultDataMaxSizeInBytes, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT);
     if (!offset)
     {
-        rowAllocator.release(*first, blas.rowCount);
+        rowAllocator.release(*first, geometries.size());
         return std::nullopt;
     }
 
@@ -707,9 +604,8 @@ void Scene::destroyBlas(BlasId id)
     if (!blas.live) return;
 
     releases.push_back({signalValue, Pool::Structures, blas.offset, blas.size});
-    releases.push_back({signalValue, Pool::Rows, blas.firstGeometry, blas.rowCount});
+    releases.push_back({signalValue, Pool::Rows, blas.firstGeometry, blas.geometries.size()});
     if (blas.micromaps) releaseMicromaps(*blas.micromaps);
-    for (const auto& [at, bytes] : blas.splitIndices) release(at, bytes);
 
     const auto generation = blas.generation;
     blas = {};
@@ -746,7 +642,7 @@ bool Scene::refit(BlasId id)
 void Scene::setMaterial(BlasId id, std::uint32_t geometry, const scene_description::Material& material)
 {
     auto& blas = structures[id];
-    if (!blas.live || geometry >= blas.meshes) return;
+    if (!blas.live || geometry >= blas.geometries.size()) return;
 
     auto row = rows[blas.firstGeometry + geometry];
     const auto before = row;
@@ -756,13 +652,6 @@ void Scene::setMaterial(BlasId id, std::uint32_t geometry, const scene_descripti
     row.specularTexture = material.specularTexture;
     row.normalTexture = material.normalTexture;
     writeRow(blas.firstGeometry + geometry, row);
-    // The mesh's opaque part, if split, is the same material over its own triangles.
-    if (geometry < blas.splitRows.size() && blas.splitRows[geometry] != NoRow)
-    {
-        auto opaqueRow = row;
-        opaqueRow.indexOffset = rows[blas.splitRows[geometry]].indexOffset;
-        writeRow(blas.splitRows[geometry], opaqueRow);
-    }
 
     // A structure that carries micromaps keeps them: they were baked from the 512-pixel copy the rays
     // sample, so the game's finer mips arriving (a new slot, the same picture) change nothing they see,
@@ -770,8 +659,7 @@ void Scene::setMaterial(BlasId id, std::uint32_t geometry, const scene_descripti
     // asks again.
     const bool hasSource = geometry < blas.sources.size() && !blas.sources[geometry].uvs.empty();
     const bool takes = (row.flags & GI_GEOMETRY_CUT_OUT) && !(row.flags & GI_GEOMETRY_HAIR) && row.texture;
-    const bool split = geometry < blas.meshSplit.size() && blas.meshSplit[geometry];
-    if (hasSource && takes && !blas.micromaps && !split) blas.micromapsDirty = true;
+    if (hasSource && takes && !blas.micromaps) blas.micromapsDirty = true;
 }
 
 bool Scene::ready(BlasId id) const
@@ -870,10 +758,6 @@ Scene::Stats Scene::stats() const
     result.micromapLinks = micromapLinks;
     result.micromapRelinks = micromapRelinks;
     result.micromapPoolUsed = micromapAllocator.usedSize();
-    result.splitStructures = splitStructures;
-    result.splitOpaque = splitOpaque;
-    result.splitTransparent = splitTransparent;
-    result.splitMixed = splitMixed;
     return result;
 }
 
@@ -885,230 +769,6 @@ void Scene::enableMicromaps()
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, "Creating the micromap pool");
     micromapScratch = createStorage(device, MicromapScratchBytes, "Creating the micromap scratch");
     micromapsOn = true;
-}
-
-void Scene::enableOpacitySplit()
-{
-    if (micromapsOn || splitsOn) return;
-
-    // The bake's room: the micromap pool, holding a classification's records, blocks and states for a frame.
-    micromaps = createBuffer(device, MicromapPoolBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, "Creating the opacity split's pool");
-    for (auto& readback : splitReadback)
-        readback = createBuffer(device, SplitReadbackBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE,
-            "Creating the opacity split's readback");
-    splitsOn = true;
-}
-
-bool Scene::classify(BlasId id)
-{
-    auto& blas = structures[id];
-
-    // The meshes not split yet whose textures have come; the rest wait for theirs (setMaterial).
-    std::vector<omm_layout::Layout> layouts;
-    std::vector<std::uint32_t> meshes;
-    for (std::uint32_t i = 0; i < blas.sources.size(); ++i)
-    {
-        const auto& source = blas.sources[i];
-        const auto& row = rows[blas.firstGeometry + i];
-        if (source.uvs.empty() || blas.meshSplit[i] || !omm_layout::takesMicromaps(row.flags) || !row.texture || row.texture > GI_MAX_TEXTURES) continue;
-
-        const auto size = textureSizes[row.texture - 1];
-        if (!size[0] || !size[1]) continue;
-
-        if (auto layout = omm_layout::layOut({source.uvs, source.indices, size[0], size[1], MicromapBytesPerMesh}))
-        {
-            layouts.push_back(std::move(*layout));
-            meshes.push_back(i);
-        }
-    }
-
-    blas.micromapsDirty = false;
-    if (layouts.empty()) return true;
-
-    // The pool's room for the bake: the blocks' states it writes, its records, and what it finds of each
-    // block, which is all that comes back.
-    const auto array = omm_layout::combine(layouts);
-    const auto blocks = static_cast<std::uint32_t>(array.blocks.size());
-    const std::uint64_t recordsAt = aligned(array.bytes, 16), statesAt = aligned(recordsAt + std::uint64_t{sizeof(gi::GIOmmBlock)} * blocks, 16),
-                        poolBytes = aligned(statesAt + 4ull * blocks, 16);
-    const auto recordBytes = std::uint64_t{sizeof(gi::GIOmmBlock)} * blocks;
-    std::optional<std::uint64_t> poolOffset;
-    if (aligned(uploadUsed, 16) + recordBytes > UploadBytes || splitReadbackUsed + 4ull * blocks > SplitReadbackBytes
-        || !(poolOffset = micromapAllocator.allocate(poolBytes, 16)))
-    {
-        blas.micromapsDirty = true;
-        return false;
-    }
-
-    std::vector<gi::GIOmmBlock> records(blocks);
-    for (std::uint32_t b = 0; b < blocks; ++b)
-    {
-        const auto& block = array.blocks[b];
-        const auto& row = rows[blas.firstGeometry + meshes[array.blockMesh[b]]];
-        records[b] = {block.uvs[0], block.uvs[1], block.uvs[2], block.level, row.texture, block.byteOffset, row.alphaThreshold, 0};
-    }
-    const auto at = reserveUpload(recordBytes);
-    std::memcpy(uploadData[slot] + at, records.data(), recordBytes);
-    micromapUploads.push_back({*poolOffset + recordsAt, at, recordBytes});
-
-    const auto pool = [&](std::uint64_t offset) { return static_cast<std::uint32_t>(*poolOffset + offset); };
-    bakes.push_back({pool(recordsAt), blocks, pool(statesAt), pool(0), 0, 0, 0});
-    splitCopies.push_back({*poolOffset + statesAt, splitReadbackUsed, 4ull * blocks});
-    classifying[slot].push_back({id, blas.generation, splitReadbackUsed, blocks, std::move(meshes), array.firstTriangle, array.triangleBlocks});
-    splitReadbackUsed += aligned(4ull * blocks, 16);
-    releases.push_back({signalValue, Pool::Micromaps, *poolOffset, poolBytes});
-    blas.classifying = true;
-    return true;
-}
-
-Scene::SplitResult Scene::applySplit(SplitDue& due, std::uint32_t postbuild)
-{
-    auto& blas = structures[due.id];
-    if (!blas.live || blas.generation != due.generation) return SplitResult::Dropped;
-    if (!blas.built || blas.queued) return SplitResult::Later;
-
-    // The meshes worth splitting: an opaque part, or triangles to drop. A mesh whose triangles are all
-    // transparent keeps one that is never met (three times its first corner), flagged opaque.
-    struct Part
-    {
-        std::uint32_t mesh{};
-        const std::vector<std::uint16_t>* opaque{};
-        const std::vector<std::uint16_t>* mixed{};
-    };
-    std::vector<Part> parts;
-    std::vector<std::vector<std::uint16_t>> empties;
-    empties.reserve(due.parts.size());
-    std::uint64_t uploadBytes{};
-    std::uint32_t appended{};
-    for (std::size_t k = 0; k < due.parts.size(); ++k)
-    {
-        auto& split = due.parts[k];
-        const auto mesh = due.meshes[k];
-        if (split.opaque.empty() && !split.transparent) continue;
-        if (split.opaque.empty() && split.mixed.empty())
-        {
-            const auto first = blas.sources[mesh].indices.front();
-            split.opaque = {first, first, first};
-        }
-        parts.push_back({mesh, &split.opaque, &split.mixed});
-        uploadBytes += aligned(split.opaque.size() * 2, 16) + aligned(split.mixed.size() * 2, 16);
-        if (!split.opaque.empty() && !split.mixed.empty()) ++appended;
-    }
-    const auto markDone = [&] {
-        for (const auto mesh : due.meshes) blas.meshSplit[mesh] = true;
-    };
-    if (parts.empty())
-    {
-        markDone();
-        return SplitResult::Dropped;
-    }
-    if (blas.geometries.size() + appended > blas.rowCount) return SplitResult::Dropped;
-    if (uploadBytes + 16 * parts.size() * 2 > uploadRoom()) return SplitResult::Later;
-
-    // The geometries as they will be, their index buffers set once the lists have their room.
-    auto geometries = blas.geometries;
-    for (const auto& part : parts)
-    {
-        auto& tested = geometries[part.mesh];
-        if (!part.mixed->empty())
-        {
-            tested.Triangles.IndexCount = static_cast<UINT>(part.mixed->size());
-            if (!part.opaque->empty())
-            {
-                auto opaque = tested;
-                opaque.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
-                opaque.Triangles.IndexCount = static_cast<UINT>(part.opaque->size());
-                geometries.push_back(opaque);
-            }
-        }
-        else
-        {
-            tested.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
-            tested.Triangles.IndexCount = static_cast<UINT>(part.opaque->size());
-        }
-    }
-
-    auto inputs = inputsOf(blas, false);
-    inputs.NumDescs = static_cast<UINT>(geometries.size());
-    inputs.pGeometryDescs = geometries.data();
-    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild{};
-    device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuild);
-    const auto blasScratch = aligned(prebuild.ScratchDataSizeInBytes, 256);
-    if (scratchUsed + blasScratch > tlasScratch + BuildScratchBytes) return SplitResult::Later;
-    const auto offset = blasAllocator.allocate(prebuild.ResultDataMaxSizeInBytes, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT);
-    if (!offset) return SplitResult::Later;
-
-    // The parts' index lists in the geometry pool, all placed and uploaded (this frame, before the build)
-    // before any row changes: a list without room leaves the structure as it is, the placed ones
-    // returning with the frame.
-    std::vector<std::array<std::uint64_t, 2>> placed;
-    const auto place = [&](const std::vector<std::uint16_t>& list) -> std::uint64_t {
-        if (list.empty()) return NoList;
-        const auto bytes = list.size() * 2;
-        const auto at = allocate(bytes);
-        if (!at) return NoList;
-        placed.push_back({*at, bytes});
-        return upload(*at, {reinterpret_cast<const std::uint8_t*>(list.data()), bytes}) ? *at : NoList;
-    };
-    std::vector<std::array<std::uint64_t, 2>> lists; // Each part's mixed and opaque lists' offsets
-    for (const auto& part : parts)
-    {
-        lists.push_back({place(*part.mixed), place(*part.opaque)});
-        if ((!part.mixed->empty() && lists.back()[0] == NoList) || (!part.opaque->empty() && lists.back()[1] == NoList))
-        {
-            blasAllocator.release(*offset, prebuild.ResultDataMaxSizeInBytes);
-            for (const auto& [at, bytes] : placed) release(at, bytes);
-            return SplitResult::Later;
-        }
-    }
-
-    const auto poolAddress = geometryPool->GetGPUVirtualAddress();
-    auto next = static_cast<std::uint32_t>(blas.geometries.size());
-    for (std::size_t p = 0; p < parts.size(); ++p)
-    {
-        const auto& part = parts[p];
-        const auto [mixedAt, opaqueAt] = lists[p];
-        auto row = rows[blas.firstGeometry + part.mesh];
-        const auto tested = mixedAt != NoList ? mixedAt : opaqueAt;
-        geometries[part.mesh].Triangles.IndexBuffer = poolAddress + tested;
-        row.indexOffset = static_cast<std::uint32_t>(tested);
-        writeRow(blas.firstGeometry + part.mesh, row);
-        if (mixedAt != NoList && opaqueAt != NoList)
-        {
-            geometries[next].Triangles.IndexBuffer = poolAddress + opaqueAt;
-            auto opaqueRow = row;
-            opaqueRow.indexOffset = static_cast<std::uint32_t>(opaqueAt);
-            writeRow(blas.firstGeometry + next, opaqueRow);
-            newRows.push_back(blas.firstGeometry + next);
-            blas.splitRows[part.mesh] = blas.firstGeometry + next;
-            ++next;
-        }
-    }
-    blas.splitIndices.insert(blas.splitIndices.end(), placed.begin(), placed.end());
-
-    for (std::size_t k = 0; k < due.parts.size(); ++k)
-    {
-        const auto& split = due.parts[k];
-        splitOpaque += split.opaque.size() / 3;
-        splitTransparent += split.transparent;
-        splitMixed += split.mixed.size() / 3;
-    }
-    markDone();
-    ++splitStructures;
-
-    // Built again in new room: the frames still in flight trace the old.
-    releases.push_back({signalValue, Pool::Structures, blas.offset, blas.size});
-    blas.geometries = std::move(geometries);
-    blas.offset = *offset;
-    blas.size = prebuild.ResultDataMaxSizeInBytes;
-    blas.scratch = blasScratch;
-    blas.updateScratch = aligned(prebuild.UpdateScratchDataSizeInBytes, 256);
-    blas.compacted = false;
-    ++blas.serial;
-    builds.push_back({due.id, blas.generation, false, scratchUsed, postbuild});
-    scratchUsed += blasScratch;
-    return SplitResult::Built;
 }
 
 bool Scene::prepareMicromaps(BlasId id)
@@ -1322,7 +982,6 @@ bool Scene::finishMicromaps(BlasId id)
     blas.scratch = blasScratch;
     blas.updateScratch = aligned(prebuild.UpdateScratchDataSizeInBytes, 256);
     blas.compacted = false;
-    ++blas.serial;
     blas.pendingLink = false;
 
     // No compacted size asked for: a structure with micromaps is never compacted, and one that lost them

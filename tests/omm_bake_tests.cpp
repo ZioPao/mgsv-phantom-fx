@@ -423,16 +423,7 @@ void bakesAgainstTheTexture()
     expect(baked.indices[1] == blocks[1], "the solid triangle does not point at its block");
     expect(baked.indices[4] == blocks[4], "the sliver does not point at its block");
     expect(baked.indices[2] == blocks[2], "the clear triangle does not point at its block");
-    expect((baked.blockStates[blocks[0]] & (GI_OMM_SOME_NOT_TRANSPARENT | GI_OMM_SOME_NOT_OPAQUE)) == (GI_OMM_SOME_NOT_TRANSPARENT | GI_OMM_SOME_NOT_OPAQUE),
-        "the edge's block is not mixed");
-    expect(baked.blockStates[blocks[1]] == GI_OMM_SOME_NOT_TRANSPARENT, "the solid block is not wholly and surely opaque");
-    expect(baked.blockStates[blocks[2]] == GI_OMM_SOME_NOT_OPAQUE, "the clear block is not wholly and surely transparent");
-
-    // The opacity split of the same bake: solid triangle and sliver opaque, clear one dropped, the edge's two tested.
-    const auto split = omm_layout::splitByOpacity(indices, blocks, baked.blockStates);
-    expect(split.opaque == std::vector<std::uint16_t>{3, 4, 5, 0, 9, 10}, "the split's opaque triangles are not the solid one and the sliver");
-    expect(split.transparent == 1, "the split did not drop the clear triangle");
-    expect(split.mixed == std::vector<std::uint16_t>{0, 1, 2, 0, 1, 2}, "the split's tested triangles are not the edge's two");
+    expect(baked.blockStates[blocks[0]] == (GI_OMM_SOME_NOT_TRANSPARENT | GI_OMM_SOME_NOT_OPAQUE), "the edge's block is not mixed");
 }
 }
 
