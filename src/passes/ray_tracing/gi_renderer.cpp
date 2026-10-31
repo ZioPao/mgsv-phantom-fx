@@ -32,7 +32,10 @@
 #include <string>
 #include <utility>
 
+#include "passes/ray_tracing/shaders/gi_omm.h"
+
 // The kernels, compiled by DXC at build time (CMakeLists.txt).
+#include "BakeMicromaps.h"
 #include "ClassifyShadowTiles.h"
 #include "ClearCounters.h"
 #include "ClearNewGeometries.h"
@@ -50,6 +53,7 @@
 #include "ProbeShadows.h"
 #include "PurgeTiles.h"
 #include "ResolveLight.h"
+#include "ResolveMicromapIndices.h"
 #include "Skin.h"
 #include "TerrainGrid.h"
 #include "TraceLampLight.h"
@@ -91,7 +95,8 @@ constexpr std::uint32_t MaxMarks = 32;
 constexpr std::span<const unsigned char> Bytecode[]{GI_ClearNewGeometries, GI_DebugScene, GI_TerrainGrid, GI_Skin,
     GI_ClearCounters, GI_GenerateDispatch, GI_PrepareGuides, GI_TraceLight, GI_LearnAlbedo, GI_PurgeTiles, GI_PopulateMultibounceCells,
     GI_PopulateCells, GI_UpdateTiles, GI_UpdateMultibounceCells, GI_ResolveLight, GI_UpdateFoliageMemory, GI_CompositeLight, GI_TraceSunShadows, GI_ClassifyShadowTiles,
-    GI_FilterShadows, GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows, GI_ProbeLocalLights, GI_TraceReflections, GI_TraceLampLight};
+    GI_FilterShadows, GI_DebugShadows, GI_ProbeShadows, GI_TraceLocalLightShadows, GI_FilterLocalLightShadows, GI_ProbeLocalLights, GI_TraceReflections, GI_TraceLampLight,
+    GI_BakeMicromaps, GI_ResolveMicromapIndices};
 static_assert(std::size(Bytecode) == static_cast<std::size_t>(Kernel::Count));
 
 using Shared = OpenedTexture;
@@ -1114,6 +1119,7 @@ Result render(const Frame& frame)
         descriptors.outputBuffer(4, s.counters.Get(), 4, GI_COUNTER_COUNT);
         descriptors.outputBuffer(5, s.dispatchArguments.Get(), 16, GI_DISPATCH_SLOTS);
         descriptors.outputBuffer(6, s.geometryAlbedo.Get(), 16, MaxGeometries);
+        if (scene.micromapPool()) descriptors.outputRawBuffer(40, scene.micromapPool(), gi_scene::Scene::MicromapPoolBytes);
         if (terrain)
         {
             descriptors.texture(14, terrainPages, frame.terrain->pagesFormat);
@@ -1193,6 +1199,20 @@ Result render(const Frame& frame)
             if (update.terrain[r].isRemade) recorder.dispatch(Kernel::TerrainGrid, groups(GI_TERRAIN_CELLS, 8), groups(GI_TERRAIN_CELLS, 8), {r});
 
         if (skinCount) recorder.dispatch(Kernel::Skin, groups(skinVertices, 64), 1, {skinVertices, skinCount});
+
+        // The opacity micromaps linked this frame: their states baked (a thread group a block, in runs
+        // under the dispatch limit), then their triangles' indices, before their arrays and structures.
+        if (const auto& bakes = scene.micromapBakes(); !bakes.empty())
+        {
+            constexpr std::uint32_t MaxGroups = D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
+            for (const auto& bake : bakes)
+                for (std::uint32_t first = 0; first < bake.blocks; first += MaxGroups)
+                    recorder.dispatch(Kernel::BakeMicromaps, std::min(bake.blocks - first, MaxGroups), 1,
+                        {bake.records + first * static_cast<std::uint32_t>(sizeof(GIOmmBlock)), bake.blocks - first, bake.states + 4 * first, bake.data});
+            recorder.barrier();
+            for (const auto& bake : bakes)
+                recorder.dispatch(Kernel::ResolveMicromapIndices, groups(bake.triangles, 64), 1, {bake.triangleBlocks, bake.triangles, bake.states, bake.indices});
+        }
 
         recorder.mark("bottom-level structures", performance::Pass::RayTracedScene);
         scene.recordBottomLevels(list);

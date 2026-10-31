@@ -97,6 +97,22 @@ public:
     // The slot is free again once the GPU is past this frame.
     void closeTexture(std::uint32_t textureSlot) override;
 
+    // ---- Opacity micromaps (docs/opacity-micromaps.md) ----
+    // From now on, static structures with textured cut-out meshes (omm_layout::takesMicromaps) link
+    // micromaps baked from their textures' alpha. Only once every kernel tracing the scene declares its
+    // ray queries with RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS: without, their traversal is undefined.
+    void enableMicromaps();
+    // The frame's bakes, for BakeMicromaps then ResolveMicromapIndices (omm_bake.hlsl) between recordWrites
+    // and recordBottomLevels, on the micromap pool at u40. Byte offsets into the pool.
+    struct MicromapBake
+    {
+        std::uint32_t records{}, blocks{}, states{}, data{}; // BakeMicromaps' g_Dispatch
+        std::uint32_t triangleBlocks{}, triangles{}, indices{}; // ResolveMicromapIndices' x, y, w (z: states)
+    };
+    const std::vector<MicromapBake>& micromapBakes() const { return bakes; }
+    ID3D12Resource* micromapPool() const { return micromaps.Get(); }
+    static constexpr std::uint64_t MicromapPoolBytes = 64ull << 20;
+
     // ---- For the kernels ----
     ID3D12Resource* pool() const { return geometryPool.Get(); }
     ID3D12Resource* geometryTable() const { return table.Get(); }
@@ -113,10 +129,29 @@ public:
         std::uint64_t compactedFrom{}, compactedTo{}; // Bytes, every compaction so far
         std::uint64_t poolUsed{}, poolCapacity{}, blasUsed{}, blasCapacity{};
         std::uint32_t geometriesUsed{};
+        std::uint32_t micromapStructures{}, micromapBlocks{}; // Structures with micromaps, and their blocks
+        std::uint64_t micromapPoolUsed{};
     };
     Stats stats() const;
 
 private:
+    // A cut-out mesh's texture coordinates and indices, kept for baking its micromaps when its texture comes.
+    struct MicromapSource
+    {
+        std::vector<std::uint32_t> uvs;
+        std::vector<std::uint16_t> indices;
+    };
+    // A structure's linked micromaps: its room in the micromap pool and its array's in the structure pool,
+    // and its geometries as built with them (pointing into `triangles` and `linkages`).
+    struct LinkedMicromaps
+    {
+        std::uint64_t poolOffset{}, poolBytes{};
+        std::uint64_t arrayOffset{}, arraySize{};
+        std::uint32_t blocks{};
+        std::vector<D3D12_RAYTRACING_GEOMETRY_TRIANGLES_DESC> triangles;
+        std::vector<D3D12_RAYTRACING_GEOMETRY_OMM_LINKAGE_DESC> linkages;
+        std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries;
+    };
     struct Blas
     {
         bool live{};
@@ -127,6 +162,18 @@ private:
         std::uint64_t offset{}, size{}; // In the structure pool
         std::uint64_t scratch{}, updateScratch{}; // Bytes a build and a refit need
         bool built{}, compacted{}, queued{};
+        std::vector<MicromapSource> sources; // By geometry; empty without any
+        bool micromapsDirty{};               // A source's texture changed since its micromaps were baked
+        std::optional<LinkedMicromaps> micromaps;
+    };
+    // An array the frame builds, before the bottom levels: its inputs in the micromap pool, its histogram.
+    struct ArrayBuild
+    {
+        BlasId id{};
+        std::uint32_t generation{};
+        std::vector<D3D12_RAYTRACING_OPACITY_MICROMAP_HISTOGRAM_ENTRY> histogram;
+        std::uint64_t data{}, descs{}; // Pool offsets
+        std::uint64_t scratch{};       // Into the frame's scratch
     };
 
     // What the GPU may still use: given back once it is past the frame that signalled `fenceValue`.
@@ -134,7 +181,8 @@ private:
     {
         Geometry,
         Structures,
-        Rows
+        Rows,
+        Micromaps
     };
     struct Release
     {
@@ -184,6 +232,12 @@ private:
     };
 
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputsOf(const Blas& blas, bool update) const;
+    // Bakes the structure's micromaps from its textures as they are now (or unlinks them when none takes
+    // any) and moves it to the room its new inputs need, its build recorded this frame with
+    // `postbuild` (a queued one keeps waiting for its first); false when this frame has no room for it.
+    bool linkMicromaps(BlasId id, std::uint32_t postbuild);
+    void releaseMicromaps(const LinkedMicromaps& linked);
+    D3D12_GPU_VIRTUAL_ADDRESS micromapAddress(std::uint64_t offset) const;
     D3D12_GPU_VIRTUAL_ADDRESS address(const Blas& blas) const;
     void writeRow(std::uint32_t row, const GIGeometry& geometry);
     std::uint64_t reserveUpload(std::uint64_t bytes);
@@ -213,6 +267,16 @@ private:
     std::vector<Compaction> compactions;
     std::vector<GIInstanceDesc> instances;
     Stats tally;
+
+    // Opacity micromaps: off until enableMicromaps; the pool, the frame's writes into it, bakes and arrays.
+    bool micromapsOn{};
+    ComPtr<ID3D12Resource> micromaps;
+    RangeAllocator micromapAllocator{MicromapPoolBytes};
+    std::vector<Upload> micromapUploads;
+    std::vector<MicromapBake> bakes;
+    std::vector<ArrayBuild> arrayBuilds;
+    // The size of the copy each texture slot views, for the micromaps' levels.
+    std::vector<std::array<std::uint32_t, 2>> textureSizes = std::vector<std::array<std::uint32_t, 2>>(GI_MAX_TEXTURES);
 
     // The game's textures by slot, a descriptor each from `textureDescriptors`; the free slots, and those
     // the GPU may still read.

@@ -34,6 +34,8 @@ enum class Kernel : std::uint8_t
     TraceSunShadows, ClassifyShadowTiles, FilterShadows, DebugShadows, ProbeShadows, TraceLocalLightShadows, FilterLocalLightShadows, ProbeLocalLights,
     // reflections.hlsl and direct_light.hlsl (path tracing)
     TraceReflections, TraceLampLight,
+    // omm_bake.hlsl (opacity micromaps)
+    BakeMicromaps, ResolveMicromapIndices,
     Count
 };
 

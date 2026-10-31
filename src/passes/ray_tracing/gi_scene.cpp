@@ -1,6 +1,9 @@
 // The ray-traced scene on the Direct3D 12 side; gi_scene.hpp describes it.
 #include "passes/ray_tracing/gi_scene.hpp"
 
+#include "passes/ray_tracing/omm_layout.hpp"
+#include "passes/ray_tracing/shaders/gi_omm.h"
+
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -21,6 +24,13 @@ constexpr std::uint64_t UploadBytes = GeometryUploadBytes + std::uint64_t{MaxIns
 // costs a few frames a little rather than one frame a lot.
 constexpr std::uint32_t BuildsPerFrame = 128;
 constexpr std::uint64_t BuildTrianglesPerFrame = 300'000;
+// Opacity micromaps: the most a mesh's blocks take (omm_layout::Mesh::maxBytes), and the structures a
+// frame links them to at most.
+constexpr std::uint64_t MicromapBytesPerMesh = 4ull << 20;
+constexpr std::uint32_t MicromapLinksPerFrame = 16;
+// D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_BYTE_ALIGNMENT, which the Windows SDK's 26100 headers lack: an
+// array's input starts on it.
+constexpr std::uint64_t MicromapArrayAlignment = 128;
 }
 
 Scene::Scene(ID3D12Device5* device, D3D12_CPU_DESCRIPTOR_HANDLE textures, UINT descriptorSize)
@@ -73,6 +83,7 @@ void Scene::beginFrame(std::uint32_t frameSlot, std::uint64_t completedFence, st
         if (release.pool == Pool::Geometry) poolAllocator.release(release.offset, release.size);
         else if (release.pool == Pool::Structures) blasAllocator.release(release.offset, release.size);
         else if (release.pool == Pool::Rows) rowAllocator.release(release.offset, release.size);
+        else if (release.pool == Pool::Micromaps) micromapAllocator.release(release.offset, release.size);
         return true;
     });
     std::erase_if(closedTextures, [&](const ClosedTexture& closed) {
@@ -102,6 +113,9 @@ void Scene::beginFrame(std::uint32_t frameSlot, std::uint64_t completedFence, st
     }
 
     poolUploads.clear();
+    micromapUploads.clear();
+    bakes.clear();
+    arrayBuilds.clear();
     builds.clear();
     compactions.clear();
     instances.clear();
@@ -115,6 +129,30 @@ void Scene::planBuilds()
 {
     std::uint32_t staticBuilds{};
     std::uint64_t triangles{};
+
+    // Structures whose cut-out meshes' textures changed take micromaps baked from them first: a built one
+    // is built again with them this frame, a queued one waits for its first build as before.
+    if (micromapsOn)
+    {
+        std::uint32_t linked{};
+        for (BlasId id = 0; id < structures.size() && linked < MicromapLinksPerFrame && staticBuilds < BuildsPerFrame; ++id)
+        {
+            auto& blas = structures[id];
+            if (!blas.live || !blas.micromapsDirty || blas.use != Use::Static) continue;
+
+            const bool rebuildsNow = !blas.queued;
+            if (!linkMicromaps(id, staticBuilds)) continue;
+
+            blas.micromapsDirty = false;
+            ++linked;
+            if (rebuildsNow)
+            {
+                ++staticBuilds;
+                triangles += blas.triangles;
+            }
+        }
+    }
+
     std::vector<BlasId> waiting;
     for (const auto id : buildQueue)
     {
@@ -177,6 +215,18 @@ void Scene::recordWrites(ID3D12GraphicsCommandList4& list)
         list.ResourceBarrier(1, &barrier);
     }
 
+    // The micromap pool: the frame's records, descriptors and triangles' blocks, then writable for the bake.
+    if (!bakes.empty())
+    {
+        barrier = transition(micromaps.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        list.ResourceBarrier(1, &barrier);
+        for (const auto& upload : micromapUploads)
+            list.CopyBufferRegion(micromaps.Get(), upload.poolOffset, uploads[slot].Get(), upload.uploadOffset, upload.bytes);
+
+        barrier = transition(micromaps.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list.ResourceBarrier(1, &barrier);
+    }
+
     // The table's rows written since the last frame, in runs.
     if (dirtyRows.empty()) return;
 
@@ -210,6 +260,38 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
 {
     D3D12_RESOURCE_BARRIER readable[]{uavBarrier(), transition(geometryPool.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)};
     list.ResourceBarrier(static_cast<UINT>(std::size(readable)), readable);
+
+    // The baked micromaps' arrays, which the bottom levels built after link to.
+    if (!bakes.empty())
+    {
+        const auto baked = transition(micromaps.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        list.ResourceBarrier(1, &baked);
+    }
+    for (const auto& build : arrayBuilds)
+    {
+        const auto& blas = structures[build.id];
+        if (!blas.live || blas.generation != build.generation || !blas.micromaps) continue;
+
+        D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC array{};
+        array.NumOmmHistogramEntries = static_cast<UINT>(build.histogram.size());
+        array.pOmmHistogram = build.histogram.data();
+        array.InputBuffer = micromapAddress(build.data);
+        array.PerOmmDescs = {micromapAddress(build.descs), sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_DESC)};
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc{};
+        desc.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_ARRAY;
+        desc.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        desc.Inputs.NumDescs = 1;
+        desc.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        desc.Inputs.pOpacityMicromapArrayDesc = &array;
+        desc.DestAccelerationStructureData = blasPool->GetGPUVirtualAddress() + blas.micromaps->arrayOffset;
+        desc.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress() + build.scratch;
+        list.BuildRaytracingAccelerationStructure(&desc, 0, nullptr);
+    }
+    if (!arrayBuilds.empty())
+    {
+        const auto arrays = uavBarrier();
+        list.ResourceBarrier(1, &arrays);
+    }
 
     bool postbuild{};
     for (const auto& build : builds)
@@ -348,6 +430,20 @@ std::optional<BlasId> Scene::createBlas(Use use, const std::vector<Geometry>& ge
         blas.triangles += (geometry.indexCount ? geometry.indexCount : geometry.vertexCount) / 3;
     }
 
+    // A static structure's cut-out meshes keep what their micromaps are baked from once their textures come.
+    if (micromapsOn && use == Use::Static)
+        for (std::uint32_t i = 0; i < geometries.size(); ++i)
+        {
+            const auto& geometry = geometries[i];
+            const bool takes = (geometry.flags & GI_GEOMETRY_CUT_OUT) && !(geometry.flags & GI_GEOMETRY_HAIR) && !geometry.uvs.empty()
+                && geometry.indices.size() == geometry.indexCount && geometry.indexCount;
+            if (!takes) continue;
+
+            blas.sources.resize(geometries.size());
+            blas.sources[i] = {{geometry.uvs.begin(), geometry.uvs.end()}, {geometry.indices.begin(), geometry.indices.end()}};
+            blas.micromapsDirty = true;
+        }
+
     auto inputs = inputsOf(blas, false);
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild{};
     device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuild);
@@ -409,6 +505,7 @@ void Scene::destroyBlas(BlasId id)
 
     releases.push_back({signalValue, Pool::Structures, blas.offset, blas.size});
     releases.push_back({signalValue, Pool::Rows, blas.firstGeometry, blas.geometries.size()});
+    if (blas.micromaps) releaseMicromaps(*blas.micromaps);
 
     const auto generation = blas.generation;
     blas = {};
@@ -444,16 +541,22 @@ bool Scene::refit(BlasId id)
 
 void Scene::setMaterial(BlasId id, std::uint32_t geometry, const scene_description::Material& material)
 {
-    const auto& blas = structures[id];
+    auto& blas = structures[id];
     if (!blas.live || geometry >= blas.geometries.size()) return;
 
     auto row = rows[blas.firstGeometry + geometry];
+    const auto before = row;
     row.flags = (row.flags & GI_GEOMETRY_CUT_OUT) | (material.flags & ~GI_GEOMETRY_CUT_OUT);
     row.texture = material.texture;
     row.alphaThreshold = material.alphaThreshold;
     row.specularTexture = material.specularTexture;
     row.normalTexture = material.normalTexture;
     writeRow(blas.firstGeometry + geometry, row);
+
+    // Its micromaps are baked from its texture's alpha: a new texture, threshold or role bakes them again.
+    const bool hasSource = geometry < blas.sources.size() && !blas.sources[geometry].uvs.empty();
+    if (hasSource && (row.texture != before.texture || row.alphaThreshold != before.alphaThreshold || row.flags != before.flags))
+        blas.micromapsDirty = true;
 }
 
 bool Scene::ready(BlasId id) const
@@ -501,6 +604,9 @@ std::optional<std::uint32_t> Scene::openTexture(const SceneTexture& texture)
     check(opened.open(device, texture.texture), "Opening one of the game's textures");
     freeTextures.pop_back();
     writeTexture(textureSlot, opened.resource.Get(), texture.viewFormat, texture.mips);
+    D3D11_TEXTURE2D_DESC desc{};
+    texture.texture->GetDesc(&desc);
+    textureSizes[textureSlot] = {desc.Width, desc.Height};
 
     return textureSlot;
 }
@@ -527,7 +633,204 @@ Scene::Stats Scene::stats() const
     result.blasUsed = blasAllocator.usedSize();
     result.blasCapacity = blasAllocator.capacity();
     result.geometriesUsed = static_cast<std::uint32_t>(rowAllocator.usedSize());
+    result.micromapStructures = result.micromapBlocks = 0;
+    for (const auto& blas : structures)
+        if (blas.live && blas.micromaps)
+        {
+            ++result.micromapStructures;
+            result.micromapBlocks += blas.micromaps->blocks;
+        }
+    result.micromapPoolUsed = micromapAllocator.usedSize();
     return result;
+}
+
+void Scene::enableMicromaps()
+{
+    if (micromapsOn) return;
+
+    micromaps = createBuffer(device, MicromapPoolBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, "Creating the micromap pool");
+    micromapsOn = true;
+}
+
+bool Scene::linkMicromaps(BlasId id, std::uint32_t postbuild)
+{
+    auto& blas = structures[id];
+    const bool rebuildsNow = !blas.queued;
+
+    // Each source whose geometry takes micromaps with its texture as it is now.
+    std::vector<omm_layout::Layout> layouts;
+    std::vector<std::uint32_t> linkedGeometries;
+    for (std::uint32_t i = 0; i < blas.sources.size(); ++i)
+    {
+        const auto& source = blas.sources[i];
+        const auto& row = rows[blas.firstGeometry + i];
+        if (source.uvs.empty() || !omm_layout::takesMicromaps(row.flags) || !row.texture || row.texture > GI_MAX_TEXTURES) continue;
+
+        const auto size = textureSizes[row.texture - 1];
+        if (!size[0] || !size[1]) continue;
+
+        if (auto layout = omm_layout::layOut({source.uvs, source.indices, size[0], size[1], MicromapBytesPerMesh}))
+        {
+            layouts.push_back(std::move(*layout));
+            linkedGeometries.push_back(i);
+        }
+    }
+
+    if (layouts.empty() && !blas.micromaps) return true;
+
+    // The pool's room: the array's input, its descriptors, the bake's records, the triangles' blocks,
+    // the blocks' states, the linkage's index buffer.
+    const auto array = omm_layout::combine(layouts);
+    const auto blocks = static_cast<std::uint32_t>(array.blocks.size());
+    const auto triangles = static_cast<std::uint32_t>(array.triangleBlocks.size());
+    const std::uint64_t descsAt = aligned(array.bytes, 16), recordsAt = aligned(descsAt + 8ull * blocks, 16),
+                        trianglesAt = recordsAt + std::uint64_t{sizeof(gi::GIOmmBlock)} * blocks, statesAt = aligned(trianglesAt + 4ull * triangles, 16),
+                        indicesAt = aligned(statesAt + 4ull * blocks, 16),
+                        poolBytes = blocks ? aligned(indicesAt + 4ull * triangles, MicromapArrayAlignment) : 0;
+    const std::uint64_t uploadBytes = (8ull + sizeof(gi::GIOmmBlock)) * blocks + 4ull * triangles + 48;
+    if (blocks && aligned(uploadUsed, 16) + uploadBytes > UploadBytes) return false;
+
+    std::optional<std::uint64_t> poolOffset;
+    if (blocks && !(poolOffset = micromapAllocator.allocate(poolBytes, MicromapArrayAlignment))) return false;
+
+    LinkedMicromaps linked;
+    linked.blocks = blocks;
+    std::vector<D3D12_RAYTRACING_OPACITY_MICROMAP_HISTOGRAM_ENTRY> histogram;
+    std::uint64_t arrayScratch{};
+    if (blocks)
+    {
+        linked.poolOffset = *poolOffset;
+        linked.poolBytes = poolBytes;
+        for (std::uint32_t level = 0; level < array.histogram.size(); ++level)
+            if (array.histogram[level]) histogram.push_back({array.histogram[level], level, D3D12_RAYTRACING_OPACITY_MICROMAP_FORMAT_OC1_4_STATE});
+
+        D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC arrayDesc{};
+        arrayDesc.NumOmmHistogramEntries = static_cast<UINT>(histogram.size());
+        arrayDesc.pOmmHistogram = histogram.data();
+        arrayDesc.InputBuffer = micromapAddress(*poolOffset);
+        arrayDesc.PerOmmDescs = {micromapAddress(*poolOffset + descsAt), sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_DESC)};
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_ARRAY;
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        inputs.NumDescs = 1;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.pOpacityMicromapArrayDesc = &arrayDesc;
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild{};
+        device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuild);
+        const auto arrayOffset = prebuild.ResultDataMaxSizeInBytes
+            ? blasAllocator.allocate(prebuild.ResultDataMaxSizeInBytes, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT)
+            : std::nullopt;
+        if (!arrayOffset)
+        {
+            micromapAllocator.release(*poolOffset, poolBytes);
+            return false;
+        }
+
+        linked.arrayOffset = *arrayOffset;
+        linked.arraySize = prebuild.ResultDataMaxSizeInBytes;
+        arrayScratch = aligned(prebuild.ScratchDataSizeInBytes, 256);
+    }
+
+    // The geometries as built with their micromaps; the vectors are sized once, so the pointers hold.
+    linked.triangles.reserve(layouts.size());
+    linked.linkages.reserve(layouts.size());
+    linked.geometries = blas.geometries;
+    for (std::uint32_t k = 0; k < layouts.size(); ++k)
+    {
+        auto& geometry = linked.geometries[linkedGeometries[k]];
+        linked.triangles.push_back(geometry.Triangles);
+        D3D12_RAYTRACING_GEOMETRY_OMM_LINKAGE_DESC linkage{};
+        linkage.OpacityMicromapIndexBuffer = {micromapAddress(linked.poolOffset + indicesAt + 4ull * array.firstTriangle[k]), 4};
+        linkage.OpacityMicromapIndexFormat = DXGI_FORMAT_R32_UINT;
+        linkage.OpacityMicromapArray = blasPool->GetGPUVirtualAddress() + linked.arrayOffset;
+        linked.linkages.push_back(linkage);
+
+        const auto flags = geometry.Flags;
+        geometry = {};
+        geometry.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_OMM_TRIANGLES;
+        geometry.Flags = flags;
+        geometry.OmmTriangles = {&linked.triangles.back(), &linked.linkages.back()};
+    }
+
+    // The structure's room for its new inputs (none of the old structure's: it may still be traced).
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = inputsOf(blas, false);
+    inputs.pGeometryDescs = blocks ? linked.geometries.data() : blas.geometries.data();
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild{};
+    device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuild);
+    const auto blasScratch = aligned(prebuild.ScratchDataSizeInBytes, 256);
+    const auto offset = blasAllocator.allocate(prebuild.ResultDataMaxSizeInBytes, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT);
+    const bool scratchFits = scratchUsed + arrayScratch + (rebuildsNow ? blasScratch : 0) <= tlasScratch + BuildScratchBytes;
+    if (!offset || !scratchFits)
+    {
+        if (offset) blasAllocator.release(*offset, prebuild.ResultDataMaxSizeInBytes);
+        if (blocks)
+        {
+            blasAllocator.release(linked.arrayOffset, linked.arraySize);
+            micromapAllocator.release(linked.poolOffset, poolBytes);
+        }
+        return false;
+    }
+
+    // Committed: the pool's inputs uploaded, the bake and the array's build recorded.
+    if (blocks)
+    {
+        std::vector<D3D12_RAYTRACING_OPACITY_MICROMAP_DESC> descs(blocks);
+        std::vector<gi::GIOmmBlock> records(blocks);
+        for (std::uint32_t b = 0; b < blocks; ++b)
+        {
+            const auto& block = array.blocks[b];
+            descs[b].ByteOffset = block.byteOffset;
+            descs[b].SubdivisionLevel = block.level;
+            descs[b].Format = D3D12_RAYTRACING_OPACITY_MICROMAP_FORMAT_OC1_4_STATE;
+            const auto& row = rows[blas.firstGeometry + linkedGeometries[array.blockMesh[b]]];
+            records[b] = {block.uvs[0], block.uvs[1], block.uvs[2], block.level, row.texture, block.byteOffset, row.alphaThreshold, 0};
+        }
+
+        const auto stage = [&](std::uint64_t poolAt, const void* data, std::uint64_t bytes) {
+            const auto at = reserveUpload(bytes);
+            std::memcpy(uploadData[slot] + at, data, bytes);
+            micromapUploads.push_back({linked.poolOffset + poolAt, at, bytes});
+        };
+        stage(descsAt, descs.data(), descs.size() * sizeof(descs[0]));
+        stage(recordsAt, records.data(), records.size() * sizeof(records[0]));
+        stage(trianglesAt, array.triangleBlocks.data(), array.triangleBlocks.size() * 4ull);
+
+        const auto at = [&](std::uint64_t poolAt) { return static_cast<std::uint32_t>(linked.poolOffset + poolAt); };
+        bakes.push_back({at(recordsAt), blocks, at(statesAt), at(0), at(trianglesAt), triangles, at(indicesAt)});
+        arrayBuilds.push_back({id, blas.generation, std::move(histogram), linked.poolOffset, linked.poolOffset + descsAt, scratchUsed});
+        scratchUsed += arrayScratch;
+    }
+
+    releases.push_back({signalValue, Pool::Structures, blas.offset, blas.size});
+    if (blas.micromaps) releaseMicromaps(*blas.micromaps);
+    if (blocks) blas.micromaps = std::move(linked);
+    else blas.micromaps.reset();
+    blas.offset = *offset;
+    blas.size = prebuild.ResultDataMaxSizeInBytes;
+    blas.scratch = blasScratch;
+    blas.updateScratch = aligned(prebuild.UpdateScratchDataSizeInBytes, 256);
+    blas.compacted = false;
+
+    if (rebuildsNow)
+    {
+        builds.push_back({id, blas.generation, false, scratchUsed, postbuild});
+        builtInSlot[slot].push_back({id, blas.generation});
+        scratchUsed += blas.scratch;
+        blas.built = true;
+    }
+    return true;
+}
+
+void Scene::releaseMicromaps(const LinkedMicromaps& linked)
+{
+    if (linked.poolBytes) releases.push_back({signalValue, Pool::Micromaps, linked.poolOffset, linked.poolBytes});
+    if (linked.arraySize) releases.push_back({signalValue, Pool::Structures, linked.arrayOffset, linked.arraySize});
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS Scene::micromapAddress(std::uint64_t offset) const
+{
+    return micromaps->GetGPUVirtualAddress() + offset;
 }
 
 D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS Scene::inputsOf(const Blas& blas, bool update) const
@@ -539,7 +842,7 @@ D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS Scene::inputsOf(const Blas&
     if (update) inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
     inputs.NumDescs = static_cast<UINT>(blas.geometries.size());
     inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    inputs.pGeometryDescs = blas.geometries.data();
+    inputs.pGeometryDescs = blas.micromaps ? blas.micromaps->geometries.data() : blas.geometries.data();
     return inputs;
 }
 

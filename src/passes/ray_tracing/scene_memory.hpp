@@ -30,6 +30,10 @@ struct Geometry
     std::uint32_t specularTexture{}, normalTexture{}, materialIndex{}; // As GIGeometry
     std::array<float, 3> emission{};
     std::uint64_t normalOffset{}; // As GIGeometry
+    // Its texture coordinates (two halves a vertex) and indices on the CPU, for its opacity micromaps
+    // (docs/opacity-micromaps.md); empty where it has none. Only read while its structure is made.
+    std::span<const std::uint32_t> uvs;
+    std::span<const std::uint16_t> indices;
 };
 
 // How a bottom-level structure is built: once, then compacted (Static); or in place, again or refitted,

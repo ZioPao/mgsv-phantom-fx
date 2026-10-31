@@ -253,8 +253,8 @@ needs a second machine, not this one.
 | # | Step | Time |
 | --- | --- | --- |
 | 0 | Runtime probe: tier 1.2, SM 6.9, `cs_6_9` RayQuery-OMM PSO on inbox and on a 619 probe exe (done 2026-10-30, see 4) | done |
-| 1 | Bake: layout (`omm_layout.cpp`), the curve shared with HLSL (`shaders/gi_omm.h`), the kernels `BakeMicromaps` and `ResolveMicromapIndices` (`shaders/omm_bake.hlsl`, on `t26`/`t27`, `u40`-`u42` of the renderer's root signature), tested on the CPU and on WARP (`omm_layout_tests`, `omm_bake_tests`) | done |
-| 2 | Scene: OMM pool (128-byte alignment, budget), linkage per BLAS, dirtiness on texture replacement | 2-3 days |
+| 1 | Bake: layout (`omm_layout.cpp`), the curve shared with HLSL (`shaders/gi_omm.h`), the kernels `BakeMicromaps` and `ResolveMicromapIndices` (`shaders/omm_bake.hlsl`, on the renderer's root signature: one raw view of the micromap pool at `u40`, byte offsets in the dispatch constants), tested on the CPU and on WARP (`omm_layout_tests`, `omm_bake_tests`) | done |
+| 2 | Scene (`gi_scene.cpp`): a 64 MB micromap pool made by `enableMicromaps`; a static structure keeps its cut-out meshes' coordinates and indices, and when their textures come or change (`setMaterial`) `linkMicromaps` lays them out, uploads the records, has the renderer dispatch the bake, builds the array and builds the structure again in new room, within the frame's budget (16 a frame); dormant until step 3 calls `enableMicromaps` | done |
 | 3 | Shaders: the template flag, hair exclusion, `cs_6_9` build wiring, menu toggle, gate (tier + SM 6.9 + trial PSO) | 2 days |
 | 4 | Dev probe exe with the Agility exports + `D3D12\D3D12Core.dll`, so the path can be exercised before the OS ships it | 0.5 day |
 | 5 | In-game validation, quality tuning (4-state conservative mip), Ada timing | 2-4 days |
