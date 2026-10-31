@@ -230,6 +230,30 @@ void PrepareGuides(uint2 did : SV_DispatchThreadID)
     g_Light_Motion[did] = float4(motion, depthChange, 0.0f);
 }
 
+// The normal a light pixel's rays leave around: the traced scene's own at the surface the depth drew, where
+// the scene holds it (as ShadowSurfaceAt finds the shadow rays' surfaces, gi_shadow.hlsli), else the
+// G-buffer's. The G-buffer's normal carries the normal map, and the render pixel's light is resolved
+// against it (CompositeLight): sampled around it as well, the light would bend twice, and a bump on a wall
+// the sun never reaches lit itself from its own tilted hemisphere (2026-10-30).
+float3 RayNormal(float3 world, float3 gbufferNormal)
+{
+    float3 toSurface = world - g_Frame.eye.xyz;
+    float surfaceDistance = length(toSurface);
+    float3 direction = toSurface / max(surfaceDistance, 1e-6f);
+    float tolerance = 0.03f + 0.02f * surfaceDistance;
+    SceneHit hit = TraceClosest(g_Frame.eye.xyz, direction, max(surfaceDistance - tolerance, 0.0f), surfaceDistance + tolerance, GI_MASK_SCENE,
+        true, false, float2(0.0f, g_Frame.rayCone.x));
+    if (!hit.hit || abs(hit.distance - surfaceDistance) > tolerance || IsShadowOnly(hit.instance, hit.geometry)) return gbufferNormal;
+
+    SceneTriangle t = LoadTriangle(hit.instance, hit.geometry, hit.primitive);
+    float3 normal = cross(t.v1 - t.v0, t.v2 - t.v0);
+    float lengthSquared = dot(normal, normal);
+    if (!(lengthSquared > 0.0f)) return gbufferNormal;
+
+    normal *= rsqrt(lengthSquared);
+    return dot(normal, direction) > 0.0f ? -normal : normal;
+}
+
 // A light pixel's rays (the ray quality, 1, 2 or 4, twice on foliage): what each hits lit afresh, and its
 // bounce, the sky's light or a cache cell's. The first ray's cell takes the hit's light and gives its own
 // after the cache's update (ResolveLight); the others' cells give theirs as they stand, a frame old, and take none,
@@ -251,8 +275,10 @@ void TraceLight(uint2 did : SV_DispatchThreadID)
         return;
     }
 
-    float3 normal = DecodeNormal(float4(encoded, 0.0f));
+    // The rays leave the surface's own side; the normal map turns the render pixel's light alone, once,
+    // where it is resolved (CompositeLight).
     float3 world = DepthPosition(pixel, depth);
+    float3 normal = RayNormal(world, DecodeNormal(float4(encoded, 0.0f)));
     Random random = MakeRandom(did.x + did.y * LightSize().x, g_FrameIndex);
     float3 origin = OffsetFromScreenSurface(world, normal);
     uint rays = clamp(g_Frame.lightRays.x, 1u, 4u);

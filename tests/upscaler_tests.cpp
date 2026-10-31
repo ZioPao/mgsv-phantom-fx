@@ -191,9 +191,10 @@ void effectPlan()
             && plan.runs(Effect::VolumetricFog) && plan.runs(Effect::Sea),
         "The effects nothing replaces run.");
 
-    for (const auto effect : {Effect::SoftShadows, Effect::SunContactShadows, Effect::LampContactShadows, Effect::LampSoftShadows, Effect::AmbientOcclusion,
-             Effect::IndirectLight})
+    for (const auto effect : {Effect::SoftShadows, Effect::LampContactShadows, Effect::LampSoftShadows, Effect::AmbientOcclusion, Effect::IndirectLight})
         expect(plan[effect] == EffectState::Replaced, "The ray-traced effects replace the soft and contact shadows, GTVBAO and SSILVB.");
+    expect(plan.runs(Effect::SunContactShadows) && !plan.replacers[Effect::SunContactShadows],
+        "The sun's contact shadows run beside the ray-traced ones, filling in where the rays alone read lit.");
 
     Settings withoutTracedLights = all;
     withoutTracedLights.rayTracedLights.on = false;

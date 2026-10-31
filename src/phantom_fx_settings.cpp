@@ -288,6 +288,15 @@ EffectPlan planEffects(const Settings& settings, const EffectConditions& conditi
         if (plan.runs(effect) && (!asksForNeeds(effect) || (needs && !plan.runs(*needs)))) plan.states[effect] = EffectState::Lacking;
     }
 
+    // The sun's contact shadows run beside the ray-traced ones, whatever their switch says: the rays alone
+    // leave a pixel here and there reading lit where the game's map has shade — thin lines where geometry
+    // meets the ground — and the contact shadows fill those in as they do for the map.
+    if (plan.runs(Effect::RayTracedShadows))
+    {
+        plan.replacers[Effect::SunContactShadows].reset();
+        plan.states[Effect::SunContactShadows] = EffectState::Running;
+    }
+
     return plan;
 }
 
