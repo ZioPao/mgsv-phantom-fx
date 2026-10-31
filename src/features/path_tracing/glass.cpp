@@ -200,7 +200,8 @@ void composite(ID3D11DeviceContext* immediate, ID3D11RenderTargetView* target, f
     check(write(immediate, compositeParameters.Get(), CompositeParameters{strength}), "Writing the glass's constants");
     immediate->CopyResource(sceneCopy.Get(), sceneTexture.Get());
 
-    ID3D11ShaderResourceView* inputs[]{sceneCopyView.Get(), weightTarget.texture.view.Get(), reflection.view.Get()};
+    ID3D11ShaderResourceView* inputs[]{sceneCopyView.Get(), weightTarget.texture.view.Get(), reflection.view.Get(),
+        ray_tracing::forwardShadow(desc.Width, desc.Height)};
     const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(desc.Width), static_cast<float>(desc.Height), 0, 1};
     immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     immediate->IASetInputLayout(nullptr);
@@ -208,7 +209,7 @@ void composite(ID3D11DeviceContext* immediate, ID3D11RenderTargetView* target, f
     immediate->GSSetShader(nullptr, nullptr, 0);
     immediate->PSSetShader(compositeShader.Get(), nullptr, 0);
     immediate->PSSetConstantBuffers(0, 1, compositeParameters.GetAddressOf());
-    immediate->PSSetShaderResources(0, 3, inputs);
+    immediate->PSSetShaderResources(0, 4, inputs);
     immediate->OMSetRenderTargets(1, &target, nullptr);
     immediate->OMSetBlendState(colorOnly.Get(), nullptr, 0xFFFFFFFF);
     immediate->OMSetDepthStencilState(nullptr, 0);

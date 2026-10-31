@@ -385,4 +385,10 @@ void TraceSurfaceReflections(uint2 did : SV_DispatchThreadID)
     // reflected (its weight, recorded at the draw, is the menu's share).
     if (isWater) light *= WaterReflectance(saturate(dot(normal, toEye)), normalRoughness.w);
     g_SurfaceReflection[did] = float4(min(RemoveNaNs(light) * g_Frame.nearFar.w, BrightestHit), hitDistance);
+
+    // The surface's own sun shadow, for the composite to dim what it covers (glass_shaders.hpp, Composite): a ray
+    // from the surface towards a point on the sun's disc, one sample, seeded by the pixel alone.
+    Random sunRandom = MakeRandom(did.x + did.y * g_BufferDimensions.x, 0u);
+    g_ForwardShadow[did] = VisibilityFromSurface(origin, normal, CopyTolerance(world), SunSample(sunRandom.rand2()), 1e4f,
+        ShadowRayTowards(RayTowardsSun));
 }
