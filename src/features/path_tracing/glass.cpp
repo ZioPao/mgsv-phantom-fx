@@ -1,4 +1,5 @@
 // Glass and mirrors on Direct3D 11; glass.hpp describes them.
+#include "features/forward_shadows/forward_shadows.hpp"
 #include "features/path_tracing/glass.hpp"
 
 #include "command_list_notes.hpp"
@@ -312,8 +313,29 @@ bool draw(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, game_
         // it covers and the fog over it, and the traced reflection takes the cube map's place at its weight.
         ID3D11ShaderResourceView* none{};
         context->PSSetShaderResources(row->reflectionSlot, 1, &none);
+        // Its shadow map leaves too (t8): the rays' shadow takes its place at the composite (forward_shadows).
+        constexpr UINT GlassShadowSlot = 8, ShadowSamplerSlot = 15;
+        ID3D11ShaderResourceView* gameShadow{};
+        ID3D11SamplerState* gameSampler{};
+        ID3D11ShaderResourceView* litShadow{};
+        ID3D11SamplerState* litSampler{};
+        const bool shadowReplaced = forward_shadows::tracedShadowResources(context, &litShadow, &litSampler);
+        if (shadowReplaced)
+        {
+            context->PSGetShaderResources(GlassShadowSlot, 1, &gameShadow);
+            context->PSGetSamplers(ShadowSamplerSlot, 1, &gameSampler);
+            context->PSSetShaderResources(GlassShadowSlot, 1, &litShadow);
+            context->PSSetSamplers(ShadowSamplerSlot, 1, &litSampler);
+        }
         context->DrawIndexedInstanced(call.count, call.instances, call.first, call.vertexOffset, call.firstInstance);
         context->PSSetShaderResources(row->reflectionSlot, 1, reflected.GetAddressOf());
+        if (shadowReplaced)
+        {
+            context->PSSetShaderResources(GlassShadowSlot, 1, &gameShadow);
+            context->PSSetSamplers(ShadowSamplerSlot, 1, &gameSampler);
+            if (gameShadow) gameShadow->Release();
+            if (gameSampler) gameSampler->Release();
+        }
 
         ID3D11RenderTargetView* const targets[3]{depth.Get(), normal.Get(), weight.Get()};
         drawSurface(context, call, surface.Get(), targets, blend.Get(), depthTest.Get(), gameTarget.Get(), gameDepth.Get());

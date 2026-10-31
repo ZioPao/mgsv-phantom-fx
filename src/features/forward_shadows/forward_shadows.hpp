@@ -40,4 +40,8 @@ struct Cameras
 };
 void setCameras(const Cameras& cameras) noexcept;
 
+// A forward surface drawn by another module (glass) leaves the game's shadow map out the same way: the 1x1
+// white map shadow and the sampler that always passes, for its shadow slot and s15. False when unavailable.
+bool tracedShadowResources(ID3D11DeviceContext* context, ID3D11ShaderResourceView** whiteMap, ID3D11SamplerState** alwaysPass) noexcept;
+
 }

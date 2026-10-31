@@ -412,6 +412,20 @@ void setCameras(const Cameras& next) noexcept
     cameras = next;
 }
 
+bool tracedShadowResources(ID3D11DeviceContext* context, ID3D11ShaderResourceView** whiteMap, ID3D11SamplerState** alwaysPass) noexcept
+{
+    ComPtr<ID3D11Device> device;
+    context->GetDevice(device.GetAddressOf());
+    if (!device) return false;
+
+    std::lock_guard lock(stateMutex);
+    if (!ensurePipeline(device.Get())) return false;
+
+    *whiteMap = lit.Get();
+    *alwaysPass = litSampler.Get();
+    return true;
+}
+
 
 
 void clearGuides(ID3D11DeviceContext* context) noexcept

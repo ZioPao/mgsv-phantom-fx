@@ -154,18 +154,11 @@ Surface main(float4 position : SV_Position, float4 uv : TEXCOORD0, float3 unused
 // trace takes the slope from the depth's neighbours, so no shader interface can go wrong), and 0.3 of what it
 // reflects, which the trace scales by the water's reflectance at the eye's angle.
 inline constexpr char WaterSurface[] = R"(
-struct Surface
-{
-    float depth : SV_Target0;
-    float4 normal : SV_Target1; // xyz 0: water, its normal from the depth's slope; w: its roughness
-    float4 weight : SV_Target2; // rgb: the share of what it reflects; a: how much it covers what is behind
-};
-
 Surface main(float4 position : SV_Position)
 {
     Surface surface;
     surface.depth = position.z;
-    surface.normal = float4(0.0f, 0.0f, 0.0f, 0.1f);
+    surface.normal = float4(0.0f, 0.0f, 0.0f, 0.1f); // xyz 0: water, the trace takes the slope from the depth's neighbours
     surface.weight = float4(0.3f, 0.3f, 0.3f, 1.0f);
     return surface;
 }
