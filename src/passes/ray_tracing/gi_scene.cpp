@@ -329,6 +329,7 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
         desc.Inputs.pOpacityMicromapArrayDesc = &array;
         desc.DestAccelerationStructureData = blasPool->GetGPUVirtualAddress() + blas.micromaps->arrayOffset;
         desc.ScratchAccelerationStructureData = micromapScratch->GetGPUVirtualAddress() + build.scratch;
+        trace::add("build micromap array " + std::to_string(build.id) + " " + std::to_string(blas.micromaps->blocks) + " blocks");
         list.BuildRaytracingAccelerationStructure(&desc, 0, nullptr);
     }
     if (!arrayBuilds.empty())
@@ -344,6 +345,7 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
         const auto& blas = structures[build.id];
         if (!blas.live || blas.generation != build.generation) continue;
 
+        trace::add(std::string("build structure ") + std::to_string(build.id) + " " + std::to_string(blas.triangles) + " triangles" + (blas.micromaps ? " linked" : ""));
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc{};
         desc.Inputs = inputsOf(blas, build.update);
         desc.DestAccelerationStructureData = address(blas);
@@ -375,8 +377,11 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
     }
 
     for (const auto& compaction : compactions)
+    {
+        trace::add("compact structure " + std::to_string(compaction.id));
         list.CopyRaytracingAccelerationStructure(blasPool->GetGPUVirtualAddress() + compaction.to, blasPool->GetGPUVirtualAddress() + compaction.from,
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
+    }
 
     if (!compactions.empty()) list.ResourceBarrier(1, &all);
 }
@@ -412,6 +417,7 @@ void Scene::recordTopLevel(ID3D12GraphicsCommandList4& list)
     top.Inputs.InstanceDescs = instanceDescs->GetGPUVirtualAddress();
     top.DestAccelerationStructureData = tlas->GetGPUVirtualAddress();
     top.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
+    trace::add("build top level " + std::to_string(instanceCount()) + " instances");
     list.BuildRaytracingAccelerationStructure(&top, 0, nullptr);
 
     const auto all = uavBarrier();

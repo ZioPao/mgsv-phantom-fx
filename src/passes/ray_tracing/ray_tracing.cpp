@@ -1,5 +1,6 @@
 // The ray-traced scene's frame on Direct3D 11; ray_tracing.hpp describes the route.
 #include "passes/ray_tracing/ray_tracing.hpp"
+#include "trace.hpp"
 
 #include "camera.hpp"
 #include "clock.hpp"
@@ -412,6 +413,7 @@ void fail(const std::string& reason)
     failed = true;
     failure = reason;
     log("Global illumination stopped: " + reason);
+    trace::dump();
     gi_renderer::dumpMessages();
     gi_inputs::setActive(false);
     engine_scene::setActive(false);
