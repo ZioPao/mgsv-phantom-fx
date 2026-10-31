@@ -66,4 +66,18 @@ std::uint32_t blockBytes(std::uint32_t level);
 // The mesh's layout; nullopt when it has no triangles, an index out of range, or does not fit maxBytes
 // even at level 0.
 std::optional<Layout> layOut(const Mesh& mesh);
+
+// A structure's meshes' layouts in one micromap array: their blocks one mesh after another, offsets and
+// block numbers across the whole array.
+struct ArrayLayout
+{
+    std::vector<Block> blocks;
+    std::vector<std::uint32_t> blockMesh;      // Which of the layouts each block came from
+    std::vector<std::uint32_t> triangleBlocks; // Every mesh's triangles, in order
+    std::vector<std::uint32_t> firstTriangle;  // Each mesh's first in triangleBlocks
+    std::array<std::uint32_t, MaxLevel + 1> histogram{};
+    std::uint64_t bytes{};
+};
+
+ArrayLayout combine(std::span<const Layout> layouts);
 }

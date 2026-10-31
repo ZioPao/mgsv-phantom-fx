@@ -203,25 +203,27 @@ Baked bake(const omm_layout::Layout& layout)
     const auto textureUpload = buffer(device.Get(), textureBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
     fill(textureUpload.Get(), texels.data(), texels.size());
 
-    // The blocks with their texture (slot 0) and threshold, and each triangle's block.
-    std::vector<gi::GIOmmBlock> blocks;
-    for (const auto& block : layout.blocks) blocks.push_back({block.uvs[0], block.uvs[1], block.uvs[2], block.level, 1, block.byteOffset, 0.5f, 0});
-    const auto blockBuffer = buffer(device.Get(), blocks.size() * sizeof(gi::GIOmmBlock), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
-    fill(blockBuffer.Get(), blocks.data(), blocks.size() * sizeof(gi::GIOmmBlock));
+    // The pool as the scene lays a structure's micromaps out: the array's input past 128 bytes nothing
+    // may touch, then the blocks' records, the triangles' blocks, the blocks' states and the index buffer.
+    // All of it starts as garbage but the records and the triangles' blocks.
+    const auto blockCount = static_cast<UINT>(layout.blocks.size());
     const auto triangles = static_cast<UINT>(layout.triangleBlocks.size());
-    const auto triangleBuffer = buffer(device.Get(), triangles * 4ull, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
-    fill(triangleBuffer.Get(), layout.triangleBlocks.data(), triangles * 4ull);
-
-    // The outputs; the array's input starts as garbage, so every word must be written.
-    const auto dataBytes = layout.bytes;
-    const auto blockCount = static_cast<UINT>(blocks.size());
-    const auto data = buffer(device.Get(), dataBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-    const auto states = buffer(device.Get(), blockCount * 4ull, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-    const auto indices = buffer(device.Get(), triangles * 4ull, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-    const std::vector<std::uint8_t> garbage(dataBytes, 0xCD);
-    const auto garbageUpload = buffer(device.Get(), dataBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
-    fill(garbageUpload.Get(), garbage.data(), garbage.size());
-    const auto readback = buffer(device.Get(), dataBytes + (blockCount + triangles) * 4ull, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+    const auto align = [](std::uint64_t value) { return (value + 15) / 16 * 16; };
+    const std::uint64_t dataAt = 128, recordsAt = align(dataAt + layout.bytes), trianglesAt = recordsAt + 32ull * blockCount,
+                        statesAt = align(trianglesAt + 4ull * triangles), indicesAt = align(statesAt + 4ull * blockCount),
+                        poolBytes = align(indicesAt + 4ull * triangles);
+    std::vector<std::uint8_t> contents(poolBytes, 0xCD);
+    for (std::uint32_t b = 0; b < blockCount; ++b)
+    {
+        const auto& block = layout.blocks[b];
+        const gi::GIOmmBlock record{block.uvs[0], block.uvs[1], block.uvs[2], block.level, 1, block.byteOffset, 0.5f, 0};
+        std::memcpy(&contents[recordsAt + 32ull * b], &record, sizeof(record));
+    }
+    std::memcpy(&contents[trianglesAt], layout.triangleBlocks.data(), 4ull * triangles);
+    const auto poolUpload = buffer(device.Get(), poolBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+    fill(poolUpload.Get(), contents.data(), contents.size());
+    const auto pool = buffer(device.Get(), poolBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    const auto readback = buffer(device.Get(), poolBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
 
     // Every slot a null view, as the renderer's tables start, then the kernels' own.
     D3D12_DESCRIPTOR_HEAP_DESC heapDesc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, SrvCount + UavCount + GI_MAX_TEXTURES, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE};
@@ -243,32 +245,12 @@ Baked bake(const omm_layout::Layout& layout)
     nullUav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     for (UINT i = 0; i < UavCount; ++i) device->CreateUnorderedAccessView(nullptr, nullptr, &nullUav, cpu(SrvCount + i));
 
-    const auto structured = [&](UINT slot, ID3D12Resource* resource, UINT stride, UINT count) {
-        D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
-        desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        desc.Buffer.NumElements = count;
-        desc.Buffer.StructureByteStride = stride;
-        device->CreateShaderResourceView(resource, &desc, cpu(slot));
-    };
-    structured(26, blockBuffer.Get(), sizeof(gi::GIOmmBlock), blockCount);
-    structured(27, triangleBuffer.Get(), 4, triangles);
-
     D3D12_UNORDERED_ACCESS_VIEW_DESC raw{};
     raw.Format = DXGI_FORMAT_R32_TYPELESS;
     raw.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-    raw.Buffer.NumElements = static_cast<UINT>(dataBytes / 4);
+    raw.Buffer.NumElements = static_cast<UINT>(poolBytes / 4);
     raw.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-    device->CreateUnorderedAccessView(data.Get(), nullptr, &raw, cpu(SrvCount + 40));
-    const auto structuredUav = [&](UINT slot, ID3D12Resource* resource, UINT count) {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
-        desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-        desc.Buffer.NumElements = count;
-        desc.Buffer.StructureByteStride = 4;
-        device->CreateUnorderedAccessView(resource, nullptr, &desc, cpu(SrvCount + slot));
-    };
-    structuredUav(41, states.Get(), blockCount);
-    structuredUav(42, indices.Get(), triangles);
+    device->CreateUnorderedAccessView(pool.Get(), nullptr, &raw, cpu(SrvCount + 40));
 
     D3D12_SHADER_RESOURCE_VIEW_DESC textureView{};
     textureView.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -290,21 +272,21 @@ Baked bake(const omm_layout::Layout& layout)
     D3D12_TEXTURE_COPY_LOCATION from{textureUpload.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
     from.PlacedFootprint = footprint;
     list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
-    list->CopyBufferRegion(data.Get(), 0, garbageUpload.Get(), 0, dataBytes);
+    list->CopyBufferRegion(pool.Get(), 0, poolUpload.Get(), 0, poolBytes);
     D3D12_RESOURCE_BARRIER ready[]{transition(texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
-        transition(data.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
+        transition(pool.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
     list->ResourceBarrier(static_cast<UINT>(std::size(ready)), ready);
 
     ID3D12DescriptorHeap* heaps[]{heap.Get()};
     list->SetDescriptorHeaps(1, heaps);
     list->SetComputeRootSignature(root.Get());
-    list->SetComputeRootConstantBufferView(0, blockBuffer->GetGPUVirtualAddress());
+    list->SetComputeRootConstantBufferView(0, poolUpload->GetGPUVirtualAddress());
     list->SetComputeRootDescriptorTable(2, gpu(0));
     list->SetComputeRootDescriptorTable(3, gpu(SrvCount));
-    list->SetComputeRootShaderResourceView(4, blockBuffer->GetGPUVirtualAddress());
+    list->SetComputeRootShaderResourceView(4, poolUpload->GetGPUVirtualAddress());
     list->SetComputeRootDescriptorTable(5, gpu(SrvCount + UavCount));
 
-    const UINT bakeConstants[4]{0, blockCount, 0, 0};
+    const UINT bakeConstants[4]{static_cast<UINT>(recordsAt), blockCount, static_cast<UINT>(statesAt), static_cast<UINT>(dataAt)};
     list->SetPipelineState(bakeKernel.Get());
     list->SetComputeRoot32BitConstants(1, 4, bakeConstants, 0);
     list->Dispatch(blockCount, 1, 1);
@@ -312,19 +294,15 @@ Baked bake(const omm_layout::Layout& layout)
     all.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     list->ResourceBarrier(1, &all);
 
-    const UINT resolveConstants[4]{0, triangles, 0, 0};
+    const UINT resolveConstants[4]{static_cast<UINT>(trianglesAt), triangles, static_cast<UINT>(statesAt), static_cast<UINT>(indicesAt)};
     list->SetPipelineState(resolveKernel.Get());
     list->SetComputeRoot32BitConstants(1, 4, resolveConstants, 0);
     list->Dispatch((triangles + 63) / 64, 1, 1);
     list->ResourceBarrier(1, &all);
 
-    D3D12_RESOURCE_BARRIER done[]{transition(data.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
-        transition(states.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
-        transition(indices.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE)};
-    list->ResourceBarrier(static_cast<UINT>(std::size(done)), done);
-    list->CopyBufferRegion(readback.Get(), 0, data.Get(), 0, dataBytes);
-    list->CopyBufferRegion(readback.Get(), dataBytes, states.Get(), 0, blockCount * 4ull);
-    list->CopyBufferRegion(readback.Get(), dataBytes + blockCount * 4ull, indices.Get(), 0, triangles * 4ull);
+    const auto done = transition(pool.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    list->ResourceBarrier(1, &done);
+    list->CopyBufferRegion(readback.Get(), 0, pool.Get(), 0, poolBytes);
     check(list->Close(), "Closing the list");
 
     ID3D12CommandList* lists[]{list.Get()};
@@ -342,11 +320,14 @@ Baked bake(const omm_layout::Layout& layout)
     void* view{};
     check(readback->Map(0, nullptr, &view), "Mapping the readback");
     const auto* mapped = static_cast<const std::uint8_t*>(view);
-    baked.data.assign(mapped, mapped + dataBytes);
+    baked.data.assign(mapped + dataAt, mapped + dataAt + layout.bytes);
     baked.blockStates.resize(blockCount);
-    std::memcpy(baked.blockStates.data(), mapped + dataBytes, blockCount * 4ull);
+    std::memcpy(baked.blockStates.data(), mapped + statesAt, blockCount * 4ull);
     baked.indices.resize(triangles);
-    std::memcpy(baked.indices.data(), mapped + dataBytes + blockCount * 4ull, triangles * 4ull);
+    std::memcpy(baked.indices.data(), mapped + indicesAt, triangles * 4ull);
+    // Nothing written outside the array's input, the states and the index buffer.
+    for (std::uint64_t at = 0; at < dataAt; ++at) expect(mapped[at] == 0xCD, "the bake wrote before the array's input");
+    for (std::uint64_t at = dataAt + layout.bytes; at < recordsAt; ++at) expect(mapped[at] == 0xCD, "the bake wrote past the array's input");
     readback->Unmap(0, nullptr);
     return baked;
 }

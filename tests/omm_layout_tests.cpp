@@ -205,6 +205,26 @@ void budgetLowersLevels()
     expect(!omm_layout::layOut({uvs, indices, 512, 512, 4}), "two blocks fit in 4 bytes");
 }
 
+// Two meshes in one array: the second's blocks after the first's, its triangles' block numbers and its
+// offsets moved past them.
+void meshesCombineIntoOneArray()
+{
+    const std::vector<std::uint32_t> uvs{uv(0, 0), uv(1, 0), uv(0, 1), uv(1, 1)};
+    const std::vector<std::uint16_t> two{0, 1, 2, 1, 3, 2}, one{0, 1, 2};
+    const auto first = omm_layout::layOut({uvs, two, 64, 64, 1u << 20});
+    const auto second = omm_layout::layOut({uvs, one, 512, 512, 1u << 20});
+    expect(first && second, "no layouts");
+
+    const std::vector<omm_layout::Layout> layouts{*first, *second};
+    const auto array = omm_layout::combine(layouts);
+    expect(array.blocks.size() == 3 && array.blockMesh == std::vector<std::uint32_t>{0, 0, 1}, "the blocks are not one mesh after another");
+    expect(array.firstTriangle == std::vector<std::uint32_t>{0, 2}, "the meshes' first triangles are wrong");
+    expect(array.triangleBlocks == std::vector<std::uint32_t>{first->triangleBlocks[0], first->triangleBlocks[1], 2}, "the second mesh's triangle is not on its block");
+    expect(array.blocks[2].byteOffset == first->bytes, "the second mesh's block does not start after the first's");
+    expect(array.bytes == first->bytes + second->bytes, "the array's size is not the meshes' sum");
+    expect(array.histogram[5] == 2 && array.histogram[6] == 1, "the histograms did not add up");
+}
+
 void unusableMeshes()
 {
     const std::vector<std::uint32_t> uvs{uv(0, 0), uv(1, 0), uv(0, 1)};
@@ -229,6 +249,7 @@ int main()
         otherOrderIsAnotherBlock();
         blocksArePacked();
         budgetLowersLevels();
+        meshesCombineIntoOneArray();
         unusableMeshes();
         std::cout << "Opacity micromap layout tests passed.\n";
 

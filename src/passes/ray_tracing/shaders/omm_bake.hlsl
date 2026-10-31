@@ -1,22 +1,22 @@
 // The opacity micromaps' bake (docs/opacity-micromaps.md, "Baking"): each block's micro-triangle states
 // from its texture's alpha, written into the micromap array's input, and its triangles' indices into
 // the array, uniform blocks turned into special indices. Bound as the global illumination's other
-// kernels are (gi_renderer.cpp's root signature), on registers none of them uses.
+// kernels are (gi_renderer.cpp's root signature): everything they read and write is in the scene's
+// micromap pool (gi_scene.cpp), on u40, which none of the others uses, at the byte offsets they are given.
 #include "gi_shared.h"
 #include "gi_omm.h"
 
 cbuffer DispatchConstants : register(b1)
 {
-    uint4 g_Dispatch; // BakeMicromaps: x the first block, y the blocks. ResolveMicromapIndices: x the first triangle, y the triangles, z the mesh's first block
+    // BakeMicromaps: x the blocks' records (GIOmmBlock), y how many, z their GI_OMM_SOME_* words, w the array's input,
+    // where the records' byteOffset start. ResolveMicromapIndices: x the triangles' blocks (omm_layout::ArrayLayout::
+    // triangleBlocks), y how many, z the blocks' GI_OMM_SOME_* words, w the linkage's index buffer. Byte offsets.
+    uint4 g_Dispatch;
 };
 
-StructuredBuffer<GIOmmBlock> g_OmmBlocks : register(t26);
-StructuredBuffer<uint> g_OmmTriangleBlocks : register(t27); // Each triangle's block within its mesh (omm_layout::Layout::triangleBlocks)
 Texture2D<float4> g_SceneTextures[GI_MAX_TEXTURES] : register(t0, space2);
 
-RWByteAddressBuffer g_OmmData : register(u40);         // The micromap array's input
-RWStructuredBuffer<uint> g_OmmBlockStates : register(u41); // GI_OMM_SOME_* of each block
-RWStructuredBuffer<uint> g_OmmIndices : register(u42);     // The linkage's index buffer
+RWByteAddressBuffer g_OmmPool : register(u40);
 
 SamplerState g_WrapSampler : register(s2);
 
@@ -25,6 +25,22 @@ SamplerState g_WrapSampler : register(s2);
 
 groupshared uint g_Words[BAKE_MAX_WORDS];
 groupshared uint g_Found;
+
+GIOmmBlock LoadBlock(uint block)
+{
+    uint at = g_Dispatch.x + 32u * block;
+    uint4 first = g_OmmPool.Load4(at), second = g_OmmPool.Load4(at + 16u);
+    GIOmmBlock loaded;
+    loaded.uv0 = first.x;
+    loaded.uv1 = first.y;
+    loaded.uv2 = first.z;
+    loaded.level = first.w;
+    loaded.texture = second.x;
+    loaded.byteOffset = second.y;
+    loaded.threshold = asfloat(second.z);
+    loaded.pad = 0u;
+    return loaded;
+}
 
 float2 UvOf(uint packed)
 {
@@ -89,7 +105,7 @@ void BakeMicromaps(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
 {
     if (group.x >= g_Dispatch.y) return;
 
-    GIOmmBlock block = g_OmmBlocks[g_Dispatch.x + group.x];
+    GIOmmBlock block = LoadBlock(group.x);
     uint level = min(block.level, GI_OMM_MAX_LEVEL);
     uint cells = 1u << (2u * level);
     uint words = max(cells * GI_OMM_STATE_BITS / 32u, 1u);
@@ -116,21 +132,20 @@ void BakeMicromaps(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
     InterlockedOr(g_Found, found);
     GroupMemoryBarrierWithGroupSync();
 
-    for (uint w = thread; w < words; w += BAKE_THREADS) g_OmmData.Store(block.byteOffset + 4u * w, g_Words[w]);
-    if (thread == 0) g_OmmBlockStates[g_Dispatch.x + group.x] = g_Found;
+    for (uint w = thread; w < words; w += BAKE_THREADS) g_OmmPool.Store(g_Dispatch.w + block.byteOffset + 4u * w, g_Words[w]);
+    if (thread == 0) g_OmmPool.Store(g_Dispatch.z + 4u * group.x, g_Found);
 }
 
-// A thread a triangle: its block's place within the mesh, or the special index of a uniform block (the
-// linkage adds the mesh's base location to the rest).
+// A thread a triangle: its block's place in the array, or the special index of a uniform block.
 [numthreads(64, 1, 1)]
 void ResolveMicromapIndices(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= g_Dispatch.y) return;
 
-    uint block = g_OmmTriangleBlocks[g_Dispatch.x + id.x];
-    uint found = g_OmmBlockStates[g_Dispatch.z + block];
+    uint block = g_OmmPool.Load(g_Dispatch.x + 4u * id.x);
+    uint found = g_OmmPool.Load(g_Dispatch.z + 4u * block);
     uint index = block;
     if (found == GI_OMM_SOME_NOT_TRANSPARENT) index = GI_OMM_INDEX_FULLY_OPAQUE;
     else if (found == GI_OMM_SOME_NOT_OPAQUE) index = GI_OMM_INDEX_FULLY_TRANSPARENT;
-    g_OmmIndices[g_Dispatch.x + id.x] = index;
+    g_OmmPool.Store(g_Dispatch.w + 4u * id.x, index);
 }

@@ -154,4 +154,26 @@ std::optional<Layout> layOut(const Mesh& mesh)
 
     return std::nullopt;
 }
+
+ArrayLayout combine(std::span<const Layout> layouts)
+{
+    ArrayLayout array;
+    for (std::uint32_t mesh = 0; mesh < layouts.size(); ++mesh)
+    {
+        const auto& layout = layouts[mesh];
+        const auto firstBlock = static_cast<std::uint32_t>(array.blocks.size());
+        array.firstTriangle.push_back(static_cast<std::uint32_t>(array.triangleBlocks.size()));
+        for (auto block : layout.blocks)
+        {
+            block.byteOffset += static_cast<std::uint32_t>(array.bytes);
+            array.blocks.push_back(block);
+            array.blockMesh.push_back(mesh);
+        }
+        for (const auto block : layout.triangleBlocks) array.triangleBlocks.push_back(firstBlock + block);
+        for (std::size_t level = 0; level < array.histogram.size(); ++level) array.histogram[level] += layout.histogram[level];
+        array.bytes += layout.bytes;
+    }
+
+    return array;
+}
 }
