@@ -7,11 +7,12 @@
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 // A ring of the last GPU operations the add-on recorded, dumped when a frame never finishes (the fence's
 // timeout) or the device is lost. PIX cannot run this game, so this stands in for its event list: the last
 // entry is the operation the GPU was in when it stopped finishing frames. Off unless PHANTOM_FX_TRACE is
-// set, since it costs a string an operation.
+// set, and then only the call sites that ask `on()` first build anything.
 namespace phantom_fx::trace
 {
 inline constexpr std::size_t Entries = 1024;
@@ -30,13 +31,19 @@ inline Ring& ring()
     return instance;
 }
 
-inline void add(std::string line)
+// Whether anything is traced: one branch at a call site, no string built when off.
+inline bool on()
+{
+    return ring().on;
+}
+
+inline void add(std::string_view line)
 {
     auto& r = ring();
     if (!r.on) return;
 
     std::lock_guard lock(r.mutex);
-    r.lines[r.written % Entries] = std::move(line);
+    r.lines[r.written % Entries].assign(line);
     ++r.written;
 }
 

@@ -124,11 +124,12 @@ void levelsFollowTexels()
 
 void blockSizes()
 {
+    // 2-state: one bit a micro-triangle, padded to a 4-byte word.
     expect(omm_layout::blockBytes(0) == 4, "level 0 is not padded to a word");
     expect(omm_layout::blockBytes(1) == 4, "level 1 is not padded to a word");
-    expect(omm_layout::blockBytes(2) == 4, "level 2: 16 states, 32 bits");
-    expect(omm_layout::blockBytes(3) == 16, "level 3: 64 states, 128 bits");
-    expect(omm_layout::blockBytes(6) == 1024, "level 6: 4096 states, 1 KB");
+    expect(omm_layout::blockBytes(2) == 4, "level 2: 16 states, 16 bits");
+    expect(omm_layout::blockBytes(3) == 8, "level 3: 64 states, 64 bits");
+    expect(omm_layout::blockBytes(6) == 512, "level 6: 4096 states, 512 bytes");
 }
 
 // A grass bank: many cards on the same coordinates, one block.
@@ -180,7 +181,7 @@ void blocksArePacked()
         expected += omm_layout::blockBytes(block.level);
     }
     expect(layout->bytes == expected, "the size is not the blocks' sum");
-    expect(layout->bytes == 1024 + 16 + 4, "the size is not 1044 bytes");
+    expect(layout->bytes == 512 + 8 + 4, "the size is not 524 bytes");
 
     std::uint32_t counted = 0;
     for (const auto count : layout->histogram) counted += count;
@@ -200,7 +201,7 @@ void budgetLowersLevels()
 
     const auto dropped = omm_layout::layOut({uvs, indices, 512, 512, 600});
     expect(dropped && dropped->levelsDropped == 1, "two level-6 blocks in 600 bytes did not drop to level 5");
-    expect(dropped->blocks[0].level == 5 && dropped->bytes == 512, "the dropped blocks are not level 5");
+    expect(dropped->blocks[0].level == 5 && dropped->bytes == 256, "the dropped blocks are not level 5 (128 bytes each)");
 
     expect(!omm_layout::layOut({uvs, indices, 512, 512, 4}), "two blocks fit in 4 bytes");
 }

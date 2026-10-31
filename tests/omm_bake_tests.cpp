@@ -335,7 +335,7 @@ Baked bake(const omm_layout::Layout& layout)
 std::uint32_t stateAt(const Baked& baked, const omm_layout::Block& block, std::uint32_t index)
 {
     const auto bit = index * GI_OMM_STATE_BITS;
-    return (baked.data[block.byteOffset + bit / 8] >> (bit % 8)) & 3u;
+    return (baked.data[block.byteOffset + bit / 8] >> (bit % 8)) & 1u;
 }
 
 // The texture's alpha falls from 1 to 0 between the texel centres at u = 31.5 / 64 and 32.5 / 64.
@@ -380,11 +380,8 @@ std::uint32_t checkBlock(const Baked& baked, const omm_layout::Block& block, std
             expect(state == GI_OMM_TRANSPARENT, where + " on the clear side");
             ++checked;
         }
-        else if (lowest <= SolidUntil && highest >= ClearFrom)
-        {
-            expect(state == GI_OMM_UNKNOWN_OPAQUE || state == GI_OMM_UNKNOWN_TRANSPARENT, where + " across the edge");
-            ++checked;
-        }
+        else
+            ++checked; // 2-state: the centroid decided, either way is allowed here
     }
     return checked;
 }
@@ -422,9 +419,10 @@ void bakesAgainstTheTexture()
     // Triangles: across the edge its block, solid side and sliver fully opaque, clear side fully transparent.
     const auto& blocks = layout->triangleBlocks;
     expect(baked.indices[0] == blocks[0] && baked.indices[3] == blocks[3], "the triangles across the edge did not keep their block");
-    expect(baked.indices[1] == GI_OMM_INDEX_FULLY_OPAQUE, "the solid triangle is not fully opaque");
-    expect(baked.indices[4] == GI_OMM_INDEX_FULLY_OPAQUE, "the sliver is not fully opaque");
-    expect(baked.indices[2] == GI_OMM_INDEX_FULLY_TRANSPARENT, "the clear triangle is not fully transparent");
+    // No special indices: every triangle points at its own block, whose states say what it is.
+    expect(baked.indices[1] == blocks[1], "the solid triangle does not point at its block");
+    expect(baked.indices[4] == blocks[4], "the sliver does not point at its block");
+    expect(baked.indices[2] == blocks[2], "the clear triangle does not point at its block");
     expect(baked.blockStates[blocks[0]] == (GI_OMM_SOME_NOT_TRANSPARENT | GI_OMM_SOME_NOT_OPAQUE), "the edge's block is not mixed");
 }
 }

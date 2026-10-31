@@ -137,6 +137,15 @@ void Scene::planBuilds()
     std::uint32_t staticBuilds{};
     std::uint64_t triangles{};
 
+    // The development switches, read once: these run whenever a structure links. `NOBAKE`'s is read in
+    // the renderer; the rest are here.
+    static const bool once = GetEnvironmentVariableA("PHANTOM_FX_OMM_ONCE", nullptr, 0) != 0;
+    static const bool keepFirstLink = GetEnvironmentVariableA("PHANTOM_FX_OMM_NO_RELINK", nullptr, 0) != 0;
+    static const auto structureCap = [] {
+        char text[16]{};
+        return GetEnvironmentVariableA("PHANTOM_FX_OMM_MAX_STRUCTURES", text, sizeof(text)) ? static_cast<std::uint32_t>(std::atoi(text)) : MicromapStructures;
+    }();
+
     // Structures whose cut-out meshes' textures changed take micromaps baked from them first: a built one
     // is built again with them this frame, a queued one waits for its first build as before.
     if (micromapsOn)
@@ -161,10 +170,10 @@ void Scene::planBuilds()
             if (!blas.live || !blas.micromapsDirty || blas.pendingLink || blas.use != Use::Static) continue;
 
             // PHANTOM_FX_OMM_ONCE links one structure a session, for telling one link from a batch of them.
-            if (GetEnvironmentVariableA("PHANTOM_FX_OMM_ONCE", nullptr, 0) && micromapLinked) return;
+            if (once && micromapLinked) return;
             // PHANTOM_FX_OMM_NO_RELINK leaves a structure's first micromaps in place: tells a fault in
             // re-linking (release and rebuild) from one in the first link.
-            if (blas.micromaps && GetEnvironmentVariableA("PHANTOM_FX_OMM_NO_RELINK", nullptr, 0))
+            if (blas.micromaps && keepFirstLink)
             {
                 blas.micromapsDirty = false;
                 continue;
@@ -174,14 +183,10 @@ void Scene::planBuilds()
             // relinking one that has them costs nothing (PHANTOM_FX_OMM_MAX_STRUCTURES overrides).
             if (!blas.micromaps)
             {
-                char capText[16]{};
-                const auto cap = GetEnvironmentVariableA("PHANTOM_FX_OMM_MAX_STRUCTURES", capText, sizeof(capText))
-                    ? static_cast<std::uint32_t>(std::atoi(capText))
-                    : MicromapStructures;
                 std::uint32_t carrying{};
                 for (const auto& other : structures)
                     if (other.live && (other.micromaps || other.pendingLink)) ++carrying;
-                if (carrying >= cap)
+                if (carrying >= structureCap)
                 {
                     blas.micromapsDirty = false;
                     continue;
@@ -329,7 +334,7 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
         desc.Inputs.pOpacityMicromapArrayDesc = &array;
         desc.DestAccelerationStructureData = blasPool->GetGPUVirtualAddress() + blas.micromaps->arrayOffset;
         desc.ScratchAccelerationStructureData = micromapScratch->GetGPUVirtualAddress() + build.scratch;
-        trace::add("build micromap array " + std::to_string(build.id) + " " + std::to_string(blas.micromaps->blocks) + " blocks");
+        if (trace::on()) trace::add("build micromap array " + std::to_string(build.id) + " " + std::to_string(blas.micromaps->blocks) + " blocks");
         list.BuildRaytracingAccelerationStructure(&desc, 0, nullptr);
     }
     if (!arrayBuilds.empty())
@@ -345,7 +350,9 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
         const auto& blas = structures[build.id];
         if (!blas.live || blas.generation != build.generation) continue;
 
-        trace::add(std::string("build structure ") + std::to_string(build.id) + " " + std::to_string(blas.triangles) + " triangles" + (blas.micromaps ? " linked" : ""));
+        if (trace::on())
+            trace::add(std::string("build structure ") + std::to_string(build.id) + " " + std::to_string(blas.triangles) + " triangles"
+                + (blas.micromaps ? " linked" : ""));
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc{};
         desc.Inputs = inputsOf(blas, build.update);
         desc.DestAccelerationStructureData = address(blas);
@@ -378,7 +385,7 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
 
     for (const auto& compaction : compactions)
     {
-        trace::add("compact structure " + std::to_string(compaction.id));
+        if (trace::on()) trace::add("compact structure " + std::to_string(compaction.id));
         list.CopyRaytracingAccelerationStructure(blasPool->GetGPUVirtualAddress() + compaction.to, blasPool->GetGPUVirtualAddress() + compaction.from,
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
     }
@@ -417,7 +424,7 @@ void Scene::recordTopLevel(ID3D12GraphicsCommandList4& list)
     top.Inputs.InstanceDescs = instanceDescs->GetGPUVirtualAddress();
     top.DestAccelerationStructureData = tlas->GetGPUVirtualAddress();
     top.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
-    trace::add("build top level " + std::to_string(instanceCount()) + " instances");
+    if (trace::on()) trace::add("build top level " + std::to_string(instanceCount()) + " instances");
     list.BuildRaytracingAccelerationStructure(&top, 0, nullptr);
 
     const auto all = uavBarrier();
@@ -638,8 +645,10 @@ std::optional<std::uint32_t> Scene::addInstance(BlasId id, const float* transfor
     // sea's rays from the waves' troughs below its plane pass its back.
     std::uint32_t flags = (kind & (GI_INSTANCE_TERRAIN | GI_INSTANCE_SEA)) ? 0 : D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
     // PHANTOM_FX_OMM_DISABLE_INSTANCES leaves the micromaps linked and built but unused at traversal:
-    // tells a fault in building and releasing them from one in reading them.
-    if (GetEnvironmentVariableA("PHANTOM_FX_OMM_DISABLE_INSTANCES", nullptr, 0)) flags |= D3D12_RAYTRACING_INSTANCE_FLAG_DISABLE_OMMS;
+    // tells a fault in building and releasing them from one in reading them. Read once: this runs for
+    // every instance of every frame.
+    static const bool disableMicromaps = GetEnvironmentVariableA("PHANTOM_FX_OMM_DISABLE_INSTANCES", nullptr, 0) != 0;
+    if (disableMicromaps) flags |= D3D12_RAYTRACING_INSTANCE_FLAG_DISABLE_OMMS;
     desc.idAndMask = (kind & 0xFFFFFFu) | (GI_MASK_SCENE << 24);
     desc.hitGroupAndFlags = (blas.firstGeometry & 0xFFFFFFu) | (flags << 24);
     const auto blasAddress = address(blas);
@@ -805,7 +814,8 @@ bool Scene::prepareMicromaps(BlasId id)
 
         // PHANTOM_FX_OMM_NOLINK builds the array and leaves the structure unlinked: tells a fault in the
         // array's build from one in a structure that links it.
-        if (GetEnvironmentVariableA("PHANTOM_FX_OMM_NOLINK", nullptr, 0)) continue;
+        static const bool noLink = GetEnvironmentVariableA("PHANTOM_FX_OMM_NOLINK", nullptr, 0) != 0;
+        if (noLink) continue;
 
         const auto flags = geometry.Flags;
         geometry = {};
