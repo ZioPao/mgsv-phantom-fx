@@ -167,7 +167,7 @@ list(SORT DXC_SDK_DIRS COMPARE NATURAL ORDER DESCENDING)
 find_program(DXC_EXECUTABLE dxc HINTS "$ENV{WindowsSdkVerBinPath}x64" ${DXC_SDK_DIRS} REQUIRED)
 set(GI_SHADER_DIR "${CMAKE_BINARY_DIR}/gi_shaders")
 set(GI_SHADER_SHARED "${CMAKE_SOURCE_DIR}/src/passes/ray_tracing/shaders")
-set(GI_SHADER_INCLUDES "${GI_SHADER_SHARED}/gi_shared.h" "${GI_SHADER_SHARED}/gi_common.hlsli" "${GI_SHADER_SHARED}/gi_shadow.hlsli" "${GI_SHADER_SHARED}/gi_hit_light.hlsli"
+set(GI_SHADER_INCLUDES "${GI_SHADER_SHARED}/gi_shared.h" "${GI_SHADER_SHARED}/gi_omm.h" "${GI_SHADER_SHARED}/gi_common.hlsli" "${GI_SHADER_SHARED}/gi_shadow.hlsli" "${GI_SHADER_SHARED}/gi_hit_light.hlsli"
     "${GI_SHADER_SHARED}/ggx_specular.hlsli" "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_filter.h"
     "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_tileclassification.h"
     "${CMAKE_SOURCE_DIR}/third_party/ffx_denoiser_shadows/ffx_denoiser_shadows_util.h" "${nrd_SOURCE_DIR}/Shaders/NRD.hlsli")
@@ -194,6 +194,7 @@ add_gi_kernels(features/ray_traced_shadows/gi_shadow_filter.hlsl FilterShadows)
 add_gi_kernels(features/ray_traced_lights/light_shadows.hlsl TraceLocalLightShadows FilterLocalLightShadows ProbeLocalLights)
 add_gi_kernels(features/path_tracing/reflections.hlsl TraceReflections)
 add_gi_kernels(features/path_tracing/direct_light.hlsl TraceLampLight)
+add_gi_kernels(passes/ray_tracing/shaders/omm_bake.hlsl BakeMicromaps ResolveMicromapIndices)
 add_custom_target(gi_kernels DEPENDS ${GI_SHADER_HEADERS})
 
 # Each feature's settings and their description (src/features/).
@@ -281,6 +282,15 @@ if(BUILD_TESTING)
     target_compile_features(omm_layout_tests PRIVATE cxx_std_20)
     target_compile_options(omm_layout_tests PRIVATE /W4 /WX /permissive- /utf-8)
     add_test(NAME omm_layout COMMAND omm_layout_tests)
+
+    add_executable(omm_bake_tests tests/omm_bake_tests.cpp src/passes/ray_tracing/omm_layout.cpp)
+    add_dependencies(omm_bake_tests gi_kernels)
+    target_include_directories(omm_bake_tests PRIVATE src "${GI_SHADER_DIR}")
+    target_link_libraries(omm_bake_tests PRIVATE d3d12 dxgi)
+    target_compile_features(omm_bake_tests PRIVATE cxx_std_20)
+    target_compile_definitions(omm_bake_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(omm_bake_tests PRIVATE /W4 /WX /permissive- /utf-8)
+    add_test(NAME omm_bake COMMAND omm_bake_tests)
 
     add_executable(light_choice_tests tests/light_choice_tests.cpp src/features/ray_traced_lights/light_choice.cpp)
     target_include_directories(light_choice_tests PRIVATE src)

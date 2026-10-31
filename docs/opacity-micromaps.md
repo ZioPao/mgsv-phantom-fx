@@ -253,7 +253,7 @@ needs a second machine, not this one.
 | # | Step | Time |
 | --- | --- | --- |
 | 0 | Runtime probe: tier 1.2, SM 6.9, `cs_6_9` RayQuery-OMM PSO on inbox and on a 619 probe exe (done 2026-10-30, see 4) | done |
-| 1 | Bake kernel + level heuristic + dedupe + tests (bit packing round-trips, level heuristic, special-index selection) | 3-4 days |
+| 1 | Bake: layout (`omm_layout.cpp`), the curve shared with HLSL (`shaders/gi_omm.h`), the kernels `BakeMicromaps` and `ResolveMicromapIndices` (`shaders/omm_bake.hlsl`, on `t26`/`t27`, `u40`-`u42` of the renderer's root signature), tested on the CPU and on WARP (`omm_layout_tests`, `omm_bake_tests`) | done |
 | 2 | Scene: OMM pool (128-byte alignment, budget), linkage per BLAS, dirtiness on texture replacement | 2-3 days |
 | 3 | Shaders: the template flag, hair exclusion, `cs_6_9` build wiring, menu toggle, gate (tier + SM 6.9 + trial PSO) | 2 days |
 | 4 | Dev probe exe with the Agility exports + `D3D12\D3D12Core.dll`, so the path can be exercised before the OS ships it | 0.5 day |

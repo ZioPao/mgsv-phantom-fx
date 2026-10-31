@@ -33,6 +33,33 @@ using uint = std::uint32_t;
 #define GI_OMM_UNKNOWN_OPAQUE      3u
 #define GI_OMM_STATE_BITS          2u
 
+// A micro-triangle is known (opaque or transparent) only when every sample of it is this far from the
+// threshold; within it, the shader's own test decides (an unknown state).
+#define GI_OMM_KNOWN_MARGIN 0.0625f
+
+// What BakeMicromaps finds of a whole block (g_OmmBlockStates): a bit when any of its micro-triangles is
+// not transparent, a bit when any is not opaque. Exactly one bit set is a uniform block, whose
+// triangles take a special index (ResolveMicromapIndices).
+#define GI_OMM_SOME_NOT_TRANSPARENT 1u
+#define GI_OMM_SOME_NOT_OPAQUE      2u
+
+// The linkage's special indices (D3D12_RAYTRACING_OPACITY_MICROMAP_SPECIAL_INDEX), as unsigned.
+#define GI_OMM_INDEX_FULLY_TRANSPARENT 0xFFFFFFFFu
+#define GI_OMM_INDEX_FULLY_OPAQUE      0xFFFFFFFEu
+
+// One block to bake (omm_layout::Block with its mesh's texture): the three texture coordinates it
+// covers (two halves each, u low), its level, its texture (1 + its slot in g_SceneTextures), where its
+// states start in the array's input, and the alpha below which light passes.
+struct GIOmmBlock
+{
+    uint uv0, uv1, uv2;
+    uint level;
+    uint texture;
+    uint byteOffset;
+    float threshold;
+    uint pad;
+};
+
 GI_OMM_INLINE uint OmmSpreadBits(uint x)
 {
     x = (x | (x << 8u)) & 0x00ff00ffu;
