@@ -534,6 +534,18 @@ void start(ID3D11Device* device11, HANDLE sharedFence, bool allowMicromaps)
         }
         else log("Direct3D 12 debug layer not available.");
     }
+    if (GetEnvironmentVariableA("PHANTOM_FX_D3D12_DRED", nullptr, 0))
+    {
+        ID3D12DeviceRemovedExtendedDataSettings1* settings{};
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&settings))) && settings)
+        {
+            settings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            settings->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            settings->Release();
+            log("Direct3D 12 DRED enabled.");
+        }
+    }
 
     const auto d3d12 = createDevice12(device11);
     s->wrapper = d3d12.wrapper;
@@ -581,6 +593,8 @@ void dumpMessages()
 {
     if (!state || !state->device) return;
 
+    log("Direct3D 12 device removed reason: 0x" + hex(static_cast<std::uint32_t>(state->device->GetDeviceRemovedReason())) + ".");
+
     ID3D12InfoQueue* queue{};
     if (FAILED(state->device->QueryInterface(IID_PPV_ARGS(&queue)))) return;
     for (UINT64 i = 0; i < queue->GetNumStoredMessages(); ++i)
@@ -594,6 +608,32 @@ void dumpMessages()
         std::free(message);
     }
 
+    // Device Removed Extended Data (PHANTOM_FX_D3D12_DRED): the last GPU operations and the address a
+    // page fault took, which the debug layer alone does not give.
+    ID3D12DeviceRemovedExtendedData* dred{};
+    if (SUCCEEDED(state->device->QueryInterface(IID_PPV_ARGS(&dred))) && dred)
+    {
+        D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT crumbs{};
+        if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&crumbs)))
+            for (auto* node = crumbs.pHeadAutoBreadcrumbNode; node; node = node->pNext)
+            {
+                const auto last = node->pLastBreadcrumbValue && *node->pLastBreadcrumbValue < node->BreadcrumbCount ? *node->pLastBreadcrumbValue : 0;
+                std::string ops;
+                for (UINT i = last; i < node->BreadcrumbCount && i < last + 8; ++i) ops += std::to_string(node->pCommandHistory[i]) + " ";
+                log("Direct3D 12 DRED: breadcrumb " + std::to_string(last) + " of " + std::to_string(node->BreadcrumbCount) + ", ops " + ops);
+            }
+
+        D3D12_DRED_PAGE_FAULT_OUTPUT fault{};
+        if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&fault)))
+        {
+            log("Direct3D 12 DRED: page fault at 0x" + hex(fault.PageFaultVA));
+            for (auto* allocation = fault.pHeadExistingAllocationNode; allocation; allocation = allocation->pNext)
+                log("Direct3D 12 DRED: allocation type " + std::to_string(static_cast<int>(allocation->AllocationType)) + " "
+                    + (allocation->ObjectNameA ? allocation->ObjectNameA : ""));
+        }
+
+        dred->Release();
+    }
     queue->Release();
 }
 
