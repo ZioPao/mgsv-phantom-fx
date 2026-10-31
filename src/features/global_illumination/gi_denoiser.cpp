@@ -152,7 +152,7 @@ Denoiser::Denoiser(ID3D12Device* device, UINT width, UINT height) : device(devic
     signature.NumStaticSamplers = static_cast<UINT>(samplers.size());
     signature.pStaticSamplers = samplers.data();
     ComPtr<ID3DBlob> blob, errors;
-    if (FAILED(D3D12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, blob.GetAddressOf(), errors.GetAddressOf())))
+    if (FAILED(d3d12_loader::serializeRootSignature()(&signature, D3D_ROOT_SIGNATURE_VERSION_1, blob.GetAddressOf(), errors.GetAddressOf())))
         throw std::runtime_error("Serializing the denoiser's root signature failed"
             + (errors ? ": " + std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize()) : std::string(".")));
     check(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&rootSignature)),

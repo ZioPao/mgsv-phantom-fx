@@ -1,5 +1,6 @@
 #pragma once
 
+#include "d3d12_loader.hpp"
 #include "hresult.hpp"
 
 #include <Windows.h>
@@ -54,36 +55,6 @@ struct Device12
     Microsoft::WRL::ComPtr<ID3D12Device> wrapper, native;
 };
 
-// Development only: an Agility SDK runtime for this process, chosen from the environment (the game's exe
-// cannot export the two symbols the Agility SDK reads). `PHANTOM_FX_D3D12_CORE` is the folder holding
-// `D3D12Core.dll`, relative to the game's exe (".\\D3D12\\619\\"); `PHANTOM_FX_D3D12_VERSION` is its
-// D3D12SDKVersion (619). ID3D12SDKConfiguration::SetSDKVersion needs Windows Developer Mode, must run
-// before the process's first Direct3D 12 device (a later call removes it), and leaves the OS runtime in
-// place when it fails. Players never set either variable; the add-on's own gate decides on the runtime
-// the OS gives it. `log` says what happened; returns whether the runtime was asked for.
-inline bool selectRuntime()
-{
-    static bool done{};
-    if (std::exchange(done, true)) return false;
-
-    char path[512]{}, version[16]{};
-    if (!GetEnvironmentVariableA("PHANTOM_FX_D3D12_CORE", path, sizeof(path))) return false;
-    if (!GetEnvironmentVariableA("PHANTOM_FX_D3D12_VERSION", version, sizeof(version))) return false;
-
-    const CLSID sdkConfiguration{0x7cda6aca, 0xa03e, 0x49c8, {0x94, 0x58, 0x03, 0x34, 0xd2, 0x0e, 0x07, 0xce}};
-    ID3D12SDKConfiguration* configuration{};
-    if (FAILED(D3D12GetInterface(sdkConfiguration, IID_PPV_ARGS(&configuration))) || !configuration)
-    {
-        log(std::string("Direct3D 12 runtime ") + version + " not selected: this Direct3D 12 has no SDK configuration interface.");
-        return false;
-    }
-
-    const auto result = configuration->SetSDKVersion(static_cast<UINT>(std::atoi(version)), path);
-    configuration->Release();
-    log(std::string("Direct3D 12 runtime ") + version + " at " + path + (SUCCEEDED(result) ? " selected." : " not selected (0x" + hex(static_cast<std::uint32_t>(result)) + "): Developer Mode is off?"));
-    return SUCCEEDED(result);
-}
-
 // Development only: PIX's GPU capturer, loaded before the process's first Direct3D 12 device (it hooks
 // device creation, so loading it later makes PIXGpuCaptureNextFrames fail). PHANTOM_FX_PIX_CAPTURE asks
 // for it; gi_renderer takes the capture itself.
@@ -99,16 +70,19 @@ inline void loadGpuCapturer()
     log(capturer ? "PIX's GPU capturer loaded at start." : "PIX's GPU capturer could not be loaded.");
 }
 
+// The runtime this device runs is the one d3d12_loader chose for the process (see d3d12_loader.hpp):
+// the shipped one, or Windows' own when it could not be chosen.
 inline Device12 createDevice12(ID3D11Device* device11)
 {
-    selectRuntime();
+    const auto makeDevice = d3d12_loader::createDevice();
+    if (!makeDevice) throw std::runtime_error("Direct3D 12 is not available.");
 
     Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;
     check(device11->QueryInterface(IID_PPV_ARGS(&dxgi)), "Finding the DXGI device");
     Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
     check(dxgi->GetAdapter(adapter.GetAddressOf()), "Finding the GPU");
     Device12 made;
-    check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&made.wrapper)), "Creating the Direct3D 12 device");
+    check(makeDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&made.wrapper)), "Creating the Direct3D 12 device");
     if (FAILED(made.wrapper->QueryInterface(UnwrappedObject, reinterpret_cast<void**>(made.native.GetAddressOf())))) made.native = made.wrapper;
 
     return made;

@@ -607,6 +607,9 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     log(DiagnosticLog ? "Phantom FX " PHANTOM_FX_VERSION ", with the diagnostic log." : "Phantom FX " PHANTOM_FX_VERSION ".");
     logGameBuild();
     log(passDeviceCheck());
+    // Before anything asks for Direct3D 12: it is loaded here, pointed at the runtime the add-on ships
+    // (d3d12_loader.hpp). Failing leaves the game without the ray-traced passes and says why.
+    if (!d3d12_loader::load()) log("Direct3D 12 is Windows' own: the ray-traced passes may not run.");
 
     // The engine hooks share one MinHook instance; a hook that cannot be made logs MinHook's reason.
     MH_Initialize();

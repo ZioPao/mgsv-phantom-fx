@@ -13,7 +13,7 @@
 // timeout) or the device is lost. PIX cannot run this game, so this stands in for its event list: the last
 // entry is the operation the GPU was in when it stopped finishing frames. Off unless PHANTOM_FX_TRACE is
 // set, and then only the call sites that ask `on()` first build anything.
-namespace phantom_fx::trace
+namespace phantom_fx::probe
 {
 inline constexpr std::size_t Entries = 1024;
 

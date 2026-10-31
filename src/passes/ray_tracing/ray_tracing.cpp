@@ -409,7 +409,7 @@ void fail(const std::string& reason)
     failed = true;
     failure = reason;
     log("Global illumination stopped: " + reason);
-    trace::dump();
+    probe::dump();
     gi_renderer::dumpMessages();
     gi_inputs::setActive(false);
     engine_scene::setActive(false);
@@ -1472,7 +1472,8 @@ void present() noexcept
         if (!std::exchange(sunSincePresent, false)) sun.reset();
     }
 
-    const auto asked = latch.present().asked;
+    const auto options = latch.present();
+    const auto asked = options.asked;
 
     const bool on = asked.needsScene() && !failed;
     lighting = on && asked.runsGlobalIllumination;

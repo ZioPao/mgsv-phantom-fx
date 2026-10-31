@@ -31,15 +31,11 @@ constexpr std::uint64_t MicromapBytesPerMesh = 4ull << 20;
 // One structure a frame, as the batch of them (6 at once, 7 in the tests) faulted the GPU with the
 // micromaps disabled at traversal too (docs/opacity-micromaps.md).
 constexpr std::uint32_t MicromapLinksPerFrame = 1;
-// How many structures may carry micromaps at once: beyond that the emulated path stops finishing
-// frames (docs/opacity-micromaps.md, section 8a). Everything else keeps the shader's own alpha test.
-// Every structure that takes micromaps may carry them: at a few thousand triangles out of millions the
-// alpha test it replaces is 0.06% of the scene, so capping the count hides any gain (docs/opacity-micromaps.md).
-// The blocks the scene may carry at once, not the structures: a mask is worth its memory when it
-// covers a mesh the rays hit, and the many small ones (grass cards, fences, nets) cost a handful of
-// blocks each. A structure is only linked while 	riangles more keep the total under this, and the
-// smallest meshes go first (docs/opacity-micromaps.md).
-constexpr std::uint32_t MicromapBlocks = 2500;
+// The blocks the scene may carry at once (PHANTOM_FX_OMM_MAX_BLOCKS overrides): about 110 bytes each in
+// the micromap pool with their descriptors, records and states, so the pool, not the device, bounds it.
+// A structure is only linked while its triangles more keep the total under this. (The cap of eight
+// structures this replaced hid a compaction bug, not a device limit: 2026-10-31.)
+constexpr std::uint32_t MicromapBlocks = 100000;
 // D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_BYTE_ALIGNMENT, which the Windows SDK's 26100 headers lack: an
 // array's input starts on it.
 constexpr std::uint64_t MicromapArrayAlignment = 128;
@@ -180,13 +176,11 @@ void Scene::planBuilds()
             if (!blas.live || !blas.micromapsDirty || blas.pendingLink || blas.use != Use::Static || !blas.built || blas.queued) continue;
             candidates.push_back(id);
         }
-        // Biggest first, and eight at most: the experiment that tells an array-count limit from a block
-        // budget (2026-10-31: 29 arrays of 28 blocks hung, 8 arrays of thousands may not).
-        std::sort(candidates.begin(), candidates.end(), [&](BlasId a, BlasId b) { return structures[a].triangles > structures[b].triangles; });
-        // PHANTOM_FX_OMM_MAX_STRUCTURES overrides the eight, for reproducing the hang under the debug layer.
+        std::sort(candidates.begin(), candidates.end(), [&](BlasId a, BlasId b) { return structures[a].triangles < structures[b].triangles; });
+        // PHANTOM_FX_OMM_MAX_STRUCTURES caps the structures carrying micromaps (none by default).
         static const auto MaxStructures = [] {
             char text[16]{};
-            return GetEnvironmentVariableA("PHANTOM_FX_OMM_MAX_STRUCTURES", text, sizeof(text)) ? static_cast<std::uint32_t>(std::atoi(text)) : 8u;
+            return GetEnvironmentVariableA("PHANTOM_FX_OMM_MAX_STRUCTURES", text, sizeof(text)) ? static_cast<std::uint32_t>(std::atoi(text)) : ~0u;
         }();
         std::uint32_t carrying{};
         for (const auto& other : structures)
@@ -378,7 +372,7 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
         desc.Inputs.pOpacityMicromapArrayDesc = &array;
         desc.DestAccelerationStructureData = blasPool->GetGPUVirtualAddress() + blas.micromaps->arrayOffset;
         desc.ScratchAccelerationStructureData = micromapScratch->GetGPUVirtualAddress() + build.scratch;
-        if (trace::on()) trace::add("build micromap array " + std::to_string(build.id) + " " + std::to_string(blas.micromaps->blocks) + " blocks");
+        if (probe::on()) probe::add("build micromap array " + std::to_string(build.id) + " " + std::to_string(blas.micromaps->blocks) + " blocks");
         mark(list, "micromap array " + std::to_string(build.id) + " " + std::to_string(blas.micromaps->blocks) + " blocks");
         list.BuildRaytracingAccelerationStructure(&desc, 0, nullptr);
     }
@@ -395,8 +389,8 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
         const auto& blas = structures[build.id];
         if (!blas.live || blas.generation != build.generation) continue;
 
-        if (trace::on())
-            trace::add(std::string("build structure ") + std::to_string(build.id) + " " + std::to_string(blas.triangles) + " triangles"
+        if (probe::on())
+            probe::add(std::string("build structure ") + std::to_string(build.id) + " " + std::to_string(blas.triangles) + " triangles"
                 + (blas.micromaps ? " linked" : ""));
         mark(list, "structure " + std::to_string(build.id) + " " + std::to_string(blas.triangles) + " triangles" + (build.update ? " update" : "")
             + (blas.micromaps ? " linked" : "") + (blas.pendingLink ? " pending" : ""));
@@ -432,7 +426,7 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
 
     for (const auto& compaction : compactions)
     {
-        if (trace::on()) trace::add("compact structure " + std::to_string(compaction.id));
+        if (probe::on()) probe::add("compact structure " + std::to_string(compaction.id));
         mark(list, "compact " + std::to_string(compaction.id));
         list.CopyRaytracingAccelerationStructure(blasPool->GetGPUVirtualAddress() + compaction.to, blasPool->GetGPUVirtualAddress() + compaction.from,
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
@@ -472,7 +466,7 @@ void Scene::recordTopLevel(ID3D12GraphicsCommandList4& list)
     top.Inputs.InstanceDescs = instanceDescs->GetGPUVirtualAddress();
     top.DestAccelerationStructureData = tlas->GetGPUVirtualAddress();
     top.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
-    if (trace::on()) trace::add("build top level " + std::to_string(instanceCount()) + " instances");
+    if (probe::on()) probe::add("build top level " + std::to_string(instanceCount()) + " instances");
     mark(list, "top level " + std::to_string(instanceCount()) + " instances");
     list.BuildRaytracingAccelerationStructure(&top, 0, nullptr);
 
