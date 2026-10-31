@@ -164,6 +164,7 @@ private:
         bool built{}, compacted{}, queued{};
         std::vector<MicromapSource> sources; // By geometry; empty without any
         bool micromapsDirty{};               // A source's texture changed since its micromaps were baked
+        bool pendingLink{};                  // Its array was built last frame: the structure links it now
         std::optional<LinkedMicromaps> micromaps;
     };
     // An array the frame builds, before the bottom levels: its inputs in the micromap pool, its histogram.
@@ -235,7 +236,8 @@ private:
     // Bakes the structure's micromaps from its textures as they are now (or unlinks them when none takes
     // any) and moves it to the room its new inputs need, its build recorded this frame with
     // `postbuild` (a queued one keeps waiting for its first); false when this frame has no room for it.
-    bool linkMicromaps(BlasId id, std::uint32_t postbuild);
+    bool prepareMicromaps(BlasId id);
+    bool finishMicromaps(BlasId id, std::uint32_t postbuild);
     void releaseMicromaps(const LinkedMicromaps& linked);
     D3D12_GPU_VIRTUAL_ADDRESS micromapAddress(std::uint64_t offset) const;
     D3D12_GPU_VIRTUAL_ADDRESS address(const Blas& blas) const;
@@ -273,6 +275,11 @@ private:
     bool micromapLogged{}; // The first link's line is in the log
     bool micromapLinked{};  // A structure has linked micromaps this session (PHANTOM_FX_OMM_ONCE)
     ComPtr<ID3D12Resource> micromaps;
+    // The array builds' own scratch, never the scene's: their place among the scene's builds is what
+    // the in-game hang pointed at (docs/opacity-micromaps.md).
+    ComPtr<ID3D12Resource> micromapScratch;
+    std::uint64_t micromapScratchUsed{};
+    static constexpr std::uint64_t MicromapScratchBytes = 8ull << 20;
     RangeAllocator micromapAllocator{MicromapPoolBytes};
     std::vector<Upload> micromapUploads;
     std::vector<MicromapBake> bakes;

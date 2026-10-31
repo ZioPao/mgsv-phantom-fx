@@ -124,6 +124,7 @@ void Scene::beginFrame(std::uint32_t frameSlot, std::uint64_t completedFence, st
     instances.clear();
     uploadUsed = geometryUploaded = 0;
     scratchUsed = tlasScratch;
+    micromapScratchUsed = 0;
     tally.builtThisFrame = tally.compactedThisFrame = 0;
     tally.builtTriangles = 0;
 }
@@ -137,11 +138,24 @@ void Scene::planBuilds()
     // is built again with them this frame, a queued one waits for its first build as before.
     if (micromapsOn)
     {
-        std::uint32_t linked{};
-        for (BlasId id = 0; id < structures.size() && linked < MicromapLinksPerFrame && staticBuilds < BuildsPerFrame; ++id)
+        // A structure whose array was built last frame links it now, and is the only structure built
+        // with micromaps this frame (docs/opacity-micromaps.md, "In game").
+        for (BlasId id = 0; id < structures.size() && staticBuilds < BuildsPerFrame; ++id)
         {
             auto& blas = structures[id];
-            if (!blas.live || !blas.micromapsDirty || blas.use != Use::Static) continue;
+            if (!blas.live || !blas.pendingLink || blas.use != Use::Static) continue;
+            if (finishMicromaps(id, staticBuilds))
+            {
+                ++staticBuilds;
+                triangles += blas.triangles;
+            }
+        }
+
+        std::uint32_t prepared{};
+        for (BlasId id = 0; id < structures.size() && prepared < MicromapLinksPerFrame; ++id)
+        {
+            auto& blas = structures[id];
+            if (!blas.live || !blas.micromapsDirty || blas.pendingLink || blas.use != Use::Static) continue;
 
             // PHANTOM_FX_OMM_ONCE links one structure a session, for telling one link from a batch of them.
             if (GetEnvironmentVariableA("PHANTOM_FX_OMM_ONCE", nullptr, 0) && micromapLinked) return;
@@ -152,16 +166,10 @@ void Scene::planBuilds()
                 blas.micromapsDirty = false;
                 continue;
             }
-            const bool rebuildsNow = !blas.queued;
-            linkMicromaps(id, staticBuilds);
 
+            if (!prepareMicromaps(id)) continue;
             blas.micromapsDirty = false;
-            ++linked;
-            if (rebuildsNow)
-            {
-                ++staticBuilds;
-                triangles += blas.triangles;
-            }
+            ++prepared;
         }
     }
 
@@ -298,7 +306,7 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
         desc.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
         desc.Inputs.pOpacityMicromapArrayDesc = &array;
         desc.DestAccelerationStructureData = blasPool->GetGPUVirtualAddress() + blas.micromaps->arrayOffset;
-        desc.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress() + build.scratch;
+        desc.ScratchAccelerationStructureData = micromapScratch->GetGPUVirtualAddress() + build.scratch;
         list.BuildRaytracingAccelerationStructure(&desc, 0, nullptr);
     }
     if (!arrayBuilds.empty())
@@ -667,13 +675,13 @@ void Scene::enableMicromaps()
 
     micromaps = createBuffer(device, MicromapPoolBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, "Creating the micromap pool");
+    micromapScratch = createStorage(device, MicromapScratchBytes, "Creating the micromap scratch");
     micromapsOn = true;
 }
 
-bool Scene::linkMicromaps(BlasId id, std::uint32_t postbuild)
+bool Scene::prepareMicromaps(BlasId id)
 {
     auto& blas = structures[id];
-    const bool rebuildsNow = !blas.queued;
 
     // Each source whose geometry takes micromaps with its texture as it is now.
     std::vector<omm_layout::Layout> layouts;
@@ -778,24 +786,11 @@ bool Scene::linkMicromaps(BlasId id, std::uint32_t postbuild)
         geometry.OmmTriangles = {&linked.triangles.back(), &linked.linkages.back()};
     }
 
-    // The structure's room for its new inputs (none of the old structure's: it may still be traced).
-    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = inputsOf(blas, false);
-    inputs.pGeometryDescs = blocks ? linked.geometries.data() : blas.geometries.data();
-    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild{};
-    device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuild);
-    const auto blasScratch = aligned(prebuild.ScratchDataSizeInBytes, 256);
-    const auto offset = blasAllocator.allocate(prebuild.ResultDataMaxSizeInBytes, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT);
-    const bool scratchFits = scratchUsed + arrayScratch + (rebuildsNow ? blasScratch : 0) <= tlasScratch + BuildScratchBytes;
-    if (!offset || !scratchFits)
+    if (blocks && micromapScratchUsed + arrayScratch > MicromapScratchBytes)
     {
-        if (offset) blasAllocator.release(*offset, prebuild.ResultDataMaxSizeInBytes);
-        const char* why = !offset ? "the structures' pool has no room for the structure" : "the frame's scratch has no room";
-        if (blocks)
-        {
-            blasAllocator.release(linked.arrayOffset, linked.arraySize);
-            micromapAllocator.release(linked.poolOffset, poolBytes);
-        }
-        return refuse(why);
+        blasAllocator.release(linked.arrayOffset, linked.arraySize);
+        micromapAllocator.release(linked.poolOffset, poolBytes);
+        return refuse("the micromap scratch has no room");
     }
 
     // Committed: the pool's inputs uploaded, the bake and the array's build recorded.
@@ -824,8 +819,8 @@ bool Scene::linkMicromaps(BlasId id, std::uint32_t postbuild)
 
         const auto at = [&](std::uint64_t poolAt) { return static_cast<std::uint32_t>(linked.poolOffset + poolAt); };
         bakes.push_back({at(recordsAt), blocks, at(statesAt), at(0), at(trianglesAt), triangles, at(indicesAt)});
-        arrayBuilds.push_back({id, blas.generation, std::move(histogram), linked.poolOffset, linked.poolOffset + descsAt, scratchUsed});
-        scratchUsed += arrayScratch;
+        arrayBuilds.push_back({id, blas.generation, std::move(histogram), linked.poolOffset, linked.poolOffset + descsAt, micromapScratchUsed});
+        micromapScratchUsed += arrayScratch;
     }
 
     if (blocks) micromapLinked = true;
@@ -833,23 +828,45 @@ bool Scene::linkMicromaps(BlasId id, std::uint32_t postbuild)
         log("Opacity micromaps: structure " + std::to_string(id) + " linked, " + std::to_string(blocks) + " blocks for " + std::to_string(triangles)
             + " triangles of " + std::to_string(layouts.size()) + " meshes, " + std::to_string(poolBytes / 1024) + " KB " + (blas.micromaps ? "relinking" : "first") + ".");
 
-    releases.push_back({signalValue, Pool::Structures, blas.offset, blas.size});
+    // The array is built this frame; the structure links it in the next (finishMicromaps), so the array
+    // build never shares a frame with the structure it belongs to.
     if (blas.micromaps) releaseMicromaps(*blas.micromaps);
     if (blocks) blas.micromaps = std::move(linked);
     else blas.micromaps.reset();
+    blas.pendingLink = true;
+    return true;
+}
+
+bool Scene::finishMicromaps(BlasId id, std::uint32_t postbuild)
+{
+    auto& blas = structures[id];
+    if (!blas.live || !blas.pendingLink) return false;
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = inputsOf(blas, false);
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild{};
+    device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuild);
+    const auto blasScratch = aligned(prebuild.ScratchDataSizeInBytes, 256);
+    const auto offset = blasAllocator.allocate(prebuild.ResultDataMaxSizeInBytes, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT);
+    if (!offset || scratchUsed + blasScratch > tlasScratch + BuildScratchBytes)
+    {
+        if (offset) blasAllocator.release(*offset, prebuild.ResultDataMaxSizeInBytes);
+        log(std::string("Opacity micromaps: structure ") + std::to_string(id) + " not linked, "
+            + (!offset ? "the structures' pool has no room for the structure" : "the frame's scratch has no room") + ".");
+        return false;
+    }
+
+    releases.push_back({signalValue, Pool::Structures, blas.offset, blas.size});
     blas.offset = *offset;
     blas.size = prebuild.ResultDataMaxSizeInBytes;
     blas.scratch = blasScratch;
     blas.updateScratch = aligned(prebuild.UpdateScratchDataSizeInBytes, 256);
     blas.compacted = false;
+    blas.pendingLink = false;
 
-    if (rebuildsNow)
-    {
-        // No compacted size asked for: a structure with micromaps is never compacted (below).
-        builds.push_back({id, blas.generation, false, scratchUsed, postbuild});
-        scratchUsed += blas.scratch;
-        blas.built = true;
-    }
+    // No compacted size asked for: a structure with micromaps is never compacted (below).
+    builds.push_back({id, blas.generation, false, scratchUsed, postbuild});
+    scratchUsed += blas.scratch;
+    blas.built = true;
     return true;
 }
 
