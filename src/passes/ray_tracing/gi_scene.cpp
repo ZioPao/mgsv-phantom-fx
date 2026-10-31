@@ -162,7 +162,7 @@ void Scene::planBuilds()
         {
             auto& blas = structures[id];
             if (!blas.live || !blas.pendingLink || blas.use != Use::Static) continue;
-            if (finishMicromaps(id, staticBuilds))
+            if (finishMicromaps(id))
             {
                 ++staticBuilds;
                 triangles += blas.triangles;
@@ -175,13 +175,19 @@ void Scene::planBuilds()
         for (BlasId id = 0; id < structures.size(); ++id)
         {
             const auto& blas = structures[id];
-            if (!blas.live || !blas.micromapsDirty || blas.pendingLink || blas.use != Use::Static) continue;
+            // Built and out of the queue: one still waiting would be built twice in a frame, by its link
+            // and by the queue, into the same room.
+            if (!blas.live || !blas.micromapsDirty || blas.pendingLink || blas.use != Use::Static || !blas.built || blas.queued) continue;
             candidates.push_back(id);
         }
         // Biggest first, and eight at most: the experiment that tells an array-count limit from a block
         // budget (2026-10-31: 29 arrays of 28 blocks hung, 8 arrays of thousands may not).
         std::sort(candidates.begin(), candidates.end(), [&](BlasId a, BlasId b) { return structures[a].triangles > structures[b].triangles; });
-        constexpr std::uint32_t MaxStructures = 8;
+        // PHANTOM_FX_OMM_MAX_STRUCTURES overrides the eight, for reproducing the hang under the debug layer.
+        static const auto MaxStructures = [] {
+            char text[16]{};
+            return GetEnvironmentVariableA("PHANTOM_FX_OMM_MAX_STRUCTURES", text, sizeof(text)) ? static_cast<std::uint32_t>(std::atoi(text)) : 8u;
+        }();
         std::uint32_t carrying{};
         for (const auto& other : structures)
             if (other.live && (other.micromaps || other.pendingLink)) ++carrying;
@@ -237,9 +243,13 @@ void Scene::planBuilds()
             continue;
         }
 
-        // The readback's k-th compacted size is the slot's k-th static build's.
-        builds.push_back({id, blas.generation, false, scratchUsed, staticBuilds++});
-        builtInSlot[slot].push_back({id, blas.generation});
+        // The readback's k-th compacted size is the k-th build that asks for one: a build with micromaps
+        // asks for none, so it takes no index (an index without its entry handed every later structure
+        // its neighbour's size, and the compaction overran its room: 2026-10-31, the device hangs).
+        const auto postbuild = static_cast<std::uint32_t>(builtInSlot[slot].size());
+        builds.push_back({id, blas.generation, false, scratchUsed, postbuild});
+        if (!blas.micromaps) builtInSlot[slot].push_back({id, blas.generation});
+        ++staticBuilds;
         scratchUsed += blas.scratch;
         triangles += blas.triangles;
         blas.queued = false;
@@ -329,6 +339,16 @@ void Scene::recordWrites(ID3D12GraphicsCommandList4& list)
     list.ResourceBarrier(1, &barrier);
 }
 
+// PHANTOM_FX_D3D12_DRED labels each build, so a device hang's breadcrumbs name the build that never
+// finished (the markers are DRED's breadcrumb contexts).
+static void mark(ID3D12GraphicsCommandList4& list, const std::string& text)
+{
+    static const bool on = GetEnvironmentVariableA("PHANTOM_FX_D3D12_DRED", nullptr, 0) != 0;
+    if (!on) return;
+    const std::wstring wide(text.begin(), text.end());
+    list.SetMarker(1, wide.c_str(), static_cast<UINT>((wide.size() + 1) * sizeof(wchar_t)));
+}
+
 void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
 {
     D3D12_RESOURCE_BARRIER readable[]{uavBarrier(), transition(geometryPool.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)};
@@ -359,6 +379,7 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
         desc.DestAccelerationStructureData = blasPool->GetGPUVirtualAddress() + blas.micromaps->arrayOffset;
         desc.ScratchAccelerationStructureData = micromapScratch->GetGPUVirtualAddress() + build.scratch;
         if (trace::on()) trace::add("build micromap array " + std::to_string(build.id) + " " + std::to_string(blas.micromaps->blocks) + " blocks");
+        mark(list, "micromap array " + std::to_string(build.id) + " " + std::to_string(blas.micromaps->blocks) + " blocks");
         list.BuildRaytracingAccelerationStructure(&desc, 0, nullptr);
     }
     if (!arrayBuilds.empty())
@@ -377,12 +398,14 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
         if (trace::on())
             trace::add(std::string("build structure ") + std::to_string(build.id) + " " + std::to_string(blas.triangles) + " triangles"
                 + (blas.micromaps ? " linked" : ""));
+        mark(list, "structure " + std::to_string(build.id) + " " + std::to_string(blas.triangles) + " triangles" + (build.update ? " update" : "")
+            + (blas.micromaps ? " linked" : "") + (blas.pendingLink ? " pending" : ""));
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc{};
         desc.Inputs = inputsOf(blas, build.update);
         desc.DestAccelerationStructureData = address(blas);
         desc.SourceAccelerationStructureData = build.update ? address(blas) : 0;
         desc.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress() + build.scratch;
-        if (blas.use == Use::Static && !blas.micromaps)
+        if (blas.use == Use::Static && !blas.micromaps && build.postbuild != NoPostbuild)
         {
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC info{postbuildSizes->GetGPUVirtualAddress() + std::uint64_t{build.postbuild} * 8,
                 D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE};
@@ -410,6 +433,7 @@ void Scene::recordBottomLevels(ID3D12GraphicsCommandList4& list)
     for (const auto& compaction : compactions)
     {
         if (trace::on()) trace::add("compact structure " + std::to_string(compaction.id));
+        mark(list, "compact " + std::to_string(compaction.id));
         list.CopyRaytracingAccelerationStructure(blasPool->GetGPUVirtualAddress() + compaction.to, blasPool->GetGPUVirtualAddress() + compaction.from,
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
     }
@@ -449,6 +473,7 @@ void Scene::recordTopLevel(ID3D12GraphicsCommandList4& list)
     top.DestAccelerationStructureData = tlas->GetGPUVirtualAddress();
     top.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
     if (trace::on()) trace::add("build top level " + std::to_string(instanceCount()) + " instances");
+    mark(list, "top level " + std::to_string(instanceCount()) + " instances");
     list.BuildRaytracingAccelerationStructure(&top, 0, nullptr);
 
     const auto all = uavBarrier();
@@ -603,7 +628,7 @@ bool Scene::rebuild(BlasId id)
         return false;
     }
 
-    builds.push_back({id, blas.generation, false, scratchUsed, 0});
+    builds.push_back({id, blas.generation, false, scratchUsed, NoPostbuild});
     scratchUsed += blas.scratch;
     blas.built = true;
     return true;
@@ -615,7 +640,7 @@ bool Scene::refit(BlasId id)
     if (!blas.built) return rebuild(id);
     if (scratchUsed + blas.updateScratch > tlasScratch + BuildScratchBytes) return false;
 
-    builds.push_back({id, blas.generation, true, scratchUsed, 0});
+    builds.push_back({id, blas.generation, true, scratchUsed, NoPostbuild});
     scratchUsed += blas.updateScratch;
     return true;
 }
@@ -934,7 +959,7 @@ bool Scene::prepareMicromaps(BlasId id)
     return true;
 }
 
-bool Scene::finishMicromaps(BlasId id, std::uint32_t postbuild)
+bool Scene::finishMicromaps(BlasId id)
 {
     auto& blas = structures[id];
     if (!blas.live || !blas.pendingLink) return false;
@@ -965,8 +990,10 @@ bool Scene::finishMicromaps(BlasId id, std::uint32_t postbuild)
     blas.compacted = false;
     blas.pendingLink = false;
 
-    // No compacted size asked for: a structure with micromaps is never compacted (below).
-    builds.push_back({id, blas.generation, false, scratchUsed, postbuild});
+    // No compacted size asked for: a structure with micromaps is never compacted, and one that lost them
+    // has no readback entry this frame.
+    builds.push_back({id, blas.generation, false, scratchUsed, NoPostbuild});
+    blas.queued = false;
     scratchUsed += blas.scratch;
     blas.built = true;
     return true;
