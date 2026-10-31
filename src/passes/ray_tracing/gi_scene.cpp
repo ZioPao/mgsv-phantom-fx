@@ -33,6 +33,10 @@ constexpr std::uint64_t MicromapBytesPerMesh = 4ull << 20;
 constexpr std::uint32_t MicromapLinksPerFrame = 1;
 // How many structures may carry micromaps at once: beyond that the emulated path stops finishing
 // frames (docs/opacity-micromaps.md, section 8a). Everything else keeps the shader's own alpha test.
+// Every structure that takes micromaps may carry them: at a few thousand triangles out of millions the
+// alpha test it replaces is 0.06% of the scene, so capping the count hides any gain (docs/opacity-micromaps.md).
+// Eight is the most the device has been observed to link and stay up (2026-10-31: 10-33 links hang
+// it, whatever else changes); beyond that the rays keep the shader's own alpha test.
 constexpr std::uint32_t MicromapStructures = 8;
 // D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_BYTE_ALIGNMENT, which the Windows SDK's 26100 headers lack: an
 // array's input starts on it.
@@ -229,8 +233,7 @@ void Scene::planBuilds()
     for (const auto& due : compactionsDue)
     {
         auto& blas = structures[due.id];
-        // A structure with micromaps was built without ALLOW_COMPACTION: copying it as compacted is
-        // undefined, and was the in-game device removal's cause (docs/opacity-micromaps.md).
+        // Never a structure with micromaps: see inputsOf.
         if (!blas.live || blas.generation != due.generation || blas.compacted || blas.micromaps || due.size >= blas.size) continue;
 
         const auto to = blasAllocator.allocate(due.size, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT);
@@ -610,10 +613,13 @@ void Scene::setMaterial(BlasId id, std::uint32_t geometry, const scene_descripti
     row.normalTexture = material.normalTexture;
     writeRow(blas.firstGeometry + geometry, row);
 
-    // Its micromaps are baked from its texture's alpha: a new texture, threshold or role bakes them again.
+    // A structure that carries micromaps keeps them: they were baked from the 512-pixel copy the rays
+    // sample, so the game's finer mips arriving (a new slot, the same picture) change nothing they see,
+    // and relinking would rebuild the structure for no quality gain. Only one that had no texture yet
+    // asks again.
     const bool hasSource = geometry < blas.sources.size() && !blas.sources[geometry].uvs.empty();
-    if (hasSource && (row.texture != before.texture || row.alphaThreshold != before.alphaThreshold || row.flags != before.flags))
-        blas.micromapsDirty = true;
+    const bool takes = (row.flags & GI_GEOMETRY_CUT_OUT) && !(row.flags & GI_GEOMETRY_HAIR) && row.texture;
+    if (hasSource && takes && !blas.micromaps) blas.micromapsDirty = true;
 }
 
 bool Scene::ready(BlasId id) const
@@ -900,18 +906,23 @@ bool Scene::finishMicromaps(BlasId id, std::uint32_t postbuild)
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild{};
     device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuild);
     const auto blasScratch = aligned(prebuild.ScratchDataSizeInBytes, 256);
-    const auto offset = blasAllocator.allocate(prebuild.ResultDataMaxSizeInBytes, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT);
+
+    // New room, never the structure's own: rebuilding a linked structure where the last frames' top
+    // levels still point at it ends in a device hang (2026-10-31, 17 links in during a load).
+    const bool inPlace = false;
+    std::optional<std::uint64_t> offset = blasAllocator.allocate(prebuild.ResultDataMaxSizeInBytes,
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT);
     if (!offset || scratchUsed + blasScratch > tlasScratch + BuildScratchBytes)
     {
-        if (offset) blasAllocator.release(*offset, prebuild.ResultDataMaxSizeInBytes);
+        if (offset && !inPlace) blasAllocator.release(*offset, prebuild.ResultDataMaxSizeInBytes);
         log(std::string("Opacity micromaps: structure ") + std::to_string(id) + " not linked, "
             + (!offset ? "the structures' pool has no room for the structure" : "the frame's scratch has no room") + ".");
         return false;
     }
 
-    releases.push_back({signalValue, Pool::Structures, blas.offset, blas.size});
+    if (!inPlace) releases.push_back({signalValue, Pool::Structures, blas.offset, blas.size});
     blas.offset = *offset;
-    blas.size = prebuild.ResultDataMaxSizeInBytes;
+    if (!inPlace) blas.size = prebuild.ResultDataMaxSizeInBytes;
     blas.scratch = blasScratch;
     blas.updateScratch = aligned(prebuild.UpdateScratchDataSizeInBytes, 256);
     blas.compacted = false;
@@ -939,8 +950,9 @@ D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS Scene::inputsOf(const Blas&
 {
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
     inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-    // A structure with micromaps is not compacted: a copy of it would keep pointing at its array, and the
-    // copies are a path the driver has to get right for both.
+    // A structure with micromaps does not compact: compacting one that links an OMM array ends in a
+    // device hang on this runtime (2026-10-31, with ALLOW_COMPACTION set properly, unlike the first
+    // time), so linked statics keep their room and their size.
     inputs.Flags = blas.use == Use::Static && !blas.micromaps
         ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION
         : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE
