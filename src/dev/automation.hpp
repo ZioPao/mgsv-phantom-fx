@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <string>
 
 struct ID3D11DeviceContext;
 struct ID3D11Resource;
@@ -26,6 +27,8 @@ struct ID3D11Resource;
 //   wait <frames>                 lets that many frames present
 //   wait_scene                    until the scene's work to do has stopped changing
 //   probe <x> <y>                 the shadow and lamp probes' text at that render pixel
+//   perf <file> [<frames>]        what the GPU's next frames cost, into `<file>.json` (perf_record.hpp), 120 without saying
+//   record_costs 0|1              the Developer page's Record the costs
 //   inspect <file>                a record of every pixel, into `<file>.bin` and `<file>.tsv` (inspect_trace.hpp)
 //   image <file>                  the next presented frame as `<file>.dds`
 //   textures <folder>             the ray tracing's textures and the game's shadow, as DDS files
@@ -39,8 +42,13 @@ struct ID3D11Resource;
 //   clock <seconds>               the time of day, its clock stopped there (weather.hpp)
 //   weather <type> [<fog>]|off    forces TppDefine.WEATHER's type, with the fog's density for Foggy; or lets go
 //   status                        frame counts, the camera, the scene
+//   peek <address|game+rva> [bytes]  the game's memory there, 256 bytes without saying, 4096 at most
+//   drawn <x> <y> <z> <radius>    where the main camera's rigid model draws of the next 10 frames put their models, near there
+//   owner <hash>                  every placement of that model the next snapshot finds: its owner, fields and raw bytes
 namespace phantom_fx::automation
 {
+// The local time as the tools' files are named by it: 2026-11-01_21-05-09.
+std::string timeNow();
 void install(const std::filesystem::path& addonDirectory) noexcept;
 // F9: on the render thread.
 void caseKey() noexcept;

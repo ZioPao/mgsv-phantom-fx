@@ -42,7 +42,7 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 #define GI_GEOMETRY_SHADOW_ONLY   128u // The game draws it into its shadow maps only (a tarp's stand-in): only rays towards lights meet it (StopsRay)
 #define GI_GEOMETRY_SUN_ONLY      256u // With GI_GEOMETRY_SHADOW_ONLY (a building's stand-in): of the rays towards lights, only the sun's meet it (StopsShadowRay)
 #define GI_GEOMETRY_EMISSIVE      512u // With GI_GEOMETRY_NO_SHADOW: it gives light (GIGeometry::emission) and takes none, its texture its light's colour
-#define GI_GEOMETRY_GLASS         1024u // With GI_GEOMETRY_CUT_OUT: every ray passes it (CutOutBlocks) but a reflection's, which it reflects by its mask (TraceReflectionRay)
+#define GI_GEOMETRY_GLASS         1024u // With GI_GEOMETRY_CUT_OUT: every ray passes it (CutOutBlocks), a light's dimmed by its mask (PaneTransmittance), but a reflection's, which it reflects by its mask (TraceReflectionRay)
 #define GI_GEOMETRY_MIRROR        2048u // With GI_GEOMETRY_GLASS: it reflects all of a reflection's rays
 #define GI_GEOMETRY_LAYER_BLEND   4096u // Its layer takes the base texture's place where it lies, not multiplying it (LayeredAlbedo)
 #define GI_GEOMETRY_LAYER_LINEAR  8192u // With GI_GEOMETRY_LAYER_BLEND: in linear light, not on the encoded values
@@ -119,6 +119,12 @@ struct float4x4 { float m[16]; }; // Rows, applied as dot(row, v), as the engine
 // The point and spot lights a frame's shadows can hold (TraceLocalLightShadows in gi_shadow.hlsl). A base
 // at night drew about 100.
 #define GI_MAX_LOCAL_LIGHTS 128u
+// Which lights can reach a place (light_bins.hpp): bins this wide in metres, around the eye, so many along x and z and along y.
+#define GI_LIGHT_BIN_SIZE 2.0f
+#define GI_LIGHT_BINS_ACROSS 128u
+#define GI_LIGHT_BINS_HIGH 64u
+// How far past the game's volume for it a light still gives light, metres (LocalLightReaching).
+#define GI_LIGHT_VOLUME_MARGIN 0.02f
 
 // A point or spot light as its shadow rays and the global illumination's hits need it: a point in the
 // world whose light falls off as the game's light shaders have it (LocalLightAt in gi_light.hlsl), cut
@@ -212,6 +218,11 @@ struct GIFrameConstants
     // The point and spot lights' shadows (TraceLocalLightShadows): x the frame's lights, y rays a pixel.
     uint4 localLightCount;
     GILocalLight localLights[GI_MAX_LOCAL_LIGHTS];
+    // Which of them can reach a place (light_bins.hpp): a bit a light, along each axis from the origin.
+    float4 lightBinsOrigin;
+    uint4 lightBinsX[GI_LIGHT_BINS_ACROSS];
+    uint4 lightBinsY[GI_LIGHT_BINS_HIGH];
+    uint4 lightBinsZ[GI_LIGHT_BINS_ACROSS];
     // Self-lit meshes: x their light's scale from the game's units (the menu's strength times the light scale); y the
     // most radiance one lights others with, so scaled. And those the rays aim at: x how many.
     float4 emission;
@@ -283,6 +294,10 @@ struct GIShadowProbe
     uint4 startHit;  // On the scene's own surface, its triangle: x its instance + 1, y its geometry, z its primitive; w the
                      // primitive of the whole ray's first hit (hits.w)
     uint4 crossed;   // The first thing between the lifted start and the surface, from the start, as lightNearest; zeros for none
+    // The pane the sun's ray crosses there, if any: what its mask covers and what reaches the start through it.
+    float4 glass;    // x: the pane's cover (GlassCover), y: what it lets through (PaneTransmittance), z: the pane's geometry row,
+                     // w: 1 on a pane met against its face, 0 with none
+    uint4 glassHit;  // x its instance + 1, y its geometry, z its primitive; w its mask texture's id, 0 without one
 };
 
 // The lamp probe: the point and spot lights at the screen's centre pixel, each with a ray from there to

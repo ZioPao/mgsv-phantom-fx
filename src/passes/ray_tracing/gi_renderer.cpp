@@ -3,6 +3,7 @@
 
 #include "camera.hpp"
 #include "clock.hpp"
+#include "dev/perf_record.hpp"
 #include "dev_tools.hpp"
 #include "features/global_illumination/gi_light.hpp"
 #include "features/path_tracing/path_tracing_rays.hpp"
@@ -11,6 +12,7 @@
 #include "log.hpp"
 #include "passes/ray_tracing/gi_d3d12.hpp"
 #include "passes/ray_tracing/gi_scene.hpp"
+#include "passes/ray_tracing/light_bins.hpp"
 #include "passes/ray_tracing/scene_contents.hpp"
 #include "passes/ray_tracing/shaders/gi_shared.h"
 #include "passes/ray_tracing/trace.hpp"
@@ -93,6 +95,7 @@ struct State
         std::uint32_t slot{}, width{}, height{};
         FrameBinding binding;
         ID3D12Resource* reflection{};
+        ID3D12Resource* shadow{}; // The sun's visibility at the surface, written beside the reflection
     };
     std::optional<SurfaceTrace> surfaceTrace;
     HANDLE event{};
@@ -138,7 +141,7 @@ struct State
     double sceneMilliseconds{}, lightMilliseconds{}, shadowMilliseconds{};
     struct Tally
     {
-        std::vector<std::pair<const char*, double>> phases; // Milliseconds, in the order they first ran
+        performance::PhaseTimes phases;
         std::uint32_t timedFrames{}, frames{}, builds{}, mostBuilds{}, waiting{}, compactions{};
         std::uint64_t builtTriangles{};
         double cpuMilliseconds{}, mostCpuMilliseconds{};
@@ -148,11 +151,14 @@ struct State
 
     // Diagnostics: a copy of the output every ten seconds, read once the GPU is past it.
     ComPtr<ID3D12Resource> statsReadback, statsCounters;
+    // For DevTools: each slot's frame's counters, while the costs are kept on file.
+    std::array<ComPtr<ID3D12Resource>, FramesInFlight> countersReadback;
+    std::array<bool, FramesInFlight> countersWritten{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT statsFootprint{};
     std::uint64_t statsFence{}, lastStats{};
     Shared depth, normal, albedo, output, shadow, shadowDebug, velocity, terrainPages, terrainHeights, lightDebug, materialSpecular, skyCube, guideNormals,
         guideSpecular, reflection, reflectionDistance, reflectionMap, guideMaterial, guideLobe, specularTable, lampMasks, lampDiffuse, lampSpecular, surfaceDepth,
-        surfaceNormal, surfaceReflection;
+        surfaceNormal, surfaceReflection, forwardShadow;
 
     ~State()
     {
@@ -390,6 +396,7 @@ GIFrameConstants constantsOf(const Frame& frame, std::uint32_t newGeometries, st
             {light.maskTile, 0, 0, 0}};
     }
     constants.localLightCount = {static_cast<std::uint32_t>(localLights), frame.localLightRays, 0, 0};
+    light_bins::fill(constants);
 
     return constants;
 }
@@ -494,6 +501,32 @@ bool started() noexcept
     return state != nullptr;
 }
 
+// The counters as they stand into `readback`, made the first time.
+void copyCounters(State& s, Recorder& recorder, ComPtr<ID3D12Resource>& readback)
+{
+    if (!readback)
+        readback = createBuffer(s.device.Get(), GI_COUNTER_COUNT * 4, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE,
+            "Creating the counters' readback");
+
+    recorder.transition(s.counters.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    s.list->CopyBufferRegion(readback.Get(), 0, s.counters.Get(), 0, GI_COUNTER_COUNT * 4);
+    recorder.transition(s.counters.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+// What a copy of the counters holds, once the GPU is past it.
+std::optional<std::array<std::uint32_t, GI_COUNTER_COUNT>> readCounters(ID3D12Resource* readback)
+{
+    void* mapped{};
+    if (FAILED(readback->Map(0, nullptr, &mapped))) return std::nullopt;
+
+    std::array<std::uint32_t, GI_COUNTER_COUNT> counters{};
+    std::memcpy(counters.data(), mapped, sizeof(counters));
+    const D3D12_RANGE none{};
+    readback->Unmap(0, &none);
+
+    return counters;
+}
+
 // Diagnostics: every ten seconds, a copy of the output and the counters for logStats.
 void copyStats(State& s, Recorder& recorder, ID3D12Resource* output, const Frame& frame)
 {
@@ -507,14 +540,8 @@ void copyStats(State& s, Recorder& recorder, ID3D12Resource* output, const Frame
     if (!s.statsReadback || s.statsReadback->GetDesc().Width < bytes)
         s.statsReadback = createBuffer(s.device.Get(), bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
             D3D12_RESOURCE_FLAG_NONE, "Creating the light's readback");
-    if (!s.statsCounters)
-        s.statsCounters = createBuffer(s.device.Get(), GI_COUNTER_COUNT * 4, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST,
-            D3D12_RESOURCE_FLAG_NONE, "Creating the counters' readback");
 
-    recorder.transition(s.counters.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    s.list->CopyBufferRegion(s.statsCounters.Get(), 0, s.counters.Get(), 0, GI_COUNTER_COUNT * 4);
-    recorder.transition(s.counters.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
+    copyCounters(s, recorder, s.statsCounters);
     recorder.transition(output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
     D3D12_TEXTURE_COPY_LOCATION from{output, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {}};
     from.SubresourceIndex = 0;
@@ -572,13 +599,10 @@ void logStats(State& s)
         + at(0.99) + ", max " + at(1.0) + "; mean rgb " + std::to_string(sum[0] / count) + " " + std::to_string(sum[1] / count) + " "
         + std::to_string(sum[2] / count) + ".");
 
-    void* mapped{};
-    if (FAILED(s.statsCounters->Map(0, nullptr, &mapped))) return;
+    const auto counters = readCounters(s.statsCounters.Get());
+    if (!counters) return;
 
-    std::uint32_t counters[GI_COUNTER_COUNT]{};
-    std::memcpy(counters, mapped, sizeof(counters));
-    s.statsCounters->Unmap(0, nullptr);
-    const auto value = [&](std::uint32_t counter) { return std::to_string(counters[counter]); };
+    const auto value = [&](std::uint32_t counter) { return std::to_string((*counters)[counter]); };
     log("Global illumination's rays: " + value(GI_COUNTER_HITS) + " hits (" + value(GI_COUNTER_NEAR_HITS) + " within 25 cm), "
         + value(GI_COUNTER_BOUNCE_HITS) + " bounces that hit (" + value(GI_COUNTER_VISIBILITY0) + " into the cache, " + value(GI_COUNTER_FULL_BUCKETS)
         + " without room in it), " + value(GI_COUNTER_VISIBILITY1) + " multibounce rays kept (" + value(GI_COUNTER_MULTIBOUNCE_AWAY)
@@ -590,7 +614,7 @@ void logStats(State& s)
         "a multibounce", "a ray's light", "a denoised light pixel", "a render pixel"};
     std::string maxima;
     for (std::uint32_t i = 0; i < GI_COUNTER_MAXIMA; ++i)
-        maxima += std::string(i ? ", " : "") + MaximumNames[i] + " " + std::to_string(std::bit_cast<float>(counters[GI_COUNTER_MAXIMA_FIRST + i]));
+        maxima += std::string(i ? ", " : "") + MaximumNames[i] + " " + std::to_string(std::bit_cast<float>((*counters)[GI_COUNTER_MAXIMA_FIRST + i]));
     log("Global illumination's largest values in that frame (before the exposure; the lights line gives the sun's and sky's): " + maxima + ".");
 }
 
@@ -607,6 +631,7 @@ void readTimes(State& s, std::uint32_t slot)
     const auto* ticks = reinterpret_cast<const std::uint64_t*>(static_cast<const std::uint8_t*>(data) + range.Begin);
     const double toMilliseconds = 1000.0 / static_cast<double>(s.timestampFrequency);
     performance::Milliseconds passes{};
+    performance::PhaseTimes phaseTimes; // For DevTools
     for (std::size_t i = 0; i + 1 < marks.size(); ++i)
     {
         // From the frame's list's end to the next list's start: the game's own work.
@@ -614,16 +639,15 @@ void readTimes(State& s, std::uint32_t slot)
 
         const double milliseconds = ticks[i + 1] >= ticks[i] ? static_cast<double>(ticks[i + 1] - ticks[i]) * toMilliseconds : 0.0;
         if (const auto pass = marks[i].pass) passes[static_cast<std::size_t>(*pass)] += static_cast<float>(milliseconds);
-        auto& phases = s.tally.phases;
-        const auto found = std::find_if(phases.begin(), phases.end(), [&](const auto& phase) { return std::strcmp(phase.first, marks[i].phase) == 0; });
-        if (found != phases.end()) found->second += milliseconds;
-        else phases.emplace_back(marks[i].phase, milliseconds);
+        performance::addPhase(s.tally.phases, marks[i].phase, milliseconds);
+        if constexpr (DevTools) phaseTimes.emplace_back(marks[i].phase, milliseconds);
     }
 
     const D3D12_RANGE none{};
     s.timestampReadback->Unmap(0, &none);
     marks.clear();
     performance::timedOnDirect3D12(passes);
+    if constexpr (DevTools) perf_record::onPhases(phaseTimes);
 
     using enum performance::Pass;
     const auto sum = [&](std::initializer_list<performance::Pass> of) {
@@ -698,6 +722,13 @@ std::pair<std::string, std::string> describeProbe(const State& s, std::span<cons
     }
     else
         text += "with every instance: nothing in the scene blocks it\n";
+
+    if (probe.glass.w > 0.5f)
+        text += std::format("the sun's ray crosses a pane: instance {}, geometry {}, its mask {}, cover {:.2f}, lets through {:.2f} (at the mask's "
+            "sharpest level)\n",
+            probe.glassHit.x - 1, probe.glassHit.y, probe.glassHit.w, probe.glass.x, probe.glass.y);
+    else
+        text += "the sun's ray crosses no pane\n";
 
     const auto& g = probe.lightRays;
     text += std::format("its global illumination rays ({}): {} hit within 1 m, {} within 10 m, {} get away, {} hit a back face; the nearest hit: {}\n",
@@ -835,6 +866,12 @@ Result render(const Frame& frame)
     if constexpr (DiagnosticLog) logStats(s);
     readTimes(s, slot);
     readProbe(s, slot);
+    if constexpr (DevTools)
+    {
+        if (std::exchange(s.countersWritten[slot], false))
+            if (const auto counters = readCounters(s.countersReadback[slot].Get())) perf_record::onCounters(*counters);
+    }
+
     const std::function<void()> waitForAll = [&] { waitFor(s, *std::max_element(s.submitted.begin(), s.submitted.end())); };
     const trace::TraceFrame traceFrame{frame, s.device.Get(), waitForAll, *s.contents, s.instancedModels[slot], slot};
     for (auto* each : trace::inOrder()) each->prepare(traceFrame);
@@ -941,6 +978,7 @@ Result render(const Frame& frame)
                 traced.surfaceDepth = openShared(s, s.surfaceDepth, frame.textures.surfaceDepth, "Opening the glass's depth").Get();
                 traced.surfaceNormal = openShared(s, s.surfaceNormal, frame.textures.surfaceNormal, "Opening the glass's normals").Get();
                 traced.surfaceReflection = openShared(s, s.surfaceReflection, frame.textures.surfaceReflection, "Opening the glass's reflections").Get();
+                traced.forwardShadow = openShared(s, s.forwardShadow, frame.textures.forwardShadow, "Opening the surfaces' shadow").Get();
             }
         }
         if (traces.tracesLampLight)
@@ -1126,11 +1164,20 @@ Result render(const Frame& frame)
 
         if (traces.tracesReflections) path_tracing_rays::recordReflections(recorder, frame.width, frame.height);
 
-        if (traces.tracesGlass) surfaceTrace = State::SurfaceTrace{slot, frame.width, frame.height, frameBinding, traced.surfaceReflection};
+        if (traces.tracesGlass) surfaceTrace = State::SurfaceTrace{slot, frame.width, frame.height, frameBinding, traced.surfaceReflection, traced.forwardShadow};
 
         if constexpr (DiagnosticLog)
         {
             if (traces.tracesLight && !frame.showScene) copyStats(s, recorder, output, frame);
+        }
+
+        if constexpr (DevTools)
+        {
+            if (traces.tracesLight && !frame.showScene && perf_record::isKeepingCosts())
+            {
+                copyCounters(s, recorder, s.countersReadback[slot]);
+                s.countersWritten[slot] = true;
+            }
         }
 
         transitionShared(true);
@@ -1166,6 +1213,8 @@ Result render(const Frame& frame)
     t.builtTriangles += stats.builtTriangles;
     t.waiting += stats.waiting;
     t.compactions += stats.compactedThisFrame;
+    if constexpr (DevTools)
+        perf_record::onKick({frame.width, frame.height, instanceCount, static_cast<std::uint32_t>(update.skins.size()), stats.builtThisFrame, s.triangles, stats.builtTriangles});
 #if PHANTOM_FX_DEV_TOOLS
     workWaiting = stats.waiting + s.contents->waitingWork();
 #endif
@@ -1197,7 +1246,9 @@ bool traceSurfaces(std::uint64_t waitValue, std::uint64_t signalValue)
         const auto firstMark = static_cast<UINT>(marks.size());
         recorder.marker = timestampMarker(s, list, trace.slot);
         recorder.transition(trace.reflection, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        recorder.transition(trace.shadow, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         path_tracing_rays::recordSurfaceReflections(recorder, trace.width, trace.height);
+        recorder.transition(trace.shadow, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
         recorder.transition(trace.reflection, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
         recorder.mark(nullptr);
         const auto marked = static_cast<UINT>(marks.size()) - firstMark;

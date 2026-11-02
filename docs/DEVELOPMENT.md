@@ -65,7 +65,7 @@ documentation and licenses are in `PhantomFX/`.
 ctest --test-dir build/release
 ```
 
-This runs eleven tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
+This runs fourteen tests that need neither the game nor a GPU. `tests/upscaler_tests.cpp`: settings
 (defaults, round trip, clamping, invalid files and values), the mode maths (render scales, texture LOD
 bias), the render size plan (DLSS's own size or the nominal one, rounded up to even and never above the
 output size, Custom's DLSS quality, the settings that make a new plan), the frames (when one starts,
@@ -107,6 +107,8 @@ view and the glass's targets. `tests/shared_textures_tests.cpp`: a shared output
 read until written, the same size keeping what it holds, a new size or a replaced texture leaving it unwritten.
 `tests/d3d12_host_tests.cpp`: Direct3D 12 work at a point of the immediate context, on WARP devices: each side reads what
 the other just wrote, frame after frame as the lists come round, and a failed evaluation leaves the next one fine.
+`tests/light_bins_tests.cpp`: a light that reaches a place is in that place's bins, wherever the light, the place and
+the eye are, in the bins or past them, however far it reaches, and stays out of places off its box.
 `tests/kernel_table_tests.cpp`: what the build makes of the compiled kernels: each kind of binding its own type,
 what the root signature binds left out, a slot with two names, a name with two shapes and a kernel without
 bindings failing.
@@ -206,6 +208,7 @@ what draws it, when that is the feature's own.
 | `src/passes/ray_tracing/trace.*` | A trace's steps, and the traces in the order the frame runs them (see "What a kick traces") |
 | `src/passes/ray_tracing/shared_textures.*` | What Direct3D 11 and 12 share: the Direct3D 11 half of a trace's results, and the rows that open, transition and bind a trace's textures |
 | `src/passes/ray_tracing/gi_renderer.*` | The Direct3D 12 side: the device, the scene's frame (the scene contents' update, then the recording), each feature's passes recorded in turn, the probes |
+| `src/passes/ray_tracing/light_bins.*` | Which of the frame's lights can reach a place, in bins along each world axis (see "Light bins") |
 | `src/passes/ray_tracing/scene_contents.*` | The scene contents: the game's models, their variants, characters, terrain rings, the sea's plane and textures the ray-traced scene holds, made as the scene memory has room and let go after a while unplaced; each frame's instances of them; their diagnostics (status, the probes' hits, F10's `models.txt`) (see "Ray-traced scene") |
 | `src/passes/ray_tracing/scene_memory.hpp` | The scene memory: the seam the scene contents reach the GPU through (the pool, structures, texture slots, instances) |
 | `src/passes/ray_tracing/gi_scene.*` | The ray-traced scene on Direct3D 12, the scene memory: the geometry pool, bottom-level structures (a geometry per mesh, compacted), the geometry table, the game's textures' slots, the frame's instances and top level (see "Ray-traced scene") |
@@ -251,8 +254,9 @@ what draws it, when that is the feature's own.
 | `src/dev/inspect_trace.cpp`, `src/dev/inspect_trace.hpp`, `src/dev/inspect.hlsl`, `src/dev/inspect_shared.h` | A debug case's record of every pixel, a trace of its own |
 | `src/dev/game_shadow.cpp`, `src/dev/game_shadow.hpp` | A debug case's reference: the game's shadow per pixel, drawn at the sun pass |
 | `src/dev/held_camera.cpp`, `src/dev/held_camera.hpp` | A debug case's camera, which photo mode's camera update takes |
+| `src/dev/perf_record.cpp`, `src/dev/perf_record.hpp` | What frames cost, on file, a row a second and captures for comparing frames (see "Costs on file") |
 | `src/dev/save_redirect.cpp`, `src/dev/save_redirect.hpp` | The automation copy of the game: its saves, backups and display settings kept apart from the player's |
-| `tools/automation/` | Dev builds: `fx.py` talks to the running game, `case.py` reports a debug case, `install.ps1` and `launch.ps1` run the automation copy; `check_release.py` fails if any of it reached a release build |
+| `tools/automation/` | Dev builds: `fx.py` talks to the running game, `case.py` reports a debug case, `perf.py` reads and compares the costs on file, `install.ps1` and `launch.ps1` run the automation copy; `check_release.py` fails if any of it reached a release build |
 | `src/resource_dump.cpp`, `src/resource_dump.hpp` | Format names, constant rows, DDS saving for the dumps |
 | `src/shader_bytecode.cpp`, `src/shader_bytecode.hpp` | DXBC checksum (bytes 4 to 20 of the container), the instruction walk, the output saturation patch, the dither patch |
 | `src/log.cpp`, `src/log.hpp` | `PhantomFX.log` beside the add-on, one per game session |
@@ -426,7 +430,7 @@ more can be asked of the same frame. Aim the screen's centre at the fault first 
   albedo, the light, the sun's and lamps' shadows, reflections, the lamps' light); what the game's shadow map
   alone says of each pixel (`game-shadow.dds`, 1 lit, 0 blocked, -1 no answer: `SHADOW_MAP` with `GAME_SHADOW` in
   `sun_light_pass_shaders.hpp`, drawn after the sun pass with its inputs as bound); what the scene is at
-  (`state.txt`), the settings; and two records of every pixel.
+  (`state.txt`), the settings; what the frozen frame costs (`perf.json`, "Costs on file"); and two records of every pixel.
 - **A record** (`scene.bin`, `revealed.bin`: `GIInspectPixel`, `InspectPixels` in `src/dev/inspect.hlsl`) has what the
   camera's ray meets first, what the scene has within a tolerance of the game's surface, what blocks the ray to the
   sun, and the game's distance. The `.tsv` beside it names every hit as the probes do.
@@ -478,8 +482,8 @@ Diagnostics ends with what the add-on's passes cost on the GPU (`src/performance
 per effect with a bar, its milliseconds and its share of the GPU frame, each opening to its passes,
 averaged over about half a second. The GPU frame runs from a timestamp at the frame's first
 command list to one at its present. Frames are timed only while the costs are on screen (the
-Diagnostics section open, or **Show the costs over the game**) or measured; otherwise no query is
-made.
+Diagnostics section open, or **Show the costs over the game**), measured, or in a dev build kept on
+file ("Costs on file"); otherwise no query is made.
 
 - **Timestamps.** Each pass ends a timestamp query before and after its work (`performance::Timed`),
   on the context it records on, inside one disjoint query per frame on the immediate context. The
@@ -515,6 +519,26 @@ made.
 - **Report.** While the costs show over the game or are measured, `PhantomFX-performance.txt`
   beside the log holds them, rewritten every second and once more after, so it keeps a finished
   measurement. `PhantomFX.log` gets each measurement's result.
+
+### Costs on file
+
+So a play session needs no one watching it. With **Record the costs** on the Developer page ticked, a dev build keeps the
+costs running and writes what each second cost to `PhantomFX-automation/perf/<time>.jsonl` (`src/dev/perf_record.cpp`): the
+frames' times with their spread, the GPU frame, each pass, each traced phase, the lights, the scene as the second's last
+kick had it with what the second built, and the rays' counters, with the map, the game's clock, the camera and whether the
+game is frozen. A line with the settings in force, as PhantomFX.ini's lines, comes first and whenever they change. It is
+off by default and stays as set across starts, by a `recording` file in that folder: a setting would put a tool's line in
+every player's PhantomFX.ini. With it off and no capture running, the recorder asks nothing of the game.
+
+- `perf.py log` reads a session by stretch of the same place, then its worst seconds.
+- The `perf <file> [<frames>]` line takes the same over a set number of the GPU's frames into a file of its own, recording
+  or not. A debug case takes one before anything else, as `perf.json`.
+  With no one timing, it takes a few presents more while the timing starts, all of the same frozen frame.
+- `perf.py ab <test> ...` compares changes on the frame as it stands: base, test, base, test, base, each after settling,
+  so a GPU that drifts as it warms shows up. Judge a difference only against the drift it reports. If a line fails it stops
+  without a table. `--images` also saves each frame and says how far it moved from the base.
+
+Compare GPU times, not frame rates: the automation copy's frame rate says little when its window is out of sight.
 
 ### Weather and time
 
@@ -1215,6 +1239,17 @@ level at Camp Omega's cliffs. No names in the exe: the class names here are desc
   whose `+0x20` and `+0x28` begin and end an array of world matrices (4x4, column-major: translation
   at `+0x30`, `1` at `+0x3C`). The props and buildings the game draws one by one with skinning shaders
   and `m_useWeightCount` 0 (see "Ray-traced shadows").
+  The holder's instances (`+0x10`, `0x60` bytes each, vtable `0x210D998`, in the matrices' order) point to their matrix
+  at `+0x28`; an instance's byte at `+0x1E` has bit `0x02` while the group does not draw it. Destructible props (barrels,
+  a hut's window panes) are such groups: the game moves a few single models of the prop onto the placements near the
+  player and stops drawing the group's copy there, and stops drawing a broken one's (2026-11-02, read with the `owner`,
+  `drawn` and `peek` automation lines: of a hut's 18 window panes, the bit was set on the three a single model stood on and
+  on the one the player broke, which the main camera's draws no longer held; clear on the others, each drawn once a frame,
+  the six about 170 m away included). Nothing else in the group, its instances' records, their ids or its model changed
+  when a pane or a barrel broke. The scene leaves those instances out (`undrawnInstances` in `engine_scene.cpp`), and
+  places a group whole when its instances do not read as these. Before, a broken barrel stayed in the rays and a
+  standing prop near the player was there twice; a rule placing such props from their single models alone dropped every
+  pane without one, and with it the dirt in their light.
 - **Model** (vtable `0x20F4D90`, `0x200` bytes), shared by a group's instances or an instance itself:
   `+0x40` the world matrix (also at `+0xA0`), `+0x80` the local box (min, max as float4), `+0x118` the
   resource handle (vtable `0x21027C0`, `0xA0` bytes: `+0x30` the file's 64-bit path hash, `+0x60` the
@@ -1913,6 +1948,9 @@ the game's lights) is left alone until it runs.
     its vertex shader gives none). The last drawn is the nearest, as the game sorts what blends; the weights blend as the
     game blends, so a pane drawn twice, as many are, weighs as it shows. A mirror with the live picture stays the game's
     (its texture is a render target), and so does whatever a smaller camera's view draws.
+    Its shadow map leaves the draw too (`t8`, `s15`), replaced by a 1x1 lit one and the sampler that always compares
+    (`forward_surfaces::tracedShadow`): the map's shadow no longer matches a scene the rays shaded, and the composite
+    dims the pane by the rays' shadow at its own pixels instead.
   - **The trace** (`ray_tracing::traceSurfaces`). Before the exposure's list, a frame that drew a surface signals the fence,
     and Direct3D 12 traces the marked pixels on the scene the kick built, in a list of their own (`gi_renderer::traceSurfaces`), up to
     `SpecularRays` as any glossy surface; Direct3D 11 waits. The rays' hits come from the same `ReflectedLight`. So
@@ -1922,12 +1960,17 @@ the game's lights) is left alone until it runs.
     encoded and added by the surface's alpha, in the scene's encoded values, as the game blends its glass, over a copy of the
     scene, before the exposure, the depth of field and the upscaler read it. So a particle in front of a pane has the
     reflection over it. A traced reflection is added to what the draw left, as encoding the sum of the two would need
-    each pane's own colour.
+    each pane's own colour. The rays' shadow on the pane itself (`TraceSurfaceReflections`, `g_ForwardShadow`: a ray from
+    the surface towards the sun's disc, one sample) dims it as the sun's absence does, to 0.85: a pane is mostly what it
+    reflects and the sky behind it, so blocking the sun barely changes it.
   - **The rays.** Glass used to be left out for its alpha and shadow bytes. It is now `MeshRole::Glass`, taken by its material: any
     with a `GlassColor` vector, which four techniques have and no other (`fox3DFW_Glass_CommonRef`, `_CommonRef_LNM`,
     `_LNM` and two unnamed); mirrors are `MeshRole::Mirror`, by their technique, `fox3DFW_ParallaxReflection`. They are non-opaque
-    in their structures, so `CutOutBlocks` lets every ray through in one place: the sun's and the lamps' light comes through,
-    tinted or not, and the global illumination's rays and the camera's pass as before. Only a reflection's rays meet them
+    in their structures, so `CutOutBlocks` lets every ray through in one place. A ray towards the sun or a lamp keeps, past
+    each pane it crosses, what the pane neither reflects nor covers (`PaneTransmittance`: 1 - its cover, `GlassCover`, by
+    its row of the table, the same split a reflection's ray takes), so a pane's dirt and frosting dim the light behind it,
+    as hair does (`NO_DUPLICATE_ANYHIT_INVOCATION`, so each pane counts once). A mirror lets it through; the global
+    illumination's rays and the camera's pass as before. Only a reflection's rays meet them
     (`RayAlongReflection`, `TraceReflectionRay`): by chance, as much as a pane's cover (`Base_Tex_LIN`, red, or alpha in a colour
     texture) by its table's row gives, a ray reflects as from a mirror, and otherwise goes on, through at most `MostPanes`, with
     nothing behind the pane taken for a copy of it. A mirror reflects all of a ray: it has no row of the table, and its mask is
@@ -2024,7 +2067,7 @@ the game's lights) is left alone until it runs.
   specular as the sun's: the game's tables, towards the light as a disc of its size (`c4.w`). Until the first sun
   pass has given those tables, the game's shaders draw the lights, as a session can start where no sun shines. A
   pixel picks two lights in proportion to their light there without shadows (weighted
-  reservoir sampling over all the frame's lights, white noise) and traces a shadow ray to a point on each
+  reservoir sampling over the lights that can reach it, see "Light bins", white noise) and traces a shadow ray to a point on each
   one's disc, as the ray-traced lights' rays leave (hair's share, the faces that cast); every light is
   shadowed in full, as the ray-traced lights shadow them. At the draw point (`path_tracing::addLampLight`,
   from `local_lights.cpp`) one full-screen draw adds their diffuse and specular light to the light
@@ -3204,6 +3247,30 @@ Not handled:
 - A spot's mask (a flashlight's pattern) is left out of its bounce, which is a little brighter for it.
 - The bounce comes with the ray-traced lights: with them off, the global illumination has the sun and
   the sky only.
+
+### Light bins
+
+Path tracing's lamps at every pixel and the rays' hits at every bounce pick among the frame's lights (`TraceLampLight`,
+`SampledLocalLightReaching`). Walking all of them cost more than the rays that followed: at Mother Base at night a frame
+asks 6.5 million places, and of the 128 lights only 3.2 can reach one on average.
+
+`src/passes/ray_tracing/light_bins.cpp` keeps three tables in the frame's constants, one for each world axis: 2 m bins around
+the eye, 128 along x and z and 64 along y, each with a bit for every light whose bounding box crosses it. `LightsNear`
+ANDs the three bins of a place. A box is a run of bins along each axis, so this is as sharp as a grid of every cell, which would
+take 16 MB a frame where these take 5 KB. A light's box is its reach, cut to the game's volume for it where that is known, and
+5 cm more each way: the 2 cm a light gives past its volume, and room for rounding.
+
+Places and lights past the bins take the last bin at that end, so a far light is still found at its place, only with less
+culling. The bins only ever hold too much: a light left out gives that place no light, and the walk (`NextLight`) keeps the
+lights' order, so the light, and the random numbers it draws, stay as they were. A test run with a count of every light that
+reached a place outside its bins read 0 over 6.5 million places a frame.
+
+| Frozen frame, 2228 x 1254, night | Lights | Walked a place | GPU frame |
+| --- | --- | --- | --- |
+| Mother Base walkway | 128, 205 past the cap | 128 to 3.2 | 32.2 to 27.8 ms |
+| Mother Base deck | 79 | 79 to 1.95 | 26.2 to 24.3 ms |
+
+The lamp shadows of the non-path-traced lights (`light_shadows.hlsl`) still walk them all.
 
 ## GTVBAO
 

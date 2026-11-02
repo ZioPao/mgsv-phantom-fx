@@ -487,8 +487,8 @@ HitMaterial HitMaterialOf(HashGridCache_Visibility visibility, float footprint, 
     if (t.geometry.flags & GI_GEOMETRY_GLASS)
     {
         // What reflects of glass, and the rest of a ray goes through (TraceReflectionRay): all of a mirror; of a pane, its
-        // cover by its row of the game's material table (fox3dfw_glass*'s alpha, whose F0 of 0.58 to 0.95 leaves the angle out).
-        // A colour texture holds its cover in alpha, a plain one, whose alpha is 1, in red.
+        // cover by its row of the game's material table (fox3dfw_glass*'s alpha, whose F0 of 0.58 to 0.95 leaves the angle out,
+        // GlassCover). A ray towards a light keeps the rest (PaneTransmittance).
         material.roughness = 0.0f;
         material.specularColor = 1.0f;
         if (t.geometry.flags & GI_GEOMETRY_MIRROR) return material;
@@ -498,7 +498,7 @@ HitMaterial HitMaterialOf(HashGridCache_Visibility visibility, float footprint, 
         {
             Texture2D<float4> texture = g_SceneTextures[NonUniformResourceIndex(t.geometry.texture - 1)];
             float4 texel = texture.SampleLevel(g_WrapSampler, TriangleUV(t.geometry, t.indices, visibility.barycentrics), HitLevel(texture, t, footprint));
-            cover = texel.a < 1.0f ? texel.a : texel.r;
+            cover = GlassCover(texel);
         }
 
         material.specularColor = cover * g_MaterialSpecular.Load(int3(t.geometry.materialIndex, 0, 0)).rgb;
@@ -543,15 +543,16 @@ bool HitIsLeaf(HashGridCache_Visibility visibility)
 }
 
 // The light at a hit from one of the frame's point and spot lights, chosen by its light here without
-// shadows (weighted reservoir sampling, a candidate a light), through a shadow ray to it: its light before
-// the cosine, over the chance it was chosen.
+// shadows (weighted reservoir sampling, a candidate a light that can reach it), through a shadow ray to it:
+// its light before the cosine, over the chance it was chosen.
 float3 SampledLocalLightReaching(float3 world, float3 normal, float3 origin, float tolerance, inout Random random, out float3 towardsLight)
 {
     towardsLight = normal;
     float total = 0.0f, chosenWeight = 0.0f;
     float3 chosenLight = 0.0f, chosenDirection = 0.0f;
     float chosenDistance = 0.0f, chosenClearance = 0.0f;
-    for (uint i = 0; i < g_Frame.localLightCount.x; ++i)
+    uint4 nearby = LightsNear(world);
+    for (uint i = NextLight(nearby, 0u); i < GI_MAX_LOCAL_LIGHTS; i = NextLight(nearby, i + 1u))
     {
         GILocalLight candidate = g_Frame.localLights[i];
         float3 toLight;
