@@ -12,6 +12,8 @@
 - **Dirty and frosted glass casts a shadow.** Sunlight and lamplight went through every pane untouched. A pane now lets
   through what it neither reflects nor covers, so its dirt shows in the light on the floor behind it.
 
+- **Destroyed props leave the ray-traced scene.** A barrel or window pane you broke kept casting its shadow and bouncing
+  light as if whole, and props near you were in the scene twice. The rays now see what the game draws.
 - **Rivers and liquids take the rays' reflections, and a river's bed takes the caustics.** Under path tracing the water
   reflects what is around it, from where it is now and not where it was a frame ago, with the game's own ripples and the
   rain's rings on it. It fades at the shore and behind the fog as the water itself does. It no longer takes the shadow map's
