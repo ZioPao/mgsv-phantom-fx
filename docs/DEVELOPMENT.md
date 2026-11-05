@@ -2111,15 +2111,16 @@ the game's lights) is left alone until it runs.
   light, `t3` is unbound for the draw (it reads 0), which takes that reflection alone out
   (`GameShader::hasRainReflection`, `indirect_light_pass.cpp`).
 - **The sun** (`PATH_TRACED` in `sun_light_pass_shaders.hpp`): the sun pass's own shader, lit by the rays'
-  shadow alone, without the shadow map or the contact shadows, which it does not trace (and the rays leave
-  nothing to the map: no shadow range for untextured cut-out meshes), inside the game's shadow range with
-  its clouds' shadow and height fade (`CLOUD_SHADOW`), and without the game's specular shadow floor and sky
-  reflection. Its specular stays the game's tables (`g_lut2` by the halfway vector's angle, the roughness and
-  the anisotropy, `g_lut1` for Fresnel), not GGX: measured against the frames of 2026-10-30 on Snake's suit
-  (roughness 0.5 to 0.9), the game's lobe at the same roughness is up to 1.8 times GGX's at its peak and a tenth
-  of it on the flank, so GGX spread the highlights into a haze: the fine creases and fabric went, and the
-  sortie screen's floor took three times the specular light. The sun's rays are traced while path tracing
-  runs, whether or not the ray-traced shadows are on.
+  shadow, with the contact shadows' screen-space shadow multiplying it where that switch is on, inside the
+  game's shadow range with its clouds' shadow and height fade (`CLOUD_SHADOW`), and without the game's
+  shadow map, specular shadow floor and sky reflection. Its specular stays the game's tables (`g_lut2` by
+  the halfway vector's angle, the roughness and the anisotropy, `g_lut1` for Fresnel), not GGX: measured
+  against the frames of 2026-10-30 on Snake's suit (roughness 0.5 to 0.9), the game's lobe at the same
+  roughness is up to 1.8 times GGX's at its peak and a tenth of it on the flank, so GGX spread the
+  highlights into a haze: the fine creases and fabric went, and the sortie screen's floor took three
+  times the specular light. The rays leave nothing to the map: no shadow range for untextured cut-out
+  meshes, so the traced scene carries the map's part. The sun's rays are traced while path tracing runs,
+  whether or not the ray-traced shadows are on.
 - **Point and spot lights** (`TraceLampLight`, `direct_light.hlsl`), in place of the game's light shaders:
   each light's light as they work it out (`LocalLightReaching`: its falloff, a spot's cone, the game's
   volume for it; a masked spot's mask; the light through leaves, the game's `LN_trans`; its diffuse and
@@ -2303,13 +2304,15 @@ Not handled:
 With **Sun contact shadows** on, the sun's shadow is multiplied by Bend Studio's screen-space
 shadows (`bend_sss_gpu.h` and `bend_sss_cpu.h` from "Inside Bend: Screen Space Shadows", Apache
 License 2.0): contact shadows traced through the depth buffer, which the shadow map is too coarse
-to give. The game has no shadow mask to multiply (see "Sun light and shadows"), so the sun pass
-draws with replacement shaders. With soft shadows off too, the game's own shaders draw; the add-on
-then only checks a flag on each full-screen draw. **Lamp contact shadows** give every point and spot
-light a short shadow of its own, marched through the depth buffer inside the light's own draw
-(`drawMarking` in `src/features/lamp_contact_shadows/lamp_contact_shadows.cpp`, from the local light
-pass), so they are a toggle of their own: the sun's is one Bend trace a frame, the lamps' a march per
-light, in the light's own volume draw.
+to give. They run beside the ray-traced or path-traced shadows too, filling in what the rays alone
+miss, and either can be switched on without the other. The game has no shadow mask to multiply (see
+"Sun light and shadows"), so the sun pass draws with replacement shaders. With soft shadows off too,
+the game's own shaders draw; the add-on then only checks a flag on each full-screen draw. **Lamp
+contact shadows** give every point and spot light a short shadow of its own, marched through the
+depth buffer inside the light's own draw (`drawMarking` in
+`src/features/lamp_contact_shadows/lamp_contact_shadows.cpp`, from the local light pass), so they
+are a toggle of their own: the sun's is one Bend trace a frame, the lamps' a march per light, in the
+light's own volume draw.
 
 - **Replacement shaders** (`src/passes/sun_light_pass_shaders.hpp`). `SunLight_DL_CS_ES` and
   `SunLight_DL_ES`, and their rain pair without the sky reflection (`SKY_REFLECTION 0`),
@@ -2963,11 +2966,12 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
 
 With **Ray-traced shadows** on, the sun's shadow comes from rays traced through the ray-traced scene
 (see "Ray-traced scene"), in place of the game's
-shadow map, soft shadows and sun contact shadows. The scene runs for them with the global
-illumination's light on or off; `kick_traces::Asked::runsRayTracedShadows` turns them on, and the
-light passes run only with `runsLight`. Lamp contact shadows stay as they are: lamps are not ray
-traced here (see "Ray-traced lights"). With DLSS Ray Reconstruction denoising, the rays go out without the
-denoiser (see "Ray Reconstruction").
+shadow map and soft shadows. Sun contact shadows can run beside the rays, filling in what they alone
+miss, and either switch stands on its own. The scene runs for them with the global illumination's
+light on or off; `kick_traces::Asked::runsRayTracedShadows` turns them on, and the light passes run
+only with `runsLight`. Lamp contact shadows stay as they are: lamps are not ray traced here (see
+"Ray-traced lights"). With DLSS Ray Reconstruction denoising, the rays go out without the denoiser
+(see "Ray Reconstruction").
 
 - **Rays** (`TraceSunShadows` in `src/features/ray_traced_shadows/gi_shadow.hlsl`). One ray a pixel at the render
   size, from the depth's world position towards a point on the sun's disc (uniform over the disc of

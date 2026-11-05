@@ -191,9 +191,11 @@ void effectPlan()
             && plan.runs(Effect::VolumetricFog) && plan.runs(Effect::Sea),
         "The effects nothing replaces run.");
 
-    for (const auto effect : {Effect::SoftShadows, Effect::SunContactShadows, Effect::LampContactShadows, Effect::LampSoftShadows, Effect::AmbientOcclusion,
+    for (const auto effect : {Effect::SoftShadows, Effect::LampContactShadows, Effect::LampSoftShadows, Effect::AmbientOcclusion,
              Effect::IndirectLight})
-        expect(plan[effect] == EffectState::Replaced, "The ray-traced effects replace the soft and contact shadows, GTVBAO and SSILVB.");
+        expect(plan[effect] == EffectState::Replaced, "The ray-traced effects replace the soft and lamp shadows, GTVBAO and SSILVB.");
+    expect(plan.runs(Effect::SunContactShadows) && !plan.replacers[Effect::SunContactShadows],
+        "The sun's contact shadows run beside the ray-traced ones, filling in where the rays alone read lit.");
 
     Settings withoutTracedLights = all;
     withoutTracedLights.rayTracedLights.on = false;
@@ -205,8 +207,8 @@ void effectPlan()
     tracedShadowsLeftOut.effects[Effect::RayTracedShadows] = true;
     const auto measured = planEffects(all, {.leftOut = tracedShadowsLeftOut});
     expect(measured[Effect::RayTracedShadows] == EffectState::LeftOut && measured[Effect::SoftShadows] == EffectState::Replaced
-            && measured[Effect::SunContactShadows] == EffectState::Replaced,
-        "Leaving out the ray-traced shadows keeps what they replace off.");
+            && measured.runs(Effect::SunContactShadows),
+        "Leaving out the ray-traced shadows keeps what they replace off, and the sun's contact shadows on.");
 
     expect(planEffects(Settings{}, {.enhancements = false})[Effect::SoftShadows] == EffectState::Off, "An effect switched off is off, held or not.");
     LeftOut softShadowsLeftOut;
@@ -223,12 +225,12 @@ void effectPlan()
         "Unsupported comes before held.");
 }
 
-// Path tracing replaces the ray-traced shadows and lights, and what they replace, while it can run; without
-// what it needs, they stay.
+// Path tracing replaces the ray-traced shadows and lights, and the soft shadows they replace, while it can
+// run; the sun's contact shadows stay beside it; without what it needs, they stay.
 void pathTracingPlan()
 {
     Settings traced;
-    traced.rayTracedShadows.on = traced.softShadows.on = traced.rayTracedLights.on = true;
+    traced.rayTracedShadows.on = traced.softShadows.on = traced.rayTracedLights.on = traced.sunContactShadows.on = true;
     traced.globalIllumination.on = traced.pathTracing.on = traced.upscaling.rayReconstruction = true;
 
     const auto plan = planEffects(traced, {});
@@ -236,6 +238,8 @@ void pathTracingPlan()
     for (const auto effect : {Effect::RayTracedShadows, Effect::RayTracedLights, Effect::SoftShadows})
         expect(plan[effect] == EffectState::Replaced && plan.replacers[effect] == Effect::PathTracing,
             "Path tracing takes the place of the ray-traced shadows and lights, and of what those replace.");
+    expect(plan.runs(Effect::SunContactShadows) && !plan.replacers[Effect::SunContactShadows],
+        "The sun's contact shadows run beside path tracing's shadows too.");
 
     Settings withoutReconstruction = traced;
     withoutReconstruction.upscaling.rayReconstruction = false;

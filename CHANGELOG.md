@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+<<<<<<< HEAD
 - **The sea's foam is the game's own again.** The waves' breaking crests were flat white patches. They now take the
   game's foam textures, lacy where a crest just breaks and denser where it breaks hard, drifting with the wind and
   thinning into the distance, as on the game's own sea.
@@ -41,6 +42,10 @@
   light with 0.3% of that, a third of their lamp's light, as the lamps already light the room. Corridors there are now
   about twice as bright as the game draws them: readable, and still dim at their far ends. If you had lowered
   **Self-lit surfaces**, set it back to 1.
+- **Sun contact shadows can run with ray-traced and path-traced shadows.** The screen-space trace fills in the short
+  shadows the rays alone miss, such as where a thin edge meets the ground, and keeps its own strength and fade. Both
+  switches stand on their own: turn **Sun contact shadows** on beside **Ray-traced shadows** or **Path tracing** under
+  **Shadows**, or leave it off. Path tracing now traces the contact shadows into its sun pass instead of ignoring them.
 - **Global illumination is a little faster in open country.** Its rays and their bounces, also those of path-traced
   reflections, now look 100 m for what they hit and take the sky's light past it. At 4K that saves about 0.7 ms of an
   18 ms frame in Afghanistan and 0.3 ms in the jungle, and the picture looks the same. Turning off **Short rays** under

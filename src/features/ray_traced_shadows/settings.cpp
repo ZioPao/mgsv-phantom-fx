@@ -11,9 +11,9 @@ void describe(RayTracedShadows& shadows, SettingVisitor& visit)
             .name = "Ray-traced shadows",
             .tag = "Experimental",
             .tip = "The sun's shadows from rays traced through the game's own scene: as soft as the sun's disc makes them, exact where objects "
-                   "meet the ground, and as far as you can see, where the game's shadows end at about 90 m. It replaces the game's shadows, soft "
-                   "shadows and sun contact shadows while on; path tracing replaces it. Needs a GPU that traces rays (DXR 1.1). Off keeps the "
-                   "game's shadow map.",
+                   "meet the ground, and as far as you can see, where the game's shadows end at about 90 m. It replaces the game's shadows and soft "
+                   "shadows while on; path tracing replaces it. Sun contact shadows can run beside it. Needs a GPU that traces rays (DXR 1.1). Off "
+                   "keeps the game's shadow map.",
             .summary = "Sun shadows traced through the game's own scene: soft, exact where things touch, and as far as you can see.",
             .keywords = "RT DXR sun size vanilla",
             .effect = Effect::RayTracedShadows,

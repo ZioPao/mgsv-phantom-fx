@@ -11,10 +11,10 @@ void describe(SunContactShadows& shadows, SettingVisitor& visit)
             .heading = "Contact shadows",
             .name = "Sun contact shadows",
             .tip = "Bend Studio's screen-space shadows for the sun: short shadows traced through the depth buffer. They add the contact shadows "
-                   "the sun's shadow map misses (feet, rocks, folds of clothing). Cheap: one trace a frame.",
+                   "the sun's shadow map misses (feet, rocks, folds of clothing), and they run beside the ray-traced or path-traced shadows too, "
+                   "filling in what the rays alone miss. Cheap: one trace a frame.",
             .summary = "The short shadows the shadow map misses: feet, rocks, folds of clothing.",
             .keywords = "screen-space SSS",
-            .effect = Effect::SunContactShadows,
-            .replacedBy = Effect::RayTracedShadows});
+            .effect = Effect::SunContactShadows});
 }
 }
