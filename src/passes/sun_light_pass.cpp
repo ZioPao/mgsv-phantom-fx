@@ -165,10 +165,10 @@ bool drawSun(ID3D11DeviceContext* context, const ui_redirect::DrawCall& call, co
     if (!ensurePipeline()) return false;
 
     bool isShadowMapped = sun.isShadowMapped;
-    // Path tracing's sun has the rays' shadow alone: no contact shadow to trace, nor to fail on and leave the
-    // game's sky reflection to add to the traced reflections.
+    // Path tracing's rays and the contact shadows can run together: the rays' shadow, filled in where the
+    // screen-space trace finds a caster the rays miss.
     ID3D11ShaderResourceView* contactShadow{};
-    if (composition.contactShadows && !isPathTracedPass)
+    if (composition.contactShadows)
     {
         if (!depth || !scene || !light)
         {

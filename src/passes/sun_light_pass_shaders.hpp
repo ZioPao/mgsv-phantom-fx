@@ -11,8 +11,9 @@ namespace phantom_fx::sun_light_pass::shaders
 // the sky reflection (SKY_REFLECTION 0). Plus the add-on's options in b6: soft shadows filter the
 // shadow map, the screen-space shadow in t7 multiplies the sun's shadow, and the ray-traced shadow in
 // t6 takes the place of the game's. With all off they give the game's output bit for bit (checked on
-// WARP with random inputs). For path tracing (PATH_TRACED 1, path_tracing.hpp), the rays' shadow alone,
-// and the clouds' inside the shadow range (CLOUD_SHADOW 1). Split into literals, as MSVC limits each to 16 KB.
+// WARP with random inputs). For path tracing (PATH_TRACED 1, path_tracing.hpp), the rays' shadow, with
+// the screen-space shadow where it runs, and the clouds' inside the shadow range (CLOUD_SHADOW 1). Split
+// into literals, as MSVC limits each to 16 KB.
 inline constexpr char SunLight[] = R"(
 cbuffer cPSScene : register(b2)
 {
@@ -280,8 +281,9 @@ float3 Tangent(float3 center, float3 before, float3 after)
 #endif
 
 #if PATH_TRACED
-// The rays' shadow, which path tracing leaves raw for Ray Reconstruction; inside the game's shadow range
-// the clouds' shadow and the height fade as SunShadow gives them.
+// The rays' shadow, which path tracing leaves raw for Ray Reconstruction and the screen-space shadow
+// multiplies; inside the game's shadow range the clouds' shadow and the height fade as SunShadow gives
+// them.
 float PathTracedShadow(float3 viewPosition, float rayTraced)
 {
     float shadow = rayTraced;
@@ -341,6 +343,8 @@ R"(
 
     float shadow = 1;
     [branch] if (g_screenSpaceShadows) shadow = g_ScreenSpaceShadow.Load(int3(position.xy, 0));
+    // The screen-space shadow alone, for the path-traced pass to multiply after the rays' shadow.
+    const float screenSpace = shadow;
     float rayTraced = 1;
     [branch] if (g_rayTraced) rayTraced = g_RayTracedShadow.Load(int3(position.xy, 0));
 #if SHADOW_MAP
@@ -365,8 +369,9 @@ R"(
     float specularShadow = shadow < 1 ? max(shadow, m_lightParams[7].x) : 1;
 #endif
 #if PATH_TRACED
-    // The rays' shadow on the specular too: no floor.
-    shadow = PathTracedShadow(viewPosition, rayTraced);
+    // The rays' shadow on the specular too: no floor. The screen-space contact shadow, where it runs,
+    // fills in what the rays alone miss.
+    shadow = PathTracedShadow(viewPosition, rayTraced) * screenSpace;
     specularShadow = shadow;
 #endif
 
