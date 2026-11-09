@@ -2,7 +2,12 @@
 
 ## Unreleased
 
-### Fixed
+- **The Mother Base emblem shows again in Sortie Prep, and stands where it should.** It was a black square in front of
+  Snake, the horse and the helicopter. The game builds the emblem in a corner of its screen buffer as a save loads, which
+  the upscaler's full-resolution UI had taken over, so the game kept an empty emblem; and the emblem, the one UI image the
+  game hides behind the characters, was tested against no depth at all. Both are as the game draws them now, with the
+  upscaler's jitter taken back out of the depth, so its edge along a character no longer flickers; and where a character's
+  edge covers part of a pixel, the emblem is blended in under it, so no band of backdrop shows between the two.
 
 - **Wall lamps no longer flicker with the upscaler, however still the camera.** The game works its light volumes out on
   the CPU, already in screen space, so the upscaler's jitter reached the depth they test against but not them: a lamp
@@ -17,6 +22,7 @@
   the last frame keep a small advantage, so a place at the light cap does not change hands. At the villa's lamps with
   DLSS Ultra Performance and the camera still, the wall's brightness went `0.23 -> 0.79` in single frames; it now stays
   within `0.25 -> 0.28`.
+  
 - **Wall lamps no longer swap their light between frames while you move.** A lamp in Africa's villa is two spots at one
   place, one up and one down, and the game draws the downward one without a shadow map from a distance. Alike in kind,
   place and colour, the two shared one identity and one volume box, so each was cut to the other's box: the wall lit
