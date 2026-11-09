@@ -2,6 +2,7 @@
 
 #include "features/ray_traced_lights/light_choice.hpp"
 #include "passes/ray_tracing/kick_traces.hpp"
+#include "passes/ray_tracing/scene_contents.hpp"
 #include "passes/ray_tracing/scene_description.hpp"
 #include "passes/ray_tracing/scene_memory.hpp"
 #include "passes/ray_tracing/shaders/gi_shared.h"
@@ -115,7 +116,11 @@ struct Frame
     bool modelInstancesUpdated{};
     std::vector<SceneTexture> newTextures; // Copied, or copied again as the game streamed more of it in, since the last frame
     std::optional<Terrain> terrain; // Absent until the game's terrain draws give its inputs
-    std::optional<float> seaLevel;  // The sea's (sea::level); absent in a frame without the add-on's sea
+    // The game's own terrain patches the main camera drew this frame, and the mesh they drew from once read back
+    // (scene_contents::TerrainPatches); with the terrain only.
+    std::vector<scene_contents::TerrainPatchDraw> terrainPatches;
+    const scene_contents::TerrainPatchMesh* terrainPatchMesh{};
+    std::optional<float> seaLevel;  // The sea plane's (sea::planeLevel); absent in a frame without the add-on's sea
     std::uint32_t frameIndex{};
     kick_traces::KickTraces traces; // The one answer to what runs; a texture a trace needs is there when it runs
     bool showScene{}; // The output shows the traced scene instead of the light

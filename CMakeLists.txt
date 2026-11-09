@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(PhantomFX VERSION 1.9.0 LANGUAGES C CXX)
+project(PhantomFX VERSION 2.0.0 LANGUAGES C CXX)
 
 if(NOT WIN32 OR NOT MSVC)
     message(FATAL_ERROR "Phantom FX requires Windows and MSVC.")
@@ -209,7 +209,7 @@ function(add_gi_kernels source)
     set(GI_KERNELS ${GI_KERNELS} PARENT_SCOPE)
 endfunction()
 file(MAKE_DIRECTORY "${GI_SHADER_DIR}")
-add_gi_kernels(passes/ray_tracing/shaders/gi_scene.hlsl ClearNewGeometries DebugScene TerrainGrid Skin BakeMicromaps)
+add_gi_kernels(passes/ray_tracing/shaders/gi_scene.hlsl ClearNewGeometries DebugScene TerrainGrid TerrainPatches Skin BakeMicromaps)
 add_gi_kernels(features/global_illumination/gi_light.hlsl ClearCounters GenerateDispatch PrepareGuides TraceLight LearnAlbedo PurgeTiles PopulateMultibounceCells PopulateCells
     UpdateTiles UpdateMultibounceCells ResolveLight UpdateFoliageMemory CompositeLight)
 add_gi_kernels(features/ray_traced_shadows/gi_shadow.hlsl TraceSunShadows ClassifyShadowTiles DebugShadows ProbeShadows)
@@ -234,16 +234,16 @@ add_custom_command(OUTPUT ${GI_GENERATED_HEADERS}
 add_custom_target(gi_kernels DEPENDS ${GI_SHADER_HEADERS} ${GI_GENERATED_HEADERS})
 
 # Each feature's settings and their description (src/features/).
-set(PHANTOM_FX_FEATURES src/features/upscaling/settings.cpp src/features/frame_generation/settings.cpp src/features/sun/settings.cpp src/features/ray_traced_shadows/settings.cpp src/features/soft_shadows/settings.cpp src/features/sun_contact_shadows/settings.cpp
-    src/features/ray_traced_lights/settings.cpp src/features/lamp_contact_shadows/settings.cpp src/features/lamp_soft_shadows/settings.cpp
-    src/features/contact_shadow_shape/settings.cpp src/features/global_illumination/settings.cpp src/features/ambient_occlusion/settings.cpp
+set(PHANTOM_FX_FEATURES src/features/upscaling/settings.cpp src/features/frame_generation/settings.cpp src/features/sun/settings.cpp src/features/ray_traced_shadows/settings.cpp src/features/soft_shadows/settings.cpp
+    src/features/ray_traced_lights/settings.cpp
+    src/features/contact_shadows/settings.cpp src/features/global_illumination/settings.cpp src/features/ambient_occlusion/settings.cpp
     src/features/indirect_light/settings.cpp src/features/path_tracing/settings.cpp src/features/volumetric_fog/settings.cpp src/features/sea/settings.cpp src/features/water_caustics/settings.cpp src/features/photo_mode/settings.cpp src/features/hdr/settings.cpp src/features/frame_rate/settings.cpp
     src/features/motion_blur/settings.cpp src/features/depth_of_field/settings.cpp)
 
 # The add-on uses ReShade's ImGui through the overlay function table, so none is linked.
 add_library(phantom_fx SHARED src/addon.cpp src/core.cpp src/modules.cpp src/features/upscaling/upscaler.cpp src/features/upscaling/render_size_plan.cpp src/features/upscaling/frames.cpp src/menu.cpp src/menu_budget.cpp src/fxui/fxui.cpp src/phantom_fx_settings.cpp ${PHANTOM_FX_FEATURES} src/camera.cpp src/constant_capture.cpp
     src/device_check.cpp src/features/motion_blur/motion_blur.cpp src/features/upscaling/fxaa.cpp src/features/frame_rate/frame_rate.cpp src/render_scale.cpp src/ui_redirect.cpp src/frame_log.cpp src/resource_dump.cpp
-    src/log.cpp src/shader_bytecode.cpp src/game_shaders.cpp src/game_dither.cpp src/features/frame_generation/presenter.cpp src/features/frame_generation/frame_generation.cpp src/game_loop.cpp src/passes/contact_shadow_trace.cpp src/passes/sun_light_pass.cpp src/features/sun_contact_shadows/sun_contact_shadows.cpp
+    src/log.cpp src/shader_bytecode.cpp src/game_shaders.cpp src/game_dither.cpp src/game_light_volumes.cpp src/features/frame_generation/presenter.cpp src/features/frame_generation/frame_generation.cpp src/game_loop.cpp src/passes/contact_shadow_trace.cpp src/passes/sun_light_pass.cpp src/features/sun_contact_shadows/sun_contact_shadows.cpp
     src/passes/local_light_pass.cpp src/features/lamp_contact_shadows/lamp_contact_shadows.cpp src/features/lamp_soft_shadows/lamp_soft_shadows.cpp
     src/features/depth_of_field/depth_of_field.cpp src/passes/indirect_light_pass.cpp src/passes/visibility_bitmask.cpp src/features/ambient_occlusion/gtvbao.cpp
     src/features/indirect_light/ssilvb.cpp src/features/global_illumination/light_combine.cpp src/features/global_illumination/river_light.cpp src/features/photo_mode/photo_mode.cpp src/features/photo_mode/focus.cpp src/features/hdr/hdr.cpp src/weather.cpp src/character.cpp src/features/volumetric_fog/atmosphere.cpp src/features/sea/sea.cpp src/features/water_caustics/water_caustics.cpp src/features/water_caustics/caustics_map.cpp src/passes/forward_water_pass.cpp src/sun_movement.cpp

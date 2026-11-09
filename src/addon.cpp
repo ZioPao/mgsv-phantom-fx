@@ -35,6 +35,7 @@
 #include "frame_log.hpp"
 #include "fxui/fxui.hpp"
 #include "game_dither.hpp"
+#include "game_light_volumes.hpp"
 #include "game_loop.hpp"
 #include "game_shaders.hpp"
 #include "log.hpp"
@@ -197,6 +198,19 @@ void onInitPipeline(device* device, pipeline_layout, uint32_t count, const pipel
 
     for (uint32_t i = 0; i < count; ++i)
     {
+        // A layout's POSITION format, where it starts each vertex of the first buffer, for draws that decode the vertices they
+        // bind (ReShade's formats are DXGI's).
+        if (subobjects[i].type == pipeline_subobject_type::input_layout)
+        {
+            const auto* elements = static_cast<const input_element*>(subobjects[i].data);
+            for (uint32_t e = 0; elements && e < subobjects[i].count; ++e)
+                if (elements[e].semantic && std::string_view(elements[e].semantic) == "POSITION" && elements[e].semantic_index == 0 && elements[e].offset == 0
+                    && elements[e].buffer_binding == 0)
+                    game_shaders::inputLayoutCreated(reinterpret_cast<IUnknown*>(pipeline.handle), static_cast<DXGI_FORMAT>(elements[e].format));
+
+            continue;
+        }
+
         const auto* shader = static_cast<const shader_desc*>(subobjects[i].data);
         if (!shader) continue;
 
@@ -459,6 +473,19 @@ bool onCreatePipeline(device* device, pipeline_layout, uint32_t count, const pip
     bool changed{};
     for (uint32_t i = 0; i < count; ++i)
     {
+        if (subobjects[i].type == pipeline_subobject_type::vertex_shader && subobjects[i].data)
+        {
+            auto* shader = static_cast<shader_desc*>(subobjects[i].data);
+            if (const auto* jittered = game_light_volumes::jittered(reinterpret_cast<ID3D11Device*>(device->get_native()), shader->code, shader->code_size))
+            {
+                shader->code = jittered->data();
+                shader->code_size = jittered->size();
+                changed = true;
+            }
+
+            continue;
+        }
+
         if (subobjects[i].type != pipeline_subobject_type::pixel_shader || !subobjects[i].data) continue;
 
         auto* shader = static_cast<shader_desc*>(subobjects[i].data);

@@ -85,7 +85,9 @@ traced, as today), texture copies arriving and replacing one another, a layered 
 pool, characters built, refitted and made again, the palette budget, frames without a newer list, the
 instance cap's order and the terrain rings' remaking. `tests/light_choice_tests.cpp`:
 which lights a kick gives the rays: the most pixels first, then the nearest, the light cap's edge, the
-same choice whatever order the lights come in, a
+same choice whatever order the lights come in and wherever the upscaler's jitter put each light's edges,
+two spots at one place pointing apart taken as two lights, and two spots at one place taken or left out
+together, a
 light drawn from another eye left and counted, one reaching no pixel left out; a light's reach (around
 the camera, behind it, a narrow spot's, the viewport's corner); a light as the rays take it (its range,
 its rays' radius, where its shadow map starts) and its key from two cameras. `tests/game_shaders_tests.cpp`:
@@ -160,7 +162,7 @@ The code is laid out by what it does for the player:
 | `src/menu_budget.cpp`, `src/menu_budget.hpp` | The window's sections, and each effect as a budget line: its state, its switch and its timed passes |
 | `src/fxui/` | fxui, the reusable frame budget settings window for ReShade add-ons (see its README.md) |
 | `src/performance.cpp`, `src/performance.hpp` | The passes' GPU costs: timestamp queries, the averages, the real cost measurement, `PhantomFX-performance.txt` (see "Costs") |
-| `src/performance_menu.cpp` | The budget page, the costs over the game, and the costs as text |
+| `src/performance_menu.cpp` | The Budget tab, the costs over the game, and the costs as text |
 
 ### Features
 
@@ -172,11 +174,11 @@ what draws it, when that is the feature's own.
 | `upscaling/` | `upscaler.*`: DLSS or FSR before the grading, in place of FXAA: NGX, composite, the grading at the output size, texture LOD bias. `frames.*`: the frames the upscaler runs on: when one starts, its main view and its jitter. `render_size_plan.*`: the render size plan, from the upscaler, mode and output size, with DLSS's own size from NGX. `d3d12_host.*`: Direct3D 12 work at a point of the immediate context, for FSR and Ray Reconstruction (see "FSR upscaling"). `upscaler_shaders.hpp`: the upscaler's inputs and motion vectors, composite with RCAS and debug views, stretch fallback. `fsr_upscaler.*`: FSR upscaling on Direct3D 12. `ray_reconstruction.*`: DLSS Ray Reconstruction on Direct3D 12 (see "Ray Reconstruction"). `fxaa.*`: hook on the FXAA plugin, the FXAA pass at any post processing setting |
 | `frame_generation/` | `presenter.*`: the game's stand-in swap chain, presented through Direct3D 12. `frame_generation.*`: DLSS Frame Generation, Streamline, its inputs and camera, Reflex. `fsr_frame_generation.*`: AMD's swap chain and its inputs |
 | `sun/` | Settings only: the sun size the soft and ray-traced shadows and the global illumination share |
-| `soft_shadows/` | Settings only: a mode of the sun light pass's shaders (`passes/sun_light_pass.*`) |
+| `soft_shadows/` | Settings only: one switch for the sun's soft shadows, a mode of the sun light pass's shaders (`passes/sun_light_pass.*`), and the lamps' (`lamp_soft_shadows/`) |
 | `sun_contact_shadows/` | `sun_contact_shadows.*`: the sun's screen-space shadow, traced once per depth a command list records |
 | `lamp_contact_shadows/` | `lamp_contact_shadows.*`: a shadow-mapped point or spot light's screen-space shadow, drawn into the light targets' alpha between its two draws. `lamp_contact_shadows_shaders.hpp`: that draw |
 | `lamp_soft_shadows/` | `lamp_soft_shadows.*`: the replacement shaders a point or spot light with a shadow map lights with, and their options. `lamp_soft_shadows_shaders.hpp`: the game's `SSLighting2_Point` and `SSLighting2_Spot` rebuilt, with the light's shadow map filtered by contact-hardening soft shadows |
-| `contact_shadow_shape/` | Settings only: the contrast, reach, thickness and fade of the contact shadow trace (`passes/contact_shadow_trace.*`), which the sun's and the lamps' share |
+| `contact_shadows/` | Settings only: one switch for the sun's and the lamps' contact shadows, and the contrast, reach, thickness and fade of their trace (`passes/contact_shadow_trace.*`) |
 | `ray_traced_shadows/` | `gi_shadow.*`: the sun's shadow rays and the FidelityFX Shadow Denoiser on Direct3D 12. `gi_shadow.hlsl`, `gi_shadow_filter.hlsl`: the rays, the denoiser's temporal pass and filters |
 | `ray_traced_lights/` | `local_lights.*`: the game's point and spot light draws kept for their stencil, their light drawn again at the sun pass's list with specular and the rays' shadow (see "Ray-traced lights"). `light_choice.*`: which lights a kick gives the rays (each light's reach, the light cap) and each light as the rays take it. `lamp_shadow_rays.*`, `light_shadows.hlsl`: the lamps' shadow rays and filter, a trace (see "What a kick traces") |
 | `global_illumination/` | `gi_light.*`, `gi_light.hlsl`: the light on Direct3D 12, its rays, the denoiser's inputs and the render size (see "Global illumination"); their hits' light and the hash grid cache in `passes/ray_tracing/shaders/gi_hit_light.hlsli`. `gi_denoiser.*`: NVIDIA NRD's RELAX denoiser without NRI. `gi_lighting.*`: the game's sky and sun in the light's terms. `light_combine.*`: the traced light in place of the game's probe light at the resolve |
@@ -209,13 +211,13 @@ what draws it, when that is the feature's own.
 | `src/passes/ray_tracing/shared_textures.*` | What Direct3D 11 and 12 share: the Direct3D 11 half of a trace's results, and the rows that open, transition and bind a trace's textures |
 | `src/passes/ray_tracing/gi_renderer.*` | The Direct3D 12 side: the device, the scene's frame (the scene contents' update, then the recording), each feature's passes recorded in turn, the probes |
 | `src/passes/ray_tracing/light_bins.*` | Which of the frame's lights can reach a place, in bins along each world axis (see "Light bins") |
-| `src/passes/ray_tracing/scene_contents.*` | The scene contents: the game's models, their variants, characters, terrain rings, the sea's plane and textures the ray-traced scene holds, made as the scene memory has room and let go after a while unplaced; each frame's instances of them; their diagnostics (status, the probes' hits, F10's `models.txt`) (see "Ray-traced scene") |
+| `src/passes/ray_tracing/scene_contents.*` | The scene contents: the game's models, their variants, characters, terrain rings and the game's own terrain patches in them, the sea's plane and textures the ray-traced scene holds, made as the scene memory has room and let go after a while unplaced; each frame's instances of them; their diagnostics (status, the probes' hits, F10's `models.txt`) (see "Ray-traced scene") |
 | `src/passes/ray_tracing/scene_memory.hpp` | The scene memory: the seam the scene contents reach the GPU through (the pool, structures, texture slots, instances) |
 | `src/passes/ray_tracing/gi_scene.*` | The ray-traced scene on Direct3D 12, the scene memory: the geometry pool, bottom-level structures (a geometry per mesh, compacted), the geometry table, the game's textures' slots, the frame's instances and top level (see "Ray-traced scene") |
 | `src/passes/ray_tracing/engine_scene.*` | The game's loaded models from its visibility managers and object brush, its characters from its model list, their model files read once, its texture manager, the terrain's heightmap inputs (see "Scene objects") |
 | `src/passes/ray_tracing/scene_description.*` | What the ray-traced scene takes of a model file: its FMDL meshes, each with its mesh role from its material, its alpha and shadow bytes and its model source, their base textures and skins; the flags, texture and alpha threshold a role gives its row of the geometry table (see "Ray-traced scene", "Mesh roles") |
 | `src/passes/ray_tracing/engine_brush.*` | The game's object brush: its loaded blocks' vegetation and props, read from their placement records (see "Scene objects") |
-| `src/passes/ray_tracing/gi_inputs.*` | What the ray tracing takes from the game's draws: the main camera of the frame drawn, its skinned meshes' bones, the terrain's inputs |
+| `src/passes/ray_tracing/gi_inputs.*` | What the ray tracing takes from the game's draws: the main camera of the frame drawn, its skinned meshes' bones, the terrain's inputs and its patch draws |
 | `src/passes/ray_tracing/gi_textures.*` | Shared copies of the game's textures the ray-traced scene's meshes use, from its texture manager (see "Ray-traced scene") |
 | `src/passes/ray_tracing/gi_d3d12.hpp` | The kernels, root signature and descriptor tables every ray-traced feature shares |
 | `src/passes/ray_tracing/gi_slots.hpp` | The slots of those tables, a type a kind; `gi_bindings.h`, generated, names each one (see "Kernels and their slots") |
@@ -228,20 +230,21 @@ what draws it, when that is the feature's own.
 | File | Purpose |
 | --- | --- |
 | `src/render_scale.cpp`, `src/render_scale.hpp` | Hook on the renderer's per-frame step: the engine renders at the requested size |
-| `src/ui_redirect.cpp`, `src/ui_redirect.hpp` | The draw call every module sees; the grading, the 2D pass and `GammaControl` on output-size targets while the engine renders below them |
+| `src/ui_redirect.cpp`, `src/ui_redirect.hpp`, `src/ui_redirect_shaders.hpp` | The draw call every module sees; the grading, the 2D pass and `GammaControl` on output-size targets while the engine renders below them, with the scene's depth for the 2D pass's depth-tested draws |
 | `src/game_constants.hpp` | The game's constant buffers by name (see "Constant buffers"): the system, scene, sun and lamp light, material, object, bones and probe constants, each with its slot, and a light pass's view space in the world |
 | `src/constant_capture.cpp`, `src/constant_capture.hpp` | The constant capture: what each of the game's threads last wrote to the constant buffers the contact shadows and the ray tracing read, copied at the game's unmap after the upscaler's jitter, read by type and only at the size written |
 | `src/camera.cpp`, `src/camera.hpp` | The main camera in the scene constants: main-view recognition, jitter, reprojection, camera cuts |
-| `src/game_shaders.cpp`, `src/game_shaders.hpp` | The game's shaders the add-on knows, in one table: each pixel shader's checksum, the game pass it draws and what tells it apart from its pass's others (a sun's shadow map, a light's kind); its vertex shaders by source name (the 2D pass, models, terrain). Every copy the game makes is known; a draw looks its pixel shader up once (`DrawnShader`) |
+| `src/game_shaders.cpp`, `src/game_shaders.hpp` | The game's shaders the add-on knows, in one table: each pixel shader's checksum, the game pass it draws and what tells it apart from its pass's others (a sun's shadow map, a light's kind); its vertex shaders by source name (the 2D pass, models, terrain); its input layouts' position formats. Every copy the game makes is known; a draw looks its pixel shader up once (`DrawnShader`) |
 | `src/game_lights.hpp` | What a point or spot light shader is (its row in `game_shaders.hpp`), for the local light pass and the ray-traced lights: its kind and twin, a light's range, its sphere on screen |
 | `src/device_check.cpp`, `src/device_check.hpp` | Lets the game start under ReShade (see below); the build check |
 | `src/game_code.hpp` | The game's image, checks of its code, hooks (MinHook) and code patches |
 | `src/game_memory.hpp` | Guarded reads of the game's objects |
 | `src/game_loop.cpp`, `src/game_loop.hpp` | Hooks on the main loop's frame start and end, for Reflex and the weather menu |
 | `src/fidelityfx.cpp`, `src/fidelityfx.hpp` | Loads the AMD FSR API, for FSR upscaling and frame generation |
-| `src/weather.cpp`, `src/weather.hpp` | The overlay's weather and time control, in Utility (see "Weather and time") |
+| `src/weather.cpp`, `src/weather.hpp` | The overlay's weather and time control, on the Sandbox tab (see "Weather and time") |
 | `src/sun_movement.cpp`, `src/sun_movement.hpp` | The sun and moon move every frame instead of in the game's steps (see "Sun movement") |
 | `src/game_dither.cpp`, `src/game_dither.hpp` | The game's colour dither taken out of its shaders as they are made (see "Dither") |
+| `src/game_light_volumes.cpp`, `src/game_light_volumes.hpp` | The game's light volumes moved by the upscaler's jitter, in its 24 light vertex shaders as they are made (see "Ray-traced lights", "The jitter on the game's light volumes") |
 | `src/dev_tools.hpp` | Whether the build has the Developer page (the dev preset) |
 | `src/dev/` | The development tools, in a dev build alone; its README says how to detach them. `dev.*`: the core's one door to them, and the Developer page |
 | `src/dev/game_lua.cpp`, `src/dev/game_lua.hpp` | Lua in the game's script state, and the Developer page's console (see "Game Lua") |
@@ -276,7 +279,13 @@ A new lighting effect takes:
    `describe()`, which gives their `PhantomFX.ini` keys, ranges, controls and menu text, and what
    the effect replaces or builds on (`needs`, `needsRayReconstruction`: it runs only while that runs); and what draws it. The settings file goes in `PHANTOM_FX_FEATURES` and the
    renderer's in `add_library` (`CMakeLists.txt`), its settings in `Settings` and `forEachFeature`
-   (`src/phantom_fx_settings.hpp`), and its switch in the presets where it belongs.
+   (`src/phantom_fx_settings.hpp`), and its `Effect` in the lighting step that switches it on (`effectsAddedBy`):
+   the step's menu shows its item. Two effects the player switches as one, such as the
+   sun's and the lamps' soft shadows, are two features with one switch: the second takes the first's `menuId` and no
+   `iniKey`, and shares its item and budget line. A setting every ray-traced effect shares takes `isRaySetting`: the
+   menu shows it in Lighting's Rays item. A feature without a switch can give its item's line a value instead: one
+   choice with `isItemValue`, such as the upscaler's mode. Each setting's reset gives back what `Settings{}` holds,
+   with the lighting step the menu shows applied.
 2. Its `Effect`, at its place in the cost measurement's order (`src/effects.hpp`).
 3. Its renderer's row in `Modules` (`src/modules.cpp`): its `attach`, `configure`, `present` and
    `detach`. Its `configure` keeps its settings (in a `FrameLatch`) and whether the effect plan
@@ -397,6 +406,11 @@ reads state; the frame renders unchanged. Its files go into that folder:
   call lists shaders, targets, depth, viewport, blend, depth state, shader resources, UAVs and
   constant buffers. `frame-<n>-writers.txt` lists the call stacks of constant buffer maps by size.
   Once both are written, a "Frame captured" toast with the file name shows at the right of the screen.
+- `trigger.txt` (a shader hash, or any text of a record line) makes F10 wait for a rare call: it
+  records frame after frame, each over the last, until a line has that text, then keeps that frame
+  and the one before it as `frame-<n>-before.txt`. F10 again stops waiting and keeps the frame.
+  It costs a record a frame while it waits, and the folders the lights and the scene dumped into go as
+  it turns over, all but the frame before's.
 - `dump.txt` (`<checksum> <count>` per line) makes the first calls with those shaders add their
   constant buffer contents (as the game wrote them on that thread) and save their textures as DDS
   in `frame-<n>/` once their command list has run, so a list's textures are as it left them, not as
@@ -542,7 +556,7 @@ Compare GPU times, not frame rates: the automation copy's frame rate says little
 
 ### Weather and time
 
-The overlay's Utility section has **Weather and time** (`src/weather.cpp`), to see the sky in every condition:
+The overlay's Sandbox tab has **Weather and time** (`src/weather.cpp`), to see the sky in every condition:
 a 24-hour time-of-day slider, a clock stop, and a weather override with fog density for Foggy.
 It calls what the game's `WeatherManager` script functions call, on the game thread at the main
 loop's frame start (the game loop is hooked with or without frame generation for this), and reads
@@ -592,6 +606,12 @@ shows what it printed and returned, or its error with the stack.
   While the code runs, `print` collects lines in place of the game's; the code runs under `xpcall`
   with `debug.traceback` when the game has the debug library. The lines and the returned values come
   back as one string; an error is raised again with the lines before it.
+- **Hooks.** Before the tools run, each function above is checked against this build's bytes at its
+  address (`game_code::matchesPastHooks`). A function another mod hooked is accepted when the rest of
+  the bytes, past the hook's jump and the `int3`/`nop` it fills the rest of the cut instruction with,
+  are this build's. Infinite Heaven's IHHook hooks these functions, so its game's Lua tools call
+  through it. A function whose code differs elsewhere still makes the tools unavailable, and the log
+  names its address.
 
 ### Travel
 
@@ -1605,8 +1625,41 @@ rate"), the photo mode hooks (see "Photo mode"), the game loop hooks (see "Frame
     `m_viewportSize.xy` copied over from a buffer holding the output size (a partial copy into a
     constant buffer, which Direct3D 11.1 drivers allow). A clear of the scene target from such a
     context goes to the output target.
+  - Only draws whose viewport covers the scene target are made there. As a save loads, the game
+    builds the Mother Base emblem with `Draw2D` shaders in corners of the scene target (1024x1024,
+    512x512 and 256x256 from 0,0, then 128x128 down to 8x8 in a row from 256,0) and reads it back
+    into the BC3 texture the sortie prep shows. Made on the output target, the game read back an
+    empty corner and the emblem was black at every mode until the next load (2026-11-04).
   - Every clear of a render-size depth-stencil also clears the output-size one, so the 2D pass's
     stencil masks work.
+  - A `Draw2D` draw that tests depth, blending over, is made in two passes of its own
+    (`compositeBehind`): into a float scratch layer, premultiplied; then over the
+    target, through `shaders::CompositeBehind`. The sortie prep's emblem is the only such draw in
+    the F10 records (frame 20182, #874: `Draw2D_Ui2_BL`, `greater_equal`, no depth write) and the
+    one UI image the game hides behind the 3D view: without the scene's depth it passed everywhere
+    and stood in front of Snake and the horse. The second pass reads the game's render-size
+    depth-stencil, without the upscaler's jitter (the scene is drawn jittered) and without the
+    one-pixel holes hair leaves in it (a dither pattern the image's upscaler fills and the depth
+    keeps). Read nearest against the draw's depth, the emblem's edge changed with the jitter every
+    frame, and nearest again over 2x2 closed the holes but grew every outline by a render pixel, a
+    band of backdrop between a character and the emblem. So the pixel's coverage is measured
+    instead: the depth is compared with the draw's at four places across the pixel, bilinearly, and
+    the emblem is blended in by `1 - coverage`. Where the pixel is partly the character, the grey
+    the upscaler mixed into it is replaced too: the backdrop is taken from nearby places nothing
+    covers, and the emblem takes its place (`out = pixel + (1 - cover) * (emblem - alpha * backdrop)`).
+    A depth-tested draw the composite cannot take, one that blends other than over (the training
+    area's circles, additive, in Mother Base's records) or one with stencil, is drawn on the output
+    target with the filled depth as before.
+    Depth a redirected 2D draw writes stays on the output-size depth, so a later fill drops it;
+    none writes depth in the records.
+  - Without upscaling (DLAA), the game draws the emblem itself, against its own render-size depth
+    and so against the jitter: the same two-pass draw is made in place on the scene target. Only for
+    draws that test depth, leave stencil alone and blend over; the rest stay the game's own.
+  - The composite's surfaces are made when first needed (the layer in `R16G16B16A16_FLOAT`, the
+    backdrop in the target's format) and again when the target's size or format changes. The stretch
+    that fills a depth-stencil with the scene's depth, `fillDepth` and `shaders::StretchDepth`, stays
+    for a draw the composite cannot take: it writes `SV_Depth` through a full-screen triangle, with
+    the stencil left alone.
   - `GammaControl` reads the output target's `_SRGB` view in place of the scene target.
   - When `GammaControl`'s viewport has its scene's size and the back buffer is larger (the exclusive
     fullscreen box), every `GammaControl` draw gets the viewport and scissor over the whole back
@@ -1894,7 +1947,12 @@ the game's lights) is left alone until it runs.
   along a reflection the surface's roughness spreads (GGX's visible normals, Heitz 2018, roughness squared,
   from Ray Reconstruction's normal guide). On a surface of roughness 0.5 and up (`RoughSurface`), most of what
   the game draws, a reflection is a faint blur: the ray's hit takes the light cache's light for its place (`CachedLight`),
-  one ray a pixel; where no ray has lit that cell yet, and at a self-lit mesh, it is shaded as below. On a glossy
+  one ray a pixel; where no ray has lit that cell yet, at a self-lit mesh, and nearer than the cell is wide, it is
+  shaded as below. A cell is a tile deep along the ray's main axis, a metre at a room's distance, through a wall:
+  until 2026-11-06 the rays from a dark room's wall beside a pipe 2 cm off it read the cell at the pipe's back, which
+  held light the pipe lit afresh had none of, and drew a pale line along it at 4 to 10 times the wall's light, and
+  dotted white blobs on a box (a debug case: recorded in 7 sessions the line lit 199 to 400 of 400 rows,
+  in 4 with the rule none). The reflections cost 0.08 ms more there at 4K (1.63 to 1.71 ms). On a glossy
   surface the hit has its material (see "Hits" below) and takes the sun, a light and a self-lit mesh afresh, each
   diffuse by its albedo. The sun and the light are specular by GGX too; a self-lit mesh's specular light is the
   specular ray that meets it. One of its lobes then goes on, chosen by what each reflects: the
@@ -1948,8 +2006,10 @@ the game's lights) is left alone until it runs.
   - **The draws** (`glass::draw`). Each leaves out what it reflects with (`GameShader::reflectionSlot` unbound, reading
     black), which keeps its tint, highlights, cover and fog, and is drawn again with the game's vertex shader and its
     depth test into three shared targets: the depth, the normal with `GlassRoughness`, and the weight the
-    game's shader gives its reflection, `alpha x (1 - GlassColor.a + GlassColor.a x F) x ReflectionColor x` the fog's
-    share (`GlassSurface`; `MirrorSurface`: its mask and the fog, the normal from the position across the pixel, as
+    game's shader gives its reflection, `cover x (1 - GlassColor.a + GlassColor.a x F) x ReflectionColor x` the fog's
+    share, with what clean glass's two faces reflect (F0 0.04: 8% head-on) in place of the game's `F` (an F0 of 0.58 to 0.95
+    times a cube map times the light on the pane: at the game's `F` the traced surroundings turned Kaz's dark sunglasses into
+    pale tinted mirrors, 2026-11-05) (`GlassSurface`; `MirrorSurface`: its mask and the fog, the normal from the position across the pixel, as
     its vertex shader gives none). The last drawn is the nearest, as the game sorts what blends; the weights blend as the
     game blends, so a pane drawn twice, as many are, weighs as it shows. A mirror with the live picture stays the game's
     (its texture is a render target), and so does whatever a smaller camera's view draws.
@@ -2273,8 +2333,8 @@ draws with replacement shaders. With soft shadows off too, the game's own shader
 then only checks a flag on each full-screen draw. **Lamp contact shadows** give every point and spot
 light a short shadow of its own, marched through the depth buffer inside the light's own draw
 (`drawMarking` in `src/features/lamp_contact_shadows/lamp_contact_shadows.cpp`, from the local light
-pass), so they are a toggle of their own: the sun's is one Bend trace a frame, the lamps' a march per
-light, in the light's own volume draw.
+pass), so they are a feature of their own, on the sun's switch: the sun's is one Bend trace a frame, the
+lamps' a march per light, in the light's own volume draw.
 
 - **Replacement shaders** (`src/passes/sun_light_pass_shaders.hpp`). `SunLight_DL_CS_ES` and
   `SunLight_DL_ES`, and their rain pair without the sky reflection (`SKY_REFLECTION 0`),
@@ -2387,7 +2447,7 @@ Not handled:
 
 ## Lamp soft shadows
 
-With **Lamp soft shadows (PCSS)** on, a point light whose shader is `SSLighting2_Point` draws with the
+With **Soft shadows (PCSS)** on, a point light whose shader is `SSLighting2_Point` draws with the
 add-on's replacement (`src/features/lamp_soft_shadows/lamp_soft_shadows_shaders.hpp`) instead of the game's, and its own shadow map is
 filtered with contact-hardening soft shadows: sharp where the object meets the light, wider the
 further the shadow falls, as a real bulb's is.
@@ -2839,7 +2899,22 @@ it is the game's own scene throughout (see "Draw capture (removed)" below).
   stand-in (model `84a1b19dea6952c1`, mesh 9) kept 80 to 100% of a room's main lamp, an unshadowed spot,
   off its wall 0.9 m from it (the lamp probe), and the scene view went red over the room: the camera's
   rays met stand-ins short of what the game drew. Cut-out stand-ins stay in, for the main-view cut-out
-  meshes left out (the pylon's lattice).
+  meshes left out (the pylon's lattice). Since 2026-11-07 only rays towards lights meet them
+  (`MeshRole::CutOutStandIn`: `GI_GEOMETRY_CUT_OUT | GI_GEOMETRY_SHADOW_ONLY`). In Africa's jungle each tree
+  fern's fronds (model `84a1f5deb4c61e59`, mesh 0, alpha 0x80 shadow 0x01) are drawn in the main view alone,
+  and the game casts them through a canopy card (model `84a3bde77c6368f3`, 10 triangles, about 22 x 22 m,
+  alpha 0xa0 shadow 0x42) 14 to 20 m up, one a tree. Met by every ray, the cards were a lid over the forest:
+  the camera's ray met one at 36 m where the game drew ground at 105 m, they stood in front of 14% of the
+  frame, and the floor under them lost the sky's light while the sun's shadow matched the game's.
+  Their fronds are cut out and are in the scene only beside a solid stand-in, as since 2026-11-09: alone they
+  are dropped, and the card casts for them. In, the fronds cost every global illumination and reflection ray
+  4.5 ms of the case's 6.7 ms frame (1280x720, 240 frames), the card 2 ms, for the same shade. A structure whose
+  meshes all let a light's rays through is
+  `GI_MASK_VIEW_ONLY`, which those rays skip whole, so its fronds may take an opacity micromap. A jungle tree
+  with a canopy card is skinned, and so was taken for a character until 2026-11-09, its card dropped with its other
+  stand-ins: the sun then reached the floor the game's map shades (`84a0fe379b794365`, no shadow over 12.5% of the
+  frame at the case's rock). A character's stand-in with the decal alpha bit is now kept as a rigid model's cut-out
+  stand-in, for rays towards lights alone; those without it stay dropped, as a woman's outfit's was (2026-10-24).
   Since 2026-10-27 a solid stand-in is kept again where its model's main view shows cut-out meshes the
   scene leaves out (shadow bit 0 with alpha bit 5 or 7), as the only thing the rays have of them, and
   only for rays towards lights (`GI_GEOMETRY_SHADOW_ONLY`, `StopsRay`): every other ray passes it, and
@@ -2965,8 +3040,32 @@ denoiser (see "Ray Reconstruction").
   sides.
 - **Where a ray leaves** (`PixelSurfaceAt`, for the sun's rays, the lights', the debug view's, and the
   global illumination's and path-traced reflections' first rays; what the game draws in front of the
-  rest, glass, mirrors and rivers, keeps its own start, as its surface is not in the opaque depth, while
-  the sea, in the G-buffer, leaves as any surface does). A ray from the eye through the pixel looks for
+  rest, glass, mirrors and rivers, keeps its own start, as its surface is not in the opaque depth). The
+  sea's pixels (the pack's albedo alpha 0, where the sea's own depth is the G-buffer's) leave from the depth's
+  point: the scene holds only a flat plane in place of the waves (see "Sea"). Searched for, the plane was the
+  surface where a wave came within reach of it and the wave's point was elsewhere, so the sun's shadow on the
+  water jumped between the two as the waves moved, and the water beside a hull took the hull's wall behind it
+  (a debug case at Mother Base, 2026-11-05, the shadow-start debug view). Nor is the plane any other pixel's
+  surface: it is passed as a stand-in. Nor is the terrain's top where the game drew a surface facing the other way
+  (`IsTerrainFacingAway`): the terrain stands up to 3 cm off the ground the game draws, above it there, so a prone
+  Snake's arm dipped under it, the search took the terrain 4 cm before the arm's underside as its surface, and the rays left
+  upwards into the sky, a pale band along the arm at 2.4x the arm's light (a debug case, 2026-11-05). From the
+  arm itself, the rays heading down passed under the one-sided terrain and met the sky too (58 of 64 escaped), so
+  the global illumination's and the opaque reflections' first rays from a model or character sunk under the
+  terrain by less than a quarter metre (`SunkUnderTerrain`) that head down and meet nothing take no light: they
+  meet the game's ground just below, which the scene lacks. The arm's underside's light fell from 0.35 to 0.12, the
+  open ground's being 0.30; the rest of the frame stayed within 2%. The gap is the game's own: its terrain shader
+  (`NewTerrain_Depth`) samples the same heightmap as `TerrainHeight` with no morph or displacement, but at the vertices
+  of its patches, whose grid coarsens with distance (32, 16, 8 or 4 cells a patch, a patch 1/128 of the heightmap and
+  up), where the scene's ring cells are 1 m; between the vertices each draws a straight line, so the two part by up to
+  3 cm, the game's ground above the scene's in one place and below in the next (the probe, 2026-11-05: within 0.3 cm
+  under a metre from the camera, 1 to 2.5 cm below 1.4 to 2.3 m away on a slope). Along a camera ray grazing the
+  ground that gap is about 10 cm, past the search's reach, and pixels by a boot resting on a slope left from the
+  depth's point, lifted 2.3 cm into the boot: their ground was black, 7x darker than the game's. Where the search
+  misses, a second one takes the terrain alone (`TerrainUnderPixel`, instance mask `GI_MASK_TERRAIN`) within 3 cm of
+  the depth's point along the terrain's own normal (not the G-buffer's, whose bumps read 3.6 cm for a 1.8 cm gap),
+  where the G-buffer's normal is within 60 degrees of the terrain's, and only for pixels within 6 cm of the scene's
+  terrain height: traced for every missed pixel, it cost 0.3 ms at 4K on a tin roof the scene leaves out. A ray from the eye through the pixel looks for
   the scene's own surface near the depth's point (within 3 cm plus 2% of the distance; cut-out geometry
   by its alpha, stand-ins passed), searching that stretch alone: the game hides what comes between the
   camera and the player (a bush the camera backs into) and the scene keeps it. Searched from the eye,
@@ -2980,8 +3079,8 @@ denoiser (see "Ray Reconstruction").
   maps reach. The point comes from the triangle's corners and the ray is traced in the instance's own
   space, each a few steps of the largest coordinate off in any direction, as a character's transform
   turns the error of one large coordinate into the others. Wachter and Binder's offset
-  (`OffsetFromTriangle`, Ray Tracing Gems chapter 6: 256 steps of each coordinate on its own, which
-  rays leaving a hit keep) failed both ways, found by the shadow probe on 2026-10-24. In the
+  (Ray Tracing Gems chapter 6: 256 steps of each coordinate on its own, which rays leaving a hit kept
+  until 2026-11-06) failed both ways, found by the shadow probe on 2026-10-24. In the
   field it lifted the start about 3 cm: Snake's chest was shadowed in strips along the folds of his
   suit, the start inside the next fold, 5 to 6 mm under its surface, the ray blocked at 0.00 m leaving
   it. In the helicopter, whose floor lies near the map's origin across but 1,200 m up, it lifted next
@@ -3009,6 +3108,18 @@ denoiser (see "Ray Reconstruction").
   ruins' and Snake's boots on a deck read the same. The stretch passes stand-ins since then too: a pixel
   behind one left from the depth's point, though only 48 of 134 recorded debug cases had any there, the
   worst 0.47% of its frame.
+- **Rays leaving a hit.** They leave by `LiftOffTriangle` too, and skip copies of the hit's surface
+  within its copy tolerance, a copy being a parallel surface whose back they meet (on a model, DXR's
+  front face), or cut-out geometry from either side. Until 2026-11-06 they left by Wachter and Binder's
+  offset and took any parallel surface for a copy. In a dark room (a debug case) a pipe 1 to 2 cm off
+  the wall glowed orange along its length, as did a poster's frame, a bed's head and a cabinet's edge:
+  half the bounce rays from the pipe's back went past 9 m and lit the sunlit walls outside. Either
+  fault alone kept the leak: the 3 cm lift started them inside the wall, past the wall's sun-only
+  stand-in, and from a 3 mm lift the wall facing them counted as a copy of the pipe. With path tracing
+  (720p render) the band beside the pipe was 5.8 times the wall's light, 5.4 with the lift alone, 5.7
+  with the copy rule alone and 1.1 with both, its light from the rays 83 times the wall's before and
+  half of it after. At 4K the frame cost 0.25 ms less (19.52 to 19.27 ms, two runs each in turn): the
+  bounce rays no longer reach cache cells far outside.
 - **Cut-out meshes.** A model mesh the game alpha-tests (FMDL alpha bits 5 and 7, see "Scene objects",
   mesh flags) is cut-out geometry: non-opaque in its structure, so only it reaches the rays' candidate
   code. In the captured-mesh era the shadow rays' alpha test on the captured grass and bushes' cards (5
@@ -3042,6 +3153,30 @@ denoiser (see "Ray Reconstruction").
   in. A ring whose build finds no scratch left that frame is left out until it is built. Their
   instances carry `GI_INSTANCE_TERRAIN` (brown in the shadow debug view). Harness modes `terrain` (flat heightmap at
   the ground: the same shadows as `beyond`) and `terrainhigh` (a metre up: everything shadowed).
+- **The game's own terrain patches** (2026-11-06). The game draws its terrain as patches of the virtual heightmap:
+  `NewTerrain_Depth` and the G-buffer's `NewTerrain_PackedMaterial*` place each vertex alike, `virtualUv = v0.xy x c9.xy +
+  c9.zw`, clamped to 0.999756, the height read there, `(u, h, v) x c10 + c11`, with no morph or displacement. `v0` comes
+  from one static patch mesh (1,501 vertices of two halves, `R16G16_FLOAT`, uv 0 to 1; 130,980 16-bit indices), its index
+  buffer holding grids of 32, 16, 8 and 4 cells across with their stitched edges; a patch near the eye is 1/128 of the
+  heightmap (64 m, 2 m cells), coarser away from it. The 1 m ring cells sampled the same heights at other points, so the
+  two grounds parted by up to 3 cm either way: the glow under a prone arm and the black ground by a boot above. The draw
+  hooks (`gi_inputs.cpp`) note each main-camera terrain draw's `c9`, `c10`, `c11` and index range, and the mesh's
+  buffers, their vertex format from the input layout (`game_shaders::positionFormatOf`, from ReShade's `init_pipeline`);
+  the kick reads the mesh back once (`ray_tracing.cpp`). The scene (`scene_contents.cpp`) gives each ring the patches wholly
+  inside it and clear of the ring inside it, nearest first, up to `GI_TERRAIN_PATCHES` and `GI_TERRAIN_PATCH_TRIANGLES`
+  a ring; a patch across a ring's edge stays the rings'. `TerrainPatches` (gi_scene.hlsl), once a ring, writes their
+  triangles as the game places them, and `TerrainGrid` collapses the ring's cells under them to a point. They are each
+  ring structure's second geometry: as a structure of their own, every ray near the ground crossed two, and the sun's
+  rays cost 0.35 ms more at 4K than with the ring alone; merged, 0.03 to 0.08 ms in all, 0.07 ms with 168 patches in a
+  view over the ruins to the horizon. Other patches than the
+  last build the ring's structure again, as which triangles are active changes (+0.34 ms in a frame forced to every
+  frame), decided before the ring's own build: a frame that both refitted and built it removed the device. Measured
+  against the game's depth: within 0.06 mm on a slope; at the ruins and the first debug case's spot some triangles lie
+  3.0 mm under the game's, the game never below; not explained by the textures bound, the samplers, the page-table
+  constants, the draws' transforms, a second index buffer, pixel-shader depth or fused arithmetic. In that view over the
+  ruins, on the same pixels: past 2 km 53% of the rings' ground stood over 0.3% of its distance off the game's, the
+  patches' 0.5%; 512 m to 2 km about half stays off with or without them (median 0.17% to 0.06%), the game's depth there
+  nearer than both; not looked into.
 - **Inside and beyond the shadow map.** Each ray works out how far its pixel lies past the game's
   shadow map range, as `SunLight_DL_CS_ES` fades its shadow to lit there (`cPSLight` `c8.x`, `c8.y`
   and `c6.x`, noted from the shadow-mapped sun shaders): 0 inside, 1 past the fade. Cut-out geometry
@@ -3176,6 +3311,18 @@ With DLSS Ray Reconstruction denoising, the rays go out without the filter (see 
   (`c6.z^(-1/16)`) the brightness's square root further, where the brighter light falls to the same
   dimness. Set when the light is noted, so its redrawn light, its shadow rays and its bounce all have
   it. Only the look: the game's guards see as before.
+- **The jitter on the game's light volumes** (`src/game_light_volumes.cpp`, 2026-11-09). The volumes come
+  in clip space, worked out on the CPU from the game's own camera, so the upscaler's jitter, which only
+  goes into the scene constants, reached the depth they test but not them: a lamp's volume lying on a
+  wall passed or failed the marking draw's `greater_equal` by that frame's jitter. Africa's villa lamps
+  flickered with the camera still, `0.24%` of the pixels at DLSS Ultra Performance and `0.000%` with the
+  jitter off, at 40 frames; the smaller the render scale, the larger the jitter in render pixels, the
+  worse. All 24 of the game's light vertex shaders are one code under a name each (2026-11-09), so each
+  is made from `game_light_volumes`' own, which adds `cPSScene`'s `c28` (the jitter in NDC) times `w` to
+  the clip position and then works out the sampling position as the game's does: `m_renderInfo` times
+  `m_renderBuffer.zwzw` from `cVSSystem` for the viewport within the targets. At the villa lamps after
+  it, `0.000%` with the effects on or off. The lights drawn again add it to their copies of the volumes,
+  and their bounds come from the volume through the unjittered `m_projectionView`.
 - **Drawn with.** Each kind of light (point or spot, mask or not, `SSLighting2` or `NA`) is drawn again
   with the game's own shader for it with specular and without a shadow map, which reads `c8.x` and the
   specular tables at `t8` and `t9`; a light whose own shader has no specular gets a scale of 1, as the
@@ -3636,7 +3783,7 @@ planet's centre is the origin, in km; the game's world has y up in metres.
 
 ## Sea
 
-With **Sea** (`sea=1`, under atmosphere; `Effect::Sea`, first in a cost measurement's order) the sea around
+With **Sea** (`sea=1`, under World; `Effect::Sea`, first in a cost measurement's order) the sea around
 Mother Base is the add-on's (`src/features/sea/`), drawn into the G-buffer, so the game's lighting, fog and
 screen-space reflections, the global illumination and path tracing take it as any surface.
 
@@ -3679,7 +3826,22 @@ screen-space reflections, the global illumination and path tracing take it as an
   and the slopes' squares with the foam, whose levels give the spread of slopes a pixel covers (LEAN mapping,
   Olano and Baker 2010; for the sea, Bruneton et al. 2010). Foam gathers where the displacement's Jacobian
   falls below 0.55 and fades over 2.5 s. The wind is the weather's, 6 m/s in sun, 8 cloudy, 14 in rain, 10 in
-  sandstorms, 4 in fog, turning over about 20 s, times **Waves** (`sea_waves`); its direction the game's.
+  sandstorms, 4 in fog, turning over about 20 s; its direction the game's. A **Waves** slider scaled that wind,
+  and it never agreed with the sea it drew, so it is gone (2026-11-05).
+  A wave moves at the deep-water speed of its length, faster than the game's sea showed (2026-11-05), so the
+  waves' clock runs at **Wave speed** (`sea_speed`) of real time (0.5, half), the foam fading on it too. Beside
+  it, `sea_albedo_r`, `_g` and `_b` set the water's albedo in the ini alone.
+  The waves' shape against the weather's sea has a slider each, applied at the next present:
+  `sea_height` (1.1) scales the geometry's heights alone, in the vertex shader, the spectrum's energy and so the
+  slopes (and the normals, the roughness and the foam built from them) left as they are: scaling the energy too
+  made every crest's shading sharpen with the slider (2026-11-05); `sea_peak` (0.7)
+  multiplies the peak frequency, below 1 giving longer, slower waves; `sea_ripples` (2) scales the slope
+  variance of the ripples too short for the tiles; `sea_chop` (0.9) the sideways displacement's sharpness;
+  and `sea_split` (4) the wavenumber where one tile's waves end and the next's begin, larger leaving the
+  longer waves with more of the spectrum. The defaults came from the game's own sea looking taller and
+  lower-frequency than the add-on's (2026-11-05, Mother Base, the same view). **Foam** (`sea_foam_coverage`, 1.25)
+  widens the squeeze foam shows over: the longest waves fold less than the short steep ones it was set for, and in
+  the measured view 1.2 matched the game's foam to within its 0.06% of the near sea's pixels (1.6 gave 1.56%).
 - **The surface**, into the G-buffer at the frame's first draw of the main view's G-buffer: the add-on
   watches the render target binds for three 8-bit targets of one size with depth, and the viewport filling
   them (the intro's mirror draws into a corner). It draws with the game's own camera constants (`b2`, the
@@ -3689,10 +3851,27 @@ screen-space reflections, the global illumination and path tracing take it as an
   edge a ring's odd vertices slide onto the next ring's grid (Strugar's CDLOD morph, 2009), their
   displacement's level of detail the same on both sides. The Earth's curve, and past the game's 4 km far
   plane the depth 1e-7, so the sea meets the sky at the horizon. As the game's objects write it: the albedo
-  (sRGB values) from water's, linear (0.002, 0.012, 0.03) (`GI_SEA_ALBEDO`), to foam's 0.7; the normal in
+  (sRGB values) from water's, linear (0.012, 0.066, 0.123) (`GI_SEA_ALBEDO`), to foam's 0.7. The water's was
+  (0.002, 0.012, 0.03), a deep clear sea's, and the sea came out 2 to 3 times darker than the game's (2026-11-05,
+  Mother Base at noon, the same view with the enhancements off and on). The light looking down rises linearly
+  with the albedo, so two runs (1x and 3x) gave the albedo per channel at which it matches the game's: 0.025
+  against the game's 0.024 in luminance. Towards the horizon, where the reflection decides, it is 82% of the
+  game's at 15 to 35% of the frame's height and 57% at the top; the normal in
   view space (`EncodeViewSpaceNormal`) from the slopes, tilted back where it faces away from the eye; the
   roughness from the slopes' spread with Cox and Munk's slope variance the tiles leave out; specular
-  intensity 1; material 106 (white, F0 0.027, the table's nearest to water's 0.02). Its own depth goes to a
+  intensity 1; material 106 (white, F0 0.027, the table's nearest to water's 0.02). The foam is the game's own
+  (its shader's source is in the dump's debug data: `shader\Primitive_TppFourierOcean.shdr`, `NCalculate`): the
+  near patches' `inFoamTexture` (`t3`, a noise, at `uv x 0.2` plus the scroll `c0.xy`) and `inFoamTexture2`
+  (`t5`, three patterns, light to dense, at `uv` plus the scroll times `c1.z` x 2), `uv` the world's xz over the
+  tile size (`c1.w`), and the pixel material's foam amount `c4.w`. The game weighs the patterns by its CPU's
+  whitecap mask (`grad.w`, `w`, `w^2`, `w^4`); here by the folds above plus where the surface is squeezed, its
+  Jacobian from 0.9 down to 0.55 (`moments.z`): weighed by the folds alone, about 1% of the sea at 12 m/s, no
+  foam showed (2026-11-05, Mother Base at noon). They fade between 100 m and 1.6 km as the game's. The draw that
+  copies the level also takes the two textures (BC1, 512 x 512 noise and 1024 x 1024 patterns once streamed in;
+  while a map loads a render target can sit in those slots, so only textures with levels are taken) and copies
+  the pixel material (`cPSMaterial`, `b4`) to the surface's `b11`; until it has, the foam is the folds alone.
+  Read back at Mother Base: tile 32 m, speed 1, amount from 0 to 0.95, changing over seconds. The game's foam
+  where the sea meets the pillars (its `foamPilars`, from the scene's depth) is not drawn. Its own depth goes to a
   fourth target (`sea::surfaceDepth`). The game's sea draws are skipped while the add-on's is drawn: while the
   game drew its sea in the last 60 s, decided at present for the frames recorded after it; a second without
   the main view's G-buffer (a loading screen) forgets it. Sea on or off takes effect at a present too, so the
@@ -3709,9 +3888,13 @@ screen-space reflections, the global illumination and path tracing take it as an
   the G-buffer's, Karis' fit of GGX's split sum for F0 0.02 ("Physically Based Shading on Mobile", 2014), in
   place of the game's weighting, floored at the sun pass's `c2.z` (0.21 on the decks) and halved: the sea
   reflects almost all of the sky at grazing angles, and 2% looking down.
-- **In the ray-traced scene**: a plane at the level under the eye, 100 km across, two triangles in a static
-  structure (`GI_INSTANCE_SEA`), one-sided with its front up, as the terrain is: the decks' rays meet its top,
-  and a ray leaving a wave's trough below the plane passes its back, so it lies at the level itself. Its hits
+- **In the ray-traced scene**: a plane under the eye, 100 km across, two triangles in a static structure
+  (`GI_INSTANCE_SEA`), one-sided with its front up, as the terrain is: the decks' rays meet its top. It lies
+  under the waves' deepest trough (`sea::planeLevel`): the wave maps' pass keeps each tile's deepest height,
+  read back with the level, and the tiles' together are as deep as the surface goes. At the level itself, a
+  hull a trough showed lay under the plane: its rays passed the plane's back and found open sky below, 45 of
+  a probe's 64 rays, and it lit up as a pale band at the waterline (2026-11-05, in about half the shots a
+  second apart at Mother Base; in none of ten after). Its hits
   take water's albedo (`HitAlbedo`). Before, the rays down from the decks met nothing and took the sky's light.
   The plane and the guide's water are in a kick only when the list that drew the sea into the frame's
   G-buffer ran before it (handed over, see "Command lists"): a frame counter by presents does not tell, as
@@ -3781,7 +3964,7 @@ at `t14` with `s15`; `cPSMaterial` at `b4`, whose `[0]` holds the normal map's t
   morning, 0.3 in the rain and none at dusk and night (measured at the Africa river, 2026-11-01), so they are full by day and go
   with it. The rays' sun shadow on the bed
   (`ray_tracing::sunShadow`) takes them off whatever stands in the sun's way, and without the rays nothing does. The fog in
-  front of the bed takes them too, as it hides the bed. `Atmosphere > Water caustics` holds the switch and the **Intensity**.
+  front of the bed takes them too, as it hides the bed. `World > Water caustics` holds the switch and the **Intensity**.
 
 The surfaces take one ray a pixel. Ray Reconstruction sees what the composite added, as the composite runs before the
 exposure, and its guides are told where a surface dominates (`forward_surfaces::guideReconstruction`).

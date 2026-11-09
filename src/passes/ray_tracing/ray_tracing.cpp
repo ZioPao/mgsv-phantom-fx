@@ -32,9 +32,11 @@
 #include <Windows.h>
 #include <d3d11_4.h>
 #include <wrl/client.h>
+#include <DirectXPackedVector.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -78,12 +80,14 @@ struct Options
 constexpr UINT ObjectVelocitySlot = 3;
 
 // Packs what the kernels read from the G-buffer: the depth, the normals in world space (0 where
-// the sky is; alpha 1/3 on foliage, the specular target's material 43, else 1) and the albedo, linear.
+// the sky is; alpha 1/3 on foliage, the specular target's material 43, else 1) and the albedo, linear
+// (alpha 0 where the add-on's sea drew, else 1: IsSeaPixel in gi_common.hlsli).
 constexpr char PackSource[] = R"(
 Texture2D<float> g_Depth : register(t0);
 Texture2D<float4> g_Normal : register(t1);
 Texture2D<float4> g_Albedo : register(t2);
 Texture2D<float4> g_Specular : register(t3);
+Texture2D<float> g_SeaDepth : register(t4); // The sea's depth where it drew (sea::surfaceDepth)
 RWTexture2D<float> g_DepthOut : register(u0);
 RWTexture2D<float4> g_NormalOut : register(u1);
 RWTexture2D<float4> g_AlbedoOut : register(u2);
@@ -94,6 +98,7 @@ cbuffer Parameters : register(b0)
     uint2 g_Size;
     uint g_HasAlbedo;
     uint g_HasSpecular;
+    uint g_HasSea;
 };
 
 [numthreads(8, 8, 1)]
@@ -114,7 +119,8 @@ void main(uint2 id : SV_DispatchThreadID)
     bool foliage = g_HasSpecular && round(g_Specular.Load(int3(id, 0)).z * 255) == 43;
     g_NormalOut[id] = depth > 0 ? float4(0.5 * world + 0.5, foliage ? 1.0 / 3 : 1) : 0;
 
-    g_AlbedoOut[id] = float4(g_HasAlbedo ? g_Albedo.Load(int3(id, 0)).rgb : 0.25, 1);
+    bool isSea = g_HasSea && depth > 0 && g_SeaDepth.Load(int3(id, 0)) == depth;
+    g_AlbedoOut[id] = float4(g_HasAlbedo ? g_Albedo.Load(int3(id, 0)).rgb : 0.25, isSea ? 0 : 1);
 }
 )";
 
@@ -122,6 +128,7 @@ struct PackParameters
 {
     float view[3][4];
     std::uint32_t width, height, hasAlbedo, hasSpecular;
+    std::uint32_t hasSea, padding[3];
 };
 
 // DLSS Ray Reconstruction's guides from the G-buffer, as its integration guide asks for them: the
@@ -471,18 +478,20 @@ void pack(ID3D11ShaderResourceView* depth, const SceneConstants& scene)
     parameters.hasAlbedo = hasAlbedo;
     const auto specular = indirect_light_pass::specularTarget(width, height);
     parameters.hasSpecular = specular != nullptr;
+    const auto seaDepth = sea::surfaceDepth(width, height);
+    parameters.hasSea = seaDepth != nullptr;
     check(write(immediate.Get(), packParameters.Get(), parameters), "Writing the G-buffer pack's constants");
 
-    ID3D11ShaderResourceView* inputs[]{depth, normals.Get(), hasAlbedo ? albedo.Get() : nullptr, specular.Get()};
+    ID3D11ShaderResourceView* inputs[]{depth, normals.Get(), hasAlbedo ? albedo.Get() : nullptr, specular.Get(), seaDepth.Get()};
     ID3D11UnorderedAccessView* outputs[]{depthOut.access.Get(), normalOut.access.Get(), albedoOut.access.Get()};
     immediate->CSSetShader(packShader.Get(), nullptr, 0);
     immediate->CSSetConstantBuffers(0, 1, packParameters.GetAddressOf());
-    immediate->CSSetShaderResources(0, 4, inputs);
+    immediate->CSSetShaderResources(0, 5, inputs);
     immediate->CSSetUnorderedAccessViews(0, 3, outputs, nullptr);
     immediate->Dispatch(groups(width), groups(height), 1);
-    ID3D11ShaderResourceView* noInputs[4]{};
+    ID3D11ShaderResourceView* noInputs[5]{};
     ID3D11UnorderedAccessView* noOutputs[3]{};
-    immediate->CSSetShaderResources(0, 4, noInputs);
+    immediate->CSSetShaderResources(0, 5, noInputs);
     immediate->CSSetUnorderedAccessViews(0, 3, noOutputs, nullptr);
     immediate->CSSetShader(nullptr, nullptr, 0);
 }
@@ -602,6 +611,64 @@ void copyTerrain(const engine_scene::TerrainInputs& inputs, gi_renderer::Frame& 
     std::copy_n(inputs.converter.begin(), 4, terrain.uvConverter.begin());
     std::copy_n(inputs.converter.begin() + 4, 4, terrain.texelCorrect.begin());
     frame.terrain = terrain;
+}
+
+// The game's terrain patch mesh (scene_contents::TerrainPatchMesh), read back from the buffers its patch draws bind,
+// again only when they change; empty when its formats are not the ones it was measured in (16-bit indices, vertices of
+// two halves, 2026-11-06).
+scene_contents::TerrainPatchMesh patchMesh;
+std::optional<gi_inputs::PatchMeshSource> lastReadSource;
+
+// A buffer's bytes, through a staging copy: a stall, once a mesh. Empty on failure.
+std::vector<std::uint8_t> readBack(ID3D11Buffer* buffer)
+{
+    D3D11_BUFFER_DESC desc{};
+    buffer->GetDesc(&desc);
+    desc = {.ByteWidth = desc.ByteWidth, .Usage = D3D11_USAGE_STAGING, .CPUAccessFlags = D3D11_CPU_ACCESS_READ};
+    ComPtr<ID3D11Buffer> staging;
+    if (FAILED(device->CreateBuffer(&desc, nullptr, staging.GetAddressOf()))) return {};
+
+    immediate->CopyResource(staging.Get(), buffer);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(immediate->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return {};
+
+    const auto* bytes = static_cast<const std::uint8_t*>(mapped.pData);
+    std::vector<std::uint8_t> read(bytes, bytes + desc.ByteWidth);
+    immediate->Unmap(staging.Get(), 0);
+
+    return read;
+}
+
+// The patch mesh from `source`, once its buffers or formats change; read again the next frame when a read fails.
+void readPatchMesh(const gi_inputs::PatchMeshSource& source)
+{
+    if (lastReadSource == source) return;
+
+    const auto indexBytes = readBack(source.indices.Get()), vertexBytes = readBack(source.vertices.Get());
+    if (indexBytes.empty() || vertexBytes.empty()) return;
+
+    lastReadSource = source;
+    patchMesh.indices.clear();
+    patchMesh.vertices.clear();
+    ++patchMesh.version;
+    const bool isReadable = source.indexFormat == DXGI_FORMAT_R16_UINT && source.vertexFormat == DXGI_FORMAT_R16G16_FLOAT && source.vertexStride >= 4;
+    for (std::size_t at = source.indexOffset; isReadable && at + 2 <= indexBytes.size(); at += 2)
+    {
+        std::uint16_t index{};
+        std::memcpy(&index, indexBytes.data() + at, 2);
+        patchMesh.indices.push_back(index);
+    }
+
+    for (std::size_t at = source.vertexOffset; isReadable && at + source.vertexStride <= vertexBytes.size(); at += source.vertexStride)
+    {
+        std::uint16_t halves[2]{};
+        std::memcpy(halves, vertexBytes.data() + at, 4);
+        patchMesh.vertices.push_back({DirectX::PackedVector::XMConvertHalfToFloat(halves[0]), DirectX::PackedVector::XMConvertHalfToFloat(halves[1])});
+    }
+
+    log(std::format("The game's terrain patch mesh: {} indices (format {}), {} vertices (format {}, stride {}){}.", patchMesh.indices.size(),
+        static_cast<int>(source.indexFormat), patchMesh.vertices.size(), static_cast<int>(source.vertexFormat), source.vertexStride,
+        isReadable ? "" : "; not in the formats measured, the scene keeps its rings"));
 }
 
 gi_renderer::Matrix matrixOf(const float (&rows)[4][4])
@@ -834,7 +901,17 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
     gi_textures::update(device.Get(), immediate.Get(), frame.newTextures);
     endStep(TexturesStep);
     if (const auto terrain = engine_scene::takeTerrain()) copyTerrain(*terrain, frame);
-    frame.seaLevel = sea::level();
+    if (const auto source = gi_inputs::patchMeshSource()) readPatchMesh(*source);
+    for (const auto& drawn : gi_inputs::takeDrawnPatches(*sceneCamera))
+        frame.terrainPatches.push_back({.uvScaleOffset = drawn.uvScaleOffset,
+            .worldScale = drawn.worldScale,
+            .worldOffset = drawn.worldOffset,
+            .firstIndex = drawn.firstIndex,
+            .indexCount = drawn.indexCount,
+            .baseVertex = static_cast<std::uint32_t>(drawn.baseVertex)});
+
+    frame.terrainPatchMesh = patchMesh.vertices.empty() ? nullptr : &patchMesh;
+    frame.seaLevel = sea::planeLevel();
     auto* skyCube = traces.isPathTraced ? sky_capture::update(immediate.Get(), LightScale) : nullptr;
 
     // The game's velocity for its moving meshes, for the shadows' and the light's denoisers: only this
@@ -1021,6 +1098,8 @@ void detach() noexcept
         fenceHandle = nullptr;
         fenceValue = lightSignalled = lightWaited = 0;
         sceneCamera.reset();
+        lastReadSource.reset();
+        patchMesh = {};
         previousCamera.reset();
         sky.reset();
         sun.reset();
@@ -1293,7 +1372,8 @@ void saveTextures(ID3D11DeviceContext* context, const std::filesystem::path& fol
         const std::pair<const char*, ID3D11Resource*> textures[]{{"depth", depthOut.texture.Get()}, {"normal", normalOut.texture.Get()},
             {"albedo", albedoOut.texture.Get()}, {"light", output.texture.Get()}, {"sun-shadow", shadowOutput.texture.Get()},
             {"lamp-shadow", lampShadow.Get()}, {"reflection", reflectionOutput.texture.Get()}, {"lamp-diffuse", lampDiffuseOutput.texture.Get()},
-            {"lamp-specular", lampSpecularOutput.texture.Get()}};
+            {"lamp-specular", lampSpecularOutput.texture.Get()}, {"reflection-map", reflectionMapOutput.texture.Get()},
+            {"reflection-distance", reflectionDistanceOutput.texture.Get()}};
         for (const auto& [name, texture] : textures)
             if (texture) saveTexture(context, texture, DXGI_FORMAT_UNKNOWN, folder / (std::string(name) + ".dds"));
     }
