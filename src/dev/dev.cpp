@@ -2,12 +2,15 @@
 
 #include "core.hpp"
 #include "dev/automation.hpp"
-#include "dev/cutscenes.hpp"
-#include "dev/game_lua.hpp"
+#include "device_check.hpp"
 #include "dev/perf_record.hpp"
 #include "dev/remaster/tool.hpp"
-#include "dev/travel.hpp"
+#include "devkit/cutscenes.hpp"
+#include "devkit/game.hpp"
+#include "devkit/game_lua.hpp"
+#include "devkit/host.hpp"
 #include "devkit/log.hpp"
+#include "devkit/travel.hpp"
 #include "features/photo_mode/photo_mode.hpp"
 #include "fxui/fxui.hpp"
 #include "log.hpp"
@@ -17,6 +20,16 @@
 #include <format>
 #include <optional>
 #include <string>
+#include <string_view>
+
+// The devkit's game layer: the build check the add-on makes.
+namespace devkit::game
+{
+bool isSupportedBuild() noexcept
+{
+    return phantom_fx::isSupportedGameBuild();
+}
+}
 
 namespace phantom_fx::dev
 {
@@ -25,10 +38,23 @@ namespace
 using fxui::State;
 using fxui::Tone;
 
+fxui::Tone toneOf(devkit::Tone tone)
+{
+    switch (tone)
+    {
+    case devkit::Tone::Dim: return fxui::Tone::Dim;
+    case devkit::Tone::Ok: return fxui::Tone::Ok;
+    case devkit::Tone::Warn: return fxui::Tone::Warn;
+    case devkit::Tone::Bad: return fxui::Tone::Bad;
+    }
+
+    return fxui::Tone::Dim;
+}
+
 // A tool that runs Lua has nothing to run on a game version without it.
 fxui::ItemSpec luaTool(fxui::ItemSpec spec)
 {
-    if (game_lua::isSupported()) return spec;
+    if (devkit::game_lua::isSupported()) return spec;
 
     spec.state = State::Unavailable;
     spec.message = "Unavailable for this game version.";
@@ -43,14 +69,14 @@ void drawTravel()
         .name = "Travel",
         .summary = "Free roam in another map, after one loading screen.",
         .keywords = "teleport map location Afghanistan Africa Mother Base free roam"}));
-    if (!item || !game_lua::isSupported()) return;
+    if (!item || !devkit::game_lua::isSupported()) return;
 
-    std::array<fxui::Option, static_cast<std::size_t>(travel::Map::Count)> maps{};
-    for (std::size_t i = 0; i < maps.size(); ++i) maps[i].label = travel::name(static_cast<travel::Map>(i));
+    std::array<fxui::Option, static_cast<std::size_t>(devkit::travel::Map::Count)> maps{};
+    for (std::size_t i = 0; i < maps.size(); ++i) maps[i].label = devkit::travel::name(static_cast<devkit::travel::Map>(i));
     const int pressed = fxui::segmented("Go to", -1, maps,
         "Leaves free roam as the helicopter would and arrives on foot: in Afghanistan and Africa where the game puts a player found off the map, "
         "at Mother Base on the Command platform. The game saves on the way, as it does when leaving free roam.");
-    if (pressed >= 0) travel::go(static_cast<travel::Map>(pressed));
+    if (pressed >= 0) devkit::travel::go(static_cast<devkit::travel::Map>(pressed));
 }
 
 // Any of the game's cutscenes, in its own mission.
@@ -60,10 +86,10 @@ void drawCutscenes()
         .name = "Cutscenes",
         .summary = "Plays any cutscene the game's scripts name, after one loading screen.",
         .keywords = "demo movie story mission play watch scene"}));
-    if (!item || !game_lua::isSupported()) return;
+    if (!item || !devkit::game_lua::isSupported()) return;
 
     static std::optional<std::size_t> selected;
-    const auto labels = cutscenes::labels();
+    const auto labels = devkit::cutscenes::labels();
     const char* const preview = selected ? labels[*selected].data() : "Pick a cutscene";
     if (const auto picked = fxui::searchCombo("Cutscene", preview, labels, selected)) selected = picked;
 
@@ -73,7 +99,7 @@ void drawCutscenes()
             "Mother Base cutscene in its place, which a toast says. Cutscenes start in the mission's own time and weather, not always the ones they "
             "have in the story.",
             selected.has_value()))
-        cutscenes::play(*selected);
+        devkit::cutscenes::play(*selected);
 }
 
 // What frames cost, on file.
@@ -97,15 +123,15 @@ void drawLuaConsole()
         .name = "Lua console",
         .summary = "Runs Lua in the game's own scripts at the next frame: an expression shows its value, print() its lines.",
         .keywords = "script execute run code vars gvars mvars svars TppMission"}));
-    if (!item || !game_lua::isSupported()) return;
+    if (!item || !devkit::game_lua::isSupported()) return;
 
     static std::array<char, 16 * 1024> code{};
     const bool submitted = fxui::textBox("##luaCode", code, 8);
-    const auto console = game_lua::console();
+    const auto console = devkit::game_lua::console();
     if (fxui::button("Run", "Ctrl+Enter in the box runs it too. It runs on the game thread at the next frame start, as the game's own scripts do.",
             !console.waiting)
         || submitted)
-        game_lua::submit(code.data());
+        devkit::game_lua::submit(code.data());
     if (!console.last) return;
 
     fxui::gap(6);
@@ -121,6 +147,8 @@ void drawLuaConsole()
 
 void install(const std::filesystem::path& addonDirectory) noexcept
 {
+    devkit::setName("PhantomFX");
+    devkit::setToast([](devkit::Tone tone, std::string_view text, std::string_view detail) { fxui::toast(toneOf(tone), text, detail); });
     devkit::setLogger(&log);
     automation::install(addonDirectory);
     perf_record::install(addonDirectory / "PhantomFX-automation" / "perf");
@@ -129,9 +157,9 @@ void install(const std::filesystem::path& addonDirectory) noexcept
 /** The game thread, at the main loop's frame start: each tool that runs there, in order. */
 void onFrameStart() noexcept
 {
-    travel::onFrameStart();
-    cutscenes::onFrameStart();
-    game_lua::onFrameStart();
+    devkit::travel::onFrameStart();
+    devkit::cutscenes::onFrameStart();
+    devkit::game_lua::onFrameStart();
     automation::onFrameStart();
     perf_record::onFrameStart();
     photo_mode::onFrameStart();

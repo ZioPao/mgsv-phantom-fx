@@ -10,7 +10,7 @@
 #include "fxui/fxui.hpp"
 #include "game_memory.hpp"
 #include "game_loop.hpp"
-#include "dev/game_lua.hpp"
+#include "devkit/game_lua.hpp"
 #include "log.hpp"
 #include "passes/ray_tracing/engine_scene.hpp"
 #include "passes/ray_tracing/gi_inputs.hpp"
@@ -18,7 +18,7 @@
 #include "passes/ray_tracing/ray_tracing.hpp"
 #include "resource_dump.hpp"
 #include "devkit/save_redirect.hpp"
-#include "dev/travel.hpp"
+#include "devkit/travel.hpp"
 #include "weather.hpp"
 
 #include <Windows.h>
@@ -215,7 +215,7 @@ void writeState(const std::string& name)
     std::ofstream state(caseFolder / "state.txt", std::ios::trunc);
     const auto camera = held_camera::lastCamera();
     state << "name=" << name << "\nframe=" << game_loop::currentFrame() << "\ncamera=" << (camera ? text(*camera) : std::string("?")) << "\n";
-    if (const auto outcome = game_lua::run(game_lua::StateScript, "=automation")) state << outcome->text << "\n";
+    if (const auto outcome = devkit::game_lua::run(devkit::game_lua::StateScript, "=automation")) state << outcome->text << "\n";
 
     const auto sky = weather::state();
     state << "clock=" << sky.clock << "\nweather=" << (sky.requested ? static_cast<int>(*sky.requested) : -1) << " " << sky.fogDensity << "\n";
@@ -520,21 +520,21 @@ void run(Script& running, const std::string& line)
     else if (command == "diagnostic") setDiagnostic(running, rest);
     else if (command == "lua")
     {
-        const auto outcome = game_lua::run(rest, "=automation", true);
+        const auto outcome = devkit::game_lua::run(rest, "=automation", true);
         if (!outcome) running.output += "error: the game's scripts are not running yet\n";
         else running.output += (outcome->ran ? "" : "error: ") + outcome->text + "\n";
     }
     else if (command == "travel")
     {
-        constexpr std::pair<std::string_view, travel::Map> Maps[]{
-            {"afghanistan", travel::Map::Afghanistan}, {"africa", travel::Map::Africa}, {"motherbase", travel::Map::MotherBase}};
+        constexpr std::pair<std::string_view, devkit::travel::Map> Maps[]{
+            {"afghanistan", devkit::travel::Map::Afghanistan}, {"africa", devkit::travel::Map::Africa}, {"motherbase", devkit::travel::Map::MotherBase}};
         std::istringstream arguments(rest);
         std::string name;
         arguments >> name;
         std::array<float, 3> place{};
         const bool hasPlace = static_cast<bool>(arguments >> place[0] >> place[1] >> place[2]);
-        const auto* const map = std::ranges::find(Maps, name, &std::pair<std::string_view, travel::Map>::first);
-        if (map != std::end(Maps)) travel::go(map->second, hasPlace ? std::optional(place) : std::nullopt);
+        const auto* const map = std::ranges::find(Maps, name, &std::pair<std::string_view, devkit::travel::Map>::first);
+        if (map != std::end(Maps)) devkit::travel::go(map->second, hasPlace ? std::optional(place) : std::nullopt);
         else running.output += "error: travel afghanistan|africa|motherbase [<x> <y> <z>]\n";
     }
     else if (command == "clock")

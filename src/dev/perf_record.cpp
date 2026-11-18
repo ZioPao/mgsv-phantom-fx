@@ -3,7 +3,7 @@
 #include "clock.hpp"
 #include "core.hpp"
 #include "dev/automation.hpp"
-#include "dev/game_lua.hpp"
+#include "devkit/game_lua.hpp"
 #include "dev/held_camera.hpp"
 #include "log.hpp"
 #include "passes/ray_tracing/shaders/gi_shared.h"
@@ -343,7 +343,7 @@ void onFrameStart() noexcept
 
         readAt = now;
         Place read;
-        if (const auto outcome = game_lua::run(game_lua::StateScript, "=perf"); outcome && outcome->ran)
+        if (const auto outcome = devkit::game_lua::run(devkit::game_lua::StateScript, "=perf"); outcome && outcome->ran)
         {
             std::istringstream lines(outcome->text);
             for (std::string line; std::getline(lines, line);)

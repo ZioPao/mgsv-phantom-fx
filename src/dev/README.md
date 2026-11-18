@@ -8,8 +8,7 @@ debug cases. `docs/DEVELOPMENT.md` describes what each does ("Debug cases", "Tra
 | `dev.hpp`, `dev.cpp` | The one door from the core, and the Developer page |
 | `dev.cmake`, `tests.cmake` | The folder's sources and kernel, and its tests |
 | `automation.*` | Commands from files, and F9's debug cases |
-| `../devkit/` | What another MGSV add-on can build on: the saves redirection, and the logger the core sets |
-| `game_lua.*`, `travel.*`, `cutscenes.*`, `cutscene_list.hpp` | Lua in the game, and the tools that run on it |
+| `../devkit/` | What another MGSV add-on can build on: the saves redirection, Lua in the game, travel, cutscenes, and the logger and toasts the core sets |
 | `inspect_trace.*`, `inspect.hlsl`, `inspect_shared.h` | A debug case's record of every pixel, a trace like any other |
 | `game_shadow.*` | A debug case's reference: the game's shadow per pixel, drawn at the sun pass |
 | `held_camera.*` | A debug case's camera, which photo mode's camera update takes |
@@ -23,7 +22,8 @@ the running game and what an agent needs to know to use them.
 
 The core calls in through `dev.hpp`, and through the few small headers its passes need. Each call stands behind
 `if constexpr (DevTools)` (`dev_tools.hpp`), which leaves a release build nothing to link, so the headers compile in
-every build and the sources in a dev build alone. A new tool goes in this folder, with its sources in `dev.cmake`.
+every build and the sources in a dev build alone. A new tool goes in this folder, with its sources in `dev.cmake`, or in
+`../devkit/` when another add-on can use it.
 
 Searching for `PHANTOM_FX_DEV_TOOLS` and `DevTools` finds every line the core keeps for the tools.
 

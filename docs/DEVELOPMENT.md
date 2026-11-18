@@ -48,7 +48,7 @@ Its log's first line says "with the diagnostic log". Builds for in-game checks u
 It also sets `PHANTOM_FX_DEV_TOOLS` (`DevTools` in `src/dev_tools.hpp`), which adds the overlay's
 **Developer** page, below Diagnostics: **Travel** (see "Travel"), **Cutscenes** (see "Cutscenes"),
 the **Lua console** (see "Game Lua"), a line on the remastering tool (**F6** marks, **F7** opens its panel:
-`src/remaster/README.md`) and the log switch above, and the debug cases (see "Debug cases"). All of it lives in `src/dev/`, whose README says how the core reaches it and how to detach it.
+`src/remaster/README.md`) and the log switch above, and the debug cases (see "Debug cases"). Most of it lives in `src/dev/`, and what another MGSV add-on can use in `src/devkit/`; both READMEs say how the core reaches them and how to detach them.
 It is left out of a release build altogether, not just switched off: CMake drops the folder's files
 and the `InspectPixels` kernel, and the little the core keeps for it stands behind `DevTools` or
 `#if PHANTOM_FX_DEV_TOOLS`. Those files hook the system's file calls, patch Steam's interfaces and
@@ -244,9 +244,10 @@ what draws it, when that is the feature's own.
 | `src/game_dither.cpp`, `src/game_dither.hpp` | The game's colour dither taken out of its shaders as they are made (see "Dither") |
 | `src/dev_tools.hpp` | Whether the build has the Developer page (the dev preset) |
 | `src/dev/` | The development tools, in a dev build alone; its README says how to detach them. `dev.*`: the core's one door to them, and the Developer page |
-| `src/dev/game_lua.cpp`, `src/dev/game_lua.hpp` | Lua in the game's script state, and the Developer page's console (see "Game Lua") |
-| `src/dev/travel.cpp`, `src/dev/travel.hpp` | The Developer page's travel: free roam in another map, and the way the page's tools leave a mission (see "Travel") |
-| `src/dev/cutscenes.cpp`, `src/dev/cutscenes.hpp`, `src/dev/cutscene_list.hpp` | The Developer page's cutscene player and its list (see "Cutscenes") |
+| `src/devkit/` | What another MGSV add-on can build on, in a dev build alone (its `README.md`): the saves redirection, Lua in the game, travel, cutscenes |
+| `src/devkit/game_lua.cpp`, `src/devkit/game_lua.hpp` | Lua in the game's script state, and the Developer page's console (see "Game Lua") |
+| `src/devkit/travel.cpp`, `src/devkit/travel.hpp` | The Developer page's travel: free roam in another map, and the way the page's tools leave a mission (see "Travel") |
+| `src/devkit/cutscenes.cpp`, `src/devkit/cutscenes.hpp`, `src/dev/cutscene_list.hpp` | The Developer page's cutscene player and its list (see "Cutscenes") |
 | `src/remaster/` | The remastering rules: they change the game's materials as they are made, saved in `materials.json` and built into the add-on (see its `README.md`, and "Materials") |
 | `src/dev/remaster/` | The remastering tool that writes them: a dev build's marks, and the panel that tunes them |
 | `src/frame_log.cpp`, `src/frame_log.hpp` | Development diagnostics, off by default: shader log, F10 frame record, constant and texture dumps |
@@ -576,7 +577,7 @@ the state back there for the overlay. Nothing is saved.
 
 ### Game Lua
 
-`src/dev/game_lua.cpp` runs Lua in the game's own script state, on the game thread at the main loop's
+`src/devkit/game_lua.cpp` runs Lua in the game's own script state, on the game thread at the main loop's
 frame start, the way the game's own calls into it run. The dev build's Developer page has a **Lua
 console** on it: Ctrl+Enter or Run runs the box's code at the next frame start, and the output box
 shows what it printed and returned, or its error with the stack.
@@ -601,7 +602,7 @@ shows what it printed and returned, or its error with the stack.
 
 ### Travel
 
-The dev build's Developer page has **Travel** (`src/dev/travel.cpp`): Afghanistan, Africa or Mother
+The dev build's Developer page has **Travel** (`src/devkit/travel.cpp`): Afghanistan, Africa or Mother
 Base free roam from any free roam, after one loading screen, without the helicopter and the sortie
 screens. It runs a chunk through Game Lua, and a toast says whether the game left or why not.
 
@@ -622,12 +623,12 @@ screens. It runs a chunk through Game Lua, and a toast says whether the game lef
   Base (9.12, 8.75, -42.43), the Command platform's first helipad (landing point
   `cl00pl0_mb_fndt_plnt_heli_30050` in `mbdvc_map_mbstage_parameter.lua`, the same in every
   layout).
-- **Shared.** The leaving and the arrival on foot are Lua helpers in `src/dev/travel.cpp`, which
+- **Shared.** The leaving and the arrival on foot are Lua helpers in `src/devkit/travel.cpp`, which
   `travel::depart` puts ahead of a chunk. The cutscene player leaves the same way.
 
 ### Cutscenes
 
-The dev build's Developer page has **Cutscenes** (`src/dev/cutscenes.cpp`): a searchable list of the
+The dev build's Developer page has **Cutscenes** (`src/devkit/cutscenes.cpp`): a searchable list of the
 game's cutscenes and a Play button, for free roam and the ACC. The game calls a cutscene a demo.
 Search takes the mission's code or title, the name in its script or the demo id.
 
@@ -4087,7 +4088,7 @@ F2 does nothing.
   position, facing the camera's yaw. The game's warp needs game time, so the request is taken at the
   next selector update (which also clears the pause), and a held camera, as a debug case leaves behind,
   is let go so the pause really clears; the warp then runs at the next frame start through the game's
-  Lua, from `dev::onFrameStart` (`src/dev/game_lua.hpp`): `GameObject.SendCommand` with
+  Lua, from `dev::onFrameStart` (`src/devkit/game_lua.hpp`): `GameObject.SendCommand` with
   `WarpAndWaitBlock` for the player (object 0), or `SetPosition` for the vehicle or walker gear they are
   in; missions and free roam only. It is the call Infinite Heaven's `InfTppUtil.Warp` makes.
 - **Near clip plane.** With **No near clip plane** on, the swapped-in camera's near plane (`+0x48`,
