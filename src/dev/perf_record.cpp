@@ -3,6 +3,7 @@
 #include "clock.hpp"
 #include "core.hpp"
 #include "dev/automation.hpp"
+#include "devkit/commands.hpp"
 #include "devkit/game_lua.hpp"
 #include "dev/held_camera.hpp"
 #include "log.hpp"
@@ -216,7 +217,7 @@ std::string timeOfDay()
 bool writeLine(const Json& line)
 {
     static bool wasFailing{};
-    if (!file.is_open()) file.open(folder / (automation::timeNow() + ".jsonl"), std::ios::app);
+    if (!file.is_open()) file.open(folder / (devkit::commands::timeNow() + ".jsonl"), std::ios::app);
 
     file << line.dump() << '\n';
     file.flush();

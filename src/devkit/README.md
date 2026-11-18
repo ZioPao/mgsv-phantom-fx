@@ -8,6 +8,7 @@ from its own hooks.
 | --- | --- |
 | `host.*` | The add-on's name, in Lua chunk names, and where its toasts go |
 | `log.*` | One logger function pointer, so the devkit writes to the add-on's log |
+| `commands.*` | Commands from files: the runner, its waits, and the present thread's jobs |
 | `save_redirect.*` | An automated run's saves, Steam Cloud and user data folder kept off the player's |
 | `game.hpp` | The game's image and code checks, and the build check the add-on answers |
 | `game_lua.*` | Lua in the game's own script state: expressions, print(), and the console's queue |

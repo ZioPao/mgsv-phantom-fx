@@ -6,19 +6,20 @@
 #include "dev/inspect_trace.hpp"
 #include "dev/perf_record.hpp"
 #include "dev/remaster/tool.hpp"
+#include "devkit/commands.hpp"
+#include "devkit/game_lua.hpp"
+#include "devkit/save_redirect.hpp"
+#include "devkit/travel.hpp"
 #include "features/global_illumination/river_light.hpp"
 #include "fxui/fxui.hpp"
 #include "game_memory.hpp"
 #include "game_loop.hpp"
-#include "devkit/game_lua.hpp"
 #include "log.hpp"
 #include "passes/ray_tracing/engine_scene.hpp"
 #include "passes/ray_tracing/gi_inputs.hpp"
 #include "passes/ray_tracing/gi_renderer.hpp"
 #include "passes/ray_tracing/ray_tracing.hpp"
 #include "resource_dump.hpp"
-#include "devkit/save_redirect.hpp"
-#include "devkit/travel.hpp"
 #include "weather.hpp"
 
 #include <Windows.h>
@@ -28,14 +29,11 @@
 #include <charconv>
 #include <cstdint>
 #include <deque>
-#include <exception>
 #include <format>
 #include <cmath>
 #include <fstream>
-#include <functional>
 #include <map>
 #include <tuple>
-#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -46,8 +44,8 @@ namespace phantom_fx::automation
 {
 namespace
 {
-// A directory scan every frame start would find nothing most of the time.
-constexpr std::uint32_t PollFrames = 6;
+using Script = devkit::commands::Script;
+
 // Presents a line waits for the render thread before it gives up: with frame generation several a game frame.
 constexpr std::uint64_t InspectionFrames = 3600, SceneFrames = 3600;
 // Presents the scene's work to do stays the same before it counts as made: a model that never gets room
@@ -58,74 +56,25 @@ constexpr std::uint32_t DefaultCaptureFrames = 120;
 // Presents after a probe's pixel changes before its text has that pixel: a readback's frames in flight.
 constexpr std::string_view ProbeWait = "wait 8";
 
-std::filesystem::path folder; // Empty while off
-std::atomic<std::uint64_t> presents{};
 std::atomic<bool> caseAsked{};
+bool probeTurnedOnView{};
 
-// A job the render thread does at its next present, and what it reports.
-using PresentJob = std::function<std::string(ID3D11DeviceContext*, ID3D11Resource* backBuffer)>;
-std::mutex jobMutex;
-std::optional<PresentJob> job;
-std::optional<std::string> jobResult;
-
-// The command file running, on the game thread only.
-struct Script
+// The waits a line leaves: the lines after it run once these are done.
+struct Waits
 {
-    std::filesystem::path result;
-    std::deque<std::string> lines;
-    std::string output;
-    std::optional<std::uint64_t> waitUntil; // A present count
-    bool isWaitingForJob{};
     std::optional<std::uint64_t> inspectionsBefore;
     std::uint64_t inspectionDeadline{};
     std::optional<std::uint64_t> capturesBefore;
     std::uint64_t captureDeadline{};
-    // Waiting for the scene: the give-up present, the work it had to do, and the present that last changed.
     std::optional<std::uint64_t> sceneDeadline;
     std::size_t sceneWork{};
     std::uint64_t sceneBusyAt{};
 };
-std::optional<Script> script;
-std::uint32_t framesSincePoll{};
-bool probeTurnedOnView{};
+Waits waits;
 
-std::optional<std::filesystem::path> nextCommandFile()
+void resetWaits()
 {
-    std::error_code error;
-    std::optional<std::filesystem::path> first;
-    for (const auto& entry : std::filesystem::directory_iterator(folder, error))
-        if (entry.path().extension() == ".cmd" && (!first || entry.path() < *first)) first = entry.path();
-
-    return first;
-}
-
-Script load(const std::filesystem::path& file)
-{
-    Script loaded{.result = std::filesystem::path(file).replace_extension(".result")};
-    std::ifstream input(file);
-    for (std::string line; std::getline(input, line);)
-    {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (!line.empty()) loaded.lines.push_back(std::move(line));
-    }
-    input.close();
-
-    std::error_code error;
-    std::filesystem::remove(file, error);
-
-    return loaded;
-}
-
-// Written under another name first, so a reader never sees half of it. The key's script has no reader.
-void finish(const Script& finished)
-{
-    if (finished.result.empty()) return;
-
-    auto partial = finished.result;
-    partial += ".partial";
-    std::ofstream(partial, std::ios::binary) << finished.output;
-    std::error_code error;
-    std::filesystem::rename(partial, finished.result, error);
+    waits = {};
 }
 
 std::string_view trimmed(std::string_view text)
@@ -189,7 +138,7 @@ float readFocalLength(std::istream& numbers)
 std::string status()
 {
     const auto camera = held_camera::lastCamera();
-    auto line = std::format("frame {}, presented {}, {}, ", game_loop::currentFrame(), presents.load(), !held_camera::isHeld() ? "running" : held_camera::isLive() ? "held live" : "frozen");
+    auto line = std::format("frame {}, presented {}, {}, ", game_loop::currentFrame(), devkit::commands::presents(), !held_camera::isHeld() ? "running" : held_camera::isLive() ? "held live" : "frozen");
     line += camera ? "camera " + text(*camera) : std::string("no camera yet");
 
     return line + "\n" + ray_tracing::status();
@@ -208,7 +157,7 @@ std::deque<std::string> caseLines(const std::string& name)
 // What the game is at into the case's folder.
 void writeState(const std::string& name)
 {
-    const auto caseFolder = folder / "cases" / name;
+    const auto caseFolder = devkit::commands::folder() / "cases" / name;
     std::error_code error;
     std::filesystem::create_directories(caseFolder, error);
 
@@ -220,15 +169,7 @@ void writeState(const std::string& name)
     const auto sky = weather::state();
     state << "clock=" << sky.clock << "\nweather=" << (sky.requested ? static_cast<int>(*sky.requested) : -1) << " " << sky.fogDensity << "\n";
     state << "scene=" << ray_tracing::status() << "\n";
-    std::filesystem::copy_file(folder.parent_path() / "PhantomFX.ini", caseFolder / "PhantomFX.ini", std::filesystem::copy_options::overwrite_existing, error);
-}
-
-void askJob(Script& running, PresentJob asked)
-{
-    std::scoped_lock lock(jobMutex);
-    job = std::move(asked);
-    jobResult.reset();
-    running.isWaitingForJob = true;
+    std::filesystem::copy_file(devkit::commands::folder().parent_path() / "PhantomFX.ini", caseFolder / "PhantomFX.ini", std::filesystem::copy_options::overwrite_existing, error);
 }
 
 void setEnhancements(bool isOn)
@@ -286,7 +227,7 @@ void run(Script& running, const std::string& line)
 
     if (command == "case")
     {
-        const auto lines = caseLines(rest.empty() ? timeNow() : rest);
+        const auto lines = caseLines(rest.empty() ? devkit::commands::timeNow() : rest);
         running.lines.insert(running.lines.begin(), lines.begin(), lines.end());
     }
     else if (command == "freeze")
@@ -322,17 +263,11 @@ void run(Script& running, const std::string& line)
         }
         else running.output += "error: move <x> <y> <z> <yaw> <pitch> <frames> [<mm>]\n";
     }
-    else if (command == "wait")
-    {
-        std::uint64_t frames{};
-        if (std::istringstream(rest) >> frames) running.waitUntil = presents + frames;
-        else running.output += "error: wait <frames>\n";
-    }
     else if (command == "wait_scene")
     {
-        running.sceneDeadline = presents + SceneFrames;
-        running.sceneWork = sceneWork();
-        running.sceneBusyAt = presents;
+        waits.sceneDeadline = devkit::commands::presents() + SceneFrames;
+        waits.sceneWork = sceneWork();
+        waits.sceneBusyAt = devkit::commands::presents();
     }
     else if (command == "probe")
     {
@@ -439,9 +374,9 @@ void run(Script& running, const std::string& line)
         running.output += engine_scene::watchedOwners().value_or("error: no snapshot came: is the ray-traced scene running?\n");
     else if (command == "inspect" && !rest.empty())
     {
-        running.inspectionsBefore = inspect_trace::finished();
-        running.inspectionDeadline = presents + InspectionFrames;
-        inspect_trace::request(folder / rest);
+        waits.inspectionsBefore = inspect_trace::finished();
+        waits.inspectionDeadline = devkit::commands::presents() + InspectionFrames;
+        inspect_trace::request(devkit::commands::folder() / rest);
     }
     else if (command == "perf" && !rest.empty())
     {
@@ -459,9 +394,9 @@ void run(Script& running, const std::string& line)
             }
         }
 
-        running.capturesBefore = perf_record::capturesFinished();
-        running.captureDeadline = presents + frames + InspectionFrames;
-        perf_record::capture(folder / file, frames);
+        waits.capturesBefore = perf_record::capturesFinished();
+        waits.captureDeadline = devkit::commands::presents() + frames + InspectionFrames;
+        perf_record::capture(devkit::commands::folder() / file, frames);
     }
     else if (command == "record_costs")
     {
@@ -471,20 +406,20 @@ void run(Script& running, const std::string& line)
     }
     else if (command == "image" && !rest.empty())
     {
-        askJob(running, [file = folder / (rest + ".dds"), rest](ID3D11DeviceContext* context, ID3D11Resource* backBuffer) {
+        devkit::commands::askPresent([file = devkit::commands::folder() / (rest + ".dds"), rest](ID3D11DeviceContext* context, ID3D11Resource* backBuffer) {
             return saveTexture(context, backBuffer, DXGI_FORMAT_UNKNOWN, file) ? "saved " + rest + ".dds\n" : "error: the back buffer could not be saved\n";
         });
     }
     else if (command == "textures" && !rest.empty())
     {
-        askJob(running, [path = folder / rest, rest](ID3D11DeviceContext* context, ID3D11Resource*) {
+        devkit::commands::askPresent([path = devkit::commands::folder() / rest, rest](ID3D11DeviceContext* context, ID3D11Resource*) {
             ray_tracing::saveTextures(context, path);
             game_shadow::save(context, path / "game-shadow.dds");
             return "saved the textures into " + rest + "\n";
         });
     }
     else if (command == "remaster")
-        askJob(running, [rest](ID3D11DeviceContext*, ID3D11Resource*) { return remaster::runLine(rest); });
+        devkit::commands::askPresent([rest](ID3D11DeviceContext*, ID3D11Resource*) { return remaster::runLine(rest); });
     else if (command == "game_shadow") game_shadow::keep(invert("0"));
     else if (command == "enhancements") setEnhancements(invert("0"));
     else if (command == "reveal")
@@ -570,7 +505,7 @@ void run(Script& running, const std::string& line)
     else if (command == "state") writeState(rest);
     else if (command == "case_done")
     {
-        std::ofstream(folder / "cases" / rest / "log.txt", std::ios::binary | std::ios::trunc) << running.output;
+        std::ofstream(devkit::commands::folder() / "cases" / rest / "log.txt", std::ios::binary | std::ios::trunc) << running.output;
         log("Debug case " + rest + " saved.");
         fxui::toast(fxui::Tone::Ok, "Debug case saved", "The game stays frozen: F9 lets it go.");
     }
@@ -578,116 +513,78 @@ void run(Script& running, const std::string& line)
     else running.output += "error: unknown command\n";
 }
 
-// Whether the line that last ran still has the render thread working for it; a line it gave up on says so.
+// Whether the line that last ran still has the render thread or the add-on working for it; a line it
+// gave up on says so.
 bool isWaiting(Script& running)
 {
-    if (running.waitUntil && presents < *running.waitUntil) return true;
-
-    running.waitUntil.reset();
-    if (running.isWaitingForJob)
+    if (waits.inspectionsBefore)
     {
-        std::scoped_lock lock(jobMutex);
-        if (!jobResult) return true;
-
-        running.output += *jobResult;
-        running.isWaitingForJob = false;
-    }
-
-    if (running.inspectionsBefore)
-    {
-        if (inspect_trace::finished() != *running.inspectionsBefore) running.inspectionsBefore.reset();
-        else if (presents < running.inspectionDeadline) return true;
+        if (inspect_trace::finished() != *waits.inspectionsBefore) waits.inspectionsBefore.reset();
+        else if (devkit::commands::presents() < waits.inspectionDeadline) return true;
         else
         {
             running.output += "error: no record came: is the ray-traced scene running?\n";
-            running.inspectionsBefore.reset();
+            waits.inspectionsBefore.reset();
         }
     }
 
-    if (running.capturesBefore)
+    if (waits.capturesBefore)
     {
-        if (perf_record::capturesFinished() != *running.capturesBefore)
+        if (perf_record::capturesFinished() != *waits.capturesBefore)
         {
             running.output += perf_record::lastCapture() + "\n";
-            running.capturesBefore.reset();
+            waits.capturesBefore.reset();
         }
-        else if (presents < running.captureDeadline) return true;
+        else if (devkit::commands::presents() < waits.captureDeadline) return true;
         else
         {
             running.output += "error: no capture came: the GPU's frames were not timed\n";
-            running.capturesBefore.reset();
+            waits.capturesBefore.reset();
             perf_record::cancelCapture();
         }
     }
 
-    if (running.sceneDeadline)
+    if (waits.sceneDeadline)
     {
-        if (const auto work = sceneWork(); work != running.sceneWork)
+        if (const auto work = sceneWork(); work != waits.sceneWork)
         {
-            running.sceneWork = work;
-            running.sceneBusyAt = presents;
+            waits.sceneWork = work;
+            waits.sceneBusyAt = devkit::commands::presents();
         }
 
-        if (presents >= *running.sceneDeadline) running.output += "error: the scene is still changing\n";
-        else if (presents < running.sceneBusyAt + SettledFrames) return true;
-        else if (running.sceneWork) running.output += std::format("the scene left {} things unmade\n", running.sceneWork);
+        if (devkit::commands::presents() >= *waits.sceneDeadline) running.output += "error: the scene is still changing\n";
+        else if (devkit::commands::presents() < waits.sceneBusyAt + SettledFrames) return true;
+        else if (waits.sceneWork) running.output += std::format("the scene left {} things unmade\n", waits.sceneWork);
 
-        running.sceneDeadline.reset();
+        waits.sceneDeadline.reset();
     }
 
     return false;
 }
 
-// Runs lines until one has to wait for frames or finishes the file.
-void step(Script& running)
-{
-    while (!isWaiting(running))
-    {
-        if (running.lines.empty())
-        {
-            finish(running);
-            script.reset();
-            return;
-        }
-
-        const auto line = std::move(running.lines.front());
-        running.lines.pop_front();
-        running.output += "> " + line + "\n";
-        run(running, line);
-    }
-}
-
 // F9: a case, or the game let go after one.
 void onCaseKey()
 {
-    if (script)
+    if (devkit::commands::isRunning())
     {
         fxui::toast(fxui::Tone::Warn, "A debug case is running");
         return;
     }
 
-    Script lines;
+    std::deque<std::string> lines;
     if (held_camera::isHeld())
     {
-        lines.lines = {"release"};
+        lines = {"release"};
         fxui::toast(fxui::Tone::Ok, "The game is let go");
     }
     else
     {
-        lines.lines = {"case"};
+        lines = {"case"};
         fxui::toast(fxui::Tone::Ok, "Debug case", "Hold on while it records: the picture changes a few times.");
     }
 
-    script = std::move(lines);
+    devkit::commands::start(std::move(lines));
 }
-}
-
-std::string timeNow()
-{
-    SYSTEMTIME now{};
-    GetLocalTime(&now);
-
-    return std::format("{:04}-{:02}-{:02}_{:02}-{:02}-{:02}", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
 }
 
 void install(const std::filesystem::path& addonDirectory) noexcept
@@ -707,65 +604,24 @@ void install(const std::filesystem::path& addonDirectory) noexcept
     std::filesystem::create_directories(candidate / "cases", error);
     if (error) return;
 
-    folder = candidate;
-    log("Automation reads command files from " + folder.string() + ".");
+    devkit::commands::install(candidate, run, isWaiting, resetWaits);
+    log("Automation reads command files from " + candidate.string() + ".");
 }
 
 void caseKey() noexcept
 {
-    if (!folder.empty()) caseAsked = true;
+    if (!devkit::commands::folder().empty()) caseAsked = true;
 }
 
 void onFrameStart() noexcept
 {
-    if (folder.empty()) return;
+    if (caseAsked.exchange(false)) onCaseKey();
 
-    try
-    {
-        if (caseAsked.exchange(false)) onCaseKey();
-
-        if (!script)
-        {
-            if (++framesSincePoll < PollFrames) return;
-
-            framesSincePoll = 0;
-            if (const auto file = nextCommandFile()) script = load(*file);
-            if (!script) return;
-        }
-
-        step(*script);
-    }
-    catch (const std::exception& error)
-    {
-        log(std::string("Automation: ") + error.what());
-        if (script)
-        {
-            script->output += std::string("error: ") + error.what() + "\n";
-            finish(*script);
-        }
-
-        script.reset();
-    }
+    devkit::commands::onFrameStart();
 }
 
 void onPresent(ID3D11DeviceContext* context, ID3D11Resource* backBuffer) noexcept
 {
-    if (folder.empty()) return;
-
-    ++presents;
-
-    std::scoped_lock lock(jobMutex);
-    if (!job) return;
-
-    try
-    {
-        jobResult = (*job)(context, backBuffer);
-    }
-    catch (const std::exception& error)
-    {
-        jobResult = std::string("error: ") + error.what() + "\n";
-    }
-
-    job.reset();
+    devkit::commands::onPresent(context, backBuffer);
 }
 }

@@ -50,8 +50,6 @@ struct ID3D11Resource;
 //   owner <hash>                  every placement of that model the next snapshot finds: its owner, fields and raw bytes
 namespace phantom_fx::automation
 {
-// The local time as the tools' files are named by it: 2026-11-01_21-05-09.
-std::string timeNow();
 void install(const std::filesystem::path& addonDirectory) noexcept;
 // F9: on the render thread.
 void caseKey() noexcept;

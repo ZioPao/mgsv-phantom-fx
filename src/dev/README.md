@@ -7,7 +7,7 @@ debug cases. `docs/DEVELOPMENT.md` describes what each does ("Debug cases", "Tra
 | --- | --- |
 | `dev.hpp`, `dev.cpp` | The one door from the core, and the Developer page |
 | `dev.cmake`, `tests.cmake` | The folder's sources and kernel, and its tests |
-| `automation.*` | Commands from files, and F9's debug cases |
+| `automation.*` | The add-on's own commands, and F9's debug cases; the files and waits are `../devkit/commands.*` |
 | `../devkit/` | What another MGSV add-on can build on: the saves redirection, Lua in the game, travel, cutscenes, and the logger and toasts the core sets |
 | `inspect_trace.*`, `inspect.hlsl`, `inspect_shared.h` | A debug case's record of every pixel, a trace like any other |
 | `game_shadow.*` | A debug case's reference: the game's shadow per pixel, drawn at the sun pass |
