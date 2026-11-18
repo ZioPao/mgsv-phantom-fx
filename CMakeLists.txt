@@ -219,6 +219,7 @@ add_gi_kernels(features/path_tracing/reflections.hlsl TraceReflections TraceSurf
 add_gi_kernels(features/path_tracing/direct_light.hlsl TraceLampLight)
 if(PHANTOM_FX_DEV_TOOLS)
     include(src/dev/dev.cmake)
+    include(src/devkit/devkit.cmake)
 endif()
 
 add_executable(kernel_bindings tools/kernel_bindings/main.cpp tools/kernel_bindings/kernel_table.cpp)
@@ -251,6 +252,9 @@ add_library(phantom_fx SHARED src/addon.cpp src/core.cpp src/modules.cpp src/fea
     src/passes/ray_tracing/ray_tracing.cpp src/passes/ray_tracing/kick_traces.cpp src/passes/ray_tracing/trace.cpp src/passes/ray_tracing/shared_textures.cpp src/passes/ray_tracing/engine_scene.cpp src/passes/ray_tracing/scene_description.cpp src/passes/ray_tracing/engine_brush.cpp src/passes/ray_tracing/gi_inputs.cpp src/features/ray_traced_lights/local_lights.cpp src/features/ray_traced_lights/light_choice.cpp src/features/ray_traced_lights/lamp_shadow_rays.cpp src/passes/ray_tracing/gi_renderer.cpp src/passes/ray_tracing/light_bins.cpp src/passes/ray_tracing/gi_scene.cpp src/passes/ray_tracing/scene_contents.cpp src/passes/ray_tracing/gi_textures.cpp src/features/global_illumination/gi_light.cpp src/features/global_illumination/gi_denoiser.cpp src/features/global_illumination/gi_lighting.cpp src/features/ray_traced_shadows/gi_shadow.cpp
     ${PHANTOM_FX_DEV_SOURCES} "${CMAKE_BINARY_DIR}/version.rc")
 add_dependencies(phantom_fx gi_kernels)
+if(PHANTOM_FX_DEV_TOOLS)
+    target_link_libraries(phantom_fx PRIVATE devkit)
+endif()
 target_include_directories(phantom_fx PRIVATE src "${GI_SHADER_DIR}")
 target_include_directories(phantom_fx SYSTEM PRIVATE "${RESHADE_DIR}/include" "${RESHADE_DIR}/imgui" "${STREAMLINE_DIR}/include" third_party
     "${FIDELITYFX_DIR}")

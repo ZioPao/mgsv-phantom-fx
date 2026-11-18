@@ -255,7 +255,7 @@ what draws it, when that is the feature's own.
 | `src/dev/game_shadow.cpp`, `src/dev/game_shadow.hpp` | A debug case's reference: the game's shadow per pixel, drawn at the sun pass |
 | `src/dev/held_camera.cpp`, `src/dev/held_camera.hpp` | A debug case's camera, which photo mode's camera update takes |
 | `src/dev/perf_record.cpp`, `src/dev/perf_record.hpp` | What frames cost, on file, a row a second and captures for comparing frames (see "Costs on file") |
-| `src/dev/save_redirect.cpp`, `src/dev/save_redirect.hpp` | The automation copy of the game: its saves, backups and display settings kept apart from the player's |
+| `src/devkit/save_redirect.cpp`, `src/devkit/save_redirect.hpp` | The automation copy of the game: its saves, backups and display settings kept apart from the player's |
 | `tools/automation/` | Dev builds: `fx.py` talks to the running game, `case.py` reports a debug case, `perf.py` reads and compares the costs on file, `scout.py` scouts showcase shots (a pose, time and weather, Phantom FX on and off, kept in a shot list), `install.ps1` and `launch.ps1` run the automation copy; `check_release.py` fails if any of it reached a release build |
 | `src/resource_dump.cpp`, `src/resource_dump.hpp` | Format names, constant rows, DDS saving for the dumps |
 | `src/shader_bytecode.cpp`, `src/shader_bytecode.hpp` | DXBC checksum (bytes 4 to 20 of the container), the instruction walk, the output saturation patch, the dither patch |
@@ -462,7 +462,7 @@ working before it is written. `fx.py case` records a case without the key.
 `fx.py --copy acc` goes on into the helicopter's cabin (`TppMission.ReserveMissionClear` for mission 40050). The title
 screen shows the same cabin but moves on by itself: a freeze there lands in a loading screen, which stalls under the pause
 and renders nothing. It reads
-and writes its own saves (`PhantomFX-automation/saves`, `src/dev/save_redirect.hpp`), and `launch.ps1` checks the player's
+and writes its own saves (`PhantomFX-automation/saves`, `src/devkit/save_redirect.hpp`), and `launch.ps1` checks the player's
 files are unchanged afterwards. Never run it beside the player's game: `launch.ps1` would put back saves the
 player's game wrote meanwhile.
 

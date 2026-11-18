@@ -7,6 +7,7 @@
 #include "dev/perf_record.hpp"
 #include "dev/remaster/tool.hpp"
 #include "dev/travel.hpp"
+#include "devkit/log.hpp"
 #include "features/photo_mode/photo_mode.hpp"
 #include "fxui/fxui.hpp"
 #include "log.hpp"
@@ -120,6 +121,7 @@ void drawLuaConsole()
 
 void install(const std::filesystem::path& addonDirectory) noexcept
 {
+    devkit::setLogger(&log);
     automation::install(addonDirectory);
     perf_record::install(addonDirectory / "PhantomFX-automation" / "perf");
 }

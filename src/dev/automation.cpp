@@ -17,7 +17,7 @@
 #include "passes/ray_tracing/gi_renderer.hpp"
 #include "passes/ray_tracing/ray_tracing.hpp"
 #include "resource_dump.hpp"
-#include "dev/save_redirect.hpp"
+#include "devkit/save_redirect.hpp"
 #include "dev/travel.hpp"
 #include "weather.hpp"
 
@@ -698,7 +698,7 @@ void install(const std::filesystem::path& addonDirectory) noexcept
     // The automation copy must not change the player's saves. Left running without its own it would, even with
     // no commands, so it quits. Without a `saves` folder this is the player's game.
     const auto saves = candidate / "saves", userData = candidate / "local";
-    if (std::filesystem::is_directory(saves, error) && !(std::filesystem::is_directory(userData, error) && save_redirect::install(saves, userData)))
+    if (std::filesystem::is_directory(saves, error) && !(std::filesystem::is_directory(userData, error) && devkit::save_redirect::install(saves, userData)))
     {
         log("The automation copy quits: it needs " + saves.string() + " with the saves to start from and " + userData.string() + ", and the game's files redirected there.");
         TerminateProcess(GetCurrentProcess(), 1);

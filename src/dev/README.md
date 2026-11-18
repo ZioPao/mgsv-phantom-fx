@@ -8,7 +8,7 @@ debug cases. `docs/DEVELOPMENT.md` describes what each does ("Debug cases", "Tra
 | `dev.hpp`, `dev.cpp` | The one door from the core, and the Developer page |
 | `dev.cmake`, `tests.cmake` | The folder's sources and kernel, and its tests |
 | `automation.*` | Commands from files, and F9's debug cases |
-| `save_redirect.*` | Keeps the automation copy off the player's files |
+| `../devkit/` | What another MGSV add-on can build on: the saves redirection, and the logger the core sets |
 | `game_lua.*`, `travel.*`, `cutscenes.*`, `cutscene_list.hpp` | Lua in the game, and the tools that run on it |
 | `inspect_trace.*`, `inspect.hlsl`, `inspect_shared.h` | A debug case's record of every pixel, a trace like any other |
 | `game_shadow.*` | A debug case's reference: the game's shadow per pixel, drawn at the sun pass |
@@ -29,11 +29,11 @@ Searching for `PHANTOM_FX_DEV_TOOLS` and `DevTools` finds every line the core ke
 
 ## Detaching it
 
-Delete this folder, `tools/automation/` and `.agents/skills/mgsv-automation/`, then remove:
+Delete this folder, `src/devkit/`, `tools/automation/` and `.agents/skills/mgsv-automation/`, then remove:
 
 | File | Lines |
 | --- | --- |
-| `CMakeLists.txt` | The `include(src/dev/dev.cmake)` and `include(src/dev/tests.cmake)` blocks and `${PHANTOM_FX_DEV_SOURCES}` |
+| `CMakeLists.txt` | The `include(src/dev/dev.cmake)` and `include(src/dev/tests.cmake)` blocks, `include(src/devkit/devkit.cmake)`, `target_link_libraries(phantom_fx PRIVATE devkit)` and `${PHANTOM_FX_DEV_SOURCES}` |
 | `src/addon.cpp` | The three `dev::` calls, the include, the Enter `photo_mode::teleport()` call, and the name of `onPresent`'s `swapChain` parameter |
 | `src/game_loop.cpp` | `dev::onFrameStart()` and the include |
 | `src/menu.cpp` | `dev::drawPage()` and the include |
