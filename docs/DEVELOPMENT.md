@@ -3391,7 +3391,10 @@ Not handled:
   2026-10-26): as a light is drawn again, a compute pass takes its volume's vertices (clip space, as
   copied from its draw) through the inverse of its pass's `m_projectionView` into their lowest and
   highest corners, read back three frames later and kept by light (its kind, its place to the
-  centimetre, its colour; the game's lights hold still). `LocalLightAt` gives no light outside them (2 cm
+  centimetre, its colour; the game's lights hold still). A light whose key is already kept is not
+  measured again, so a frame of still lights costs no bounds passes. A light not drawn for 60 frames
+  loses its bounds: a map change passes through a loading screen that draws no lights, so the new map's
+  lights never take the old map's boxes where a key repeats. `LocalLightAt` gives no light outside them (2 cm
   spare), so the bounce, the share's picks and the lamp probe keep each light within its box, as the
   game and the light drawn again do. Before, the global illumination's bounce lit every surface within a
   light's reach: in the prologue's hospital three bluish fill lights 200 m wide and a 250 m spot
@@ -4087,6 +4090,10 @@ F2 does nothing.
   Lua, from `dev::onFrameStart` (`src/dev/game_lua.hpp`): `GameObject.SendCommand` with
   `WarpAndWaitBlock` for the player (object 0), or `SetPosition` for the vehicle or walker gear they are
   in; missions and free roam only. It is the call Infinite Heaven's `InfTppUtil.Warp` makes.
+- **Near clip plane.** With **No near clip plane** on, the swapped-in camera's near plane (`+0x48`,
+  0.069 m in play, copied to `GrCamera + 0x168` and from there into the projection and
+  `m_viewportSize.z`) becomes 1 mm for the update and is put back after it. A held camera
+  (debug cases) keeps the game's, so its frames match the game's own.
 - **Input.** In photo mode the raw input reader takes the mouse's movement for the free camera and
   gives the game only button and key releases, so nothing held when photo mode started stays held
   after it. The keys come from ReShade, and not while its overlay is open.
