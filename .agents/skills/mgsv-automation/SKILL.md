@@ -15,6 +15,7 @@ The tools exist in **dev builds only** (`build/dev`). Reference: `docs/DEVELOPME
 
 - **Never run the automation copy beside the player's game.** `launch.ps1` restores the player's save files when the copy exits, so it could overwrite newer saves. `fx.py replay` and `fx.py scenarios` refuse to start then. Check before launching anything by hand: `(Get-Process mgsvtpp).Path`.
 - **Never stop the player's game.** If it is in the way, ask the user to close it, or wait for it to close. To stop the copy, stop only a process whose path is under `mgsv-automation`.
+- **Close the copy when the work is done.** `session` with action `stop` closes only the copy; do not leave it running after a test. The MCP closes a copy it started after ten minutes with no tool call, and when the server exits.
 - **`--copy` decides which game you talk to.** Without it, `fx.py` commands reach the player's running game. `setting` writes to their `PhantomFX.ini`, so restore what you change.
 - **Tell the user when their game is left frozen.** F9 again, or `fx.py run release`, lets it go.
 - **`session start` takes the keyboard for a moment.** It brings the off-screen copy forward to press its startup notices, then puts the previous window back. Do not start it while the user is typing.

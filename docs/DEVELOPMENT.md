@@ -432,7 +432,8 @@ So lighting faults can be looked into without anyone sending pictures or numbers
 more can be asked of the same frame. Aim the screen's centre at the fault first if there is one spot to look at.
 An MCP client gets the same tools from `tools/automation/mcp_server.py` (`opencode.json` registers it): its `start`
 installs, launches, presses the startup notices away and stops in free roam as one job; a long replay or scenario run
-is a job too, and a case comes back with its pictures.
+is a job too, and a case comes back with its pictures. It closes a copy it started after ten minutes with no tool
+call, and when the server exits.
 
 - **What a case holds** (`PhantomFX-automation/cases/<time>/`): the frame as traced and as the game draws it, from
   the same frozen camera and world (`traced.dds`, `vanilla.dds`); the ray tracing's textures (depth, normals,

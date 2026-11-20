@@ -109,6 +109,8 @@ Not now: a named pipe, a binary protocol, or a scripting language in the game. `
 - `start`, `replay` and `verify` refuse while `mgsvtpp` answers from anywhere but the copy. The bridge, not the skill,
   decides this.
 - The bridge stops only a process whose path is under the automation folder.
+- A copy the bridge started is closed when the task calls `session stop`, after ten minutes with no tool call, and
+  when the server exits. `MGSV_AUTO_CLOSE_SECONDS` changes the idle time; 0 turns it off.
 - Outputs go under `PhantomFX-automation` or `mgsv-automation`; the bridge rejects paths outside them, so game images
   cannot reach the repository.
 

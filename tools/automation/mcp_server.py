@@ -8,6 +8,7 @@ Every failure is `{ok: false, code, message, fix}`.
 
 The tool surface and its reasons: docs/AUTOMATION.md.
 """
+import atexit
 import json
 import os
 import re
@@ -33,12 +34,24 @@ GAMES = {"player": fx.PLAYER_GAME, "copy": fx.AUTOMATION_GAME}
 mcp = MCPServer(
     "phantom-fx-automation",
     version=VERSION,
-    instructions="Drives the Phantom FX dev build: session status first. Long work returns a job id; poll it with job.",
+    instructions="Drives the Phantom FX dev build: session status first. Long work returns a job id; poll it with job. Stop the copy when the task is done; a copy started here also closes after ten minutes with no tool call.",
 )
 
 session_target = "player"
 fx.game_folder = GAMES[session_target]
 LOCK = threading.RLock()
+# A copy the tools started closes after this many seconds with no tool call, and when the server exits.
+AUTO_CLOSE_SECONDS = float(os.environ.get("MGSV_AUTO_CLOSE_SECONDS", "600"))
+owned_copy = False
+last_activity = time.monotonic()
+ACTIVITY_LOCK = threading.Lock()
+
+
+def note_activity() -> None:
+    """Every tool call is a reason to keep a running copy alive; the idle timer starts again here."""
+    global last_activity
+    with ACTIVITY_LOCK:
+        last_activity = time.monotonic()
 
 
 # ---------------------------------------------------------------- results and failures
@@ -82,6 +95,67 @@ def player_running() -> bool:
 
 def copy_running() -> bool:
     return any(path.parent == GAMES["copy"] for path in running())
+
+
+def stop_copy() -> bool:
+    """Stops the copy, never the player's game; whether one was running."""
+    if not copy_running():
+        return False
+
+    escaped = str(GAMES["copy"]).replace("'", "''")
+    subprocess.run(["powershell", "-NoProfile", "-Command",
+        f"Get-Process mgsvtpp -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -like '{escaped}\\*' }} | Stop-Process -Force"],
+        capture_output=True, text=True, timeout=30)
+    return True
+
+
+def owned_path() -> Path:
+    """A marker in the copy: the tools started it, so the tools may close it after an idle wait or on exit."""
+    return GAMES["copy"] / fx.LINK / "mcp-owned"
+
+
+def own_copy() -> None:
+    global owned_copy
+    owned_copy = True
+    path = owned_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("mcp\n", encoding="utf-8")
+
+
+def disown_copy() -> None:
+    global owned_copy
+    owned_copy = False
+    owned_path().unlink(missing_ok=True)
+
+
+def auto_close() -> None:
+    """The backstop: a copy the tools started is closed after AUTO_CLOSE_SECONDS without a tool call, or when
+    the server exits. A job still running keeps it; the task's own session stop should come first."""
+    while True:
+        time.sleep(30)
+        if AUTO_CLOSE_SECONDS <= 0 or not owned_copy:
+            continue
+
+        with ACTIVITY_LOCK:
+            idle = time.monotonic() - last_activity
+        if idle < AUTO_CLOSE_SECONDS:
+            continue
+        with JOB_LOCK:
+            if any(job.state == "running" for job in JOBS.values()):
+                continue
+
+        if not copy_running():
+            disown_copy()
+            continue
+        if stop_copy():
+            disown_copy()
+            print(f"closed the automation copy after {idle:.0f} s idle", file=sys.stderr)
+
+
+def close_on_exit() -> None:
+    if owned_copy:
+        stop_copy()
+        disown_copy()
 
 
 def needs_copy() -> CallToolResult | None:
@@ -192,8 +266,10 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
             destination: Literal["afghanistan", "africa", "motherbase"] | None = None) -> CallToolResult:
     """What the game is doing, and which game the tools talk to. `open` sets the default target; `start` installs
     this build into the automation copy, presses its startup notices away and stops in free roam. boot, travel,
-    acc and start return a job."""
-    global session_target
+    acc and start return a job. Stop the copy when the task is done; a copy started here closes after ten minutes
+    with no tool call, and when the server exits."""
+    note_activity()
+    global session_target, owned_copy
     with LOCK:
         if action == "open":
             if target is None:
@@ -207,13 +283,9 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
         if action == "stop":
             if target == "player":
                 return fail("WRONG_TARGET", "The tools never stop the player's game.", "Ask the user to close it; only the copy can be stopped here.")
-            if not copy_running():
-                return ok({"stopped": False}, text="No copy is running.")
-            escaped = str(GAMES["copy"]).replace("'", "''")
-            subprocess.run(["powershell", "-NoProfile", "-Command",
-                f"Get-Process mgsvtpp -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -like '{escaped}\\*' }} | Stop-Process -Force"],
-                capture_output=True, text=True, timeout=30)
-            return ok({"stopped": True}, text="Stopped the automation copy.")
+            stopped = stop_copy()
+            owned_copy = False
+            return ok({"stopped": stopped}, text="Stopped the automation copy." if stopped else "No copy is running.")
 
         if action == "start":
             if target == "player":
@@ -233,6 +305,7 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
             if not result.is_error:
                 session_target = "copy"
                 fx.game_folder = GAMES["copy"]
+                owned_copy = True
             return result
 
         try:
@@ -273,6 +346,7 @@ def run(lines: list[str] | str, timeout_s: float = 120.0, target: Literal["playe
     """Runs automation lines as one command file and returns what each printed. The escape hatch for anything the
     other tools do not cover; one string per line (src/dev/automation.hpp lists them). confirm=true allows a
     setting line to write the player's ini."""
+    note_activity()
     clean = normalise(lines)
     if not clean:
         return fail("EMPTY", "No lines to run.", "Pass at least one automation line.")
@@ -333,7 +407,8 @@ def case(action: Literal["latest", "open", "record", "replay", "compare"] = "lat
          target: Literal["player", "copy"] | None = None) -> CallToolResult:
     """A debug case, as F9 records one: its report, checks and pictures. `record` takes a case from the frozen frame;
     `replay` rebuilds and returns one as a job; `compare` puts two cases' numbers side by side."""
-    global session_target
+    note_activity()
+    global session_target, owned_copy
     with LOCK:
         try:
             game, _ = resolve(target)
@@ -351,6 +426,7 @@ def case(action: Literal["latest", "open", "record", "replay", "compare"] = "lat
             if not result.is_error:
                 session_target = "copy"
                 fx.game_folder = GAMES["copy"]
+                owned_copy = True
             return result
 
         if action == "record":
@@ -412,6 +488,7 @@ def capture(kind: Literal["image", "inspect", "perf"], name: str | None = None, 
             target: Literal["player", "copy"] | None = None) -> CallToolResult:
     """Captures the frozen frame: image (a picture back), inspect (a per-pixel record) or perf (what frames cost).
     Paths are under PhantomFX-automation; the picture is returned as an image, the others as files."""
+    note_activity()
     with LOCK:
         try:
             resolve(target)
@@ -454,7 +531,8 @@ def capture(kind: Literal["image", "inspect", "perf"], name: str | None = None, 
 def verify(names: list[str] | str | None = None, accept: bool = False) -> CallToolResult:
     """Runs the saved scenarios in a fresh copy with the player's settings, and returns a job. It says what got
     worse and writes a before and after picture for each. accept takes the run as the new expectation."""
-    global session_target
+    note_activity()
+    global session_target, owned_copy
     refused = needs_steam()
     if refused:
         return refused
@@ -470,6 +548,7 @@ def verify(names: list[str] | str | None = None, accept: bool = False) -> CallTo
     if not result.is_error:
         session_target = "copy"
         fx.game_folder = GAMES["copy"]
+        owned_copy = True
     return result
 
 
@@ -480,6 +559,7 @@ def setting(key: str, action: Literal["get", "set"] = "get", value: str | None =
             target: Literal["player", "copy"] | None = None, confirm: bool = False) -> CallToolResult:
     """One PhantomFX.ini key, read or written. A write goes through the running game and is saved; the player's ini
     needs confirm=true, and the old value comes back so it can be put back."""
+    note_activity()
     if not key or "\n" in key or "=" in key:
         return fail("BAD_KEY", "Give one key, such as ray_tracing.", "Read docs/DEVELOPMENT.md for the settings.")
     if value is not None and "\n" in value:
@@ -523,6 +603,7 @@ def setting(key: str, action: Literal["get", "set"] = "get", value: str | None =
 def job(action: Literal["list", "status", "wait", "cancel"] = "list", job_id: str | None = None, timeout_s: float = 20.0) -> CallToolResult:
     """A long action's progress. wait blocks at most timeout_s (and never past a tool call); cancel stops the job
     and says what it had printed so far."""
+    note_activity()
     with JOB_LOCK:
         chosen = JOBS.get(job_id) if job_id else next(reversed(JOBS.values()), None) if JOBS else None
         if action == "list":
@@ -593,4 +674,6 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["--job"]:
         job_main(sys.argv[2:])
     else:
+        atexit.register(close_on_exit)
+        threading.Thread(target=auto_close, daemon=True).start()
         mcp.run()

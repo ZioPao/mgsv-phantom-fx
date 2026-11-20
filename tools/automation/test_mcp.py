@@ -115,13 +115,18 @@ def test_start_needs_steam():
         server.fx.steam_running = original
 
 
+def test_stop_refuses_player():
+    result = server.session(action="stop", target="player")
+    assert result.is_error and payload(result)["code"] == "WRONG_TARGET", payload(result)
+
+
 def test_job_list_is_empty():
     result = server.job(action="list")
     assert not result.is_error and payload(result)["jobs"] == [], payload(result)
 
 
 if __name__ == "__main__":
-    for check in (test_run_and_refusals, test_setting_reads_the_ini, test_status_says_no_game, test_start_needs_steam, test_job_list_is_empty):
+    for check in (test_run_and_refusals, test_setting_reads_the_ini, test_status_says_no_game, test_start_needs_steam, test_stop_refuses_player, test_job_list_is_empty):
         check()
         print(f"{check.__name__}: ok")
 
