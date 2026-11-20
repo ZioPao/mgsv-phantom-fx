@@ -1,0 +1,579 @@
+"""The automation tools as an MCP server, for any MCP client (dev builds only).
+
+  uv run -q --with mcp --with numpy --with pillow --with scipy python tools/automation/mcp_server.py
+
+It wraps what `fx.py` and `case.py` already do: sessions name the game to talk to, `run` is the escape hatch,
+and long work (start, boot, replay, scenarios) returns a job so no tool call outlives a client's timeout.
+Every failure is `{ok: false, code, message, fix}`.
+
+The tool surface and its reasons: docs/AUTOMATION.md.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import case as report
+import fx
+from mcp.server.mcpserver import Image, MCPServer
+from mcp.types import CallToolResult, TextContent
+
+VERSION = "0.1"
+HERE = Path(__file__).resolve().parent
+GAMES = {"player": fx.PLAYER_GAME, "copy": fx.AUTOMATION_GAME}
+
+mcp = MCPServer(
+    "phantom-fx-automation",
+    version=VERSION,
+    instructions="Drives the Phantom FX dev build: session status first. Long work returns a job id; poll it with job.",
+)
+
+session_target = "player"
+fx.game_folder = GAMES[session_target]
+LOCK = threading.RLock()
+
+
+# ---------------------------------------------------------------- results and failures
+
+def ok(payload: dict | None = None, text: str | None = None, images: tuple[Path, ...] = ()) -> CallToolResult:
+    body = {"ok": True, **(payload or {})}
+    content = [TextContent(type="text", text=text or json.dumps(body, indent=2, ensure_ascii=False))]
+    content += [Image(path=str(path)).to_image_content() for path in images if path.exists()]
+    return CallToolResult(content=content, structured_content=body)
+
+
+def fail(code: str, message: str, fix: str) -> CallToolResult:
+    body = {"ok": False, "code": code, "message": message, "fix": fix}
+    return CallToolResult(content=[TextContent(type="text", text=json.dumps(body, indent=2, ensure_ascii=False))], structured_content=body, is_error=True)
+
+
+def resolve(target: str | None) -> tuple[str, Path]:
+    """The target and its folder; sets what fx.py talks to. Callers hold LOCK."""
+    name = target or session_target
+    if name not in GAMES:
+        raise ValueError(f"target is player or copy, not {name!r}")
+    folder = GAMES[name]
+    fx.game_folder = folder
+    return name, folder
+
+
+def running() -> list[Path]:
+    """The paths of every running mgsvtpp, or none if none, or if they cannot be asked."""
+    try:
+        done = subprocess.run(["powershell", "-NoProfile", "-Command", "(Get-Process mgsvtpp -ErrorAction SilentlyContinue).Path"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+    return [Path(line.strip()) for line in done.stdout.splitlines() if line.strip()]
+
+
+def player_running() -> bool:
+    return any(path.parent != GAMES["copy"] for path in running())
+
+
+def copy_running() -> bool:
+    return any(path.parent == GAMES["copy"] for path in running())
+
+
+def needs_copy() -> CallToolResult | None:
+    """The refusal a copy-only job needs while the player's game is open: launch.ps1 would restore their saves."""
+    if player_running():
+        return fail("PLAYER_GAME_RUNNING", "The player's game is running; the automation copy must not start beside it.",
+            "Ask the user to close their game, then run this again.")
+    return None
+
+
+def normalise(lines: list[str] | str) -> list[str]:
+    if isinstance(lines, str):
+        lines = [lines]
+
+    return [line.strip() for item in lines for line in str(item).splitlines() if line.strip()]
+
+
+def target_label() -> str:
+    return next((name for name, folder in GAMES.items() if folder == fx.game_folder), session_target)
+
+
+# ---------------------------------------------------------------- running lines
+
+def send(lines: list[str], timeout: float) -> CallToolResult:
+    """One command file, its text back. Callers hold LOCK and have resolved the target."""
+    try:
+        text = fx.run(lines, timeout=timeout)
+    except TimeoutError:
+        return fail("NO_DEV_BUILD", f"No result in {timeout:.0f} s from {fx.game_folder}.",
+            "Start a dev build there, or read PhantomFX-automation/launch.log, then session status.")
+    except (OSError, PermissionError) as error:
+        return fail("NO_DEV_BUILD", f"Could not reach {fx.game_folder}: {error}",
+            "Start a dev build there, then session status.")
+
+    return ok({"target": target_label(), "lines": lines, "result": text}, text=text or "(no output)")
+
+
+# ---------------------------------------------------------------- jobs
+
+@dataclass
+class Job:
+    id: str
+    action: str
+    process: subprocess.Popen
+    output: list[str] = field(default_factory=list)
+    started: float = field(default_factory=time.monotonic)
+
+    @property
+    def state(self) -> str:
+        if self.process.poll() is None:
+            return "running"
+        return "done" if self.process.returncode == 0 else "failed"
+
+
+JOBS: dict[str, Job] = {}
+JOB_LOCK = threading.Lock()
+MUTATING = {"start", "boot", "travel", "acc", "replay", "scenarios"}
+JOB_ETA = {"start": 150, "boot": 45, "travel": 40, "acc": 20, "replay": 150, "scenarios": 60}
+
+
+def pump(job: Job) -> None:
+    assert job.process.stdout is not None
+    for line in job.process.stdout:
+        job.output.append(line.rstrip())
+        del job.output[:-400]
+    job.process.wait()
+
+
+def start_job(action: str, target: str, extra: list[str], eta: int) -> CallToolResult:
+    with JOB_LOCK:
+        busy = next((job for job in JOBS.values() if job.state == "running" and job.action in MUTATING), None)
+        if busy:
+            return fail("BUSY", f"{busy.action} is still running as job {busy.id}.",
+                "Poll it with job, or cancel it, before starting another.")
+        job_id = f"{action}-{time.strftime('%H%M%S')}-{len(JOBS) + 1}"
+        try:
+            process = subprocess.Popen([sys.executable, str(Path(__file__)), "--job", action, "--target", target, *extra],
+                cwd=str(HERE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                bufsize=1, env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"})
+        except OSError as error:
+            return fail("JOB_FAILED", f"{action} could not start: {error}", "Check that uv and the tools are where the server expects them.")
+        job = Job(id=job_id, action=action, process=process)
+        JOBS[job_id] = job
+    threading.Thread(target=pump, args=(job,), daemon=True).start()
+
+    return ok({"job": job_id, "action": action, "state": "running", "eta_s": eta},
+        text=f"{action} started as job {job_id} (about {eta} s). Poll it with job.")
+
+
+def job_payload(job: Job, lines: int = 60) -> dict:
+    return {"job": job.id, "action": job.action, "state": job.state, "seconds": round(time.monotonic() - job.started, 1),
+        "output": "\n".join(job.output[-lines:])}
+
+
+# ---------------------------------------------------------------- session
+
+@mcp.tool()
+def session(action: Literal["status", "open", "freeze", "release", "boot", "travel", "acc", "start", "stop"] = "status",
+            target: Literal["player", "copy"] | None = None,
+            destination: Literal["afghanistan", "africa", "motherbase"] | None = None) -> CallToolResult:
+    """What the game is doing, and which game the tools talk to. `open` sets the default target; `start` installs
+    this build into the automation copy, presses its startup notices away and stops in free roam. boot, travel,
+    acc and start return a job."""
+    global session_target
+    with LOCK:
+        if action == "open":
+            if target is None:
+                return fail("NEEDS_TARGET", "open needs target='player' or target='copy'.", "Call session with action='open', target='copy'.")
+            if not GAMES[target].is_dir():
+                return fail("NO_GAME", f"{GAMES[target]} is not there.", "Install the game there, or open the other target.")
+            session_target = target
+            fx.game_folder = GAMES[target]
+            return ok({"target": target, "folder": str(GAMES[target]), "running": [str(path) for path in running()]})
+
+        if action == "stop":
+            if target == "player":
+                return fail("WRONG_TARGET", "The tools never stop the player's game.", "Ask the user to close it; only the copy can be stopped here.")
+            if not copy_running():
+                return ok({"stopped": False}, text="No copy is running.")
+            escaped = str(GAMES["copy"]).replace("'", "''")
+            subprocess.run(["powershell", "-NoProfile", "-Command",
+                f"Get-Process mgsvtpp -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -like '{escaped}\\*' }} | Stop-Process -Force"],
+                capture_output=True, text=True, timeout=30)
+            return ok({"stopped": True}, text="Stopped the automation copy.")
+
+        if action == "start":
+            if target == "player":
+                return fail("WRONG_TARGET", "start installs into the automation copy, never the player's game.", "Use session with action='start', target='copy'.")
+            refused = needs_copy()
+            if refused:
+                return refused
+            ini = GAMES["player"] / "PhantomFX.ini"
+            if not ini.exists() and (GAMES["copy"] / "PhantomFX.ini").exists():
+                ini = GAMES["copy"] / "PhantomFX.ini"  # Only the copy is installed here: keep its settings
+            if not ini.exists():
+                return fail("NO_INI", "Neither game has a PhantomFX.ini, so there are no settings to copy.", "Start a game once so it writes its settings.")
+            result = start_job("start", "copy", [str(ini)], JOB_ETA["start"])
+            if not result.is_error:
+                session_target = "copy"
+                fx.game_folder = GAMES["copy"]
+            return result
+
+        try:
+            name, folder = resolve(target)
+        except ValueError as error:
+            return fail("BAD_TARGET", str(error), "Use target='player' or target='copy'.")
+
+        if action == "status":
+            addon = folder / "PhantomFX.addon64"
+            paths = running()
+            payload = {"target": name, "folder": str(folder), "exists": folder.is_dir(), "session": session_target,
+                "running": {other: [str(path) for path in paths if path.parent == GAMES[other]] for other in GAMES},
+                "addon": {"path": str(addon), "seconds_old": round(time.time() - addon.stat().st_mtime, 0)} if addon.exists() else None}
+            try:
+                payload |= {"responds": True, "game": fx.run(["status"], timeout=5).strip()}
+            except (TimeoutError, OSError, PermissionError) as error:
+                payload |= {"responds": False, "hint": f"No dev build answered in {folder}: {error}"}
+            return ok(payload)
+
+        if action in ("freeze", "release"):
+            return send([action], timeout=20)
+
+        if action in ("boot", "travel", "acc"):
+            if action == "travel" and destination is None:
+                return fail("NEEDS_DESTINATION", "travel needs a destination.", "Use destination='afghanistan', 'africa' or 'motherbase'.")
+            if not any(path.parent == GAMES[name] for path in running()):
+                return fail("NO_DEV_BUILD", f"No {name} game is running.", "Start it, then run boot, travel or acc, or check launch.log.")
+            extra = [destination] if destination else []
+            return start_job(action, name, extra, JOB_ETA[action])
+
+        return fail("BAD_ACTION", f"Unknown action {action!r}.", "Use status, open, freeze, release, boot, travel, acc, start or stop.")
+
+
+# ---------------------------------------------------------------- run
+
+@mcp.tool()
+def run(lines: list[str] | str, timeout_s: float = 120.0, target: Literal["player", "copy"] | None = None, confirm: bool = False) -> CallToolResult:
+    """Runs automation lines as one command file and returns what each printed. The escape hatch for anything the
+    other tools do not cover; one string per line (src/dev/automation.hpp lists them). confirm=true allows a
+    setting line to write the player's ini."""
+    clean = normalise(lines)
+    if not clean:
+        return fail("EMPTY", "No lines to run.", "Pass at least one automation line.")
+
+    with LOCK:
+        try:
+            name, _ = resolve(target)
+        except ValueError as error:
+            return fail("BAD_TARGET", str(error), "Use target='player' or target='copy'.")
+
+        if name == "player" and any(line.split(maxsplit=1)[0] == "setting" for line in clean) and not confirm:
+            return fail("NEEDS_CONFIRM", "A setting line writes the player's PhantomFX.ini.",
+                "Pass confirm=true when the user asked for this change, or run it against the copy.")
+
+        return send(clean, timeout=max(1.0, min(float(timeout_s), 300.0)))
+
+
+# ---------------------------------------------------------------- case
+
+def case_folder(name: str | None, target: str) -> Path | None:
+    cases = GAMES[target] / fx.LINK / "cases"
+    if name:
+        found = cases / name
+        return found if found.is_dir() else None
+    if not cases.is_dir():
+        return None
+    folders = [folder for folder in cases.iterdir() if (folder / "state.txt").exists()]
+    return max(folders, key=lambda folder: folder.stat().st_mtime) if folders else None
+
+
+def bad_case_name(name: str) -> bool:
+    path = Path(name)
+    return path.is_absolute() or ".." in path.parts or any(character.isspace() for character in name)
+
+
+def case_payload(folder: Path) -> tuple[dict, tuple[Path, ...]]:
+    with LOCK:
+        text = report.write(folder) if not (folder / "report.md").exists() else (folder / "report.md").read_text(encoding="utf-8")
+    pictures = tuple(folder / name for name in ("scene-check.png", "sun-check.png", "light-ratio.png", "traced.png", "vanilla.png", "before-after.png"))
+    numbers = folder / "numbers.json"
+    game = next((name for name, root in GAMES.items() if folder.is_relative_to(root)), "player")
+    payload = {"game": game, "case": folder.name, "folder": str(folder), "report": text, "pictures": [str(path) for path in pictures if path.exists()],
+        "numbers": json.loads(numbers.read_text()) if numbers.exists() else None}
+    return payload, pictures
+
+
+def read_case(folder: Path) -> CallToolResult:
+    try:
+        payload, pictures = case_payload(folder)
+    except (OSError, KeyError, ValueError, IndexError) as error:
+        log = folder / "log.txt"
+        return fail("CASE_UNREADABLE", f"{folder.name}: {error}", f"Read {log}." if log.exists() else "Record the case again.")
+    return ok(payload, images=pictures)
+
+
+@mcp.tool()
+def case(action: Literal["latest", "open", "record", "replay", "compare"] = "latest", name: str | None = None, other: str | None = None,
+         target: Literal["player", "copy"] | None = None) -> CallToolResult:
+    """A debug case, as F9 records one: its report, checks and pictures. `record` takes a case from the frozen frame;
+    `replay` rebuilds and returns one as a job; `compare` puts two cases' numbers side by side."""
+    global session_target
+    with LOCK:
+        try:
+            game, _ = resolve(target)
+        except ValueError as error:
+            return fail("BAD_TARGET", str(error), "Use target='player' or target='copy'.")
+
+        if action == "replay":
+            refused = needs_copy()
+            if refused:
+                return refused
+            result = start_job("replay", "copy", [name] if name else [], JOB_ETA["replay"])
+            if not result.is_error:
+                session_target = "copy"
+                fx.game_folder = GAMES["copy"]
+            return result
+
+        if action == "record":
+            name = name or time.strftime("%Y-%m-%d_%H-%M-%S")
+            if bad_case_name(name):
+                return fail("BAD_NAME", f"{name!r} is not a case name.", "Use one word of letters, digits, - and _.")
+            result = send([f"case {name}"], timeout=180)
+            if result.is_error:
+                return result
+            folder = case_folder(name, game)
+            if folder is None:
+                return fail("CASE_MISSING", f"The game did not write case {name} in {GAMES[game]}.",
+                    "Check that the game is frozen on a frame that renders, then read the case's log.txt.")
+            return read_case(folder)
+
+        if action == "compare":
+            if not name or not other:
+                return fail("NEEDS_CASES", "compare needs two case names.", "Pass name=<before> and other=<after>.")
+            if bad_case_name(name) or bad_case_name(other):
+                return fail("BAD_NAME", "A case name is one word under the cases folder.", "Use one word of letters, digits, - and _.")
+            first, second = case_folder(name, game), case_folder(other, game)
+            if first is None or second is None:
+                return fail("CASE_MISSING", f"No case {name if first is None else other} in {GAMES[game]}.", "Run case with action='latest' to see what is there.")
+            try:
+                view = report.same_view(first, second)
+                payload = {"before": name, "after": other, "same_view": None if view is None else {"surfaces_percent": round(view[0], 2), "eye_metres": round(view[1], 3)}}
+                first_numbers, second_numbers = first / "numbers.json", second / "numbers.json"
+                if first_numbers.exists() and second_numbers.exists():
+                    payload["worse"] = report.worse(json.loads(first_numbers.read_text()), json.loads(second_numbers.read_text()))
+            except (OSError, KeyError, ValueError, IndexError) as error:
+                return fail("CASE_UNREADABLE", f"{name} and {other}: {error}", "Read each case's log.txt.")
+            return ok(payload)
+
+        folder = case_folder(name, game)
+        if folder is None and not name and action == "latest":
+            folder = case_folder(None, "copy" if game == "player" else "player")
+        if folder is None:
+            if name and bad_case_name(name):
+                return fail("BAD_NAME", "A case name is one word under the cases folder.", "Use one word of letters, digits, - and _.")
+            message = f"No case {name} in {GAMES[game]}." if name else f"No case has been recorded in {GAMES[game]}."
+            return fail("CASE_MISSING", message, "Press F9 in the game, or ask the user to.")
+        return read_case(folder)
+
+
+# ---------------------------------------------------------------- capture
+
+def capture_path(name: str | None) -> Path:
+    link = fx.link()
+    rel = Path(name) if name else Path("captures") / (time.strftime("%Y-%m-%d_%H-%M-%S") + f"-{time.time_ns() % 1000:03d}")
+    if rel.is_absolute() or ".." in rel.parts:
+        raise ValueError("the name must be under PhantomFX-automation")
+    path = link / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+@mcp.tool()
+def capture(kind: Literal["image", "inspect", "perf"], name: str | None = None, frames: int = 120,
+            target: Literal["player", "copy"] | None = None) -> CallToolResult:
+    """Captures the frozen frame: image (a picture back), inspect (a per-pixel record) or perf (what frames cost).
+    Paths are under PhantomFX-automation; the picture is returned as an image, the others as files."""
+    with LOCK:
+        try:
+            resolve(target)
+        except ValueError as error:
+            return fail("BAD_TARGET", str(error), "Use target='player' or target='copy'.")
+
+        try:
+            path = capture_path(name)
+        except ValueError as error:
+            return fail("BAD_PATH", str(error), "Use a relative name such as captures/my-shot.")
+
+        rel = path.relative_to(fx.link()).with_suffix("").as_posix()
+        if kind == "image":
+            result = send([f"image {rel}"], timeout=60)
+            if result.is_error:
+                return result
+            dds = path.with_suffix(".dds")
+            if not dds.exists():
+                return fail("NO_PICTURE", f"The game wrote no {dds.name}.", "Freeze on a frame that renders, then try again.")
+            picture = fx.png(str(dds))
+            return ok({"dds": str(dds), "png": picture}, images=(Path(picture),))
+
+        if kind == "inspect":
+            result = send([f"inspect {rel}"], timeout=180)
+            if result.is_error:
+                return result
+            files = [path.with_suffix(".bin"), path.with_suffix(".tsv")]
+            return ok({"files": [str(file) for file in files if file.exists()]})
+
+        result = send([f"perf {rel} {max(1, min(frames, 3600))}"], timeout=180)
+        if result.is_error:
+            return result
+        numbers = path.with_suffix(".json")
+        return ok({"file": str(numbers), "costs": json.loads(numbers.read_text()) if numbers.exists() else None})
+
+
+# ---------------------------------------------------------------- verify
+
+@mcp.tool()
+def verify(names: list[str] | str | None = None, accept: bool = False) -> CallToolResult:
+    """Runs the saved scenarios in a fresh copy with the player's settings, and returns a job. It says what got
+    worse and writes a before and after picture for each. accept takes the run as the new expectation."""
+    global session_target
+    refused = needs_copy()
+    if refused:
+        return refused
+    if not (fx.PLAYER_GAME / "PhantomFX.ini").exists():
+        return fail("NO_INI", "The player's PhantomFX.ini is not there, so scenarios cannot take its settings.",
+            "Start the player's game once so it writes its settings.")
+    chosen = normalise(names) if names else []
+    count = len(chosen) or len(fx.load_scenarios())
+    result = start_job("scenarios", "copy", [*(["--accept"] if accept else []), *chosen], max(60, 60 * max(1, count)))
+    if not result.is_error:
+        session_target = "copy"
+        fx.game_folder = GAMES["copy"]
+    return result
+
+
+# ---------------------------------------------------------------- setting
+
+@mcp.tool()
+def setting(key: str, action: Literal["get", "set"] = "get", value: str | None = None,
+            target: Literal["player", "copy"] | None = None, confirm: bool = False) -> CallToolResult:
+    """One PhantomFX.ini key, read or written. A write goes through the running game and is saved; the player's ini
+    needs confirm=true, and the old value comes back so it can be put back."""
+    if not key or "\n" in key or "=" in key:
+        return fail("BAD_KEY", "Give one key, such as ray_tracing.", "Read docs/DEVELOPMENT.md for the settings.")
+    if value is not None and "\n" in value:
+        return fail("BAD_VALUE", "A value is one line.", "Pass a single-line value.")
+
+    with LOCK:
+        try:
+            game, folder = resolve(target)
+        except ValueError as error:
+            return fail("BAD_TARGET", str(error), "Use target='player' or target='copy'.")
+
+        ini = folder / "PhantomFX.ini"
+        if not ini.exists():
+            return fail("NO_INI", f"{ini} is not there.", "Start that game once so it writes its settings, or use the other target.")
+        old = None
+        for line in ini.read_text(encoding="utf-8", errors="replace").splitlines():
+            found = re.match(rf"\s*{re.escape(key)}\s*=\s*(.*)$", line)
+            if found:
+                old = found.group(1).strip()
+                break
+
+        if action == "get":
+            if key and old is None:
+                return fail("NO_SETTING", f"{key} is not in {ini}.", "Read the file, or use a key the add-on writes.")
+            return ok({"key": key, "value": old, "ini": str(ini)})
+
+        if value is None:
+            return fail("NEEDS_VALUE", "set needs a value.", "Pass the value to write.")
+        if game == "player" and not confirm:
+            return fail("NEEDS_CONFIRM", f"This writes the player's {ini}; it is {old!r} now.",
+                "Ask the user first, then pass confirm=true. The old value is in this answer.")
+        result = send([f"setting {key}={value}"], timeout=30)
+        if result.is_error:
+            return result
+        return ok({"key": key, "old": old, "new": value, "ini": str(ini)})
+
+
+# ---------------------------------------------------------------- job
+
+@mcp.tool()
+def job(action: Literal["list", "status", "wait", "cancel"] = "list", job_id: str | None = None, timeout_s: float = 20.0) -> CallToolResult:
+    """A long action's progress. wait blocks at most timeout_s (and never past a tool call); cancel stops the job
+    and says what it had printed so far."""
+    with JOB_LOCK:
+        chosen = JOBS.get(job_id) if job_id else next(reversed(JOBS.values()), None) if JOBS else None
+        if action == "list":
+            return ok({"jobs": [job_payload(found, 5) for found in JOBS.values()]})
+        if chosen is None:
+            return fail("NO_JOB", f"No job {job_id}." if job_id else "No job has run yet.", "Start one with session or verify.")
+
+        if action == "status":
+            return ok(job_payload(chosen))
+
+        if action == "cancel":
+            if chosen.state != "running":
+                return ok(job_payload(chosen), text=f"{chosen.id} is already {chosen.state}.")
+            subprocess.run(["taskkill", "/PID", str(chosen.process.pid), "/T", "/F"], capture_output=True, text=True, timeout=15)
+            try:
+                chosen.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                chosen.process.kill()
+            return ok(job_payload(chosen), text=f"Cancelled {chosen.id}; run start again if it was installing.")
+
+    deadline = time.monotonic() + max(0.0, min(float(timeout_s), 50.0))
+    while chosen.state == "running" and time.monotonic() < deadline:
+        time.sleep(0.25)
+    return ok(job_payload(chosen))
+
+
+# ---------------------------------------------------------------- job child
+
+def job_main(arguments: list[str]) -> None:
+    """The child a job runs: the same fx.py actions, in a process that can be cancelled."""
+    action, *rest = arguments
+    target = "copy"
+    if "--target" in rest:
+        at = rest.index("--target")
+        target = rest[at + 1]
+        del rest[at:at + 2]
+    fx.game_folder = GAMES[target]
+
+    try:
+        if action == "start":
+            fx.restart_copy(Path(rest[0]))
+            print("started the automation copy")
+            print(f"in the game after {fx.boot():.1f} s")
+        elif action == "boot":
+            print(f"in the game after {fx.boot():.1f} s")
+        elif action == "travel":
+            fx.travel(rest[0])
+            print(f"in {rest[0]}")
+        elif action == "acc":
+            fx.cabin()
+            print("in the cabin")
+        elif action == "replay":
+            fx.replay(rest[0] if rest else None)
+        elif action == "scenarios":
+            names = [name for name in rest if name != "--accept"]
+            sys.exit(1 if fx.run_scenarios(names, "--accept" in rest) else 0)
+        else:
+            sys.exit(f"unknown job {action}")
+    except SystemExit as stop:
+        print(f"stopped: {stop}", file=sys.stderr)
+        raise
+    except Exception as error:  # The parent reads this as the job's failure
+        print(f"{type(error).__name__}: {error}", file=sys.stderr)
+        raise
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["--job"]:
+        job_main(sys.argv[2:])
+    else:
+        mcp.run()

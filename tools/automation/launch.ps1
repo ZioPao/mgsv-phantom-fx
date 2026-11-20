@@ -1,12 +1,14 @@
 # Starts the automation copy of the game and waits for it to close. Its display settings are its own
 # (install.ps1 writes them, src/dev/save_redirect.hpp points the game at them).
 param(
-    [string]$Game = (Join-Path $env:USERPROFILE 'Documents\Development\mgsv-automation\game'),
-    [string]$Steam = 'C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP',
+    [string]$Game = $env:MGSV_AUTOMATION_GAME,
+    [string]$Steam = $env:MGSV_PLAYER_GAME,
     # Off-screen by default: the game keeps rendering there (not when minimised), out of the way.
     [switch]$Visible
 )
 $ErrorActionPreference = 'Stop'
+if (-not $Game) { $Game = Join-Path $env:USERPROFILE 'Documents\Development\mgsv-automation\game' }
+if (-not $Steam) { $Steam = 'C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP' }
 
 Add-Type -Namespace Automation -Name Window -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool SetWindowPos(System.IntPtr window, System.IntPtr after, int x, int y, int width, int height, uint flags);

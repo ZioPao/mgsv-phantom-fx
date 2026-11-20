@@ -9,12 +9,15 @@ The user steers to a broken spot once and presses **F9**. Everything after that 
 
 The tools exist in **dev builds only** (`build/dev`). Reference: `docs/DEVELOPMENT.md`, "Debug cases". Every command line the game takes: `src/dev/automation.hpp`.
 
+**Prefer the MCP tools** when the client has `phantom-fx-automation` (`session`, `run`, `case`, `capture`, `verify`, `setting`, `job`): a case comes back with its pictures and long work is a job. The commands below are the same surface for clients without it, and the rules and reading advice below apply to both.
+
 ## Rules that protect the user
 
 - **Never run the automation copy beside the player's game.** `launch.ps1` restores the player's save files when the copy exits, so it could overwrite newer saves. `fx.py replay` and `fx.py scenarios` refuse to start then. Check before launching anything by hand: `(Get-Process mgsvtpp).Path`.
 - **Never stop the player's game.** If it is in the way, ask the user to close it, or wait for it to close. To stop the copy, stop only a process whose path is under `mgsv-automation`.
 - **`--copy` decides which game you talk to.** Without it, `fx.py` commands reach the player's running game. `setting` writes to their `PhantomFX.ini`, so restore what you change.
 - **Tell the user when their game is left frozen.** F9 again, or `fx.py run release`, lets it go.
+- **`session start` takes the keyboard for a moment.** It brings the off-screen copy forward to press its startup notices, then puts the previous window back. Do not start it while the user is typing.
 - **Keep game images out of the repository.** Scenario baselines stay in `mgsv-automation/baselines`; only numbers go in `scenarios.json`.
 - **Commit, push and install into the player's game only when the user has asked.** Install with a backup of the current add-on and with their game closed.
 
@@ -30,8 +33,8 @@ uv run -q --with numpy --with pillow python perf.py [--copy] <command>
 
 Cases are in `PhantomFX-automation/cases` beside each game:
 
-- Player: `C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP`
-- Copy: `%USERPROFILE%\Documents\Development\mgsv-automation\game`
+- Player: `C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP`, or `MGSV_PLAYER_GAME`
+- Copy: `%USERPROFILE%\Documents\Development\mgsv-automation\game`, or `MGSV_AUTOMATION_GAME`
 
 ## The loop
 
@@ -66,7 +69,7 @@ Cases are in `PhantomFX-automation/cases` beside each game:
 | `perf.py [--copy] log [<file>]` | A play session's costs by place, then its worst seconds |
 | `perf.py [--copy] ab <test> ...` | What each change costs on the frame as it stands, with the drift to judge it by. `--images` also says how far the frame moved |
 
-To drive the copy by hand: run `install.ps1` (`-Settings @()` for the player's exact settings), start `launch.ps1` in the background, then `fx.py --copy boot`. `replay` and `scenarios` do all of this themselves.
+To drive the copy by hand: run `install.ps1` (`-Settings @()` for the player's exact settings), start `launch.ps1` in the background, then `fx.py --copy boot`. `replay` and `scenarios` do all of this themselves. With the MCP, `session` with action `start` does install, launch, the startup notices and logos, and free roam as one job; the steps above are the manual equivalent.
 
 ## Costs
 

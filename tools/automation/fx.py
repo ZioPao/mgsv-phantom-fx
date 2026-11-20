@@ -22,6 +22,7 @@
 """
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -32,8 +33,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-PLAYER_GAME = Path(r"C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP")
-AUTOMATION_GAME = Path.home() / "Documents" / "Development" / "mgsv-automation" / "game"
+# The two games; the environment points them at another install when the defaults are not where they are.
+PLAYER_GAME = Path(os.environ.get("MGSV_PLAYER_GAME", r"C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP"))
+AUTOMATION_GAME = Path(os.environ.get("MGSV_AUTOMATION_GAME", Path.home() / "Documents" / "Development" / "mgsv-automation" / "game"))
 LINK = "PhantomFX-automation"
 # What is expected of each scenario, in the repository; their pictures and depth, which stay on this machine.
 SCENARIOS = Path(__file__).resolve().parent / "scenarios.json"
@@ -161,6 +163,7 @@ def diff(a, b):
 # click are skipped before they start, to where their click leads; the Konami login too, as it opens a
 # notice that waits for one.
 BOOT_STEP = """
+if not gvars or not mvars or not vars then return "0 waiting" end
 local skips = {
   Seq_Demo_ConfirmAutoSave = "Seq_Demo_StartSignIn",
   Seq_Demo_LogInKonamiServer = "Seq_Demo_CheckPatchDlcForInvitation",
@@ -195,9 +198,88 @@ return vars.missionCode .. " " .. tostring(sequence) .. (playing and " playing" 
 """.strip().replace("\n", " ")
 
 
-def boot(timeout=600.0):
+def game_running():
+    """Whether a game runs from game_folder."""
+    command = "(Get-Process mgsvtpp -ErrorAction SilentlyContinue).Path"
+    paths = subprocess.run(["powershell", "-NoProfile", "-Command", command], capture_output=True, text=True).stdout.split("\n")
+    return any(Path(line.strip()).parent == game_folder for line in paths if line.strip())
+
+
+def press_enter():
+    """Enter to the game's window, for the notices before its scripts run (autosave, online information). The game
+    reads the keyboard's state, not window messages, so the off-screen window is brought forward for the key and the
+    window that had it is put back."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+    except (AttributeError, OSError):
+        return False
+
+    hwnd = user32.FindWindowW(None, "METAL GEAR SOLID V: THE PHANTOM PAIN")
+    if not hwnd:
+        return False
+
+    previous = user32.GetForegroundWindow()
+    user32.keybd_event(0x12, 0, 0, 0)  # Alt: Windows then lets this process set the foreground
+    user32.SetForegroundWindow(hwnd)
+    user32.keybd_event(0x12, 0, 2, 0)
+    time.sleep(0.25)
+    user32.keybd_event(0x0D, 0, 0, 0)
+    user32.keybd_event(0x0D, 0, 2, 0)
+    time.sleep(0.4)
+    if previous and previous != hwnd:
+        user32.SetForegroundWindow(previous)
+
+    return True
+
+
+def wait_for_scripts(timeout=120.0, least_seconds=45.0):
+    """Until the game is far enough through start-up to answer a Lua call. With another mod's hooks over the
+    game's Lua (Infinite Heaven's IHHook), a call too early can crash the game, so the first 45 s only presses
+    the notices away and watches the process; from then on a camera and a frame past 200 mean it is ready."""
+    started = time.monotonic()
+    deadline = started + timeout
+    last_press = 0.0
+    # A game already in play answers at once; nothing is pressed into it.
+    try:
+        line = run(["status"], timeout=5).splitlines()[1]
+    except (TimeoutError, FileNotFoundError, IndexError):
+        line = ""
+    frame = re.match(r"frame (\d+)", line)
+    if frame and int(frame.group(1)) > 200 and " camera " in f" {line} ":
+        return
+
+    print("waiting for the game's scripts; pressing its startup notices away", flush=True)
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        if now - last_press > 2.5:
+            press_enter()
+            last_press = now
+
+        if now - started < least_seconds:
+            time.sleep(0.4)
+            continue
+
+        try:
+            line = run(["status"], timeout=5).splitlines()[1]
+        except (TimeoutError, FileNotFoundError, IndexError):
+            time.sleep(0.3)
+            continue
+
+        frame = re.match(r"frame (\d+)", line)
+        if frame and int(frame.group(1)) > 200 and " camera " in f" {line} ":
+            print(f"the game's scripts answer after {time.monotonic() - started:.0f} s", flush=True)
+            return
+
+        time.sleep(0.3)
+
+    raise TimeoutError(f"the game's scripts did not answer after {timeout:.0f} s: read {link() / 'launch.log'}")
+
+
+def boot(timeout=180.0):
     """Steps the game from wherever it is into free roam; returns the seconds it took."""
     start = time.monotonic()
+    wait_for_scripts()
     last = None
     while time.monotonic() - start < timeout:
         try:

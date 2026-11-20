@@ -2,8 +2,8 @@
 # builds never replace the add-on in the Steam folder. Run with the game closed.
 param(
     [string]$Build = (Join-Path $PSScriptRoot '..\..\build\dev'),
-    [string]$Game = (Join-Path $env:USERPROFILE 'Documents\Development\mgsv-automation\game'),
-    [string]$Steam = 'C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP',
+    [string]$Game = $env:MGSV_AUTOMATION_GAME,
+    [string]$Steam = $env:MGSV_PLAYER_GAME,
     # The saves every run starts from; the game reads and writes a copy (src/dev/save_redirect.hpp).
     [string]$SeedSaves = (Join-Path $env:USERPROFILE 'Documents\Development\mgsv-automation\seed-saves'),
     [int]$Width = 1920,
@@ -15,6 +15,9 @@ param(
     [string]$Ini
 )
 $ErrorActionPreference = 'Stop'
+if (-not $Game) { $Game = Join-Path $env:USERPROFILE 'Documents\Development\mgsv-automation\game' }
+if (-not $Steam) { $Steam = 'C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP' }
+if (-not $PSBoundParameters.ContainsKey('Build') -and $env:MGSV_DEV_BUILD) { $Build = $env:MGSV_DEV_BUILD }
 
 if (Get-Process mgsvtpp -ErrorAction SilentlyContinue) { throw 'The game is running; close it first.' }
 
@@ -55,6 +58,8 @@ $saves = Join-Path $Game 'PhantomFX-automation\saves'
 if (Test-Path $saves) { Remove-Item $saves -Recurse -Force }
 New-Item -ItemType Directory -Force $saves | Out-Null
 Copy-Item (Join-Path $SeedSaves '*') $saves
+# The copy drops the game's startup logos, which cost eighteen seconds of every run (automation.cpp).
+New-Item -ItemType File -Force (Join-Path $Game 'PhantomFX-automation\skip-logos') | Out-Null
 
 # The game's user data folder for the run: its own display settings, windowed at 1920x1080.
 $userData = Join-Path $Game 'PhantomFX-automation\local'
