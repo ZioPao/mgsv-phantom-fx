@@ -13,10 +13,12 @@ from its own hooks.
 | `game.hpp` | The game's image and code checks, and the build check the add-on answers |
 | `game_lua.*` | Lua in the game's own script state: expressions, print(), and the console's queue |
 | `travel.*`, `cutscenes.*`, `cutscene_list.hpp` | Free roam in another map, and any cutscene the game's scripts name |
+| `page.*` | The devkit's own Developer page: travel, cutscenes and the Lua console in plain ImGui |
 
 `devkit.cmake` builds the static library. The add-on answers `devkit::game::isSupportedBuild()` (PhantomFX:
-`src/device_check.cpp`); everything else the devkit needs is in its folder. `src/dev/` is what stays PhantomFX's
-own: the Developer page, the debug cases, and the probes into its passes.
+`src/device_check.cpp`); everything else the devkit needs is in its folder. `src/dev/` stays PhantomFX's own: its
+Developer page with the debug cases and the probes into its passes. The devkit's page is plain ImGui, so it looks
+like ReShade's other windows.
 
 ## Using it in another add-on
 
@@ -45,10 +47,18 @@ own: the Developer page, the debug cases, and the probes into its passes.
 4. Use the tools directly: `game_lua::run` and its console, `travel::go`, `cutscenes::play`,
    `save_redirect::install`, each with its `onFrameStart` called from the game thread. Paths for command results
    are `devkit::commands::folder()`.
+5. Draw the devkit's page from the overlay callback, inside the window ReShade gives it:
 
-The page is the add-on's: the devkit ships no UI and no `fxui`. PhantomFX's Developer page (`src/dev/dev.cpp`)
-is the example; it maps `devkit::Tone` to `fxui::Tone` in one switch. What stays PhantomFX's: the Developer page,
-the debug cases, and the probes into its passes (inspect, perf record, game shadow, held camera, remaster).
+   ```cpp
+   reshade::register_overlay("MyMod", [](reshade::api::effect_runtime*) { devkit::page::draw(); });
+   ```
+
+   It uses ReShade's ImGui function table (`imgui.h` and `reshade_overlay.hpp`) and no `fxui`, so it looks like
+   ReShade's other windows. The host can also call `draw()` inside its own settings window.
+
+PhantomFX keeps its own page (`src/dev/dev.cpp`, drawn with `fxui`) and its probes; another add-on draws
+`devkit::page::draw()` instead. What stays PhantomFX's: that page, the debug cases, and the probes into its passes
+(inspect, perf record, game shadow, held camera, remaster).
 
 Release: link `devkit` only when the dev tools are on, and keep the dev-only strings listed in
 `tools/automation/check_release.py` current; it reads the built add-on and fails if any reached it.

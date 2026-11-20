@@ -244,7 +244,7 @@ what draws it, when that is the feature's own.
 | `src/game_dither.cpp`, `src/game_dither.hpp` | The game's colour dither taken out of its shaders as they are made (see "Dither") |
 | `src/dev_tools.hpp` | Whether the build has the Developer page (the dev preset) |
 | `src/dev/` | The development tools, in a dev build alone; its README says how to detach them. `dev.*`: the core's one door to them, and the Developer page |
-| `src/devkit/` | What another MGSV add-on can build on, in a dev build alone (its `README.md`): the saves redirection, Lua in the game, travel, cutscenes |
+| `src/devkit/` | What another MGSV add-on can build on, in a dev build alone (its `README.md`): the saves redirection, Lua in the game, travel, cutscenes, and its own Developer page in plain ImGui |
 | `src/devkit/game_lua.cpp`, `src/devkit/game_lua.hpp` | Lua in the game's script state, and the Developer page's console (see "Game Lua") |
 | `src/devkit/travel.cpp`, `src/devkit/travel.hpp` | The Developer page's travel: free roam in another map, and the way the page's tools leave a mission (see "Travel") |
 | `src/devkit/cutscenes.cpp`, `src/devkit/cutscenes.hpp`, `src/dev/cutscene_list.hpp` | The Developer page's cutscene player and its list (see "Cutscenes") |
