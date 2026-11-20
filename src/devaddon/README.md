@@ -2,7 +2,8 @@
 
 The developer tools as their own ReShade add-on (`DevKit.addon64`), built in the dev preset beside
 `PhantomFX.addon64` and not linked into it. It draws `src/devkit/page.*` in ReShade's default ImGui
-style and hooks the game's main loop for travel, cutscenes, the Lua console and command files.
+style, and gets the game's frame start from PhantomFX when that is loaded (or hooks the loop itself)
+for travel, cutscenes, the Lua console and command files.
 
 | File | What it is |
 | --- | --- |
@@ -18,13 +19,14 @@ Copy `build/dev/DevKit.addon64` beside `mgsvtpp.exe` with ReShade 6.8. The add-o
 - `DevKit/commands/` — `<name>.cmd` files, one line at a time: `lua <code>`, `state`, `travel
   Afghanistan|Africa|MotherBase`, `cutscene <index>`, and the runner's `wait <frames>`.
 - `DevKit/saves/`, `DevKit/local/` — when `saves/` exists, the game's Steam Cloud and user data
-  folder are redirected there, as PhantomFX's automation copy does.
+  folder are redirected there, as PhantomFX's automation copy does. Have only one of the two
+  redirects in place: each installs its own Steam hooks.
 
 The page is ReShade's overlay entry **DevKit**.
 
-## Limits
+## With PhantomFX
 
-- It hooks the game's main loop. Do not run it with an add-on that already hooks that loop
-  (PhantomFX does): the second hook sees the first's jump, reports unexpected code, and the frame
-  tools stay off.
-- No PhantomFX probes, cases or remaster panel: those are `src/dev/` and stay with PhantomFX.
+When `PhantomFX.addon64` is loaded, DevKit registers its frame work on PhantomFX's main-loop hook
+through the `PhantomFXRegisterFrameStart` export, so both add-ons run together with one hook. Without
+PhantomFX, DevKit hooks the loop itself. PhantomFX keeps its own probes, cases and remaster panel
+(`src/dev/`); DevKit has none of them.

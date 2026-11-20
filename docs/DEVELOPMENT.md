@@ -45,8 +45,8 @@ only feeds them (`DiagnosticLog` in `src/log.hpp`, tested with `if constexpr`):
 - Developer, **Log global illumination often**.
 
 Its log's first line says "with the diagnostic log". Builds for in-game checks use this preset. It also writes
-`build/dev/DevKit.addon64`, the separate developer add-on with travel, cutscenes and the Lua console
-(`src/devaddon/README.md`). The preset also sets `PHANTOM_FX_DEV_TOOLS` (`DevTools` in `src/dev_tools.hpp`),
+`build/dev/DevKit.addon64`, the separate developer add-on with travel, cutscenes and the Lua console, which runs
+beside PhantomFX on its frame start (`src/devaddon/README.md`). The preset also sets `PHANTOM_FX_DEV_TOOLS` (`DevTools` in `src/dev_tools.hpp`),
 which adds the overlay's **Developer** page, below Diagnostics: **Costs on file**, a line on the remastering tool
 (**F6** marks, **F7**
 opens its panel: `src/remaster/README.md`) and the log switch above, and the debug cases (see "Debug cases").

@@ -22,20 +22,44 @@ constexpr std::uintptr_t FrameStartRva = 0x7F840;
 constexpr unsigned char FrameStartCode[]{0x40, 0x53, 0x56, 0x57, 0x48, 0x83, 0xEC, 0x60, 0x48, 0xC7, 0x44, 0x24, 0x20, 0xFE, 0xFF, 0xFF, 0xFF};
 
 using FrameStart = void (*)(std::uint8_t* loop, void* argument);
+using RegisterFrameStart = bool (*)(void (*)());
+using UnregisterFrameStart = void (*)(void (*)());
 FrameStart original{};
+bool withPhantomFx{};
 
-void frameStart(std::uint8_t* loop, void* argument)
+void devkitFrameStart()
 {
     devkit::travel::onFrameStart();
     devkit::cutscenes::onFrameStart();
     devkit::game_lua::onFrameStart();
     devkit::commands::onFrameStart();
+}
+
+void frameStart(std::uint8_t* loop, void* argument)
+{
+    devkitFrameStart();
     original(loop, argument);
+}
+
+HMODULE phantomFx() noexcept
+{
+    return GetModuleHandleW(L"PhantomFX.addon64");
 }
 }
 
 std::string hook() noexcept
 {
+    // PhantomFX already hooks the loop: its callbacks run on the game thread without a second hook.
+    if (const auto module = phantomFx())
+    {
+        const auto registerFrameStart = reinterpret_cast<RegisterFrameStart>(GetProcAddress(module, "PhantomFXRegisterFrameStart"));
+        if (registerFrameStart && registerFrameStart(&devkitFrameStart))
+        {
+            withPhantomFx = true;
+            return "Registered on PhantomFX's frame start.";
+        }
+    }
+
     if (!devkit::game::isSupportedBuild()) return "Unknown game build; the game loop is not hooked.";
 
     auto* base = phantom_fx::game_code::image();
@@ -50,6 +74,15 @@ std::string hook() noexcept
 
 void unhook() noexcept
 {
+    if (withPhantomFx)
+    {
+        if (const auto module = phantomFx())
+            if (const auto unregisterFrameStart = reinterpret_cast<UnregisterFrameStart>(GetProcAddress(module, "PhantomFXUnregisterFrameStart")))
+                unregisterFrameStart(&devkitFrameStart);
+        withPhantomFx = false;
+        return;
+    }
+
     if (!original) return;
 
     MH_RemoveHook(phantom_fx::game_code::image() + FrameStartRva);
