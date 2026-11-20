@@ -105,13 +105,23 @@ def test_status_says_no_game():
             server.fx.run = original
 
 
+def test_start_needs_steam():
+    original = server.fx.steam_running
+    server.fx.steam_running = lambda: False
+    try:
+        result = server.session(action="start", target="copy")
+        assert result.is_error and payload(result)["code"] == "STEAM_NOT_RUNNING", payload(result)
+    finally:
+        server.fx.steam_running = original
+
+
 def test_job_list_is_empty():
     result = server.job(action="list")
     assert not result.is_error and payload(result)["jobs"] == [], payload(result)
 
 
 if __name__ == "__main__":
-    for check in (test_run_and_refusals, test_setting_reads_the_ini, test_status_says_no_game, test_job_list_is_empty):
+    for check in (test_run_and_refusals, test_setting_reads_the_ini, test_status_says_no_game, test_start_needs_steam, test_job_list_is_empty):
         check()
         print(f"{check.__name__}: ok")
 

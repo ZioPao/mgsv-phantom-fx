@@ -371,9 +371,22 @@ def windows_powershell():
     return {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
 
 
+def steam_running():
+    """Whether Steam runs: the game cannot initialize SteamAPI without it, and sits on its error dialog instead."""
+    try:
+        listed = subprocess.run(["tasklist", "/FI", "IMAGENAME eq steam.exe"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return True  # A check that cannot answer must not stop a run
+
+    return "steam.exe" in listed.lower()
+
+
 def restart_copy(ini):
     """A fresh automation copy on this checkout's build with `ini`'s settings. Never beside the player's game:
     launch.ps1 puts the player's files back as it ends, which would undo that game's saves."""
+    if not steam_running():
+        raise SystemExit("Steam is not running: start it and log in, then try again.")
+
     command = "(Get-Process mgsvtpp -ErrorAction SilentlyContinue).Path"
     running = subprocess.run(["powershell", "-NoProfile", "-Command", command], capture_output=True, text=True).stdout.split("\n")
     games = [Path(line.strip()) for line in running if line.strip()]

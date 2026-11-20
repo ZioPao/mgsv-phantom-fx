@@ -92,6 +92,14 @@ def needs_copy() -> CallToolResult | None:
     return None
 
 
+def needs_steam() -> CallToolResult | None:
+    """The refusal every launch needs: without Steam the game sits on its SteamAPI error dialog, and no scripts run."""
+    if fx.steam_running():
+        return None
+    return fail("STEAM_NOT_RUNNING", "Steam is not running, so the game cannot initialize SteamAPI.",
+        "Start Steam and log in, then run this again.")
+
+
 def normalise(lines: list[str] | str) -> list[str]:
     if isinstance(lines, str):
         lines = [lines]
@@ -210,6 +218,9 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
         if action == "start":
             if target == "player":
                 return fail("WRONG_TARGET", "start installs into the automation copy, never the player's game.", "Use session with action='start', target='copy'.")
+            refused = needs_steam()
+            if refused:
+                return refused
             refused = needs_copy()
             if refused:
                 return refused
@@ -330,6 +341,9 @@ def case(action: Literal["latest", "open", "record", "replay", "compare"] = "lat
             return fail("BAD_TARGET", str(error), "Use target='player' or target='copy'.")
 
         if action == "replay":
+            refused = needs_steam()
+            if refused:
+                return refused
             refused = needs_copy()
             if refused:
                 return refused
@@ -441,6 +455,9 @@ def verify(names: list[str] | str | None = None, accept: bool = False) -> CallTo
     """Runs the saved scenarios in a fresh copy with the player's settings, and returns a job. It says what got
     worse and writes a before and after picture for each. accept takes the run as the new expectation."""
     global session_target
+    refused = needs_steam()
+    if refused:
+        return refused
     refused = needs_copy()
     if refused:
         return refused
