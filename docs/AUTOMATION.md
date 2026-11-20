@@ -110,7 +110,7 @@ Not now: a named pipe, a binary protocol, or a scripting language in the game. `
   decides this.
 - The bridge stops only a process whose path is under the automation folder.
 - A copy the bridge started is closed when the task calls `session stop`, after ten minutes with no tool call, and
-  when the server exits. `MGSV_AUTO_CLOSE_SECONDS` changes the idle time; 0 turns it off.
+  when the server exits. `PHANTOM_FX_AUTO_CLOSE_SECONDS` changes the idle time; 0 turns it off.
 - Outputs go under `PhantomFX-automation` or `mgsv-automation`; the bridge rejects paths outside them, so game images
   cannot reach the repository.
 
@@ -146,8 +146,8 @@ Run it from the repository root; an MCP client starts the same command:
 uv run -q --with mcp --with numpy --with pillow --with scipy python tools/automation/mcp_server.py
 ```
 
-`opencode.json` registers it project-locally. `MGSV_PLAYER_GAME` and `MGSV_AUTOMATION_GAME` (read in `fx.py` and
-the two PowerShell scripts) point the CLI, the server and the copy's installer at other installs. `MGSV_DEV_BUILD`
+`opencode.json` registers it project-locally. `PHANTOM_FX_GAME` and `PHANTOM_FX_AUTOMATION_GAME` (read in `fx.py`
+and the two PowerShell scripts) point the CLI, the server and the copy's installer at other installs. `PHANTOM_FX_DEV_BUILD`
 selects another build. `session` with action `start` drives the whole way as one job: install the checkout's
 `build/dev` into the copy, launch it, press the startup notices away (autosave, online information), skip the
 Konami and Fox logos (`skip-logos`, `automation.cpp`) and step into free roam. It waits 45 s before its first Lua

@@ -34,8 +34,8 @@ uv run -q --with numpy --with pillow python perf.py [--copy] <command>
 
 Cases are in `PhantomFX-automation/cases` beside each game:
 
-- Player: `C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP`, or `MGSV_PLAYER_GAME`
-- Copy: `%USERPROFILE%\Documents\Development\mgsv-automation\game`, or `MGSV_AUTOMATION_GAME`
+- Player: `C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP`, or `PHANTOM_FX_GAME`
+- Copy: `%USERPROFILE%\Documents\Development\mgsv-automation\game`, or `PHANTOM_FX_AUTOMATION_GAME`
 
 ## The loop
 

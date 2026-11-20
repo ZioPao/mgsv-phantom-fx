@@ -2,8 +2,9 @@
 # builds never replace the add-on in the Steam folder. Run with the game closed.
 param(
     [string]$Build = (Join-Path $PSScriptRoot '..\..\build\dev'),
-    [string]$Game = $env:MGSV_AUTOMATION_GAME,
-    [string]$Steam = $env:MGSV_PLAYER_GAME,
+    [string]$Game = $(if ($env:PHANTOM_FX_AUTOMATION_GAME) { $env:PHANTOM_FX_AUTOMATION_GAME } else { Join-Path $env:USERPROFILE 'Documents\Development\mgsv-automation\game' }),
+    # The player's game the copy is made from: PHANTOM_FX_GAME, else Steam's usual folder.
+    [string]$Steam = $(if ($env:PHANTOM_FX_GAME) { $env:PHANTOM_FX_GAME } else { 'C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP' }),
     # The saves every run starts from; the game reads and writes a copy (src/dev/save_redirect.hpp).
     [string]$SeedSaves = (Join-Path $env:USERPROFILE 'Documents\Development\mgsv-automation\seed-saves'),
     [int]$Width = 1920,
@@ -15,9 +16,7 @@ param(
     [string]$Ini
 )
 $ErrorActionPreference = 'Stop'
-if (-not $Game) { $Game = Join-Path $env:USERPROFILE 'Documents\Development\mgsv-automation\game' }
-if (-not $Steam) { $Steam = 'C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP' }
-if (-not $PSBoundParameters.ContainsKey('Build') -and $env:MGSV_DEV_BUILD) { $Build = $env:MGSV_DEV_BUILD }
+if (-not $PSBoundParameters.ContainsKey('Build') -and $env:PHANTOM_FX_DEV_BUILD) { $Build = $env:PHANTOM_FX_DEV_BUILD }
 
 if (Get-Process mgsvtpp -ErrorAction SilentlyContinue) { throw 'The game is running; close it first.' }
 

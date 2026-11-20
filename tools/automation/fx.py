@@ -33,9 +33,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-# The two games; the environment points them at another install when the defaults are not where they are.
-PLAYER_GAME = Path(os.environ.get("MGSV_PLAYER_GAME", r"C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP"))
-AUTOMATION_GAME = Path(os.environ.get("MGSV_AUTOMATION_GAME", Path.home() / "Documents" / "Development" / "mgsv-automation" / "game"))
+# The two games; the environment names another install of either.
+PLAYER_GAME = Path(os.environ.get("PHANTOM_FX_GAME", r"C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP"))
+AUTOMATION_GAME = Path(os.environ.get("PHANTOM_FX_AUTOMATION_GAME", Path.home() / "Documents" / "Development" / "mgsv-automation" / "game"))
 LINK = "PhantomFX-automation"
 # What is expected of each scenario, in the repository; their pictures and depth, which stay on this machine.
 SCENARIOS = Path(__file__).resolve().parent / "scenarios.json"

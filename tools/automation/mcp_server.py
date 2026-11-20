@@ -41,7 +41,7 @@ session_target = "player"
 fx.game_folder = GAMES[session_target]
 LOCK = threading.RLock()
 # A copy the tools started closes after this many seconds with no tool call, and when the server exits.
-AUTO_CLOSE_SECONDS = float(os.environ.get("MGSV_AUTO_CLOSE_SECONDS", "600"))
+AUTO_CLOSE_SECONDS = float(os.environ.get("PHANTOM_FX_AUTO_CLOSE_SECONDS", "600"))
 owned_copy = False
 last_activity = time.monotonic()
 ACTIVITY_LOCK = threading.Lock()
