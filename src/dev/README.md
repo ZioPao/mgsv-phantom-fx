@@ -2,6 +2,8 @@
 
 Everything a dev build has for testing in the game, and a release build does not: the overlay's Developer page and the
 debug cases. `docs/DEVELOPMENT.md` describes what each does ("Debug cases", "Travel", "Cutscenes", "Game Lua").
+Travel, cutscenes and the Lua console are the **DevKit add-on's** page (`../devaddon/README.md`); this page keeps
+PhantomFX's own probes.
 
 | File | What it is |
 | --- | --- |

@@ -220,6 +220,7 @@ add_gi_kernels(features/path_tracing/direct_light.hlsl TraceLampLight)
 if(PHANTOM_FX_DEV_TOOLS)
     include(src/dev/dev.cmake)
     include(src/devkit/devkit.cmake)
+    include(src/devaddon/devaddon.cmake)
 endif()
 
 add_executable(kernel_bindings tools/kernel_bindings/main.cpp tools/kernel_bindings/kernel_table.cpp)

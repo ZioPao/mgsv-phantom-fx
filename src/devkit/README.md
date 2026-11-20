@@ -2,7 +2,8 @@
 
 What a dev build of another MGSV add-on can build on: the tools that do not need PhantomFX to mean anything.
 The add-on sets its name, its logger and its toasts first, links `devkit` in its dev preset alone, and calls in
-from its own hooks.
+from its own hooks. This repository also builds it as the separate `DevKit.addon64` (`../devaddon/README.md`),
+which is the add-on to run when PhantomFX's own dev build is not.
 
 | File | What it is |
 | --- | --- |
@@ -56,9 +57,10 @@ like ReShade's other windows.
    It uses ReShade's ImGui function table (`imgui.h` and `reshade_overlay.hpp`) and no `fxui`, so it looks like
    ReShade's other windows. The host can also call `draw()` inside its own settings window.
 
-PhantomFX keeps its own page (`src/dev/dev.cpp`, drawn with `fxui`) and its probes; another add-on draws
-`devkit::page::draw()` instead. What stays PhantomFX's: that page, the debug cases, and the probes into its passes
-(inspect, perf record, game shadow, held camera, remaster).
+PhantomFX keeps its own page (`src/dev/dev.cpp`, drawn with `fxui`) for its probes and costs; the DevKit add-on
+draws `devkit::page::draw()` instead, and so does another add-on that links the devkit. What stays PhantomFX's:
+that page, the debug cases, and the probes into its passes (inspect, perf record, game shadow, held camera,
+remaster).
 
 Release: link `devkit` only when the dev tools are on, and keep the dev-only strings listed in
 `tools/automation/check_release.py` current; it reads the built add-on and fails if any reached it.
