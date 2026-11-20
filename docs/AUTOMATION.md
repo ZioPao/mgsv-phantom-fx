@@ -63,6 +63,11 @@ agent (any MCP client)          human (shell)
 The game stays the only C++ part. The bridge is one Python package; the CLI and the MCP server are two front ends to
 it, so there is one implementation of parsing, paths and safety.
 
+The dev tools are split: `DevKit.addon64` carries the generic commands, Lua, travel, cutscenes and save redirection;
+PhantomFX's dev add-on carries the cases, probes, performance captures, inspect and remaster that read its passes.
+The MCP still speaks to PhantomFX's `src/dev/automation.*` for the automation surface; moving that behind a DevKit
+API is the open piece.
+
 ### Tools, v1
 
 | Tool | What it does | Replaces |

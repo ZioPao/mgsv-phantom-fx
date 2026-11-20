@@ -11,7 +11,8 @@ import sys
 from pathlib import Path
 
 TEXTS = ["PhantomFX-automation", "Costs on file", "SteamRemoteStorage", "InspectPixels", "GAME_SHADOW", "g_ShadowMapAlone", "sun-light-game-shadow", "left out:", "dropped by the mesh rules",
-    "Debug case", "PhantomFX-marks", "Hold for original", "reveal_now", "case_done", "command files", "TppPlayer", "TppMission", "ReserveMissionClear", "Automation", "=automation", "probe_text"]
+    "Debug case", "PhantomFX-marks", "Hold for original", "reveal_now", "case_done", "command files", "TppPlayer", "TppMission", "ReserveMissionClear", "Automation", "=automation", "probe_text",
+    "The game's saves are read from and written to"]
 WIDE_TEXTS = ["steam_api64.dll"]
 
 

@@ -44,11 +44,15 @@ only feeds them (`DiagnosticLog` in `src/log.hpp`, tested with `if constexpr`):
 - the shadow probe's findings, while its debug view shows;
 - Developer, **Log global illumination often**.
 
-Its log's first line says "with the diagnostic log". Builds for in-game checks use this preset.
-It also sets `PHANTOM_FX_DEV_TOOLS` (`DevTools` in `src/dev_tools.hpp`), which adds the overlay's
-**Developer** page, below Diagnostics: **Travel** (see "Travel"), **Cutscenes** (see "Cutscenes"),
-the **Lua console** (see "Game Lua"), a line on the remastering tool (**F6** marks, **F7** opens its panel:
-`src/remaster/README.md`) and the log switch above, and the debug cases (see "Debug cases"). All of it lives in `src/dev/`, whose README says how the core reaches it and how to detach it.
+Its log's first line says "with the diagnostic log". Builds for in-game checks use this preset. It also writes
+`build/dev/DevKit.addon64`, the separate developer add-on with travel, cutscenes and the Lua console, which runs
+beside PhantomFX on its frame start (`src/devaddon/README.md`). The preset also sets `PHANTOM_FX_DEV_TOOLS` (`DevTools` in `src/dev_tools.hpp`),
+which adds the overlay's **Developer** page, below Diagnostics: **Costs on file**, a line on the remastering tool
+(**F6** marks, **F7**
+opens its panel: `src/remaster/README.md`) and the log switch above, and the debug cases (see "Debug cases").
+Travel, cutscenes and the Lua console are the separate `DevKit.addon64`'s page (`src/devaddon/`), which the dev
+preset also builds; most of PhantomFX's own tools live in `src/dev/`, and what another MGSV add-on can use in
+`src/devkit/`; both READMEs say how the core reaches them and how to detach them.
 It is left out of a release build altogether, not just switched off: CMake drops the folder's files
 and the `InspectPixels` kernel, and the little the core keeps for it stands behind `DevTools` or
 `#if PHANTOM_FX_DEV_TOOLS`. Those files hook the system's file calls, patch Steam's interfaces and
@@ -244,18 +248,19 @@ what draws it, when that is the feature's own.
 | `src/game_dither.cpp`, `src/game_dither.hpp` | The game's colour dither taken out of its shaders as they are made (see "Dither") |
 | `src/dev_tools.hpp` | Whether the build has the Developer page (the dev preset) |
 | `src/dev/` | The development tools, in a dev build alone; its README says how to detach them. `dev.*`: the core's one door to them, and the Developer page |
-| `src/dev/game_lua.cpp`, `src/dev/game_lua.hpp` | Lua in the game's script state, and the Developer page's console (see "Game Lua") |
-| `src/dev/travel.cpp`, `src/dev/travel.hpp` | The Developer page's travel: free roam in another map, and the way the page's tools leave a mission (see "Travel") |
-| `src/dev/cutscenes.cpp`, `src/dev/cutscenes.hpp`, `src/dev/cutscene_list.hpp` | The Developer page's cutscene player and its list (see "Cutscenes") |
+| `src/devkit/` | What another MGSV add-on can build on, in a dev build alone (its `README.md`): the saves redirection, Lua in the game, travel, cutscenes, and its own Developer page in plain ImGui. Built as the separate `DevKit.addon64` (`src/devaddon/`) |
+| `src/devkit/game_lua.cpp`, `src/devkit/game_lua.hpp` | Lua in the game's script state, and the DevKit add-on's console (see "Game Lua") |
+| `src/devkit/travel.cpp`, `src/devkit/travel.hpp` | The DevKit add-on's travel: free roam in another map, and the way the page's tools leave a mission (see "Travel") |
+| `src/devkit/cutscenes.cpp`, `src/devkit/cutscenes.hpp`, `src/devkit/cutscene_list.hpp` | The DevKit add-on's cutscene player and its list (see "Cutscenes") |
 | `src/remaster/` | The remastering rules: they change the game's materials as they are made, saved in `materials.json` and built into the add-on (see its `README.md`, and "Materials") |
 | `src/dev/remaster/` | The remastering tool that writes them: a dev build's marks, and the panel that tunes them |
 | `src/frame_log.cpp`, `src/frame_log.hpp` | Development diagnostics, off by default: shader log, F10 frame record, constant and texture dumps |
-| `src/dev/automation.cpp`, `src/dev/automation.hpp` | Dev builds: commands from files into the running game, F9's debug cases (see "Debug cases") |
+| `src/dev/automation.cpp`, `src/dev/automation.hpp` | Dev builds: the add-on's own commands from files and F9's debug cases; the files and waits are `src/devkit/commands.*` (see "Debug cases") |
 | `src/dev/inspect_trace.cpp`, `src/dev/inspect_trace.hpp`, `src/dev/inspect.hlsl`, `src/dev/inspect_shared.h` | A debug case's record of every pixel, a trace of its own |
 | `src/dev/game_shadow.cpp`, `src/dev/game_shadow.hpp` | A debug case's reference: the game's shadow per pixel, drawn at the sun pass |
 | `src/dev/held_camera.cpp`, `src/dev/held_camera.hpp` | A debug case's camera, which photo mode's camera update takes |
 | `src/dev/perf_record.cpp`, `src/dev/perf_record.hpp` | What frames cost, on file, a row a second and captures for comparing frames (see "Costs on file") |
-| `src/dev/save_redirect.cpp`, `src/dev/save_redirect.hpp` | The automation copy of the game: its saves, backups and display settings kept apart from the player's |
+| `src/devkit/save_redirect.cpp`, `src/devkit/save_redirect.hpp` | The automation copy of the game: its saves, backups and display settings kept apart from the player's |
 | `tools/automation/` | Dev builds: `fx.py` talks to the running game, `case.py` reports a debug case, `perf.py` reads and compares the costs on file, `scout.py` scouts showcase shots (a pose, time and weather, Phantom FX on and off, kept in a shot list), `mcp_server.py` gives the same tools to an MCP client with `test_mcp.py` checking it without the game, `install.ps1` and `launch.ps1` run the automation copy; `check_release.py` fails if any of it reached a release build |
 | `src/resource_dump.cpp`, `src/resource_dump.hpp` | Format names, constant rows, DDS saving for the dumps |
 | `src/shader_bytecode.cpp`, `src/shader_bytecode.hpp` | DXBC checksum (bytes 4 to 20 of the container), the instruction walk, the output saturation patch, the dither patch |
@@ -466,7 +471,7 @@ working before it is written. `fx.py case` records a case without the key.
 `fx.py --copy acc` goes on into the helicopter's cabin (`TppMission.ReserveMissionClear` for mission 40050). The title
 screen shows the same cabin but moves on by itself: a freeze there lands in a loading screen, which stalls under the pause
 and renders nothing. It reads
-and writes its own saves (`PhantomFX-automation/saves`, `src/dev/save_redirect.hpp`), and `launch.ps1` checks the player's
+and writes its own saves (`PhantomFX-automation/saves`, `src/devkit/save_redirect.hpp`), and `launch.ps1` checks the player's
 files are unchanged afterwards. Never run it beside the player's game: `launch.ps1` would put back saves the
 player's game wrote meanwhile.
 
@@ -580,10 +585,10 @@ the state back there for the overlay. Nothing is saved.
 
 ### Game Lua
 
-`src/dev/game_lua.cpp` runs Lua in the game's own script state, on the game thread at the main loop's
-frame start, the way the game's own calls into it run. The dev build's Developer page has a **Lua
-console** on it: Ctrl+Enter or Run runs the box's code at the next frame start, and the output box
-shows what it printed and returned, or its error with the stack.
+`src/devkit/game_lua.cpp` runs Lua in the game's own script state, on the game thread at the main loop's
+frame start, the way the game's own calls into it run. The DevKit add-on's Developer page has a **Lua
+console** on it: Run runs the box's code at the next frame start, and the output box shows what it
+printed and returned, or its error with the stack.
 
 - **Lua.** Lua 5.1.5 is linked into the exe (its copyright string at `0x24B47A0`). The base
   library's table at `0x24B6A70` gives `loadstring` (`0x1A2E2E0`), which calls `luaL_loadbuffer`
@@ -605,7 +610,7 @@ shows what it printed and returned, or its error with the stack.
 
 ### Travel
 
-The dev build's Developer page has **Travel** (`src/dev/travel.cpp`): Afghanistan, Africa or Mother
+The DevKit add-on's Developer page has **Travel** (`src/devkit/travel.cpp`): Afghanistan, Africa or Mother
 Base free roam from any free roam, after one loading screen, without the helicopter and the sortie
 screens. It runs a chunk through Game Lua, and a toast says whether the game left or why not.
 
@@ -626,16 +631,16 @@ screens. It runs a chunk through Game Lua, and a toast says whether the game lef
   Base (9.12, 8.75, -42.43), the Command platform's first helipad (landing point
   `cl00pl0_mb_fndt_plnt_heli_30050` in `mbdvc_map_mbstage_parameter.lua`, the same in every
   layout).
-- **Shared.** The leaving and the arrival on foot are Lua helpers in `src/dev/travel.cpp`, which
+- **Shared.** The leaving and the arrival on foot are Lua helpers in `src/devkit/travel.cpp`, which
   `travel::depart` puts ahead of a chunk. The cutscene player leaves the same way.
 
 ### Cutscenes
 
-The dev build's Developer page has **Cutscenes** (`src/dev/cutscenes.cpp`): a searchable list of the
+The DevKit add-on's Developer page has **Cutscenes** (`src/devkit/cutscenes.cpp`): a searchable list of the
 game's cutscenes and a Play button, for free roam and the ACC. The game calls a cutscene a demo.
 Search takes the mission's code or title, the name in its script or the demo id.
 
-- **List.** `src/dev/cutscene_list.hpp` holds 198 cutscenes: each mission's `demoList` (157, without the
+- **List.** `src/devkit/cutscene_list.hpp` holds 198 cutscenes: each mission's `demoList` (157, without the
   names that repeat a demo id and the placeholders that are not cutscenes) and 41 of the 47 in
   `TppDefine.MB_FREEPLAY_DEMO_PRIORITY_LIST`. Only the running mission's list is in memory, so the
   file is written out from the game's `s*_demo.lua` scripts.
@@ -4091,7 +4096,7 @@ F2 does nothing.
   position, facing the camera's yaw. The game's warp needs game time, so the request is taken at the
   next selector update (which also clears the pause), and a held camera, as a debug case leaves behind,
   is let go so the pause really clears; the warp then runs at the next frame start through the game's
-  Lua, from `dev::onFrameStart` (`src/dev/game_lua.hpp`): `GameObject.SendCommand` with
+  Lua, from `dev::onFrameStart` (`src/devkit/game_lua.hpp`): `GameObject.SendCommand` with
   `WarpAndWaitBlock` for the player (object 0), or `SetPosition` for the vehicle or walker gear they are
   in; missions and free roam only. It is the call Infinite Heaven's `InfTppUtil.Warp` makes.
 - **Near clip plane.** With **No near clip plane** on, the swapped-in camera's near plane (`+0x48`,

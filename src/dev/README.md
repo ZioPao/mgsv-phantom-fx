@@ -2,14 +2,15 @@
 
 Everything a dev build has for testing in the game, and a release build does not: the overlay's Developer page and the
 debug cases. `docs/DEVELOPMENT.md` describes what each does ("Debug cases", "Travel", "Cutscenes", "Game Lua").
+Travel, cutscenes and the Lua console are the **DevKit add-on's** page (`../devaddon/README.md`); this page keeps
+PhantomFX's own probes.
 
 | File | What it is |
 | --- | --- |
 | `dev.hpp`, `dev.cpp` | The one door from the core, and the Developer page |
 | `dev.cmake`, `tests.cmake` | The folder's sources and kernel, and its tests |
-| `automation.*` | Commands from files, and F9's debug cases |
-| `save_redirect.*` | Keeps the automation copy off the player's files |
-| `game_lua.*`, `travel.*`, `cutscenes.*`, `cutscene_list.hpp` | Lua in the game, and the tools that run on it |
+| `automation.*` | The add-on's own commands, and F9's debug cases; the files and waits are `../devkit/commands.*` |
+| `../devkit/` | What another MGSV add-on can build on: the saves redirection, Lua in the game, travel, cutscenes, its own Developer page in plain ImGui, and the logger and toasts the core sets |
 | `inspect_trace.*`, `inspect.hlsl`, `inspect_shared.h` | A debug case's record of every pixel, a trace like any other |
 | `game_shadow.*` | A debug case's reference: the game's shadow per pixel, drawn at the sun pass |
 | `held_camera.*` | A debug case's camera, which photo mode's camera update takes |
@@ -23,17 +24,18 @@ the running game and what an agent needs to know to use them.
 
 The core calls in through `dev.hpp`, and through the few small headers its passes need. Each call stands behind
 `if constexpr (DevTools)` (`dev_tools.hpp`), which leaves a release build nothing to link, so the headers compile in
-every build and the sources in a dev build alone. A new tool goes in this folder, with its sources in `dev.cmake`.
+every build and the sources in a dev build alone. A new tool goes in this folder, with its sources in `dev.cmake`, or in
+`../devkit/` when another add-on can use it.
 
 Searching for `PHANTOM_FX_DEV_TOOLS` and `DevTools` finds every line the core keeps for the tools.
 
 ## Detaching it
 
-Delete this folder, `tools/automation/` and `.agents/skills/mgsv-automation/`, then remove:
+Delete this folder, `src/devkit/`, `tools/automation/` and `.agents/skills/mgsv-automation/`, then remove:
 
 | File | Lines |
 | --- | --- |
-| `CMakeLists.txt` | The `include(src/dev/dev.cmake)` and `include(src/dev/tests.cmake)` blocks and `${PHANTOM_FX_DEV_SOURCES}` |
+| `CMakeLists.txt` | The `include(src/dev/dev.cmake)` and `include(src/dev/tests.cmake)` blocks, `include(src/devkit/devkit.cmake)`, `target_link_libraries(phantom_fx PRIVATE devkit)` and `${PHANTOM_FX_DEV_SOURCES}` |
 | `src/addon.cpp` | The three `dev::` calls, the include, the Enter `photo_mode::teleport()` call, and the name of `onPresent`'s `swapChain` parameter |
 | `src/game_loop.cpp` | `dev::onFrameStart()` and the include |
 | `src/menu.cpp` | `dev::drawPage()` and the include |
