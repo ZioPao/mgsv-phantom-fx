@@ -16,7 +16,7 @@ Copy `build/dev/DevKit.addon64` beside `mgsvtpp.exe` with ReShade 6.8. The add-o
 `DevKit/` beside itself:
 
 - `DevKit.log` — its log, including the reasons a tool did not run.
-- `PhantomFX-automation/` — the automation (`src/devkit/automation.*`, its lines are listed in the header):
+- `DevKit/` — the automation (`src/devkit/automation.*`, its lines are listed in the header):
   `<name>.cmd` files, one line at a time, and F9's debug cases. The name is the one the
   `tools/automation` scripts know. When it holds `saves/` and `local/`, the game's Steam Cloud and user
   data folder are redirected there (the automation copy), or the game quits at once.
@@ -25,11 +25,11 @@ The page is ReShade's overlay entry **DevKit**.
 
 ## With PhantomFX
 
-DevKit owns the automation; PhantomFX owns nothing of it but the parts that run inside its passes.
-When `PhantomFX.addon64` is loaded, DevKit registers its frame work on PhantomFX's main-loop hook
-through the `PhantomFXRegisterFrameStart` export, so both add-ons run together with one hook, and
-reaches the held camera, the records, the costs, the probes, the scene and the settings through the
-`PhantomFXGetDevApi` export (`src/devkit/phantom_api.hpp`, answered by `src/dev/dev_api.cpp`). Without
-PhantomFX, DevKit hooks the loop itself, and the lines that stand on the game alone (`lua`, `travel`,
-`cutscene`, `state`, `peek`) still run; the others say PhantomFX is not loaded. PhantomFX's own
-Developer page keeps the remaster panel and the cost recorder (`src/dev/`).
+DevKit knows no add-on. Another add-on, PhantomFX among them, plugs its own command lines, state and F9
+into it through the `DevKitGetApi` export (`src/devkit/extension.hpp`); PhantomFX's are in
+`src/dev/devkit_link.cpp`. `help` in a command file lists the lines there are.
+When `PhantomFX.addon64` is loaded, DevKit also registers its frame work on PhantomFX's main-loop hook
+through the `PhantomFXRegisterFrameStart` export, so both add-ons run together with one hook; otherwise
+DevKit hooks the loop itself. The lines that stand on the game alone (`lua`, `travel`, `cutscene`, `state`,
+`status`, `peek`) run either way. PhantomFX's own Developer page keeps the remaster panel and the cost
+recorder (`src/dev/`).

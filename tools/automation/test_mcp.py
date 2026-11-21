@@ -21,7 +21,7 @@ class FakeGame:
 
     def __init__(self, root):
         self.root = Path(root)
-        self.link = self.root / "PhantomFX-automation"
+        self.link = self.root / "DevKit"
         self.link.mkdir(parents=True)
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.serve, daemon=True)

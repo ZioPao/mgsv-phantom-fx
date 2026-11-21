@@ -3,7 +3,6 @@
 #include "clock.hpp"
 #include "core.hpp"
 #include "devkit/commands.hpp"
-#include "devkit/commands.hpp"
 #include "devkit/game_lua.hpp"
 #include "dev/held_camera.hpp"
 #include "log.hpp"

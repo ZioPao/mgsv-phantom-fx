@@ -193,7 +193,7 @@ def send(lines: list[str], timeout: float) -> CallToolResult:
         text = fx.run(lines, timeout=timeout)
     except TimeoutError:
         return fail("NO_DEV_BUILD", f"No result in {timeout:.0f} s from {fx.game_folder}.",
-            "Start a dev build there, or read PhantomFX-automation/launch.log, then session status.")
+            "Start a dev build there, or read DevKit/launch.log, then session status.")
     except (OSError, PermissionError) as error:
         return fail("NO_DEV_BUILD", f"Could not reach {fx.game_folder}: {error}",
             "Start a dev build there, then session status.")
@@ -477,7 +477,7 @@ def capture_path(name: str | None) -> Path:
     link = fx.link()
     rel = Path(name) if name else Path("captures") / (time.strftime("%Y-%m-%d_%H-%M-%S") + f"-{time.time_ns() % 1000:03d}")
     if rel.is_absolute() or ".." in rel.parts:
-        raise ValueError("the name must be under PhantomFX-automation")
+        raise ValueError("the name must be under DevKit")
     path = link / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
@@ -487,7 +487,7 @@ def capture_path(name: str | None) -> Path:
 def capture(kind: Literal["image", "inspect", "perf"], name: str | None = None, frames: int = 120,
             target: Literal["player", "copy"] | None = None) -> CallToolResult:
     """Captures the frozen frame: image (a picture back), inspect (a per-pixel record) or perf (what frames cost).
-    Paths are under PhantomFX-automation; the picture is returned as an image, the others as files."""
+    Paths are under DevKit; the picture is returned as an image, the others as files."""
     note_activity()
     with LOCK:
         try:

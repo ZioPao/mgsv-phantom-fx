@@ -2,6 +2,7 @@
 
 #include "core.hpp"
 #include "device_check.hpp"
+#include "dev/devkit_link.hpp"
 #include "dev/perf_record.hpp"
 #include "dev/remaster/tool.hpp"
 #include "devkit/cutscenes.hpp"
@@ -53,7 +54,7 @@ void drawCostRecording()
 
     bool isOn = perf_record::isRecording();
     if (fxui::checkbox("Record the costs", isOn,
-            "Writes every pass, the rays, the lights, the map and the clock to PhantomFX-automation/perf once a second, until turned off, across starts. "
+            "Writes every pass, the rays, the lights, the map and the clock to DevKit/perf once a second, until turned off, across starts. "
             "tools/automation/perf.py log reads it. Debug cases keep their own costs either way."))
         perf_record::setRecording(isOn);
 }
@@ -65,7 +66,8 @@ void install(const std::filesystem::path& addonDirectory) noexcept
     devkit::setName("PhantomFX");
     devkit::setToast([](devkit::Tone tone, std::string_view text, std::string_view detail) { fxui::toast(toneOf(tone), text, detail); });
     devkit::setLogger(&log);
-    perf_record::install(addonDirectory / "PhantomFX-automation" / "perf");
+    perf_record::install(addonDirectory / "DevKit" / "perf");
+    devkit_link::install();
 }
 
 /** The game thread, at the main loop's frame start: each tool that runs there, in order. */
@@ -74,6 +76,7 @@ void onFrameStart() noexcept
     devkit::travel::onFrameStart();
     devkit::cutscenes::onFrameStart();
     devkit::game_lua::onFrameStart();
+    devkit_link::onFrameStart();
     perf_record::onFrameStart();
     photo_mode::onFrameStart();
 }

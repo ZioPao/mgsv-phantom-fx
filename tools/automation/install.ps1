@@ -53,15 +53,15 @@ if (Test-Path $Runtime) {
 }
 # Ray Reconstruction's library, which the player's folder has and a build does not.
 Copy-Item (Join-Path $Steam 'nvngx_dlssd.dll') $Game -Force
-$saves = Join-Path $Game 'PhantomFX-automation\saves'
+$saves = Join-Path $Game 'DevKit\saves'
 if (Test-Path $saves) { Remove-Item $saves -Recurse -Force }
 New-Item -ItemType Directory -Force $saves | Out-Null
 Copy-Item (Join-Path $SeedSaves '*') $saves
 # The copy drops the game's startup logos, which cost eighteen seconds of every run (automation.cpp).
-New-Item -ItemType File -Force (Join-Path $Game 'PhantomFX-automation\skip-logos') | Out-Null
+New-Item -ItemType File -Force (Join-Path $Game 'DevKit\skip-logos') | Out-Null
 
 # The game's user data folder for the run: its own display settings, windowed at 1920x1080.
-$userData = Join-Path $Game 'PhantomFX-automation\local'
+$userData = Join-Path $Game 'DevKit\local'
 New-Item -ItemType Directory -Force $userData | Out-Null
 $config = Get-ChildItem (Join-Path $Steam '..\..\..\userdata\*\287700\local\TPP_GRAPHICS_CONFIG') | Select-Object -First 1
 if (-not $config) { throw "No TPP_GRAPHICS_CONFIG in Steam's userdata: run the game once from Steam first." }

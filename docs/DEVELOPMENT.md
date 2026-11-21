@@ -255,8 +255,9 @@ what draws it, when that is the feature's own.
 | `src/remaster/` | The remastering rules: they change the game's materials as they are made, saved in `materials.json` and built into the add-on (see its `README.md`, and "Materials") |
 | `src/dev/remaster/` | The remastering tool that writes them: a dev build's marks, and the panel that tunes them |
 | `src/frame_log.cpp`, `src/frame_log.hpp` | Development diagnostics, off by default: shader log, F10 frame record, constant and texture dumps |
-| `src/devkit/automation.cpp`, `src/devkit/automation.hpp` | DevKit: the automation, the command language, F9's debug cases and the waits, over `src/devkit/commands.*` (see "Debug cases") |
-| `src/dev/dev_api.cpp`, `src/devkit/phantom_api.hpp` | PhantomFX's side of the automation: the held camera, records, costs, probes, scene and settings it answers DevKit with |
+| `src/devkit/automation.cpp`, `src/devkit/automation.hpp` | DevKit: the runner over `src/devkit/commands.*`, the lines that stand on the game alone, the waits and F9, and the registry add-ons plug into (see "Debug cases") |
+| `src/devkit/extension.hpp` | DevKit's C API for another add-on: its lines, state, status, F9, waits and render-thread jobs |
+| `src/dev/devkit_link.cpp` | PhantomFX's lines in DevKit's command files: the held camera, records, costs, probes, scene, settings, sky and the debug case |
 | `src/dev/inspect_trace.cpp`, `src/dev/inspect_trace.hpp`, `src/dev/inspect.hlsl`, `src/dev/inspect_shared.h` | A debug case's record of every pixel, a trace of its own |
 | `src/dev/game_shadow.cpp`, `src/dev/game_shadow.hpp` | A debug case's reference: the game's shadow per pixel, drawn at the sun pass |
 | `src/dev/held_camera.cpp`, `src/dev/held_camera.hpp` | A debug case's camera, which photo mode's camera update takes |
@@ -441,7 +442,7 @@ installs, launches, presses the startup notices away and stops in free roam as o
 is a job too, and a case comes back with its pictures. It closes a copy it started after ten minutes with no tool
 call, and when the server exits.
 
-- **What a case holds** (`PhantomFX-automation/cases/<time>/`): the frame as traced and as the game draws it, from
+- **What a case holds** (`DevKit/cases/<time>/`): the frame as traced and as the game draws it, from
   the same frozen camera and world (`traced.dds`, `vanilla.dds`); the ray tracing's textures (depth, normals,
   albedo, the light, the sun's and lamps' shadows, reflections, the lamps' light); what the game's shadow map
   alone says of each pixel (`game-shadow.dds`, 1 lit, 0 blocked, -1 no answer: `SHADOW_MAP` with `GAME_SHADOW` in
@@ -472,7 +473,7 @@ working before it is written. `fx.py case` records a case without the key.
 `fx.py --copy acc` goes on into the helicopter's cabin (`TppMission.ReserveMissionClear` for mission 40050). The title
 screen shows the same cabin but moves on by itself: a freeze there lands in a loading screen, which stalls under the pause
 and renders nothing. It reads
-and writes its own saves (`PhantomFX-automation/saves`, `src/devkit/save_redirect.hpp`), and `launch.ps1` checks the player's
+and writes its own saves (`DevKit/saves`, `src/devkit/save_redirect.hpp`), and `launch.ps1` checks the player's
 files are unchanged afterwards. Never run it beside the player's game: `launch.ps1` would put back saves the
 player's game wrote meanwhile.
 
@@ -539,7 +540,7 @@ file ("Costs on file"); otherwise no query is made.
 ### Costs on file
 
 So a play session needs no one watching it. With **Record the costs** on the Developer page ticked, a dev build keeps the
-costs running and writes what each second cost to `PhantomFX-automation/perf/<time>.jsonl` (`src/dev/perf_record.cpp`): the
+costs running and writes what each second cost to `DevKit/perf/<time>.jsonl` (`src/dev/perf_record.cpp`): the
 frames' times with their spread, the GPU frame, each pass, each traced phase, the lights, the scene as the second's last
 kick had it with what the second built, and the rays' counters, with the map, the game's clock, the camera and whether the
 game is frozen. A line with the settings in force, as PhantomFX.ini's lines, comes first and whenever they change. It is

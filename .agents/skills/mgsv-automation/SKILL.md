@@ -32,7 +32,7 @@ uv run -q --with numpy --with pillow --with scipy python case.py [--copy] [<case
 uv run -q --with numpy --with pillow python perf.py [--copy] <command>
 ```
 
-Cases are in `PhantomFX-automation/cases` beside each game:
+Cases are in `DevKit/cases` beside each game:
 
 - Player: `C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP`, or `PHANTOM_FX_GAME`
 - Copy: `%USERPROFILE%\Documents\Development\mgsv-automation\game`, or `PHANTOM_FX_AUTOMATION_GAME`
@@ -74,7 +74,7 @@ To drive the copy by hand: run `install.ps1` (`-Settings @()` for the player's e
 
 ## Costs
 
-With **Record the costs** on the Developer page ticked, or after `fx.py run "record_costs 1"`, a dev build writes what each second cost to `PhantomFX-automation/perf/`. The user plays, you read `perf.py log`. It stays as set across starts. A case always takes `perf.json` on its frozen frame. Judge a change by `perf.py ab` on a frozen frame, and never by a difference smaller than the drift it reports.
+With **Record the costs** on the Developer page ticked, or after `fx.py run "record_costs 1"`, a dev build writes what each second cost to `DevKit/perf/`. The user plays, you read `perf.py log`. It stays as set across starts. A case always takes `perf.json` on its frozen frame. Judge a change by `perf.py ab` on a frozen frame, and never by a difference smaller than the drift it reports.
 
 ## Reading a report
 
@@ -117,7 +117,7 @@ Everything here is left out of a release build altogether, because hooking syste
 |---|---|
 | "no record came" | Nothing rendered: a freeze during loading stalls the game, or the scene is off |
 | "no capture came" | The GPU's frames were not timed: nothing rendered, as above |
-| `fx.py` times out | No dev build running there, or the copy failed to start: read `PhantomFX-automation/launch.log` |
+| `fx.py` times out | No dev build running there, or the copy failed to start: read `DevKit/launch.log` |
 | Report says "No record of the frame" | The case's `log.txt` has the error |
 | Title screen shows the cabin but a case fails | The title moves on by itself into a load. Use `fx.py --copy acc` |
 | A scenario says "did not reach the view" with the eye at 0 m | Compare `before-after.png`, then the numbers, before trusting it |

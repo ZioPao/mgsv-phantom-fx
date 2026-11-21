@@ -63,11 +63,12 @@ agent (any MCP client)          human (shell)
 The game stays the only C++ part. The bridge is one Python package; the CLI and the MCP server are two front ends to
 it, so there is one implementation of parsing, paths and safety.
 
-The automation is DevKit's: `DevKit.addon64` owns the command language, the runner, F9 and the cases, the waits, the saves
-redirection and `PhantomFX-automation`'s folder (`src/devkit/automation.*`). PhantomFX keeps only what runs inside its passes, the
-held camera, the records, the costs, the probes, the scene and the settings, and answers DevKit through one exported
-C API (`src/devkit/phantom_api.hpp`, `src/dev/dev_api.cpp`). Without PhantomFX the lines that stand on the game
-alone (`lua`, `travel`, `cutscene`, `state`, `peek`) still run.
+The runner is DevKit's, and it is not PhantomFX's: `DevKit.addon64` owns the command files, the waits, F9, the saves
+redirection and the `DevKit` folder (`src/devkit/automation.*`), with the lines that stand on the game alone (`lua`,
+`travel`, `cutscene`, `state`, `status`, `peek`, `help`). Any add-on plugs its own lines, state and F9 into it through
+`DevKitGetApi` (`src/devkit/extension.hpp`). PhantomFX is one: `src/dev/devkit_link.cpp` registers the camera, the
+records, the costs, the probes, the scene, the settings and the sky, and the debug case. DevKit includes nothing of
+PhantomFX; without PhantomFX those lines say they are unknown, and `help` lists what is there.
 
 ### Tools, v1
 
@@ -117,7 +118,7 @@ Not now: a named pipe, a binary protocol, or a scripting language in the game. `
 - The bridge stops only a process whose path is under the automation folder.
 - A copy the bridge started is closed when the task calls `session stop`, after ten minutes with no tool call, and
   when the server exits. `PHANTOM_FX_AUTO_CLOSE_SECONDS` changes the idle time; 0 turns it off.
-- Outputs go under `PhantomFX-automation` or `mgsv-automation`; the bridge rejects paths outside them, so game images
+- Outputs go under `DevKit` or `mgsv-automation`; the bridge rejects paths outside them, so game images
   cannot reach the repository.
 
 ## The skill after the rebuild

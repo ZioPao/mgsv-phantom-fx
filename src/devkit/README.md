@@ -57,6 +57,20 @@ like ReShade's other windows.
    It uses ReShade's ImGui function table (`imgui.h` and `reshade_overlay.hpp`) and no `fxui`, so it looks like
    ReShade's other windows. The host can also call `draw()` inside its own settings window.
 
+6. Or skip steps 3 and 4: run `DevKit.addon64` beside the add-on and plug the add-on's own lines in
+   (`devkit/extension.hpp`, nothing to link). Find `DevKitGetApi` in the module, then:
+
+   ```cpp
+   const auto* kit = getApi();   // null until DevKit has loaded: try again at the first frames
+   kit->addCommand("hello", [](DevKitScript* script, const char* arguments, void*) { kit->say(script, "hi\n"); }, nullptr);
+   kit->addState(&myState, nullptr);   // text for `state` and `status`
+   kit->setKey(&myF9, nullptr);        // F9: usually kit->start("line\nline")
+   ```
+
+   A line can `say` its output, `queue` more lines to run next, `waitUntil` a function says it is done, or hand the
+   render thread a `presentJob`. Plain C types and caller buffers only: each add-on has its own CRT.
+   `src/dev/devkit_link.cpp` is PhantomFX doing it.
+
 PhantomFX keeps its own page (`src/dev/dev.cpp`, drawn with `fxui`) for its probes and costs; the DevKit add-on
 draws `devkit::page::draw()` instead, and so does another add-on that links the devkit. What stays PhantomFX's:
 that page, the debug cases, and the probes into its passes (inspect, perf record, game shadow, held camera,

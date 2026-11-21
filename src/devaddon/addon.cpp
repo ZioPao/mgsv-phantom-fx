@@ -5,6 +5,7 @@
 
 #include "devkit/automation.hpp"
 #include "devkit/cutscenes.hpp"
+#include "devkit/extension.hpp"
 #include "devkit/game.hpp"
 #include "devkit/game_lua.hpp"
 #include "devkit/host.hpp"
@@ -33,7 +34,7 @@
 
 extern "C" __declspec(dllexport) const char* NAME = "DevKit";
 extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "Developer tools for MGSV add-ons: travel, cutscenes, Lua, command files and saves redirection, with no PhantomFX inside.";
+    "Developer tools for MGSV add-ons: travel, cutscenes, Lua, command files, saves redirection and an extension API, with no other add-on inside.";
 
 namespace
 {
@@ -92,7 +93,7 @@ void onPresent(command_queue* queue, swapchain* swapChain, const rect*, const re
     devkit::automation::onPresent(native(list), reinterpret_cast<ID3D11Resource*>(swapChain->get_current_back_buffer().handle));
 }
 
-// Every frame, with the overlay open or closed: F9 records a debug case, or lets the game go after one.
+// Every frame, with the overlay open or closed: F9 is for the add-on that takes it (a debug case, say).
 void onReshadePresent(effect_runtime* runtime)
 {
     if (runtime->is_key_pressed(VK_F9)) devkit::automation::caseKey();
@@ -139,6 +140,12 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     reshade::register_overlay("DevKit", onOverlay);
 
     return true;
+}
+
+// What another add-on plugs its own command lines, state and F9 into (devkit/extension.hpp).
+extern "C" __declspec(dllexport) const DevKitApi* DevKitGetApi()
+{
+    return devkit::automation::extensionApi();
 }
 
 extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshadeModule)
