@@ -73,6 +73,7 @@ return sequence .. (dropped > 0 and (" dropped " .. dropped) or "")
 )";
 
 std::atomic<bool> caseAsked{};
+bool hosted{};
 bool probeTurnedOnView{};
 
 // The waits a line leaves: the lines after it run once these are done.
@@ -607,6 +608,8 @@ void onCaseKey()
 
 void install(const std::filesystem::path& addonDirectory) noexcept
 {
+    if (!devkit::commands::folder().empty()) return;
+
     std::error_code error;
     const auto candidate = addonDirectory / "PhantomFX-automation";
 
@@ -624,6 +627,16 @@ void install(const std::filesystem::path& addonDirectory) noexcept
 
     devkit::commands::install(candidate, run, isWaiting, resetWaits);
     log("Automation reads command files from " + candidate.string() + ".");
+}
+
+void setHosted(bool value) noexcept
+{
+    hosted = value;
+}
+
+bool isHosted() noexcept
+{
+    return hosted;
 }
 
 void caseKey() noexcept
@@ -662,4 +675,21 @@ void onPresent(ID3D11DeviceContext* context, ID3D11Resource* backBuffer) noexcep
 {
     devkit::commands::onPresent(context, backBuffer);
 }
+}
+
+// The DevKit add-on hosts this automation when both are loaded: it calls these through GetProcAddress.
+extern "C" __declspec(dllexport) void PhantomFXAutomationInstall(const wchar_t* addonDirectory)
+{
+    phantom_fx::automation::install(std::filesystem::path(addonDirectory));
+    phantom_fx::automation::setHosted(true);
+}
+
+extern "C" __declspec(dllexport) void PhantomFXAutomationFrameStart()
+{
+    phantom_fx::automation::onFrameStart();
+}
+
+extern "C" __declspec(dllexport) void PhantomFXAutomationPresent(void* context, void* backBuffer)
+{
+    phantom_fx::automation::onPresent(reinterpret_cast<ID3D11DeviceContext*>(context), reinterpret_cast<ID3D11Resource*>(backBuffer));
 }
