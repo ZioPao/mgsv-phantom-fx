@@ -13,7 +13,7 @@ from pathlib import Path
 TEXTS = ["DevKit.addon64", "Costs on file", "SteamRemoteStorage", "InspectPixels", "GAME_SHADOW", "g_ShadowMapAlone", "sun-light-game-shadow", "left out:", "dropped by the mesh rules",
     "Debug case", "PhantomFX-marks", "Hold for original", "reveal_now", "case_done", "command files", "TppPlayer", "TppMission", "ReserveMissionClear", "Automation", "=automation", "probe_text",
     "The game's saves are read from and written to"]
-WIDE_TEXTS = ["steam_api64.dll"]
+WIDE_TEXTS = ["steam_api64.dll", "DevKit.addon64"]
 
 
 def main():
