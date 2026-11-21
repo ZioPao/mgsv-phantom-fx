@@ -7,7 +7,7 @@ description: Debug and verify Phantom FX lighting in the running game with the a
 
 The user steers to a broken spot once and presses **F9**. Everything after that is yours: read what the game recorded, ask it questions while it is frozen, try fixes on the same frame, and verify them yourself. Do not ask the user for screenshots, probe readings or numbers; get them from the game.
 
-The tools exist in **dev builds only** (`build/dev`). Reference: `docs/DEVELOPMENT.md`, "Debug cases". Every command line the game takes: `src/dev/automation.hpp`.
+The tools exist in **dev builds only** (`build/dev`). Reference: `docs/DEVELOPMENT.md`, "Debug cases". Every command line the game takes: `src/devkit/automation.hpp`.
 
 **Prefer the MCP tools** when the client has `phantom-fx-automation` (`session`, `run`, `case`, `capture`, `verify`, `setting`, `job`): a case comes back with its pictures and long work is a job. The commands below are the same surface for clients without it, and the rules and reading advice below apply to both.
 
@@ -57,7 +57,7 @@ Cases are in `PhantomFX-automation/cases` beside each game:
 | `fx.py [--copy] status` | Frame, camera, frozen or running, what the scene holds |
 | `fx.py [--copy] probe <x> <y> [...]` | Shadow and lamp probes at render pixels. Needs ray-traced shadows or path tracing running |
 | `fx.py [--copy] case [<name>]` | Records a case as F9 does, then reports it |
-| `fx.py [--copy] run "<line>" ...` | Any lines of `src/dev/automation.hpp`, as one command file |
+| `fx.py [--copy] run "<line>" ...` | Any lines of `src/devkit/automation.hpp`, as one command file |
 | `fx.py replay [<case>]` | Fresh copy, back at the spot, recorded and compared. Latest case of either game by default |
 | `fx.py scenario <name> "<why>" [<case>]` | Keeps a case as a scenario, its numbers as what to expect |
 | `fx.py scenarios [--accept] [<name> ...]` | Runs them, with the player's settings |

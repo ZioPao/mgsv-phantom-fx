@@ -16,17 +16,20 @@ Copy `build/dev/DevKit.addon64` beside `mgsvtpp.exe` with ReShade 6.8. The add-o
 `DevKit/` beside itself:
 
 - `DevKit.log` — its log, including the reasons a tool did not run.
-- `DevKit/commands/` — `<name>.cmd` files, one line at a time: `lua <code>`, `state`, `travel
-  Afghanistan|Africa|MotherBase`, `cutscene <index>`, and the runner's `wait <frames>`.
-- `DevKit/saves/`, `DevKit/local/` — when `saves/` exists, the game's Steam Cloud and user data
-  folder are redirected there, as PhantomFX's automation copy does. Have only one of the two
-  redirects in place: each installs its own Steam hooks.
+- `PhantomFX-automation/` — the automation (`src/devkit/automation.*`, its lines are listed in the header):
+  `<name>.cmd` files, one line at a time, and F9's debug cases. The name is the one the
+  `tools/automation` scripts know. When it holds `saves/` and `local/`, the game's Steam Cloud and user
+  data folder are redirected there (the automation copy), or the game quits at once.
 
 The page is ReShade's overlay entry **DevKit**.
 
 ## With PhantomFX
 
+DevKit owns the automation; PhantomFX owns nothing of it but the parts that run inside its passes.
 When `PhantomFX.addon64` is loaded, DevKit registers its frame work on PhantomFX's main-loop hook
-through the `PhantomFXRegisterFrameStart` export, so both add-ons run together with one hook. Without
-PhantomFX, DevKit hooks the loop itself. PhantomFX keeps its own probes, cases and remaster panel
-(`src/dev/`); DevKit has none of them.
+through the `PhantomFXRegisterFrameStart` export, so both add-ons run together with one hook, and
+reaches the held camera, the records, the costs, the probes, the scene and the settings through the
+`PhantomFXGetDevApi` export (`src/devkit/phantom_api.hpp`, answered by `src/dev/dev_api.cpp`). Without
+PhantomFX, DevKit hooks the loop itself, and the lines that stand on the game alone (`lua`, `travel`,
+`cutscene`, `state`, `peek`) still run; the others say PhantomFX is not loaded. PhantomFX's own
+Developer page keeps the remaster panel and the cost recorder (`src/dev/`).

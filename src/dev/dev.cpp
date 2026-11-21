@@ -1,7 +1,6 @@
 #include "dev/dev.hpp"
 
 #include "core.hpp"
-#include "dev/automation.hpp"
 #include "device_check.hpp"
 #include "dev/perf_record.hpp"
 #include "dev/remaster/tool.hpp"
@@ -66,7 +65,6 @@ void install(const std::filesystem::path& addonDirectory) noexcept
     devkit::setName("PhantomFX");
     devkit::setToast([](devkit::Tone tone, std::string_view text, std::string_view detail) { fxui::toast(toneOf(tone), text, detail); });
     devkit::setLogger(&log);
-    automation::install(addonDirectory);
     perf_record::install(addonDirectory / "PhantomFX-automation" / "perf");
 }
 
@@ -76,19 +74,8 @@ void onFrameStart() noexcept
     devkit::travel::onFrameStart();
     devkit::cutscenes::onFrameStart();
     devkit::game_lua::onFrameStart();
-    automation::onFrameStart();
     perf_record::onFrameStart();
     photo_mode::onFrameStart();
-}
-
-void onPresent(ID3D11DeviceContext* context, ID3D11Resource* backBuffer) noexcept
-{
-    automation::onPresent(context, backBuffer);
-}
-
-void onCaseKey() noexcept
-{
-    automation::caseKey();
 }
 
 void drawPage()

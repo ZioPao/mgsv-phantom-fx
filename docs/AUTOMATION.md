@@ -11,7 +11,7 @@ An MCP fixes how a model reaches the tools: typed arguments and descriptions the
 results and errors, one place for session state and safety, resources for reports and pictures, and jobs for work
 longer than a tool call. That is most of why weaker models fail today.
 
-An MCP does not fix what the tools can do. One MCP tool per line of `src/dev/automation.hpp` would make the surface
+An MCP does not fix what the tools can do. One MCP tool per line of `src/devkit/automation.hpp` would make the surface
 larger and the descriptions thinner: 28 tools to choose between, with the same narrow verbs underneath. The rebuild
 is the tool surface, not the protocol.
 
@@ -22,7 +22,7 @@ underneath until it measurably hurts. About 7 working days in four phases, each 
 
 | Layer | What it is | Files |
 | --- | --- | --- |
-| Game | 28 line verbs mapped almost one to one onto internal functions; writes one text result per command file | `src/dev/automation.*` |
+| Game | 28 line verbs mapped almost one to one onto internal functions; writes one text result per command file | `src/devkit/automation.*` |
 | Bridge | Four CLIs that write files, poll every 50 ms, and parse text and DDS | `fx.py`, `case.py`, `perf.py`, `scout.py` |
 | Agent | A 120-line skill holding commands, paths, safety rules and how to read reports | `.agents/skills/mgsv-automation/` |
 
@@ -63,10 +63,11 @@ agent (any MCP client)          human (shell)
 The game stays the only C++ part. The bridge is one Python package; the CLI and the MCP server are two front ends to
 it, so there is one implementation of parsing, paths and safety.
 
-The dev tools are split: `DevKit.addon64` carries the generic commands, Lua, travel, cutscenes and save redirection;
-PhantomFX's dev add-on carries the cases, probes, performance captures, inspect and remaster that read its passes.
-The MCP still speaks to PhantomFX's `src/dev/automation.*` for the automation surface; moving that behind a DevKit
-API is the open piece.
+The automation is DevKit's: `DevKit.addon64` owns the command language, the runner, F9 and the cases, the waits, the saves
+redirection and `PhantomFX-automation`'s folder (`src/devkit/automation.*`). PhantomFX keeps only what runs inside its passes, the
+held camera, the records, the costs, the probes, the scene and the settings, and answers DevKit through one exported
+C API (`src/devkit/phantom_api.hpp`, `src/dev/dev_api.cpp`). Without PhantomFX the lines that stand on the game
+alone (`lua`, `travel`, `cutscene`, `state`, `peek`) still run.
 
 ### Tools, v1
 

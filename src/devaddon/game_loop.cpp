@@ -1,6 +1,6 @@
 #include "devaddon/game_loop.hpp"
 
-#include "devkit/commands.hpp"
+#include "devkit/automation.hpp"
 #include "devkit/cutscenes.hpp"
 #include "devkit/game.hpp"
 #include "devkit/game_lua.hpp"
@@ -34,7 +34,7 @@ void devkitFrameStart()
     devkit::travel::onFrameStart();
     devkit::cutscenes::onFrameStart();
     devkit::game_lua::onFrameStart();
-    devkit::commands::onFrameStart();
+    devkit::automation::onFrameStart();
 }
 
 void frameStart(std::uint8_t* loop, void* argument)

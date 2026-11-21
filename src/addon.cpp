@@ -560,12 +560,9 @@ void onDestroyCommandList(command_list* list)
 }
 
 // With frame generation the game's swap chain is the presenter's stand-in, whose Present follows.
-void onPresent(command_queue* queue, swapchain* swapChain, const rect*, const rect*, uint32_t, const rect*)
+void onPresent(command_queue* queue, swapchain*, const rect*, const rect*, uint32_t, const rect*)
 {
     if (queue->get_immediate_command_list() != immediateList) return;
-
-    if constexpr (DevTools)
-        dev::onPresent(native(queue->get_immediate_command_list()), reinterpret_cast<ID3D11Resource*>(swapChain->get_current_back_buffer().handle));
 
     const bool generating = presenter::active();
     upscaler::setFrameGeneration(generating);
@@ -614,7 +611,6 @@ void onReshadePresent(effect_runtime* runtime)
     if (runtime->is_key_pressed(VK_F4)) photo_mode::toggleBlur();
     if constexpr (DevTools)
     {
-        if (runtime->is_key_pressed(VK_F9)) dev::onCaseKey();
         // Enter teleports the player to the free camera (photo_mode.cpp); the overlay's own Enter is left alone.
         if (!overlayOpen && runtime->is_key_pressed(VK_RETURN)) photo_mode::teleport();
     }

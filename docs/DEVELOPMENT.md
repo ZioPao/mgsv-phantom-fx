@@ -255,7 +255,8 @@ what draws it, when that is the feature's own.
 | `src/remaster/` | The remastering rules: they change the game's materials as they are made, saved in `materials.json` and built into the add-on (see its `README.md`, and "Materials") |
 | `src/dev/remaster/` | The remastering tool that writes them: a dev build's marks, and the panel that tunes them |
 | `src/frame_log.cpp`, `src/frame_log.hpp` | Development diagnostics, off by default: shader log, F10 frame record, constant and texture dumps |
-| `src/dev/automation.cpp`, `src/dev/automation.hpp` | Dev builds: the add-on's own commands from files and F9's debug cases; the files and waits are `src/devkit/commands.*` (see "Debug cases") |
+| `src/devkit/automation.cpp`, `src/devkit/automation.hpp` | DevKit: the automation, the command language, F9's debug cases and the waits, over `src/devkit/commands.*` (see "Debug cases") |
+| `src/dev/dev_api.cpp`, `src/devkit/phantom_api.hpp` | PhantomFX's side of the automation: the held camera, records, costs, probes, scene and settings it answers DevKit with |
 | `src/dev/inspect_trace.cpp`, `src/dev/inspect_trace.hpp`, `src/dev/inspect.hlsl`, `src/dev/inspect_shared.h` | A debug case's record of every pixel, a trace of its own |
 | `src/dev/game_shadow.cpp`, `src/dev/game_shadow.hpp` | A debug case's reference: the game's shadow per pixel, drawn at the sun pass |
 | `src/dev/held_camera.cpp`, `src/dev/held_camera.hpp` | A debug case's camera, which photo mode's camera update takes |
@@ -461,7 +462,7 @@ call, and when the server exits.
   with a pixel to probe and, from the revealed scene, what is there and why it was left out. Run it with
   `uv run --with numpy --with pillow --with scipy python tools/automation/case.py`.
 
-The running game takes commands from files (`src/dev/automation.hpp` lists them, `tools/automation/fx.py` sends them):
+The running game takes commands from files (`src/devkit/automation.hpp` lists them, `tools/automation/fx.py` sends them):
 the probes at any pixel (`probe <x> <y>`), the camera anywhere while frozen, settings and debug views, the Lua
 console, and `reveal <hash>`, which tries the scene with a model in it: a fix for a left-out model can be seen
 working before it is written. `fx.py case` records a case without the key.

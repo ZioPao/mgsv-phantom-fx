@@ -3,7 +3,7 @@
 // style, and hooks the main loop for travel, cutscenes, the Lua console and command files.
 #include "devaddon/game_loop.hpp"
 
-#include "devkit/commands.hpp"
+#include "devkit/automation.hpp"
 #include "devkit/cutscenes.hpp"
 #include "devkit/game.hpp"
 #include "devkit/game_lua.hpp"
@@ -76,72 +76,6 @@ void toast(devkit::Tone tone, std::string_view text, std::string_view detail)
     writeLog(line);
 }
 
-void append(devkit::commands::Script& script, const std::optional<devkit::game_lua::Outcome>& outcome)
-{
-    if (!outcome)
-    {
-        script.output += "error: the game's Lua is not available\n";
-        return;
-    }
-    if (!outcome->ran)
-    {
-        script.output += "error: " + outcome->text + "\n";
-        return;
-    }
-    if (!outcome->text.empty()) script.output += outcome->text + "\n";
-}
-
-// The command files' own lines: `lua`, `state`, `travel` and `cutscene`; `wait` is the runner's.
-void runLine(devkit::commands::Script& script, const std::string& line)
-{
-    if (line == "state")
-    {
-        append(script, devkit::game_lua::run(devkit::game_lua::StateScript, "DevKit state", false));
-        return;
-    }
-    if (line.starts_with("lua "))
-    {
-        append(script, devkit::game_lua::run(line.substr(4), "DevKit command", true));
-        return;
-    }
-    if (line.starts_with("travel "))
-    {
-        const auto wanted = line.substr(7);
-        for (int i = 0; i < static_cast<int>(devkit::travel::Map::Count); ++i)
-        {
-            const auto map = static_cast<devkit::travel::Map>(i);
-            if (_stricmp(wanted.c_str(), devkit::travel::name(map)) != 0) continue;
-            devkit::travel::go(map);
-            script.output += "travel requested\n";
-            return;
-        }
-        script.output += "error: travel Afghanistan|Africa|MotherBase\n";
-        return;
-    }
-    if (line.starts_with("cutscene "))
-    {
-        std::istringstream indexText(line.substr(9));
-        std::size_t index{};
-        if (indexText >> index && index < devkit::cutscenes::labels().size())
-        {
-            devkit::cutscenes::play(index);
-            script.output += "cutscene requested\n";
-        }
-        else
-        {
-            script.output += "error: cutscene <index>\n";
-        }
-        return;
-    }
-
-    script.output += "error: unknown command\n";
-}
-
-bool isWaiting(devkit::commands::Script&) noexcept
-{
-    return false;
-}
-
 ID3D11DeviceContext* native(command_list* list)
 {
     return reinterpret_cast<ID3D11DeviceContext*>(list->get_native());
@@ -155,7 +89,13 @@ void onPresent(command_queue* queue, swapchain* swapChain, const rect*, const re
     auto* list = queue->get_immediate_command_list();
     if (!list) return;
 
-    devkit::commands::onPresent(native(list), reinterpret_cast<ID3D11Resource*>(swapChain->get_current_back_buffer().handle));
+    devkit::automation::onPresent(native(list), reinterpret_cast<ID3D11Resource*>(swapChain->get_current_back_buffer().handle));
+}
+
+// Every frame, with the overlay open or closed: F9 records a debug case, or lets the game go after one.
+void onReshadePresent(effect_runtime* runtime)
+{
+    if (runtime->is_key_pressed(VK_F9)) devkit::automation::caseKey();
 }
 
 void onOverlay(effect_runtime*)
@@ -178,9 +118,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
 
     self = addon;
     const auto directory = dataDirectory();
-    const auto data = directory / "DevKit";
-    std::error_code error;
-    std::filesystem::create_directories(data / "commands", error);
 
     phantom_fx::openLog(directory / "DevKit.log");
     phantom_fx::log("DevKit: the developer tools as their own add-on.");
@@ -195,15 +132,10 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     devaddon::defer();
     phantom_fx::log("Waiting for the first frame to register on PhantomFX's frame start.");
 
-    const auto saves = data / "saves", local = data / "local";
-    if (std::filesystem::is_directory(saves, error))
-        phantom_fx::log(devkit::save_redirect::install(saves, local) ? "The saves are redirected into " + saves.string() + "."
-                                                                    : "The saves could not be redirected; do not run the game on this copy.");
-
-    devkit::commands::install(data / "commands", &runLine, &isWaiting);
-    phantom_fx::log("Command files are read from " + (data / "commands").string() + ".");
+    devkit::automation::install(directory);
 
     reshade::register_event<reshade::addon_event::present>(onPresent);
+    reshade::register_event<reshade::addon_event::reshade_present>(onReshadePresent);
     reshade::register_overlay("DevKit", onOverlay);
 
     return true;
@@ -213,6 +145,7 @@ extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshade
 {
     devaddon::unhook();
     reshade::unregister_overlay("DevKit", onOverlay);
+    reshade::unregister_event<reshade::addon_event::reshade_present>(onReshadePresent);
     reshade::unregister_event<reshade::addon_event::present>(onPresent);
     MH_Uninitialize();
     reshade::unregister_addon(addon, reshadeModule);
