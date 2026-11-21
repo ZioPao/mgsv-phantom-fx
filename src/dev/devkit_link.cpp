@@ -721,6 +721,29 @@ void install() noexcept
     link();
 }
 
+std::filesystem::path recordingDirectory() noexcept
+{
+    if (!kit || !kit->recordingFolder) return {};
+
+    try
+    {
+        std::string text(512, '\0');
+        auto length = kit->recordingFolder(text.data(), text.size());
+        if (length >= text.size())
+        {
+            text.assign(length + 1, '\0');
+            length = kit->recordingFolder(text.data(), text.size());
+        }
+        text.resize(std::min(length, text.size() - 1));
+
+        return pathOf(text);
+    }
+    catch (const std::exception&)
+    {
+        return {};
+    }
+}
+
 void onFrameStart() noexcept
 {
     if (linked || ++framesSinceLook < LookFrames) return;

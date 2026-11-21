@@ -14,7 +14,9 @@ which is the add-on to run when PhantomFX's own dev build is not.
 | `game.hpp` | The game's image and code checks, and the build check the add-on answers |
 | `game_lua.*` | Lua in the game's own script state: expressions, print(), and the console's queue |
 | `travel.*`, `cutscenes.*`, `cutscene_list.hpp` | Free roam in another map, and any cutscene the game's scripts name |
-| `page.*` | The devkit's own Developer page: travel, cutscenes and the Lua console in plain ImGui |
+| `frame_log.*` | The game's shaders (kept, searched, disassembled, saved) and the frame recorder: every draw with its shaders, targets and states, dumps of constants and textures |
+| `automation.*`, `extension.hpp` | The runner's lines and the API an add-on plugs its own into |
+| `page.*` | The devkit's own Developer page: travel, cutscenes, shaders and the Lua console in plain ImGui |
 
 `devkit.cmake` builds the static library. The add-on answers `devkit::game::isSupportedBuild()` (PhantomFX:
 `src/device_check.cpp`); everything else the devkit needs is in its folder. `src/dev/` stays PhantomFX's own: its

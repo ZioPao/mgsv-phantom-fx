@@ -81,6 +81,11 @@ void onFrameStart() noexcept
     photo_mode::onFrameStart();
 }
 
+std::filesystem::path recordingDirectory() noexcept
+{
+    return devkit_link::recordingDirectory();
+}
+
 void drawPage()
 {
     const fxui::Page page(Section::Developer);

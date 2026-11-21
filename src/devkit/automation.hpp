@@ -23,6 +23,9 @@ struct DevKitApi;
 //   travel <map> [<x> <y> <z>]    afghanistan, africa or motherbase free roam, at that place
 //   cutscene <index>              plays the cutscene at that index of the list
 //   peek <address|game+rva> [bytes]  the game's memory there, 256 bytes without saying, 4096 at most
+//   frame                         records the next frame as F10 does (needs DevKit/frame-log): draws, shaders, targets
+//   shaders [<text>]              the shaders the game created: stage, hash, source name, size; text filters them
+//   shader <hash start|name> [save]  a shader's assembly; `save` writes its .dxbc and .asm into DevKit/shaders
 //   case_done <name>              keeps what the script's lines said in cases/<name>/log.txt
 //   help                          the lines there are, with the add-ons' own
 namespace devkit::automation

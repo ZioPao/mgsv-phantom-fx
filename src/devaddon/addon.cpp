@@ -6,6 +6,7 @@
 #include "devkit/automation.hpp"
 #include "devkit/cutscenes.hpp"
 #include "devkit/extension.hpp"
+#include "devkit/frame_log.hpp"
 #include "devkit/game.hpp"
 #include "devkit/game_lua.hpp"
 #include "devkit/host.hpp"
@@ -134,6 +135,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     phantom_fx::log("Waiting for the first frame to register on PhantomFX's frame start.");
 
     devkit::automation::install(directory);
+    devkit::frame_log::install(directory);
 
     reshade::register_event<reshade::addon_event::present>(onPresent);
     reshade::register_event<reshade::addon_event::reshade_present>(onReshadePresent);
@@ -151,6 +153,7 @@ extern "C" __declspec(dllexport) const DevKitApi* DevKitGetApi()
 extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshadeModule)
 {
     devaddon::unhook();
+    devkit::frame_log::uninstall();
     reshade::unregister_overlay("DevKit", onOverlay);
     reshade::unregister_event<reshade::addon_event::reshade_present>(onReshadePresent);
     reshade::unregister_event<reshade::addon_event::present>(onPresent);

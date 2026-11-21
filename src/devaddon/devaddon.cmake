@@ -1,9 +1,9 @@
 # The devkit's tools as their own add-on (README.md here): DevKit.addon64, built in the dev preset
 # beside PhantomFX and never linked into it.
-add_library(devkit_addon SHARED src/devaddon/addon.cpp src/devaddon/game_loop.cpp src/device_check.cpp src/log.cpp)
+add_library(devkit_addon SHARED src/devaddon/addon.cpp src/devaddon/game_loop.cpp src/device_check.cpp src/log.cpp src/resource_dump.cpp src/shader_bytecode.cpp)
 target_include_directories(devkit_addon PRIVATE src)
 target_include_directories(devkit_addon SYSTEM PRIVATE "${RESHADE_DIR}/include" "${RESHADE_DIR}/imgui")
-target_link_libraries(devkit_addon PRIVATE devkit d3d11)
+target_link_libraries(devkit_addon PRIVATE devkit d3d11 d3dcompiler)
 target_compile_features(devkit_addon PRIVATE cxx_std_20)
 target_compile_definitions(devkit_addon PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX ImTextureID=ImU64)
 target_compile_options(devkit_addon PRIVATE /W4 /WX /permissive- /utf-8)

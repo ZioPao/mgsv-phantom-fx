@@ -14,4 +14,6 @@ void install(const std::filesystem::path& addonDirectory) noexcept;
 void onFrameStart() noexcept;
 // The overlay's Developer page.
 void drawPage();
+// While DevKit's frame log records a frame, the folder the passes save what they draw into; empty otherwise.
+std::filesystem::path recordingDirectory() noexcept;
 }

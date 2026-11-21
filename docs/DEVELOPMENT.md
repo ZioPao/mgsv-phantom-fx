@@ -254,7 +254,7 @@ what draws it, when that is the feature's own.
 | `src/devkit/cutscenes.cpp`, `src/devkit/cutscenes.hpp`, `src/devkit/cutscene_list.hpp` | The DevKit add-on's cutscene player and its list (see "Cutscenes") |
 | `src/remaster/` | The remastering rules: they change the game's materials as they are made, saved in `materials.json` and built into the add-on (see its `README.md`, and "Materials") |
 | `src/dev/remaster/` | The remastering tool that writes them: a dev build's marks, and the panel that tunes them |
-| `src/frame_log.cpp`, `src/frame_log.hpp` | Development diagnostics, off by default: shader log, F10 frame record, constant and texture dumps |
+| `src/devkit/frame_log.cpp`, `src/devkit/frame_log.hpp` | DevKit's render diagnostics: the shaders the game creates (search, assembly), F10 frame record (off unless `DevKit/frame-log` exists), constant and texture dumps |
 | `src/devkit/automation.cpp`, `src/devkit/automation.hpp` | DevKit: the runner over `src/devkit/commands.*`, the lines that stand on the game alone, the waits and F9, and the registry add-ons plug into (see "Debug cases") |
 | `src/devkit/extension.hpp` | DevKit's C API for another add-on: its lines, state, status, F9, waits and render-thread jobs |
 | `src/dev/devkit_link.cpp` | PhantomFX's lines in DevKit's command files: the held camera, records, costs, probes, scene, settings, sky and the debug case |
@@ -397,15 +397,23 @@ the option saved on, the game's first requests at start-up get the `Variable` wa
 
 ## Diagnostics
 
-RenderDoc cannot capture this game (see "Known limitations of the tools"), so the add-on has its
-own recorder, `src/frame_log.cpp`. It is off unless a `PhantomFX-frame-log` folder exists beside the
-add-on when the game starts; without the folder it registers no event and costs nothing. It only
-reads state; the frame renders unchanged. Its files go into that folder:
+RenderDoc cannot capture this game (see "Known limitations of the tools"), so the DevKit add-on
+(`DevKit.addon64`, not PhantomFX: any MGSV mod can use it) has its own recorder, `src/devkit/frame_log.cpp`.
+The frame recording is off unless a `DevKit/frame-log` folder exists beside the add-ons when the game starts;
+without the folder it registers no recording event and costs nothing. It only reads state; the frame renders
+unchanged. Its files go into that folder:
 
-- Every shader is logged once to `PhantomFX.log` (stage, checksum, size). With a `shaders` folder
-  inside, the bytecode is saved there. The game's shaders keep reflection and debug info (cbuffer
+- Every shader the game creates is kept (bytecode and the source name in its debug data) and logged once to
+  `DevKit.log` (stage, checksum, size), whether or not the folder is there. The DevKit overlay page searches them
+  by stage, hash or source name and shows a shader's assembly; the command-file lines `shaders [<text>]` and
+  `shader <hash start|name> [save]` do the same, and `save` writes `<stage>_<hash>.dxbc` and `.asm` into
+  `DevKit/shaders`. With a `shaders` folder inside the frame-log folder, every shader's bytecode is saved there
+  as it is created. The game's shaders keep reflection and debug info (cbuffer
   and variable names, `#line` source paths), so `D3DDisassemble` names every pass.
-- F10 records a frame to `frame-<n>.txt`, after one warm-up frame, in GPU order: command lists
+- F10 (or the `frame` line, which waits for it) records a frame to `frame-<n>.txt`, after thirty warm-up frames
+  (the game records a list many frames before the immediate context executes it, and a list is read only
+  if it was recorded while this runs: with one warm-up frame a free-roam frame held 34 calls, the interface alone,
+  and with thirty 7,000), in GPU order: command lists
   recorded on deferred contexts appear, indented, where the immediate context executes them. Each
   call lists shaders, targets, depth, viewport, blend, depth state, shader resources, UAVs and
   constant buffers. `frame-<n>-writers.txt` lists the call stacks of constant buffer maps by size.

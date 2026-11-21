@@ -3,6 +3,7 @@
 #include "devkit/commands.hpp"
 #include "devkit/cutscenes.hpp"
 #include "devkit/extension.hpp"
+#include "devkit/frame_log.hpp"
 #include "devkit/game_lua.hpp"
 #include "devkit/host.hpp"
 #include "devkit/log.hpp"
@@ -51,6 +52,8 @@ return sequence .. (dropped > 0 and (" dropped " .. dropped) or "")
 )";
 // The most a present job can say.
 constexpr std::size_t JobTextBytes = 4096;
+// Presents `frame` waits for the render thread to record a frame: with frame generation several a game frame.
+constexpr std::uint64_t FrameWait = 3600;
 
 std::atomic<bool> caseAsked{};
 std::uint32_t framesSinceLogos{};
@@ -149,6 +152,26 @@ void writeState(const std::string& name)
     std::ofstream(caseFolder / "state.txt", std::ios::trunc) << stateText(name, folderText.c_str());
 }
 
+// The frame log's recording: the lines after `frame` wait for it.
+Script& scriptOf(DevKitScript* script);
+std::uint64_t recordingsBefore{};
+
+int pollRecording(DevKitScript* script, int timedOut, void*)
+{
+    auto& output = scriptOf(script).output;
+    if (frame_log::recordings() != recordingsBefore)
+    {
+        output += "recorded " + frame_log::lastRecording() + " in frame-log\n";
+        return 0;
+    }
+
+    if (!timedOut) return 1;
+
+    output += "error: no frame was recorded\n";
+
+    return 0;
+}
+
 std::string statusText()
 {
     auto text = joined(statusTexts, nullptr);
@@ -158,7 +181,7 @@ std::string statusText()
 
 std::string listing()
 {
-    std::string text = "built in: lua travel cutscene state peek wait status case_done help\n";
+    std::string text = "built in: lua travel cutscene state peek wait status case_done help frame shaders shader\n";
     if (commandTable.empty()) return text + "added by add-ons: nothing\n";
 
     text += "added by add-ons:";
@@ -238,6 +261,45 @@ void run(Script& running, const std::string& line)
                     for (std::size_t i = 0; i < bytes; ++i) running.output += std::format(" {:02x}", row[i]);
                 running.output += '\n';
             }
+        }
+    }
+    else if (command == "frame")
+    {
+        if (!frame_log::installed())
+        {
+            running.output += "error: the frame log is off: make the DevKit/frame-log folder beside the add-ons and start the game again\n";
+            return;
+        }
+
+        recordingsBefore = frame_log::recordings();
+        frame_log::request();
+        waits.push_back({&pollRecording, nullptr, commands::presents() + FrameWait});
+    }
+    else if (command == "shaders")
+    {
+        // The most it lists: a search, not the whole game.
+        constexpr std::size_t Most = 100;
+        const auto found = frame_log::shaders(rest);
+        for (std::size_t i = 0; i < found.size() && i < Most; ++i)
+            running.output += std::format("{} {} {} {} bytes\n", found[i].stage, found[i].hash, found[i].name.empty() ? "-" : found[i].name, found[i].size);
+
+        running.output += std::format("{} of {} shaders{}\n", found.size(), frame_log::shaderCount(), found.size() > Most ? ", the first 100 listed" : "");
+    }
+    else if (command == "shader")
+    {
+        std::istringstream arguments(rest);
+        std::string which, action;
+        arguments >> which >> action;
+        if (which.empty() || (!action.empty() && action != "save")) running.output += "error: shader <hash start or part of a source name> [save]\n";
+        else if (action == "save")
+        {
+            const auto saved = frame_log::saveShader(which);
+            running.output += saved ? "saved " + utf8(*saved) + " and its .asm\n" : "error: no shader matches " + which + "\n";
+        }
+        else
+        {
+            const auto text = frame_log::disassemble(which);
+            running.output += text ? *text : "error: no shader matches " + which + "\n";
         }
     }
     else if (command == "case_done")
@@ -411,8 +473,21 @@ void writeLog(const char* text)
     devkit::log(text ? text : "");
 }
 
+std::size_t recordingFolder(char* out, std::size_t cap)
+{
+    const auto text = utf8(frame_log::recordingDirectory());
+    if (out && cap)
+    {
+        const auto count = std::min(text.size(), cap - 1);
+        std::memcpy(out, text.data(), count);
+        out[count] = '\0';
+    }
+
+    return text.size();
+}
+
 const DevKitApi Api{sizeof(DevKitApi), DevKitApiVersion, &addCommand, &addState, &addStatus, &setKey, &say, &queue, &waitUntil, &presentJob, &start,
-    &presents, &folder, &showToast, &writeLog};
+    &presents, &folder, &showToast, &writeLog, &recordingFolder};
 }
 
 const DevKitApi* extensionApi() noexcept

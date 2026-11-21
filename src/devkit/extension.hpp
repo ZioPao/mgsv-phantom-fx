@@ -16,7 +16,7 @@
 extern "C"
 {
 constexpr std::size_t DevKitNone = static_cast<std::size_t>(-1);
-constexpr std::uint32_t DevKitApiVersion = 1;
+constexpr std::uint32_t DevKitApiVersion = 2;
 
 // The command file running, as a line sees it. Valid for the call it is handed to.
 struct DevKitScript;
@@ -66,6 +66,10 @@ struct DevKitApi
     // tone: 0 a note, 1 done, 2 a warning, 3 an error.
     void (*toast)(int tone, const char* text, const char* detail);
     void (*log)(const char* text);
+
+    // While the frame log records a frame (F10, or `frame`), its dump folder (UTF-8; made if missing), for an add-on's
+    // own passes to save what they draw into; empty otherwise. Any thread: the render thread asks it.
+    std::size_t (*recordingFolder)(char* out, std::size_t cap);
 };
 
 // DevKit's export: null before it is ready.

@@ -55,6 +55,8 @@ Cases are in `DevKit/cases` beside each game:
 | Command | What it does |
 |---|---|
 | `fx.py [--copy] status` | Frame, camera, frozen or running, what the scene holds |
+| `fx.py [--copy] run "shaders <text>"`, `"shader <hash start or name> [save]"` | DevKit's shader list (stage, hash, source name, size), and one shader's assembly, saved with `save` into `DevKit/shaders` |
+| `fx.py [--copy] run "frame"` | DevKit's frame recorder: every draw with its shaders, targets and states into `DevKit/frame-log/frame-<n>.txt`; needs that folder |
 | `fx.py [--copy] probe <x> <y> [...]` | Shadow and lamp probes at render pixels. Needs ray-traced shadows or path tracing running |
 | `fx.py [--copy] case [<name>]` | Records a case as F9 does, then reports it |
 | `fx.py [--copy] run "<line>" ...` | Any lines of `src/devkit/automation.hpp`, as one command file |

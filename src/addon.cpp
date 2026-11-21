@@ -3,7 +3,7 @@
 // the rest of Phantom FX's features (features/, one folder each), plugged into the game's passes
 // they share (passes/). It lets the game start under ReShade (device_check.hpp), holds the settings
 // and hands every change to the modules (core.hpp), draws the settings window (menu.hpp), and has
-// an optional pipeline recorder (frame_log.hpp), the GPU costs of its passes (performance.hpp) and
+// the GPU costs of its passes (performance.hpp) and
 // weather and time control (weather.hpp) for development.
 // NGX receives ReShade's wrapped context, so other add-ons that follow DLSS evaluations see it like
 // a game's own DLSS.
@@ -32,7 +32,6 @@
 #include "features/upscaling/fxaa.hpp"
 #include "features/upscaling/upscaler.hpp"
 #include "features/volumetric_fog/atmosphere.hpp"
-#include "frame_log.hpp"
 #include "fxui/fxui.hpp"
 #include "game_dither.hpp"
 #include "game_loop.hpp"
@@ -645,7 +644,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     log(sun_movement::makeSmooth());
     if (isSupportedGameBuild() && !weather::supported()) log("The weather manager has unexpected code; the weather menu is unavailable.");
 
-    frame_log::install(directory);
     if constexpr (DevTools) dev::install(directory);
     upscaler::initialize(directory);
     core::initialize(directory, isSupportedGameBuild());
@@ -719,6 +717,5 @@ extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshade
     immediateList = nullptr;
     effects = nullptr;
     reshade::unregister_overlay("Phantom FX", onOverlay);
-    frame_log::uninstall();
     reshade::unregister_addon(addon, reshadeModule);
 }

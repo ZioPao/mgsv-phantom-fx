@@ -1,5 +1,5 @@
 # The development tools another MGSV add-on can build on, in a dev build alone (README.md here).
-add_library(devkit STATIC src/devkit/log.cpp src/devkit/host.cpp src/devkit/save_redirect.cpp src/devkit/commands.cpp src/devkit/automation.cpp src/devkit/game_lua.cpp src/devkit/travel.cpp src/devkit/cutscenes.cpp src/devkit/page.cpp)
+add_library(devkit STATIC src/devkit/log.cpp src/devkit/host.cpp src/devkit/save_redirect.cpp src/devkit/commands.cpp src/devkit/automation.cpp src/devkit/frame_log.cpp src/devkit/game_lua.cpp src/devkit/travel.cpp src/devkit/cutscenes.cpp src/devkit/page.cpp)
 target_include_directories(devkit PUBLIC src)
 # The page draws through ReShade's overlay function table, like the add-on's own windows.
 target_include_directories(devkit SYSTEM PRIVATE "${RESHADE_DIR}/imgui" "${RESHADE_DIR}/include")
