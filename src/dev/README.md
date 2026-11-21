@@ -9,6 +9,7 @@ PhantomFX's own probes.
 | --- | --- |
 | `dev.hpp`, `dev.cpp` | The one door from the core, and the Developer page |
 | `dev.cmake`, `tests.cmake` | The folder's sources and kernel, and its tests |
+| `../dev_tools.hpp` | `DevTools`, and `ToolsOnly`: the `tools` preset, which keeps these tools and leaves the game's frame as it is |
 | `devkit_link.cpp` | PhantomFX's lines in the DevKit add-on's command files, plugged in through `../devkit/extension.hpp`: DevKit owns the runner, the waits and F9 (`../devkit/automation.*`) and knows nothing of these |
 | `../devkit/` | What another MGSV add-on can build on: the saves redirection, Lua in the game, travel, cutscenes, its own Developer page in plain ImGui, and the logger and toasts the core sets |
 | `inspect_trace.*`, `inspect.hlsl`, `inspect_shared.h` | A debug case's record of every pixel, a trace like any other |

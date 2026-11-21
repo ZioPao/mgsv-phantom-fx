@@ -3,6 +3,7 @@
 #include "features/hdr/hdr.hpp"
 #include "features/upscaling/upscaler.hpp"
 #include "log.hpp"
+#include "dev_tools.hpp"
 #include "modules.hpp"
 
 #include <Windows.h>
@@ -27,7 +28,7 @@ bool isFirstLaunch{}; // No settings file yet: the upscaler follows the GPU once
 std::mutex settingsMutex;
 Settings settings;
 Diagnostics diagnostics;
-bool enhancements{true}; // Off turns the lighting enhancements off whatever their settings say
+bool enhancements{!ToolsOnly}; // Off turns the lighting enhancements off whatever their settings say
 LeftOut leftOut;         // A cost measurement's step, over the settings
 std::optional<std::uint64_t> unsavedChange; // GetTickCount64 of the latest change PhantomFX.ini does not have yet
 
@@ -76,6 +77,23 @@ void savePendingSettings(std::uint64_t settle)
 }
 }
 
+namespace
+{
+// The tools build leaves the game's frame as it is: upscaling and frame generation would change it whatever the
+// effects' settings say.
+Settings unchanged(Settings wanted)
+{
+    if constexpr (ToolsOnly)
+    {
+        wanted.upscaling.mode = upscaler::Mode::Off;
+        wanted.upscaling.rayReconstruction = false;
+        wanted.frameGeneration.mode = upscaler::FrameGenerationMode::Off;
+    }
+
+    return wanted;
+}
+}
+
 void initialize(const std::filesystem::path& directory, bool supportedBuild) noexcept
 {
     settingsPath = directory / "PhantomFX.ini";
@@ -86,7 +104,7 @@ void initialize(const std::filesystem::path& directory, bool supportedBuild) noe
     std::lock_guard lock(settingsMutex);
     try
     {
-        settings = loadSettings(settingsPath);
+        settings = unchanged(loadSettings(settingsPath));
     }
     catch (const std::exception& error)
     {
@@ -128,7 +146,7 @@ Settings currentSettings()
 void applySettings(const Settings& wanted)
 {
     std::lock_guard lock(settingsMutex);
-    settings = wanted;
+    settings = unchanged(wanted);
     unsavedChange = GetTickCount64();
     configureModules();
 }
@@ -154,6 +172,18 @@ bool enhancementsOn()
 
 void setEnhancements(bool on)
 {
+    if constexpr (ToolsOnly)
+    {
+        static bool said{};
+        if (on && !said)
+        {
+            said = true;
+            log("The tools build leaves the game's frame as it is: the enhancements stay off.");
+        }
+
+        on = false;
+    }
+
     {
         std::lock_guard lock(settingsMutex);
         enhancements = on;

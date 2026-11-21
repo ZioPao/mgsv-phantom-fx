@@ -467,6 +467,8 @@ void onDestroyResourceView(device*, resource_view destroyed)
 bool onCreatePipeline(device* device, pipeline_layout, uint32_t count, const pipeline_subobject* subobjects)
 {
     if (device->get_api() != device_api::d3d11) return false;
+    // The tools build leaves the game's shaders as they are: no dither out, no HDR in.
+    if constexpr (ToolsOnly) return false;
 
     bool changed{};
     for (uint32_t i = 0; i < count; ++i)

@@ -91,9 +91,13 @@ void drawPage()
     const fxui::Page page(Section::Developer);
     if (!page) return;
 
-    drawCostRecording();
-    remaster::drawTool();
-    if constexpr (DiagnosticLog)
+    if constexpr (ToolsOnly) fxui::note(Tone::Dim, "The tools build: PhantomFX's own changes to the frame are off; its tools here read what of it runs.");
+    else
+    {
+        drawCostRecording();
+        remaster::drawTool();
+    }
+    if constexpr (DiagnosticLog && !ToolsOnly)
     {
         auto options = core::currentDiagnostics();
         const fxui::Item item({.id = "globalIlluminationLog", .name = "Global illumination log", .keywords = "log often light fade"});

@@ -22,6 +22,16 @@ It builds with `/W4 /WX`. The version comes from `project()` in `CMakeLists.txt`
 add-on's version resource (`src/version.rc.in`), which ReShade shows and logs, and the first line
 of `PhantomFX.log`.
 
+### The tools build
+
+The `tools` preset (`cmake --preset tools`, into `build/tools`) is for debugging **another mod's** rendering:
+the hooks and the Developer page without PhantomFX's own changes to the frame. It sets `PHANTOM_FX_TOOLS_ONLY`
+(`ToolsOnly` in `src/dev_tools.hpp`), which turns the enhancements off whatever the settings or F1 say, forces
+upscaling and frame generation off, and leaves the game's shaders unpatched (no dither out, no HDR in,
+`onCreatePipeline`). What it keeps: every hook, the frame recorder, the shader list, DevKit's page and the
+automation lines. What it loses: the tools that read PhantomFX's own passes answer that the scene is not
+running. Its Developer page says so, and `PhantomFX.log` says it when something asks for the enhancements.
+
 ### The diagnostic log
 
 The `release` preset is what players get: `PhantomFX.log` holds only what happens once (startup,

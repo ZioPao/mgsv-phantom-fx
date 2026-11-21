@@ -14,6 +14,12 @@ endif()
 option(PHANTOM_FX_DIAGNOSTIC_LOG "Log the periodic statistics used in development" OFF)
 # The overlay's Developer page, tools for testing in the game that players never get (the dev preset).
 option(PHANTOM_FX_DEV_TOOLS "Add the Developer page to the overlay" OFF)
+# The tools build: the hooks and debug tools, with none of PhantomFX's changes to the game's frame, so another mod's
+# rendering can be debugged on its own (docs/DEVELOPMENT.md, "The tools build"). It has the dev tools by definition.
+option(PHANTOM_FX_TOOLS_ONLY "Leave the game's frame as it is: the hooks and tools alone" OFF)
+if(PHANTOM_FX_TOOLS_ONLY)
+    set(PHANTOM_FX_DEV_TOOLS ON)
+endif()
 
 include(FetchContent)
 FetchContent_Declare(minhook
@@ -262,7 +268,8 @@ target_include_directories(phantom_fx SYSTEM PRIVATE "${RESHADE_DIR}/include" "$
 target_link_libraries(phantom_fx PRIVATE minhook ngx NRD d3d11 d3d12 dxgi d3dcompiler)
 target_compile_features(phantom_fx PRIVATE cxx_std_20)
 target_compile_definitions(phantom_fx PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX ImTextureID=ImU64 PHANTOM_FX_VERSION="${PROJECT_VERSION}"
-    PHANTOM_FX_DIAGNOSTIC_LOG=$<BOOL:${PHANTOM_FX_DIAGNOSTIC_LOG}> PHANTOM_FX_DEV_TOOLS=$<BOOL:${PHANTOM_FX_DEV_TOOLS}>)
+    PHANTOM_FX_DIAGNOSTIC_LOG=$<BOOL:${PHANTOM_FX_DIAGNOSTIC_LOG}> PHANTOM_FX_DEV_TOOLS=$<BOOL:${PHANTOM_FX_DEV_TOOLS}>
+    PHANTOM_FX_TOOLS_ONLY=$<BOOL:${PHANTOM_FX_TOOLS_ONLY}>)
 target_compile_options(phantom_fx PRIVATE /W4 /WX /permissive- /utf-8)
 # Record only the PDB's file name, not the build machine's path.
 target_link_options(phantom_fx PRIVATE /PDBALTPATH:%_PDB%)
