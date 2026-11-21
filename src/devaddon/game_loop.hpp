@@ -13,7 +13,5 @@ std::string hook() noexcept;
 void defer() noexcept;
 // The first present: registers on PhantomFX's frame start when it is there, otherwise hooks the loop.
 void onPresent() noexcept;
-// The hosted automation's frame start, called with the rest of the devkit's frame work.
-void setAutomationFrameStart(void (*callback)()) noexcept;
 void unhook() noexcept;
 }

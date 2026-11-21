@@ -41,37 +41,6 @@ using namespace reshade::api;
 
 HMODULE self{};
 
-using AutomationInstall = void (*)(const wchar_t*);
-using AutomationFrameStart = void (*)();
-using AutomationPresent = void (*)(void*, void*);
-AutomationInstall installAutomation{};
-AutomationFrameStart frameStartAutomation{};
-AutomationPresent presentAutomation{};
-bool automationInstalled{};
-std::filesystem::path gameFolder{};
-
-// PhantomFX keeps the automation's commands; DevKit owns when it is installed and run.
-bool connectAutomation()
-{
-    if (automationInstalled) return true;
-    if (!installAutomation || !frameStartAutomation || !presentAutomation)
-    {
-        const auto module = GetModuleHandleW(L"PhantomFX.addon64");
-        if (!module) return false;
-
-        installAutomation = reinterpret_cast<AutomationInstall>(GetProcAddress(module, "PhantomFXAutomationInstall"));
-        frameStartAutomation = reinterpret_cast<AutomationFrameStart>(GetProcAddress(module, "PhantomFXAutomationFrameStart"));
-        presentAutomation = reinterpret_cast<AutomationPresent>(GetProcAddress(module, "PhantomFXAutomationPresent"));
-        if (!installAutomation || !frameStartAutomation || !presentAutomation) return false;
-    }
-
-    installAutomation(gameFolder.c_str());
-    devaddon::setAutomationFrameStart(frameStartAutomation);
-    automationInstalled = true;
-    phantom_fx::log("PhantomFX automation is hosted here: " + (gameFolder / "PhantomFX-automation").string() + ".");
-    return true;
-}
-
 // The add-on's folder, as ReShade keeps its own files beside it.
 std::filesystem::path dataDirectory()
 {
@@ -186,9 +155,6 @@ void onPresent(command_queue* queue, swapchain* swapChain, const rect*, const re
     auto* list = queue->get_immediate_command_list();
     if (!list) return;
 
-    if (connectAutomation())
-        presentAutomation(native(list), reinterpret_cast<ID3D11Resource*>(swapChain->get_current_back_buffer().handle));
-
     devkit::commands::onPresent(native(list), reinterpret_cast<ID3D11Resource*>(swapChain->get_current_back_buffer().handle));
 }
 
@@ -212,7 +178,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
 
     self = addon;
     const auto directory = dataDirectory();
-    gameFolder = directory;
     const auto data = directory / "DevKit";
     std::error_code error;
     std::filesystem::create_directories(data / "commands", error);

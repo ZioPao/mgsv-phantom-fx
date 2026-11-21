@@ -66,8 +66,7 @@ void install(const std::filesystem::path& addonDirectory) noexcept
     devkit::setName("PhantomFX");
     devkit::setToast([](devkit::Tone tone, std::string_view text, std::string_view detail) { fxui::toast(toneOf(tone), text, detail); });
     devkit::setLogger(&log);
-    automation::setHosted(GetModuleHandleW(L"DevKit.addon64") != nullptr);
-    if (!automation::isHosted()) automation::install(addonDirectory);
+    automation::install(addonDirectory);
     perf_record::install(addonDirectory / "PhantomFX-automation" / "perf");
 }
 
@@ -77,14 +76,14 @@ void onFrameStart() noexcept
     devkit::travel::onFrameStart();
     devkit::cutscenes::onFrameStart();
     devkit::game_lua::onFrameStart();
-    if (!automation::isHosted()) automation::onFrameStart();
+    automation::onFrameStart();
     perf_record::onFrameStart();
     photo_mode::onFrameStart();
 }
 
 void onPresent(ID3D11DeviceContext* context, ID3D11Resource* backBuffer) noexcept
 {
-    if (!automation::isHosted()) automation::onPresent(context, backBuffer);
+    automation::onPresent(context, backBuffer);
 }
 
 void onCaseKey() noexcept

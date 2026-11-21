@@ -51,9 +51,6 @@ struct ID3D11Resource;
 namespace phantom_fx::automation
 {
 void install(const std::filesystem::path& addonDirectory) noexcept;
-// Whether DevKit hosts the command runner; PhantomFX then leaves its frame and present calls to it.
-void setHosted(bool value) noexcept;
-bool isHosted() noexcept;
 // F9: on the render thread.
 void caseKey() noexcept;
 // The game thread, at the main loop's frame start.

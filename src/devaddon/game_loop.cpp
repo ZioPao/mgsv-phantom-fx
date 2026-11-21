@@ -28,14 +28,12 @@ using UnregisterFrameStart = void (*)(void (*)());
 FrameStart original{};
 bool withPhantomFx{};
 bool pending{};
-void (*automationFrameStart)();
 
 void devkitFrameStart()
 {
     devkit::travel::onFrameStart();
     devkit::cutscenes::onFrameStart();
     devkit::game_lua::onFrameStart();
-    if (automationFrameStart) automationFrameStart();
     devkit::commands::onFrameStart();
 }
 
@@ -86,11 +84,6 @@ void onPresent() noexcept
     if (!pending) return;
     pending = false;
     phantom_fx::log(hook());
-}
-
-void setAutomationFrameStart(void (*callback)()) noexcept
-{
-    automationFrameStart = callback;
 }
 
 void unhook() noexcept
