@@ -42,6 +42,8 @@ VertexShader kindOf(std::string_view code)
 
     const auto name = sourceName(code, "_vs.hlsl");
     if (name.starts_with("NewTerrain_Depth") || name.starts_with("NewTerrain_Shadow")) return VertexShader::Terrain;
+    // The object brush's vegetation: the wave shaders that bend a clump in the wind.
+    if (name.find("_wave") != std::string_view::npos) return VertexShader::Vegetation;
     if (name.starts_with("fox3ddf_") || name.starts_with("tpp3ddf_") || name.starts_with("ModelForward_Shadow")) return VertexShader::Model;
 
     return VertexShader::Other;

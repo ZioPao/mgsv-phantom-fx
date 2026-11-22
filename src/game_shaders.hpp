@@ -226,8 +226,9 @@ static_assert(
     "a pass drawn from a single shader has one row");
 
 // What a vertex shader draws, from its source name: the 2D pass (Draw2D*), the game's models (their
-// G-buffer and shadow passes), its terrain, or something else.
-enum class VertexShader : std::uint8_t { Other, Draw2D, Model, Terrain };
+// G-buffer and shadow passes), the object brush's vegetation (its wave shaders), its terrain, or
+// something else.
+enum class VertexShader : std::uint8_t { Other, Draw2D, Model, Vegetation, Terrain };
 
 // ---- On the game's threads ----
 // As the game creates a pixel shader; `code` is the game's own (HDR's patched shaders are known by the

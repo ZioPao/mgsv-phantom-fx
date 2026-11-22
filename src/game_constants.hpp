@@ -123,6 +123,26 @@ struct TerrainMaterialConstants
 
 static_assert(sizeof(TerrainMaterialConstants) == 8 * RegisterSize);
 
+// cVSMaterial for the object brush's vegetation (fox3ddf_fast_wave*_clone_vs), b4 (128 bytes): the wave
+// the vertex shader bends a clump with. c2.xyz is where its blades lean (normalized), c2.w a base lean;
+// c3.x the wave's phase, c3.y its amplitude (the tangent at the top), c3.z and c3.w the height weight's
+// exponent and bias. Read from the game's vegetation draws (gi_inputs.cpp), so the ray-traced scene sways
+// with the grass the game draws.
+struct VegetationMaterialConstants
+{
+    static constexpr std::uint32_t Slot = 4;
+
+    float materials[2][4]; // c0-c1: the material's colour and the second weight's exponent and bias
+    float direction[4];    // c2: xyz the lean's direction, w a base lean
+    float wave[4];         // c3: x phase, y amplitude, z height weight's exponent, w its bias
+    float rise[4];         // c4: xyz a second displacement, w the material's id
+    float normal[4];       // c5
+    float spare[2][4];     // c6-c7
+};
+
+static_assert(sizeof(VegetationMaterialConstants) == 8 * RegisterSize);
+static_assert(offsetof(VegetationMaterialConstants, direction) == 2 * RegisterSize && offsetof(VegetationMaterialConstants, wave) == 3 * RegisterSize);
+
 // cVSObject / cPSObject, b5 (208 bytes): the object a draw draws.
 struct ObjectConstants
 {
