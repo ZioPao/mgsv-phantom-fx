@@ -12,6 +12,7 @@
   fx.py scenarios [--accept] [<name> ...]  a fresh copy with this build through every scenario, or those named: says
                                            what got worse, with a before and after picture of each. --accept takes
                                            the run as what to expect from now on, after a change meant to show
+  fx.py [--copy] show, hide                the copy's window on screen, or off it again, as it starts
   fx.py [--copy] boot                      steps the automation copy from launch into free roam
   fx.py [--copy] acc                       from free roam into the helicopter's cabin at Mother Base, once it plays
   fx.py [--copy] travel <map>              another free roam, once it plays
@@ -306,6 +307,36 @@ def time_of_day(seconds=None, run_clock=False):
     run([f"clock {seconds:g}" + (" run" if run_clock else "")])
 
     return state_field("clock")
+
+
+def view(show=True):
+    """Shows the copy's window on screen, or hides it off-screen again as launch.ps1 leaves it. Returns whether the
+    game's window was there."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    hwnd = user32.FindWindowW(None, "METAL GEAR SOLID V: THE PHANTOM PAIN")
+    if not hwnd:
+        return False
+
+    class Rect(ctypes.Structure):
+        _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG), ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+    rect = Rect()
+    user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    width, height = rect.right - rect.left, rect.bottom - rect.top
+    if show:
+        work = Rect()
+        user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(work), 0)  # SPI_GETWORKAREA
+        area_width, area_height = work.right - work.left, work.bottom - work.top
+        width, height = min(width, area_width), min(height, area_height)
+        user32.SetWindowPos(hwnd, 0, work.left + (area_width - width) // 2, work.top + (area_height - height) // 2, width, height, 0x0040)  # SWP_SHOWWINDOW
+        user32.SetForegroundWindow(hwnd)
+    else:
+        user32.SetWindowPos(hwnd, 0, -6000, 100, 0, 0, 0x0011)  # SWP_NOSIZE | SWP_NOACTIVATE: off-screen, as launched
+
+    return True
 
 
 def press_space():
@@ -664,6 +695,8 @@ def main():
         diff(*rest)
     elif command == "travel":
         travel(rest[0])
+    elif command in ("show", "hide"):
+        print("on screen" if view(command == "show") else "no game window")
     elif command == "weather":
         print(weather(*rest))
     elif command == "clock":

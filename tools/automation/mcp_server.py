@@ -261,13 +261,14 @@ def job_payload(job: Job, lines: int = 60) -> dict:
 # ---------------------------------------------------------------- session
 
 @mcp.tool()
-def session(action: Literal["status", "open", "freeze", "release", "boot", "travel", "acc", "start", "stop", "recover"] = "status",
+def session(action: Literal["status", "open", "freeze", "release", "boot", "travel", "acc", "start", "stop", "recover", "show", "hide"] = "status",
             target: Literal["player", "copy"] | None = None,
             destination: Literal["afghanistan", "africa", "motherbase"] | None = None) -> CallToolResult:
     """What the game is doing, and which game the tools talk to. `open` sets the default target; `start` installs
     this build into the automation copy, presses its startup notices away and stops in free roam. A loading screen
     that waits for Space is pressed through by boot and travel themselves, and recover does that for a copy already
-    sitting on one, without restarting it. boot, travel, acc, start and recover return a job. Stop the copy when the task is done; a copy started here closes after ten minutes with no
+    sitting on one, without restarting it. show brings the copy's window on screen to watch or play it, hide puts it
+    back off screen. boot, travel, acc, start and recover return a job. Stop the copy when the task is done; a copy started here closes after ten minutes with no
     tool call, and when the server exits."""
     note_activity()
     global session_target, owned_copy
@@ -280,6 +281,16 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
             session_target = target
             fx.game_folder = GAMES[target]
             return ok({"target": target, "folder": str(GAMES[target]), "running": [str(path) for path in running()]})
+
+        if action in ("show", "hide"):
+            if target == "player":
+                return fail("WRONG_TARGET", "show and hide move the automation copy's window, never the player's game.",
+                    "Ask the user to move their own window.")
+            if not any(path.parent == GAMES["copy"] for path in running()):
+                return fail("NOT_RUNNING", "No copy is running.", "Start it with session action='start', target='copy'.")
+            fx.view(action == "show")
+            return ok({"target": "copy", "visible": action == "show"},
+                text="The copy is on screen." if action == "show" else "The copy is off screen again.")
 
         if action == "stop":
             if target == "player":
@@ -344,7 +355,7 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
             extra = [destination] if destination else []
             return start_job(action, name, extra, JOB_ETA[action])
 
-        return fail("BAD_ACTION", f"Unknown action {action!r}.", "Use status, open, freeze, release, boot, travel, acc, start, stop or recover.")
+        return fail("BAD_ACTION", f"Unknown action {action!r}.", "Use status, open, freeze, release, boot, travel, acc, start, stop, recover, show or hide.")
 
 
 # ---------------------------------------------------------------- run

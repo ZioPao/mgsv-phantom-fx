@@ -68,6 +68,7 @@ Cases are in `DevKit/cases` beside each game:
 | `fx.py scenarios [--accept] [<name> ...]` | Runs them, with the player's settings |
 | `fx.py [--copy] boot` | Copy from launch into free roam, 30 to 45 s |
 | `fx.py [--copy] travel <map>` | `afghanistan`, `africa` or `motherbase` free roam; a loading screen that waits for Space is pressed through |
+| MCP `session action='show'` / `'hide'`, `fx.py [--copy] show` / `hide` | The copy's window on screen, to watch or let the user play it, or off screen again |
 | `fx.py [--copy] run "key space"` | Space at the game's window, for a loading screen that waits for it while the game's loop runs |
 | `fx.py [--copy] acc` | From free roam into the helicopter's cabin (the ACC) |
 | `fx.py png <file.dds>`, `fx.py diff <a.dds> <b.dds>` | A texture as a picture; how two captures differ |
