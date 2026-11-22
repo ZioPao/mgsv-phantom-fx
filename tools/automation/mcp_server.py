@@ -265,9 +265,9 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
             target: Literal["player", "copy"] | None = None,
             destination: Literal["afghanistan", "africa", "motherbase"] | None = None) -> CallToolResult:
     """What the game is doing, and which game the tools talk to. `open` sets the default target; `start` installs
-    this build into the automation copy, presses its startup notices away and stops in free roam. recover presses a
-    copy past a loading screen or a sequence that waits for a key, without restarting it. boot, travel, acc, start and
-    recover return a job. Stop the copy when the task is done; a copy started here closes after ten minutes with no
+    this build into the automation copy, presses its startup notices away and stops in free roam. A loading screen
+    that waits for Space is pressed through by boot and travel themselves, and recover does that for a copy already
+    sitting on one, without restarting it. boot, travel, acc, start and recover return a job. Stop the copy when the task is done; a copy started here closes after ten minutes with no
     tool call, and when the server exits."""
     note_activity()
     global session_target, owned_copy
@@ -352,8 +352,9 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
 @mcp.tool()
 def run(lines: list[str] | str, timeout_s: float = 120.0, target: Literal["player", "copy"] | None = None, confirm: bool = False) -> CallToolResult:
     """Runs automation lines as one command file and returns what each printed. The escape hatch for anything the
-    other tools do not cover; one string per line (src/devkit/automation.hpp lists them). confirm=true allows a
-    setting line to write the player's ini."""
+    other tools do not cover; one string per line (src/devkit/automation.hpp lists them). `key space` presses Space at
+    the game's window, for a loading screen that waits for it. confirm=true allows a setting line to write the player's
+    ini."""
     note_activity()
     clean = normalise(lines)
     if not clean:

@@ -89,6 +89,12 @@ PhantomFX; without PhantomFX those lines say they are unknown, and `help` lists 
 Travel, clock, weather, live, move, reveal, diagnostic, enhancements and remaster stay `run` lines. Making each a tool
 is how the surface became too specific.
 
+A loading screen that waits for Space stops the game's own loop, so a command file cannot press it. `boot`, `travel`
+and `recover` press Space at the game's window from outside the game, every few seconds while it is not playing;
+`recover` is the tool for a copy already sitting on one, and it never restarts the game. When the loop does run,
+`key <name> [times]` presses one from a command file. Do not restart a game stuck on such a screen, and do not
+improvise a keypress.
+
 ### Resources
 
 `case://latest/report.md`, `case://latest/checks.json`, the case pictures, `scenario://list`, `scenario://<name>`,

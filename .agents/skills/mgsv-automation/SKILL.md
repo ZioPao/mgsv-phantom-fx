@@ -19,6 +19,7 @@ The tools exist in **dev builds only** (`build/dev`). Reference: `docs/DEVELOPME
 - **`--copy` decides which game you talk to.** Without it, `fx.py` commands reach the player's running game. `setting` writes to their `PhantomFX.ini`, so restore what you change.
 - **Tell the user when their game is left frozen.** F9 again, or `fx.py run release`, lets it go.
 - **`session start` takes the keyboard for a moment.** It brings the off-screen copy forward to press its startup notices, then puts the previous window back. Do not start it while the user is typing.
+- **A loading screen that waits for Space is not stuck, and never restart the game over one.** `boot`, `travel` and `recover` press Space at the game's window themselves every few seconds, from outside the game: a loading screen stops the game's own loop, so a command file cannot press it. When the loop is alive, `fx.py run "key space"` presses it too. Call `session action='recover'` for a copy that sits on such a screen; do not improvise a keypress or a reboot.
 - **Keep game images out of the repository.** Scenario baselines stay in `mgsv-automation/baselines`; only numbers go in `scenarios.json`.
 - **Commit, push and install into the player's game only when the user has asked.** Install with a backup of the current add-on and with their game closed.
 
@@ -66,7 +67,8 @@ Cases are in `DevKit/cases` beside each game:
 | `fx.py scenario <name> "<why>" [<case>]` | Keeps a case as a scenario, its numbers as what to expect |
 | `fx.py scenarios [--accept] [<name> ...]` | Runs them, with the player's settings |
 | `fx.py [--copy] boot` | Copy from launch into free roam, 30 to 45 s |
-| `fx.py [--copy] travel <map>` | `afghanistan`, `africa` or `motherbase` free roam |
+| `fx.py [--copy] travel <map>` | `afghanistan`, `africa` or `motherbase` free roam; a loading screen that waits for Space is pressed through |
+| `fx.py [--copy] run "key space"` | Space at the game's window, for a loading screen that waits for it while the game's loop runs |
 | `fx.py [--copy] acc` | From free roam into the helicopter's cabin (the ACC) |
 | `fx.py png <file.dds>`, `fx.py diff <a.dds> <b.dds>` | A texture as a picture; how two captures differ |
 | `check_release.py` | Fails if the tools reached a release build |
@@ -122,6 +124,7 @@ Everything here is left out of a release build altogether, because hooking syste
 | "no record came" | Nothing rendered: a freeze during loading stalls the game, or the scene is off |
 | "no capture came" | The GPU's frames were not timed: nothing rendered, as above |
 | `fx.py` times out | No dev build running there, or the copy failed to start: read `DevKit/launch.log` |
+| Stuck on a loading screen after travel or boot | It waits for Space, and the game's loop is stopped with it: `session action='recover'` presses it from outside, no restart. `fx.py --copy travel <map>` presses it too |
 | Report says "No record of the frame" | The case's `log.txt` has the error |
 | Title screen shows the cabin but a case fails | The title moves on by itself into a load. Use `fx.py --copy acc` |
 | A scenario says "did not reach the view" with the eye at 0 m | Compare `before-after.png`, then the numbers, before trusting it |
