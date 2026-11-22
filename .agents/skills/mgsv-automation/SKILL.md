@@ -55,6 +55,8 @@ Cases are in `DevKit/cases` beside each game:
 | Command | What it does |
 |---|---|
 | `fx.py [--copy] status` | Frame, camera, frozen or running, what the scene holds |
+| `fx.py [--copy] weather [<type> [<fog>]|off]`, `fx.py [--copy] clock [<seconds> [run]]` | The sky and the time of day, read or set |
+| MCP `session action='recover'` | A copy stuck in loading or on a dead sequence: stops it, starts it again and boots to free roam |
 | `fx.py [--copy] run "shaders <text>"`, `"shader <hash start or name> [save]"` | DevKit's shader list (stage, hash, source name, size), and one shader's assembly, saved with `save` into `DevKit/shaders` |
 | `fx.py [--copy] run "frame"` | DevKit's frame recorder: every draw with its shaders, targets and states into `DevKit/frame-log/frame-<n>.txt`; needs that folder |
 | `fx.py [--copy] probe <x> <y> [...]` | Shadow and lamp probes at render pixels. Needs ray-traced shadows or path tracing running |

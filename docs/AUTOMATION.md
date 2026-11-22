@@ -74,13 +74,15 @@ PhantomFX; without PhantomFX those lines say they are unknown, and `help` lists 
 
 | Tool | What it does | Replaces |
 | --- | --- | --- |
-| `session` | `status`, `open player\|copy`, `freeze`, `release`, `start` (install, launch, free roam), `stop`, `boot`, `travel`, `acc`; holds which game and build for later calls | `fx.py status`, `boot`, `acc`, `travel`, `install.ps1`, `launch.ps1` |
+| `session` | `status`, `open player\|copy`, `freeze`, `release`, `start` (install, launch, free roam), `stop`, `boot`, `travel`, `acc`, `recover` (a copy stuck loading: stop, start, boot); holds which game and build for later calls | `fx.py status`, `boot`, `acc`, `travel`, `install.ps1`, `launch.ps1` |
 | `run` | A batch of `automation.hpp` lines, each answered `ok` or an error; the escape hatch for anything not below | `fx.py run` |
 | `observe` | One query: `pixel`, `region`, `object`, `excluded`, `memory`, `lua`; filters by hash, owner, bounds or reason left out; returns rows and paths | `probe`, `peek`, `drawn`, `owner`, `lua` |
 | `capture` | `image`, `inspect` or `perf` on the frozen frame; returns files plus a preview as image content | `image`, `inspect`, `textures`, `perf`, `png`, `diff` |
 | `case` | `latest`, `open`, `record`, `replay`, `compare`; replay is a job | `case.py`, `fx.py replay` |
 | `verify` | Runs scenarios, returns per-check deltas against the limits and a pass or fail per check | `fx.py scenarios` |
 | `setting` | Reads or writes a `PhantomFX.ini` key, with a restore token; a player-game write needs `confirm` | `setting`, ini edits |
+| `weather` | The sky: `get`, `set` a type (0 sunny, 1 cloudy, 2 rainy, 3 sandstorm, 4 foggy, with its fog) or `off`; PhantomFX's WeatherManager | `weather [<type> [<fog>]|off]` |
+| `time_of_day` | The clock: reads it, or sets seconds since midnight and stops it unless `run` | `clock [<seconds> [run]]` |
 | `job` | `status`, `wait`, `cancel` for replay, scenarios, perf and launch | timeouts and retries |
 
 Travel, clock, weather, live, move, reveal, diagnostic, enhancements and remaster stay `run` lines. Making each a tool

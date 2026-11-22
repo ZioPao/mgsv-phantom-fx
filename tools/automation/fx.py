@@ -15,6 +15,10 @@
   fx.py [--copy] boot                      steps the automation copy from launch into free roam
   fx.py [--copy] acc                       from free roam into the helicopter's cabin at Mother Base, once it plays
   fx.py [--copy] travel <map>              another free roam, once it plays
+  fx.py [--copy] weather [<type> [<fog>]|off]  the game's sky: reads it, forces a type (0 sunny, 1 cloudy, 2 rainy,
+                                           3 sandstorm, 4 foggy) or lets the missions choose again
+  fx.py [--copy] clock [<seconds> [run]]   the time of day: reads it, or sets it there (since midnight) and stops it
+                                           unless run
   fx.py png <file.dds> [<out.png>]         a texture as a picture
   fx.py diff <a.dds> <b.dds>               how much two captures differ, and a PNG of where
 
@@ -274,6 +278,34 @@ def wait_for_scripts(timeout=120.0, least_seconds=45.0):
         time.sleep(0.3)
 
     raise TimeoutError(f"the game's scripts did not answer after {timeout:.0f} s: read {link() / 'launch.log'}")
+
+
+def state_field(name):
+    """One `state` line, as the game reports it."""
+    for line in run(["state"]).splitlines():
+        if line.startswith(name + "="):
+            return line
+
+    return ""
+
+
+def weather(setting=None, fog=None):
+    """The sky's weather: reads it, forces a type (0 sunny, 1 cloudy, 2 rainy, 3 sandstorm, 4 foggy), or `off`."""
+    if setting is None:
+        return state_field("weather")
+    line = "weather off" if setting == "off" else f"weather {setting}" + (f" {fog}" if fog is not None else "")
+    run([line])
+
+    return state_field("weather")
+
+
+def time_of_day(seconds=None, run_clock=False):
+    """The clock: reads it, or sets it (seconds since midnight), stopped there unless `run_clock`."""
+    if seconds is None:
+        return state_field("clock")
+    run([f"clock {seconds:g}" + (" run" if run_clock else "")])
+
+    return state_field("clock")
 
 
 def boot(timeout=180.0):
@@ -572,6 +604,10 @@ def main():
         diff(*rest)
     elif command == "travel":
         travel(rest[0])
+    elif command == "weather":
+        print(weather(*rest))
+    elif command == "clock":
+        print(time_of_day(float(rest[0]) if rest and rest[0] != "run" else None, "run" in rest))
     elif command == "boot":
         print(f"in the game after {boot():.1f} s")
     elif command == "acc":

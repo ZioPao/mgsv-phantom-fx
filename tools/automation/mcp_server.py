@@ -220,8 +220,8 @@ class Job:
 
 JOBS: dict[str, Job] = {}
 JOB_LOCK = threading.Lock()
-MUTATING = {"start", "boot", "travel", "acc", "replay", "scenarios"}
-JOB_ETA = {"start": 150, "boot": 45, "travel": 40, "acc": 20, "replay": 150, "scenarios": 60}
+MUTATING = {"start", "recover", "boot", "travel", "acc", "replay", "scenarios"}
+JOB_ETA = {"start": 150, "recover": 170, "boot": 45, "travel": 40, "acc": 20, "replay": 150, "scenarios": 60}
 
 
 def pump(job: Job) -> None:
@@ -261,13 +261,14 @@ def job_payload(job: Job, lines: int = 60) -> dict:
 # ---------------------------------------------------------------- session
 
 @mcp.tool()
-def session(action: Literal["status", "open", "freeze", "release", "boot", "travel", "acc", "start", "stop"] = "status",
+def session(action: Literal["status", "open", "freeze", "release", "boot", "travel", "acc", "start", "stop", "recover"] = "status",
             target: Literal["player", "copy"] | None = None,
             destination: Literal["afghanistan", "africa", "motherbase"] | None = None) -> CallToolResult:
     """What the game is doing, and which game the tools talk to. `open` sets the default target; `start` installs
-    this build into the automation copy, presses its startup notices away and stops in free roam. boot, travel,
-    acc and start return a job. Stop the copy when the task is done; a copy started here closes after ten minutes
-    with no tool call, and when the server exits."""
+    this build into the automation copy, presses its startup notices away and stops in free roam. recover stops a
+    copy stuck in a loading screen or a dead sequence, starts it again and boots it. boot, travel, acc, start and
+    recover return a job. Stop the copy when the task is done; a copy started here closes after ten minutes with no
+    tool call, and when the server exits."""
     note_activity()
     global session_target, owned_copy
     with LOCK:
@@ -287,7 +288,15 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
             owned_copy = False
             return ok({"stopped": stopped}, text="Stopped the automation copy." if stopped else "No copy is running.")
 
-        if action == "start":
+        if action == "recover":
+            # A copy stuck in a loading screen or on a dead sequence has no line that moves it: only a fresh start,
+            # and restart_copy stops whatever copy runs.
+            if target == "player":
+                return fail("WRONG_TARGET", "recover restarts the automation copy, never the player's game.",
+                    "Ask the user to close and reopen their game.")
+            target = "copy"
+
+        if action in ("start", "recover"):
             if target == "player":
                 return fail("WRONG_TARGET", "start installs into the automation copy, never the player's game.", "Use session with action='start', target='copy'.")
             refused = needs_steam()
@@ -301,7 +310,7 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
                 ini = GAMES["copy"] / "PhantomFX.ini"  # Only the copy is installed here: keep its settings
             if not ini.exists():
                 return fail("NO_INI", "Neither game has a PhantomFX.ini, so there are no settings to copy.", "Start a game once so it writes its settings.")
-            result = start_job("start", "copy", [str(ini)], JOB_ETA["start"])
+            result = start_job(action, "copy", [str(ini)], JOB_ETA[action])
             if not result.is_error:
                 session_target = "copy"
                 fx.game_folder = GAMES["copy"]
@@ -336,7 +345,7 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
             extra = [destination] if destination else []
             return start_job(action, name, extra, JOB_ETA[action])
 
-        return fail("BAD_ACTION", f"Unknown action {action!r}.", "Use status, open, freeze, release, boot, travel, acc, start or stop.")
+        return fail("BAD_ACTION", f"Unknown action {action!r}.", "Use status, open, freeze, release, boot, travel, acc, start, stop or recover.")
 
 
 # ---------------------------------------------------------------- run
@@ -469,6 +478,79 @@ def case(action: Literal["latest", "open", "record", "replay", "compare"] = "lat
             message = f"No case {name} in {GAMES[game]}." if name else f"No case has been recorded in {GAMES[game]}."
             return fail("CASE_MISSING", message, "Press F9 in the game, or ask the user to.")
         return read_case(folder)
+
+
+# ---------------------------------------------------------------- weather and time
+
+def state_values() -> dict[str, str]:
+    """The `state` line's key=value pairs, as the running game reports them."""
+    try:
+        text = fx.run(["state"], timeout=10)
+    except (TimeoutError, OSError, PermissionError):
+        return {}
+
+    values = {}
+    for line in text.splitlines():
+        if "=" in line and not line.startswith(">"):
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip()
+    return values
+
+
+@mcp.tool()
+def weather(action: Literal["get", "set", "off"] = "get", weather_type: int | None = None, fog: float | None = None,
+            target: Literal["player", "copy"] | None = None) -> CallToolResult:
+    """The game's sky. get reads the clock and the weather; set forces a type (0 sunny, 1 cloudy, 2 rainy, 3 sandstorm,
+    4 foggy, fog's density only for 4); off lets the game's missions choose again. Needs PhantomFX loaded."""
+    note_activity()
+    with LOCK:
+        try:
+            resolve(target)
+        except ValueError as error:
+            return fail("BAD_TARGET", str(error), "Use target='player' or target='copy'.")
+
+        if action == "set":
+            if weather_type is None or not 0 <= weather_type <= 4:
+                return fail("NEEDS_TYPE", "set needs a weather type.", "0 sunny, 1 cloudy, 2 rainy, 3 sandstorm, 4 foggy.")
+            line = f"weather {weather_type}" + (f" {fog}" if fog is not None else "")
+            result = send([line], timeout=20)
+            if result.is_error:
+                return result
+        elif action == "off":
+            result = send(["weather off"], timeout=20)
+            if result.is_error:
+                return result
+
+        values = state_values()
+        if "weather" not in values:
+            return fail("NOT_LOADED", "The game did not answer with its sky.", "Start a dev build with PhantomFX loaded there.")
+        requested, _, density = values["weather"].partition(" ")
+        return ok({"target": target_label(), "clock": values.get("clock"), "weather": requested, "fog": density or None},
+            text=f"weather {requested}" + (f", fog {density}" if density else "") + f"; clock {values.get('clock')}")
+
+
+@mcp.tool()
+def time_of_day(seconds: float | None = None, run: bool = False, target: Literal["player", "copy"] | None = None) -> CallToolResult:
+    """The game's clock: without seconds, reads it; with seconds since midnight, sets it there and stops its clock
+    unless run=true. Needs PhantomFX loaded."""
+    note_activity()
+    with LOCK:
+        try:
+            resolve(target)
+        except ValueError as error:
+            return fail("BAD_TARGET", str(error), "Use target='player' or target='copy'.")
+
+        if seconds is not None:
+            if not 0 <= seconds < 86400:
+                return fail("BAD_SECONDS", "The clock is seconds since midnight.", "Pass a number from 0 to 86399.")
+            result = send([f"clock {seconds:g}" + (" run" if run else "")], timeout=20)
+            if result.is_error:
+                return result
+
+        values = state_values()
+        if "clock" not in values:
+            return fail("NOT_LOADED", "The game did not answer with its clock.", "Start a dev build with PhantomFX loaded there.")
+        return ok({"target": target_label(), "clock": values["clock"], "running": run}, text=f"clock {values['clock']}")
 
 
 # ---------------------------------------------------------------- capture
@@ -643,7 +725,7 @@ def job_main(arguments: list[str]) -> None:
     fx.game_folder = GAMES[target]
 
     try:
-        if action == "start":
+        if action in ("start", "recover"):
             fx.restart_copy(Path(rest[0]))
             print("started the automation copy")
             print(f"in the game after {fx.boot():.1f} s")
