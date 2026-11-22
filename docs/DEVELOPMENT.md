@@ -605,13 +605,21 @@ shows what it printed and returned, or its error with the stack.
   whether to try the code as an expression first (`return ` before it, as an interactive Lua does).
   While the code runs, `print` collects lines in place of the game's; the code runs under `xpcall`
   with `debug.traceback` when the game has the debug library. The lines and the returned values come
-  back as one string; an error is raised again with the lines before it.
-- **Hooks.** Before the tools run, each function above is checked against this build's bytes at its
-  address (`game_code::matchesPastHooks`). A function another mod hooked is accepted when the rest of
-  the bytes, past the hook's jump and the `int3`/`nop` it fills the rest of the cut instruction with,
-  are this build's. Infinite Heaven's IHHook hooks these functions, so its game's Lua tools call
-  through it. A function whose code differs elsewhere still makes the tools unavailable, and the log
-  names its address.
+  back as one string. A script's failure does not raise: it comes back as text that starts with `\1ERROR `,
+  which no script's own output can, with the lines before it and the error last. It must not raise, because
+  another mod's hooks over the game's Lua turn an error raised past them into the game's death.
+- **Hooks.** Before the tools run, the seven functions the harness calls are checked against this build's
+  bytes at their address (`game_code::matchesPastHooks`): the scope's begin and end, `luaL_loadbuffer`,
+  `lua_pcall`, `lua_tolstring`, `lua_pushlstring` and `lua_pushboolean`. A function another mod hooked is
+  accepted when the rest of the bytes, past the hook's jump and the `int3`/`nop` it fills the rest of the
+  cut instruction with, are this build's. Infinite Heaven's IHHook hooks these functions, so its game's Lua
+  tools call through it. A function whose code differs elsewhere still makes the tools unavailable, and the
+  log names its address. The check's limits: it knows two openings, `jmp rel32` (`E9`) and `jmp [rip + disp32]`
+  (`FF 25`, with its target after it when the displacement is zero, 14 bytes, else 6), so an opening of
+  another shape — a short `jmp` (`EB`), a push-and-return trampoline, `mov rax` + `jmp rax` — leaves the tools
+  unavailable although the game may be fine. It compares from that opening only up to the bytes it holds for
+  each function, and only at start-up: a hook installed later, or a patch of the body that leaves the first
+  bytes this build's, is not seen. And it needs at least 8 bytes of the expected code past the opening.
 
 ### Travel
 
@@ -3322,7 +3330,13 @@ With DLSS Ray Reconstruction denoising, the rays go out without the filter (see 
   the clip position and then works out the sampling position as the game's does: `m_renderInfo` times
   `m_renderBuffer.zwzw` from `cVSSystem` for the viewport within the targets. At the villa lamps after
   it, `0.000%` with the effects on or off. The lights drawn again add it to their copies of the volumes,
-  and their bounds come from the volume through the unjittered `m_projectionView`.
+  and their bounds come from the volume through the unjittered `m_projectionView`. The shift is in NDC
+  times `w`, so it holds for any projection: a perspective pass scales it with depth, and an orthographic
+  one (`w` 1) moves by the jitter itself. It is read from the scene constants the draw binds, not from a
+  camera of the add-on's: a light's draws bind the main camera's, which is why the jitter reaches them; a
+  pass whose `c28` is zero gets no shift, so the shader is a no-op there rather than a wrong shift — the
+  game without the upscaler, or a view the add-on did not jitter, such as the intro mirror's smaller one
+  when the frames it starts on are not the main camera's.
 - **Drawn with.** Each kind of light (point or spot, mask or not, `SSLighting2` or `NA`) is drawn again
   with the game's own shader for it with specular and without a shadow map, which reads `c8.x` and the
   specular tables at `t8` and `t9`; a light whose own shader has no specular gets a scale of 1, as the
