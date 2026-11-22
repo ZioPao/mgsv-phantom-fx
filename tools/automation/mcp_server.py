@@ -221,7 +221,7 @@ class Job:
 JOBS: dict[str, Job] = {}
 JOB_LOCK = threading.Lock()
 MUTATING = {"start", "recover", "boot", "travel", "acc", "replay", "scenarios"}
-JOB_ETA = {"start": 150, "recover": 170, "boot": 45, "travel": 40, "acc": 20, "replay": 150, "scenarios": 60}
+JOB_ETA = {"start": 150, "recover": 90, "boot": 45, "travel": 40, "acc": 20, "replay": 150, "scenarios": 60}
 
 
 def pump(job: Job) -> None:
@@ -265,8 +265,8 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
             target: Literal["player", "copy"] | None = None,
             destination: Literal["afghanistan", "africa", "motherbase"] | None = None) -> CallToolResult:
     """What the game is doing, and which game the tools talk to. `open` sets the default target; `start` installs
-    this build into the automation copy, presses its startup notices away and stops in free roam. recover stops a
-    copy stuck in a loading screen or a dead sequence, starts it again and boots it. boot, travel, acc, start and
+    this build into the automation copy, presses its startup notices away and stops in free roam. recover presses a
+    copy past a loading screen or a sequence that waits for a key, without restarting it. boot, travel, acc, start and
     recover return a job. Stop the copy when the task is done; a copy started here closes after ten minutes with no
     tool call, and when the server exits."""
     note_activity()
@@ -289,14 +289,13 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
             return ok({"stopped": stopped}, text="Stopped the automation copy." if stopped else "No copy is running.")
 
         if action == "recover":
-            # A copy stuck in a loading screen or on a dead sequence has no line that moves it: only a fresh start,
-            # and restart_copy stops whatever copy runs.
+            # A copy stuck on a screen that waits for a key: press it, without restarting the game.
             if target == "player":
-                return fail("WRONG_TARGET", "recover restarts the automation copy, never the player's game.",
+                return fail("WRONG_TARGET", "recover presses a key in the automation copy; it never starts the player's game.",
                     "Ask the user to close and reopen their game.")
-            target = "copy"
+            return start_job("recover", "copy", [], JOB_ETA["recover"])
 
-        if action in ("start", "recover"):
+        if action == "start":
             if target == "player":
                 return fail("WRONG_TARGET", "start installs into the automation copy, never the player's game.", "Use session with action='start', target='copy'.")
             refused = needs_steam()
@@ -725,7 +724,9 @@ def job_main(arguments: list[str]) -> None:
     fx.game_folder = GAMES[target]
 
     try:
-        if action in ("start", "recover"):
+        if action == "recover":
+            print(f"playing after {fx.unstick():.1f} s")
+        elif action == "start":
             fx.restart_copy(Path(rest[0]))
             print("started the automation copy")
             print(f"in the game after {fx.boot():.1f} s")

@@ -74,7 +74,8 @@ PhantomFX; without PhantomFX those lines say they are unknown, and `help` lists 
 
 | Tool | What it does | Replaces |
 | --- | --- | --- |
-| `session` | `status`, `open player\|copy`, `freeze`, `release`, `start` (install, launch, free roam), `stop`, `boot`, `travel`, `acc`, `recover` (a copy stuck loading: stop, start, boot); holds which game and build for later calls | `fx.py status`, `boot`, `acc`, `travel`, `install.ps1`, `launch.ps1` |
+| `key` | Presses a key at the game's window, for loading screens that wait for one: `key space` | `key <name> [times]` |
+| session | `status`, `open player\|copy`, `freeze`, `release`, `start` (install, launch, free roam), `stop`, `boot`, `travel`, `acc`, `recover` (a copy stuck on a screen that waits for a key: presses it, no restart); holds which game and build for later calls | `fx.py status`, `boot`, `acc`, `travel`, `install.ps1`, `launch.ps1` |
 | `run` | A batch of `automation.hpp` lines, each answered `ok` or an error; the escape hatch for anything not below | `fx.py run` |
 | `observe` | One query: `pixel`, `region`, `object`, `excluded`, `memory`, `lua`; filters by hash, owner, bounds or reason left out; returns rows and paths | `probe`, `peek`, `drawn`, `owner`, `lua` |
 | `capture` | `image`, `inspect` or `perf` on the frozen frame; returns files plus a preview as image content | `image`, `inspect`, `textures`, `perf`, `png`, `diff` |

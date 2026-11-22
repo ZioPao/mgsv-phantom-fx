@@ -6,6 +6,7 @@
 #include "devkit/frame_log.hpp"
 #include "devkit/game_lua.hpp"
 #include "devkit/host.hpp"
+#include "devkit/keys.hpp"
 #include "devkit/log.hpp"
 #include "devkit/save_redirect.hpp"
 #include "devkit/travel.hpp"
@@ -181,7 +182,7 @@ std::string statusText()
 
 std::string listing()
 {
-    std::string text = "built in: lua travel cutscene state peek wait status case_done help frame shaders shader\n";
+    std::string text = "built in: lua travel cutscene key state peek wait status case_done help frame shaders shader\n";
     if (commandTable.empty()) return text + "added by add-ons: nothing\n";
 
     text += "added by add-ons:";
@@ -217,6 +218,20 @@ void run(Script& running, const std::string& line)
         const auto* const map = std::ranges::find(Maps, name, &std::pair<std::string_view, travel::Map>::first);
         if (map != std::end(Maps)) travel::go(map->second, hasPlace ? std::optional(place) : std::nullopt);
         else running.output += "error: travel afghanistan|africa|motherbase [<x> <y> <z>]\n";
+    }
+    else if (command == "key")
+    {
+        // The screens that wait for one: the loading screens press space, sometimes more than once.
+        std::istringstream arguments(rest);
+        std::string name;
+        int times{1};
+        arguments >> name >> times;
+        if (!keys::keyOf(name)) running.output += "error: key space|enter|escape|tab|up|down|left|right|e|f|q|0x<code> [times]\n";
+        else
+        {
+            keys::press(name, std::max(times, 1));
+            running.output += "pressed " + name + (times > 1 ? " " + std::to_string(times) + " times" : "") + "\n";
+        }
     }
     else if (command == "cutscene")
     {

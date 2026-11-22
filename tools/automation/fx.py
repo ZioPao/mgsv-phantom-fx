@@ -308,11 +308,40 @@ def time_of_day(seconds=None, run_clock=False):
     return state_field("clock")
 
 
+def press_space():
+    """Space to the game's window, where a loading screen waits for it. As press_enter, the game reads the keyboard's
+    state, so the off-screen window is brought forward for the key and the window that had it is put back."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+    except (AttributeError, OSError):
+        return False
+
+    hwnd = user32.FindWindowW(None, "METAL GEAR SOLID V: THE PHANTOM PAIN")
+    if not hwnd:
+        return False
+
+    previous = user32.GetForegroundWindow()
+    user32.keybd_event(0x12, 0, 0, 0)  # Alt: Windows then lets this process set the foreground
+    user32.SetForegroundWindow(hwnd)
+    user32.keybd_event(0x12, 0, 2, 0)
+    time.sleep(0.2)
+    user32.keybd_event(0x20, 0, 0, 0)
+    user32.keybd_event(0x20, 0, 2, 0)
+    time.sleep(0.3)
+    if previous and previous != hwnd:
+        user32.SetForegroundWindow(previous)
+
+    return True
+
+
 def boot(timeout=180.0):
-    """Steps the game from wherever it is into free roam; returns the seconds it took."""
+    """Steps the game from wherever it is into free roam; returns the seconds it took. A loading screen that waits
+    for a key gets space every few seconds."""
     start = time.monotonic()
     wait_for_scripts()
     last = None
+    pressed = 0.0
     while time.monotonic() - start < timeout:
         try:
             state = run([f"lua {BOOT_STEP}", "status"], timeout=30).splitlines()
@@ -325,9 +354,37 @@ def boot(timeout=180.0):
         if state[1].endswith(" playing"):
             return time.monotonic() - start
 
+        if time.monotonic() - pressed > 6:
+            pressed = time.monotonic()
+            press_space()
+
         time.sleep(0.5)
 
     raise TimeoutError(f"not in the game after {timeout} s")
+
+
+def unstick(timeout=90.0):
+    """Presses a copy past a loading screen or a sequence that waits for a key, without restarting it; returns the
+    seconds it took to play."""
+    start = time.monotonic()
+    last = None
+    while time.monotonic() - start < timeout:
+        try:
+            state = run([f"lua {BOOT_STEP}", "status"], timeout=20).splitlines()
+        except (TimeoutError, OSError, PermissionError):
+            time.sleep(1)
+            continue
+
+        if state[1] != last:
+            print(f"{time.monotonic() - start:6.1f} s  {state[1]}", flush=True)
+            last = state[1]
+        if state[1].endswith(" playing"):
+            return time.monotonic() - start
+
+        press_space()
+        time.sleep(1)
+
+    raise TimeoutError(f"still not playing after {timeout} s; the game may need recover")
 
 
 MAPS = {"afghanistan": 30010, "africa": 30020, "motherbase": 30050}
@@ -348,6 +405,9 @@ def travel(destination, place=None, timeout=300.0):
             loading_seen = True
         elif loading_seen and state[0] == str(code):
             return
+        if loading_seen and time.monotonic() - asked > 6:
+            asked = time.monotonic()
+            press_space()
         elif not loading_seen and state[0] != str(code) and time.monotonic() - asked > 5:
             run([f"travel {destination}" + (f" {place}" if place else "")])
             asked = time.monotonic()
