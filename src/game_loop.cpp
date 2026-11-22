@@ -10,8 +10,10 @@
 
 #include <Windows.h>
 #include <MinHook.h>
+#include <array>
 #include <atomic>
 #include <cstring>
+#include <mutex>
 
 namespace phantom_fx::game_loop
 {
@@ -33,6 +35,9 @@ FrameStart originalFrameStart{};
 FrameEnd originalFrameEnd{};
 std::atomic<std::uint32_t> current{};
 
+std::mutex callbacksMutex;
+std::array<FrameStartCallback, 8> frameStartCallbacks{};
+
 std::uint32_t countOf(const std::uint8_t* loop)
 {
     return *reinterpret_cast<const std::uint32_t*>(loop + FrameCountOffset);
@@ -46,6 +51,15 @@ void frameStart(std::uint8_t* loop, void* argument)
     weather::onFrameStart();
     character::onFrameStart();
     if constexpr (DevTools) dev::onFrameStart();
+    {
+        std::array<FrameStartCallback, 8> callbacks;
+        {
+            std::scoped_lock lock(callbacksMutex);
+            callbacks = frameStartCallbacks;
+        }
+        for (const auto callback : callbacks)
+            if (callback) callback();
+    }
     originalFrameStart(loop, argument);
     current = frame;
 }
@@ -87,4 +101,40 @@ std::uint32_t currentFrame() noexcept
 {
     return current;
 }
+
+bool registerFrameStart(FrameStartCallback callback) noexcept
+{
+    if (!callback) return false;
+
+    std::scoped_lock lock(callbacksMutex);
+    for (const auto registered : frameStartCallbacks)
+        if (registered == callback) return true;
+    for (auto& slot : frameStartCallbacks)
+    {
+        if (slot) continue;
+
+        slot = callback;
+        return true;
+    }
+
+    return false;
+}
+
+void unregisterFrameStart(FrameStartCallback callback) noexcept
+{
+    std::scoped_lock lock(callbacksMutex);
+    for (auto& slot : frameStartCallbacks)
+        if (slot == callback) slot = nullptr;
+}
+}
+
+// The devkit add-on's way onto this add-on's frame start, without a second MinHook hook of its own.
+extern "C" __declspec(dllexport) bool PhantomFXRegisterFrameStart(void (*callback)()) noexcept
+{
+    return phantom_fx::game_loop::registerFrameStart(callback);
+}
+
+extern "C" __declspec(dllexport) void PhantomFXUnregisterFrameStart(void (*callback)()) noexcept
+{
+    phantom_fx::game_loop::unregisterFrameStart(callback);
 }

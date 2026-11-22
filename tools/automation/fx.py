@@ -1,4 +1,4 @@
-"""Talks to the add-on's automation (src/dev/automation.hpp) in a running dev build.
+"""Talks to the add-on's automation (src/devkit/automation.hpp) in a running dev build.
 
   fx.py [--copy] run <line> [<line> ...]   runs the lines as one command file and prints the result
   fx.py [--copy] status                    what the game is doing
@@ -15,6 +15,10 @@
   fx.py [--copy] boot                      steps the automation copy from launch into free roam
   fx.py [--copy] acc                       from free roam into the helicopter's cabin at Mother Base, once it plays
   fx.py [--copy] travel <map>              another free roam, once it plays
+  fx.py [--copy] weather [<type> [<fog>]|off]  the game's sky: reads it, forces a type (0 sunny, 1 cloudy, 2 rainy,
+                                           3 sandstorm, 4 foggy) or lets the missions choose again
+  fx.py [--copy] clock [<seconds> [run]]   the time of day: reads it, or sets it there (since midnight) and stops it
+                                           unless run
   fx.py png <file.dds> [<out.png>]         a texture as a picture
   fx.py diff <a.dds> <b.dds>               how much two captures differ, and a PNG of where
 
@@ -33,9 +37,10 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+# The two games; the environment names another install of either.
 PLAYER_GAME = Path(os.environ.get("PHANTOM_FX_GAME", r"C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP"))
-AUTOMATION_GAME = Path.home() / "Documents" / "Development" / "mgsv-automation" / "game"
-LINK = "PhantomFX-automation"
+AUTOMATION_GAME = Path(os.environ.get("PHANTOM_FX_AUTOMATION_GAME", Path.home() / "Documents" / "Development" / "mgsv-automation" / "game"))
+LINK = "DevKit"
 # What is expected of each scenario, in the repository; their pictures and depth, which stay on this machine.
 SCENARIOS = Path(__file__).resolve().parent / "scenarios.json"
 BASELINES = AUTOMATION_GAME.parent / "baselines"
@@ -250,39 +255,139 @@ return vars.missionCode .. " " .. tostring(sequence) .. (playing and " playing" 
 """.strip().replace("\n", " ")
 
 
-def wait_for_scripts(timeout=90.0, least_seconds=45.0):
+def press_enter():
+    """Enter to the game's window, for the notices before its scripts run (autosave, online information). The game
+    reads the keyboard's state, not window messages, so the off-screen window is brought forward for the key and the
+    window that had it is put back."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+    except (AttributeError, OSError):
+        return False
+
+    hwnd = user32.FindWindowW(None, "METAL GEAR SOLID V: THE PHANTOM PAIN")
+    if not hwnd:
+        return False
+
+    previous = user32.GetForegroundWindow()
+    user32.keybd_event(0x12, 0, 0, 0)  # Alt: Windows then lets this process set the foreground
+    user32.SetForegroundWindow(hwnd)
+    user32.keybd_event(0x12, 0, 2, 0)
+    time.sleep(0.25)
+    user32.keybd_event(0x0D, 0, 0, 0)
+    user32.keybd_event(0x0D, 0, 2, 0)
+    time.sleep(0.4)
+    if previous and previous != hwnd:
+        user32.SetForegroundWindow(previous)
+
+    return True
+
+
+def wait_for_scripts(timeout=120.0, least_seconds=45.0):
     """Until the game is far enough through start-up to answer a Lua call. With another mod's hooks over the
-    game's Lua (Infinite Heaven's IHHook), a script state exists seconds after launch but a call then
-    crashes the game (0xC0000409); from about 45 s, at the title, it answers. A game without the hooks says
-    'not running yet' instead and is harmless to ask."""
+    game's Lua (Infinite Heaven's IHHook), a call too early can crash the game, so the first 45 s only presses
+    the notices away and watches the process; from then on a camera and a frame past 200 mean it is ready."""
     started = time.monotonic()
     deadline = started + timeout
+    last_press = 0.0
+    # A game already in play answers at once; nothing is pressed into it.
+    try:
+        line = run(["status"], timeout=5).splitlines()[1]
+    except (TimeoutError, FileNotFoundError, IndexError):
+        line = ""
+    frame = re.match(r"frame (\d+)", line)
+    if frame and int(frame.group(1)) > 200 and " camera " in f" {line} ":
+        return
+
+    print("waiting for the game's scripts; pressing its startup notices away", flush=True)
     while time.monotonic() < deadline:
-        if time.monotonic() - started < least_seconds:
-            time.sleep(3)
-            # The process can take a few seconds to appear after launch.ps1 starts it.
-            if time.monotonic() - started > 15 and not game_running():
-                raise GameGone(f"no game runs in {game_folder}: read {link() / 'launch.log'}")
+        now = time.monotonic()
+        if now - last_press > 2.5:
+            press_enter()
+            last_press = now
+
+        if now - started < least_seconds:
+            time.sleep(0.4)
             continue
 
         try:
-            line = run(["status"], timeout=30).splitlines()[1]
-        except (TimeoutError, FileNotFoundError):
-            time.sleep(0.5)
+            line = run(["status"], timeout=5).splitlines()[1]
+        except (TimeoutError, FileNotFoundError, IndexError):
+            time.sleep(0.3)
             continue
 
         frame = re.match(r"frame (\d+)", line)
         if frame and int(frame.group(1)) > 200 and " camera " in f" {line} ":
+            print(f"the game's scripts answer after {time.monotonic() - started:.0f} s", flush=True)
             return
 
-        time.sleep(0.5)
+        time.sleep(0.3)
+
+    raise TimeoutError(f"the game's scripts did not answer after {timeout:.0f} s: read {link() / 'launch.log'}")
+
+
+def state_field(name):
+    """One `state` line, as the game reports it."""
+    for line in run(["state"]).splitlines():
+        if line.startswith(name + "="):
+            return line
+
+    return ""
+
+
+def weather(setting=None, fog=None):
+    """The sky's weather: reads it, forces a type (0 sunny, 1 cloudy, 2 rainy, 3 sandstorm, 4 foggy), or `off`."""
+    if setting is None:
+        return state_field("weather")
+    line = "weather off" if setting == "off" else f"weather {setting}" + (f" {fog}" if fog is not None else "")
+    run([line])
+
+    return state_field("weather")
+
+
+def time_of_day(seconds=None, run_clock=False):
+    """The clock: reads it, or sets it (seconds since midnight), stopped there unless `run_clock`."""
+    if seconds is None:
+        return state_field("clock")
+    run([f"clock {seconds:g}" + (" run" if run_clock else "")])
+
+    return state_field("clock")
+
+
+def press_space():
+    """Space to the game's window, where a loading screen waits for it. As press_enter, the game reads the keyboard's
+    state, so the off-screen window is brought forward for the key and the window that had it is put back."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+    except (AttributeError, OSError):
+        return False
+
+    hwnd = user32.FindWindowW(None, "METAL GEAR SOLID V: THE PHANTOM PAIN")
+    if not hwnd:
+        return False
+
+    previous = user32.GetForegroundWindow()
+    user32.keybd_event(0x12, 0, 0, 0)  # Alt: Windows then lets this process set the foreground
+    user32.SetForegroundWindow(hwnd)
+    user32.keybd_event(0x12, 0, 2, 0)
+    time.sleep(0.2)
+    user32.keybd_event(0x20, 0, 0, 0)
+    user32.keybd_event(0x20, 0, 2, 0)
+    time.sleep(0.3)
+    if previous and previous != hwnd:
+        user32.SetForegroundWindow(previous)
+
+    return True
 
 
 def boot(timeout=180.0):
-    """Steps the game from wherever it is into free roam; returns the seconds it took."""
+    """Steps the game from wherever it is into free roam; returns the seconds it took. A loading screen that waits
+    for a key gets space every few seconds."""
     start = time.monotonic()
     wait_for_scripts()
     last = None
+    pressed = 0.0
     while time.monotonic() - start < timeout:
         try:
             state = run([f"lua {BOOT_STEP}", "status"], timeout=30).splitlines()
@@ -295,9 +400,37 @@ def boot(timeout=180.0):
         if state[1].endswith(" playing"):
             return time.monotonic() - start
 
+        if time.monotonic() - pressed > 6:
+            pressed = time.monotonic()
+            press_space()
+
         time.sleep(0.5)
 
     raise TimeoutError(f"not in the game after {timeout} s")
+
+
+def unstick(timeout=90.0):
+    """Presses a copy past a loading screen or a sequence that waits for a key, without restarting it; returns the
+    seconds it took to play."""
+    start = time.monotonic()
+    last = None
+    while time.monotonic() - start < timeout:
+        try:
+            state = run([f"lua {BOOT_STEP}", "status"], timeout=20).splitlines()
+        except (TimeoutError, OSError, PermissionError):
+            time.sleep(1)
+            continue
+
+        if state[1] != last:
+            print(f"{time.monotonic() - start:6.1f} s  {state[1]}", flush=True)
+            last = state[1]
+        if state[1].endswith(" playing"):
+            return time.monotonic() - start
+
+        press_space()
+        time.sleep(1)
+
+    raise TimeoutError(f"still not playing after {timeout} s; the game may need recover")
 
 
 MAPS = {"afghanistan": 30010, "africa": 30020, "motherbase": 30050}
@@ -318,6 +451,9 @@ def travel(destination, place=None, timeout=180.0, again=False):
             loading_seen = True
         elif loading_seen and state[0] == str(code):
             return
+        if loading_seen and time.monotonic() - asked > 6:
+            asked = time.monotonic()
+            press_space()
         elif not loading_seen and (again or state[0] != str(code)) and time.monotonic() - asked > 5:
             run([f"travel {destination}" + (f" {place}" if place else "")])
             asked = time.monotonic()
@@ -395,9 +531,22 @@ def windows_powershell():
     return {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
 
 
+def steam_running():
+    """Whether Steam runs: the game cannot initialize SteamAPI without it, and sits on its error dialog instead."""
+    try:
+        listed = subprocess.run(["tasklist", "/FI", "IMAGENAME eq steam.exe"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return True  # A check that cannot answer must not stop a run
+
+    return "steam.exe" in listed.lower()
+
+
 def restart_copy(ini):
     """A fresh automation copy on this checkout's build with `ini`'s settings. Never beside the player's game:
     launch.ps1 puts the player's files back as it ends, which would undo that game's saves."""
+    if not steam_running():
+        raise SystemExit("Steam is not running: start it and log in, then try again.")
+
     command = "(Get-Process mgsvtpp -ErrorAction SilentlyContinue).Path"
     running = subprocess.run(["powershell", "-NoProfile", "-Command", command], capture_output=True, text=True).stdout.split("\n")
     games = [Path(line.strip()) for line in running if line.strip()]
@@ -639,6 +788,10 @@ def main():
         diff(*rest)
     elif command == "travel":
         travel(rest[0])
+    elif command == "weather":
+        print(weather(*rest))
+    elif command == "clock":
+        print(time_of_day(float(rest[0]) if rest and rest[0] != "run" else None, "run" in rest))
     elif command == "boot":
         print(f"in the game after {boot():.1f} s")
     elif command == "acc":

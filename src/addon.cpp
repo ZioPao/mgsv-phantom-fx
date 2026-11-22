@@ -3,7 +3,7 @@
 // the rest of Phantom FX's features (features/, one folder each), plugged into the game's passes
 // they share (passes/). It lets the game start under ReShade (device_check.hpp), holds the settings
 // and hands every change to the modules (core.hpp), draws the settings window (menu.hpp), and has
-// an optional pipeline recorder (frame_log.hpp), the GPU costs of its passes (performance.hpp) and
+// the GPU costs of its passes (performance.hpp) and
 // weather and time control (weather.hpp) for development.
 // NGX receives ReShade's wrapped context, so other add-ons that follow DLSS evaluations see it like
 // a game's own DLSS.
@@ -32,7 +32,6 @@
 #include "features/upscaling/fxaa.hpp"
 #include "features/upscaling/upscaler.hpp"
 #include "features/volumetric_fog/atmosphere.hpp"
-#include "frame_log.hpp"
 #include "fxui/fxui.hpp"
 #include "game_dither.hpp"
 #include "game_light_volumes.hpp"
@@ -469,6 +468,8 @@ void onDestroyResourceView(device*, resource_view destroyed)
 bool onCreatePipeline(device* device, pipeline_layout, uint32_t count, const pipeline_subobject* subobjects)
 {
     if (device->get_api() != device_api::d3d11) return false;
+    // The tools build leaves the game's shaders as they are: no dither out, no HDR in.
+    if constexpr (ToolsOnly) return false;
 
     bool changed{};
     for (uint32_t i = 0; i < count; ++i)
@@ -574,12 +575,9 @@ void onDestroyCommandList(command_list* list)
 }
 
 // With frame generation the game's swap chain is the presenter's stand-in, whose Present follows.
-void onPresent(command_queue* queue, swapchain* swapChain, const rect*, const rect*, uint32_t, const rect*)
+void onPresent(command_queue* queue, swapchain*, const rect*, const rect*, uint32_t, const rect*)
 {
     if (queue->get_immediate_command_list() != immediateList) return;
-
-    if constexpr (DevTools)
-        dev::onPresent(native(queue->get_immediate_command_list()), reinterpret_cast<ID3D11Resource*>(swapChain->get_current_back_buffer().handle));
 
     const bool generating = presenter::active();
     upscaler::setFrameGeneration(generating);
@@ -628,7 +626,6 @@ void onReshadePresent(effect_runtime* runtime)
     if (runtime->is_key_pressed(VK_F4)) photo_mode::toggleBlur();
     if constexpr (DevTools)
     {
-        if (runtime->is_key_pressed(VK_F9)) dev::onCaseKey();
         // Enter teleports the player to the free camera (photo_mode.cpp); the overlay's own Enter is left alone.
         if (!overlayOpen && runtime->is_key_pressed(VK_RETURN)) photo_mode::teleport();
     }
@@ -663,7 +660,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     log(sun_movement::makeSmooth());
     if (isSupportedGameBuild() && !weather::supported()) log("The weather manager has unexpected code; the weather menu is unavailable.");
 
-    frame_log::install(directory);
     if constexpr (DevTools) dev::install(directory);
     upscaler::initialize(directory);
     core::initialize(directory, isSupportedGameBuild());
@@ -737,6 +733,5 @@ extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshade
     immediateList = nullptr;
     effects = nullptr;
     reshade::unregister_overlay("Phantom FX", onOverlay);
-    frame_log::uninstall();
     reshade::unregister_addon(addon, reshadeModule);
 }

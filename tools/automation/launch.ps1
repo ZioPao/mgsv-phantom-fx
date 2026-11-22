@@ -1,7 +1,7 @@
 # Starts the automation copy of the game and waits for it to close. Its display settings are its own
-# (install.ps1 writes them, src/dev/save_redirect.hpp points the game at them).
+# (install.ps1 writes them, src/devkit/save_redirect.hpp points the game at them).
 param(
-    [string]$Game = (Join-Path $env:USERPROFILE 'Documents\Development\mgsv-automation\game'),
+    [string]$Game = $(if ($env:PHANTOM_FX_AUTOMATION_GAME) { $env:PHANTOM_FX_AUTOMATION_GAME } else { Join-Path $env:USERPROFILE 'Documents\Development\mgsv-automation\game' }),
     # The player's game the copy is made from: PHANTOM_FX_GAME, else Steam's usual folder.
     [string]$Steam = $(if ($env:PHANTOM_FX_GAME) { $env:PHANTOM_FX_GAME } else { 'C:\Program Files (x86)\Steam\steamapps\common\MGS_TPP' }),
     # Off-screen by default: the game keeps rendering there (not when minimised), out of the way.

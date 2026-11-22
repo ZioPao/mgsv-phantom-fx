@@ -8,7 +8,7 @@
 #include "features/global_illumination/gi_light.hpp"
 #include "features/path_tracing/path_tracing_rays.hpp"
 #include "features/ray_traced_shadows/gi_shadow.hpp"
-#include "frame_log.hpp"
+#include "dev/dev.hpp"
 #include "log.hpp"
 #include "passes/ray_tracing/gi_d3d12.hpp"
 #include "passes/ray_tracing/gi_scene.hpp"
@@ -973,10 +973,10 @@ Result render(Frame& frame)
     const trace::TraceFrame traceFrame{frame, s.device.Get(), waitForAll, *s.contents, s.instancedModels[slot], slot};
     for (auto* each : trace::inOrder()) each->prepare(traceFrame);
     lap(ProbeStep);
-    if constexpr (DiagnosticLog)
+    if constexpr (DevTools)
     {
         static std::filesystem::path dumped;
-        if (const auto folder = frame_log::recordingDirectory(); !folder.empty() && folder != dumped)
+        if (const auto folder = dev::recordingDirectory(); !folder.empty() && folder != dumped)
         {
             dumped = folder;
             s.contents->dumpModels(folder);
