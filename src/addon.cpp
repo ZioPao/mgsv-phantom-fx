@@ -33,6 +33,9 @@
 #include "features/upscaling/upscaler.hpp"
 #include "features/volumetric_fog/atmosphere.hpp"
 #include "fxui/fxui.hpp"
+#if PHANTOM_FX_DEV_TOOLS
+#include "dev/hot_kernels.hpp"
+#endif
 #include "game_dither.hpp"
 #include "game_loop.hpp"
 #include "game_shaders.hpp"
@@ -713,6 +716,10 @@ extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshade
 {
     // ReShade unloads add-ons when its last device goes; the next load reports the game's device again.
     detachEffects();
+#if PHANTOM_FX_DEV_TOOLS
+    // Joined here, where the loader lock is not held: at process detach it would join under it (hot_kernels.hpp).
+    hot_kernels::stop();
+#endif
     photo_mode::leave();
     // Removes every engine hook, so the game keeps running without the add-on.
     MH_Uninitialize();

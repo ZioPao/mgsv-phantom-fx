@@ -4,6 +4,9 @@
 #include "camera.hpp"
 #include "clock.hpp"
 #include "dev/perf_record.hpp"
+#if PHANTOM_FX_DEV_TOOLS
+#include "dev/hot_kernels.hpp"
+#endif
 #include "dev_tools.hpp"
 #include "features/global_illumination/gi_light.hpp"
 #include "features/path_tracing/path_tracing_rays.hpp"
@@ -177,6 +180,8 @@ struct State
 
     ComPtr<ID3D12RootSignature> rootSignature;
     Pipelines pipelines;
+    // Pipelines a hot reload replaced (dev/hot_kernels.hpp), kept while a frame in flight may still run them.
+    std::vector<ComPtr<ID3D12PipelineState>> retiredPipelines;
     ComPtr<ID3D12CommandSignature> dispatchSignature;
     ComPtr<ID3D12DescriptorHeap> heap;
     UINT descriptorSize{};
@@ -951,6 +956,29 @@ Result render(Frame& frame)
         s.tally.cpuSteps[step] += clock::millisecondsOf(now - lapStarted);
         lapStarted = now;
     };
+
+#if PHANTOM_FX_DEV_TOOLS
+    {
+        hot_kernels::start();
+        for (auto& fresh : hot_kernels::take())
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};
+            pipeline.pRootSignature = s.rootSignature.Get();
+            pipeline.CS = {fresh.code.data(), fresh.code.size()};
+            if (s.hasMicromapSupport) pipeline.Flags = RayQueryAllowsMicromaps;
+            ComPtr<ID3D12PipelineState> made;
+            if (FAILED(s.device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&made))))
+            {
+                log(std::format("Hot kernels: kernel {} compiled but its pipeline was refused; the one in use stays.", fresh.kernel));
+                continue;
+            }
+            s.retiredPipelines.push_back(std::exchange(s.pipelines[fresh.kernel], made));
+            // A reload every few seconds while tuning: keep only the last few, older than any frame in flight.
+            if (s.retiredPipelines.size() > 8) s.retiredPipelines.erase(s.retiredPipelines.begin());
+            log(std::format("Hot kernels: kernel {} swapped in.", fresh.kernel));
+        }
+    }
+#endif
 
     Result result;
     const auto& traces = frame.traces;
