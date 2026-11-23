@@ -1,4 +1,5 @@
 // The ray-traced scene's frame on Direct3D 11; ray_tracing.hpp describes the route.
+#include "features/clouds/clouds.hpp"
 #include "passes/ray_tracing/ray_tracing.hpp"
 
 #include "camera.hpp"
@@ -957,6 +958,8 @@ void kick(ID3D11ShaderResourceView* depth, const Options& options)
         textures.surfaceNormal = surfaces.normal;
         textures.surfaceReflection = surfaces.reflection;
     }
+
+    frame.textures.cloudShadow = clouds::shadowTexture();
 
     frame.width = depthOut.width;
     frame.height = depthOut.height;

@@ -2,6 +2,7 @@
 
 #include "effects.hpp"
 #include "features/ambient_occlusion/settings.hpp"
+#include "features/clouds/settings.hpp"
 #include "features/contact_shadows/settings.hpp"
 #include "features/depth_of_field/settings.hpp"
 #include "features/frame_generation/settings.hpp"
@@ -45,6 +46,7 @@ struct Settings
     AmbientOcclusion ambientOcclusion;
     IndirectLight indirectLight;
     VolumetricFog volumetricFog;
+    Clouds clouds;
     Sea sea;
     WaterCaustics waterCaustics;
     DepthOfField depthOfField;
@@ -72,6 +74,7 @@ template<class Visit> void forEachFeature(Settings& settings, Visit&& visit)
     visit(settings.ambientOcclusion);
     visit(settings.indirectLight);
     visit(settings.volumetricFog);
+    visit(settings.clouds);
     visit(settings.sea);
     visit(settings.waterCaustics);
     visit(settings.depthOfField);

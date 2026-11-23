@@ -14,6 +14,7 @@
 #include "dev/dev.hpp"
 #include "dev_tools.hpp"
 #include "device_check.hpp"
+#include "features/clouds/clouds.hpp"
 #include "features/frame_generation/fsr_frame_generation.hpp"
 #include "features/frame_generation/presenter.hpp"
 #include "features/frame_rate/frame_rate.hpp"
@@ -295,7 +296,8 @@ bool onDrawIndexed(command_list* list, uint32_t indices, uint32_t instances, uin
     // The one order among the owners that matters: a point or spot light's draws have two, and the
     // ray-traced lights come first, so the local light pass never draws a light the rays shadow.
     if (hiddenUi(list) || local_lights::draw(context, call, shader) || local_light_pass::draw(context, call, shader) || sea::draw(context, call, shader)
-        || forward_water_pass::draw(context, call, shader) || glass::draw(context, call, shader) || upscaler::draw(context, call, shader))
+        || forward_water_pass::draw(context, call, shader) || glass::draw(context, call, shader) || clouds::draw(context, call, shader)
+        || upscaler::draw(context, call, shader))
         return true;
 
     // The sky's dome and clouds, then again for the rays.
