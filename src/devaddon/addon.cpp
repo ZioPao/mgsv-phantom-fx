@@ -7,6 +7,7 @@
 #include "devkit/cutscenes.hpp"
 #include "devkit/extension.hpp"
 #include "devkit/frame_log.hpp"
+#include "devkit/gamepad.hpp"
 #include "devkit/game.hpp"
 #include "devkit/game_lua.hpp"
 #include "devkit/host.hpp"
@@ -131,6 +132,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshadeMo
     devkit::setToast(&toast);
 
     MH_Initialize();
+    devkit::gamepad::install(directory);
     devaddon::defer();
     phantom_fx::log("Waiting for the first frame to register on PhantomFX's frame start.");
 
@@ -153,6 +155,7 @@ extern "C" __declspec(dllexport) const DevKitApi* DevKitGetApi()
 extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon, HMODULE reshadeModule)
 {
     devaddon::unhook();
+    devkit::gamepad::uninstall();
     devkit::frame_log::uninstall();
     reshade::unregister_overlay("DevKit", onOverlay);
     reshade::unregister_event<reshade::addon_event::reshade_present>(onReshadePresent);

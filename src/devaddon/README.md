@@ -4,7 +4,9 @@ The developer tools as their own ReShade add-on (`DevKit.addon64`), built in the
 `PhantomFX.addon64` and not linked into it. It draws `src/devkit/page.*` in ReShade's default ImGui
 style, and gets the game's frame start from PhantomFX when that is loaded (or hooks the loop itself)
 for travel, cutscenes, the Lua console, command files and the render diagnostics: the game's shaders (search,
-assembly, bytecode) and a frame recorder (`src/devkit/frame_log.*`), for any MGSV add-on, not only PhantomFX.
+assembly, bytecode) and a frame recorder (`src/devkit/frame_log.*`), for any MGSV add-on, not only PhantomFX. It
+also merges a synthetic gamepad button into XInput (`src/devkit/gamepad.*`), so an automated run can press the
+screens that wait for one without taking the keyboard or the foreground.
 
 | File | What it is |
 | --- | --- |

@@ -12,6 +12,7 @@
   fx.py scenarios [--accept] [<name> ...]  a fresh copy with this build through every scenario, or those named: says
                                            what got worse, with a before and after picture of each. --accept takes
                                            the run as what to expect from now on, after a change meant to show
+  fx.py [--copy] pad [<button>]            a gamepad button to the copy, with no focus taken (a, b, start, ...)
   fx.py [--copy] show, hide                the copy's window on screen, or off it again, as it starts
   fx.py [--copy] boot                      steps the automation copy from launch into free roam
   fx.py [--copy] acc                       from free roam into the helicopter's cabin at Mother Base, once it plays
@@ -269,20 +270,21 @@ def sent_to_foreground(window, key):
 
 
 def press_enter():
-    """Enter to the game's window, for the notices before its scripts run (autosave, online information). The game
-    reads the keyboard's state, not window messages, so the off-screen window is brought forward for the key and the
-    window that had it is put back."""
+    """A confirm for the notices before the game's scripts run (autosave, online information): a gamepad A, which the
+    game reads without any window taking the keyboard. Only when the game already has the foreground is Enter sent."""
     try:
         import ctypes
         user32 = ctypes.windll.user32
     except (AttributeError, OSError):
         return False
 
-    window = game_window()
-    if not window:
-        return False
+    import ctypes
 
-    return sent_to_foreground(window, 0x0D)
+    window = game_window()
+    if window and ctypes.windll.user32.GetForegroundWindow() == window:
+        return sent_to_foreground(window, 0x0D)
+
+    return press_pad("a")
 
 
 def wait_for_scripts(timeout=120.0, least_seconds=45.0):
@@ -393,20 +395,33 @@ def view(show=True):
     return True
 
 
+def press_pad(button="a"):
+    """A gamepad button to the game, through the file DevKit's XInput hook watches: the game reads it every frame, so
+    no window is brought forward and the user's focus is not touched. Works while the game loop is stopped."""
+    trigger = link() / "pad"
+    partial = trigger.with_name("pad.tmp")
+    partial.write_text(button + "\n", encoding="utf-8")
+    partial.replace(trigger)
+
+    return True
+
+
 def press_space():
-    """Space to the game's window, where a loading screen waits for it. As press_enter, the game reads the keyboard's
-    state, so the off-screen window is brought forward for the key and the window that had it is put back."""
+    """Space for a loading screen: a gamepad button, which the game reads every frame without this process taking the
+    keyboard or the foreground. If the game's own window is already in front, Space is sent instead (see the hooks)."""
     try:
         import ctypes
         user32 = ctypes.windll.user32
     except (AttributeError, OSError):
         return False
 
-    window = game_window()
-    if not window:
-        return False
+    import ctypes
 
-    return sent_to_foreground(window, 0x20)
+    window = game_window()
+    if window and ctypes.windll.user32.GetForegroundWindow() == window:
+        return sent_to_foreground(window, 0x20)
+
+    return press_pad("a")
 
 
 def boot(timeout=180.0):
@@ -758,6 +773,9 @@ def main():
         diff(*rest)
     elif command == "travel":
         travel(rest[0])
+    elif command == "pad":
+        print("pressed pad " + (rest[0] if rest else "a"))
+        press_pad(rest[0] if rest else "a")
     elif command in ("show", "hide"):
         moved = view(command == "show")
         print(("on screen" if command == "show" else "off screen") if moved else "no game window")

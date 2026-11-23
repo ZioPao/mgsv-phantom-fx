@@ -5,6 +5,7 @@
 #include "devkit/extension.hpp"
 #include "devkit/frame_log.hpp"
 #include "devkit/game_lua.hpp"
+#include "devkit/gamepad.hpp"
 #include "devkit/host.hpp"
 #include "devkit/keys.hpp"
 #include "devkit/log.hpp"
@@ -195,7 +196,7 @@ std::string statusText()
 
 std::string listing()
 {
-    std::string text = "built in: lua travel cutscene key state peek wait status case_done help frame shaders shader\n";
+    std::string text = "built in: lua travel cutscene key pad state peek wait status case_done help frame shaders shader\n";
     if (commandTable.empty()) return text + "added by add-ons: nothing\n";
 
     text += "added by add-ons:";
@@ -244,6 +245,22 @@ void run(Script& running, const std::string& line)
         {
             keys::press(name, std::max(times, 1));
             running.output += "pressed " + name + (times > 1 ? " " + std::to_string(times) + " times" : "") + "\n";
+        }
+    }
+    else if (command == "pad")
+    {
+        // A button of a gamepad the game reads, without the keyboard or its focus. The screen that waits for a key
+        // while the loop is stopped is asked through DevKit/pad instead (fx.py press_pad).
+        std::istringstream arguments(rest);
+        std::string name;
+        int polls{6};
+        arguments >> name >> polls;
+        const auto button = gamepad::buttonOf(name);
+        if (!button) running.output += "error: pad a|b|x|y|start|back|lb|rb|up|down|left|right|0x<mask> [polls]\n";
+        else
+        {
+            gamepad::press(*button, std::max(polls, 1));
+            running.output += "pressed pad " + name + "\n";
         }
     }
     else if (command == "cutscene")

@@ -90,7 +90,9 @@ Travel, clock, weather, live, move, reveal, diagnostic, enhancements and remaste
 is how the surface became too specific.
 
 A loading screen that waits for Space stops the game's own loop, so a command file cannot press it. `boot`, `travel`
-and `recover` press Space at the game's window from outside the game, every few seconds while it is not playing;
+and `recover` press a gamepad A from outside the game, every few seconds while it is not playing: DevKit hooks
+XInput and merges the button into what the game reads, so no window is brought forward and the user's focus is not
+taken. With the copy's window already in front, Space is sent instead;
 `recover` is the tool for a copy already sitting on one, and it never restarts the game. When the loop does run,
 `key <name> [times]` presses one from a command file. Do not restart a game stuck on such a screen, and do not
 improvise a keypress.
