@@ -1190,11 +1190,11 @@ std::uint64_t request()
 {
     if (!active) return 0;
 
-    // A request already waiting for its present is not replaced: the caller is told it is busy.
-    if (requested.load() != 0) return 0;
-
+    // A request already waiting for its present is not replaced: the caller is told it is busy. F10 and a scripting
+    // thread can ask at once, so the free slot is claimed atomically and the loser leaves the first request alone.
     const auto id = ++requestsMade;
-    requested = id;
+    std::uint64_t free{};
+    if (!requested.compare_exchange_strong(free, id)) return 0;
 
     return id;
 }
