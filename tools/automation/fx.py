@@ -247,6 +247,20 @@ def game_window():
     return found[0] if found else 0
 
 
+
+
+
+def press_pad(button="a"):
+    """A gamepad button to the game, through the file DevKit's XInput hook watches: the game reads it every frame, so
+    no window is brought forward and the user's focus is not touched. Works while the game loop is stopped."""
+    trigger = link() / "pad"
+    partial = trigger.with_name("pad.tmp")
+    partial.write_text(button + "\n", encoding="utf-8")
+    partial.replace(trigger)
+
+    return True
+
+
 def press_enter():
     """A confirm for the notices before the game's scripts run (autosave, online information): a gamepad A, which the
     game reads without any window taking the keyboard."""
@@ -257,6 +271,50 @@ def press_space():
     """The button a screen that waits for one takes: a gamepad A, which reaches the game even while its loop is
     stopped, with no focus taken from the user."""
     return press_pad("a")
+
+
+def wait_for_scripts(timeout=120.0, least_seconds=45.0):
+    """Until the game is far enough through start-up to answer a Lua call. With another mod's hooks over the
+    game's Lua (Infinite Heaven's IHHook), a call too early can crash the game, so the first 45 s only presses
+    the notices away and watches the process; from then on a camera and a frame past 200 mean it is ready."""
+    started = time.monotonic()
+    deadline = started + timeout
+    last_press = 0.0
+    # A game already in play answers at once; nothing is pressed into it.
+    try:
+        line = run(["status"], timeout=5).splitlines()[1]
+    except (TimeoutError, FileNotFoundError, IndexError):
+        line = ""
+    frame = re.match(r"frame (\d+)", line)
+    if frame and int(frame.group(1)) > 200 and " camera " in f" {line} " and "no camera yet" not in line:
+        return
+
+    print("waiting for the game's scripts; pressing its startup notices away", flush=True)
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        if now - last_press > 2.5:
+            press_enter()
+            press_space()  # The startup notices take Enter; a loading screen before loop start takes Space
+            last_press = now
+
+        if now - started < least_seconds:
+            time.sleep(0.4)
+            continue
+
+        try:
+            line = run(["status"], timeout=5).splitlines()[1]
+        except (TimeoutError, FileNotFoundError, IndexError):
+            time.sleep(0.3)
+            continue
+
+        frame = re.match(r"frame (\d+)", line)
+        if frame and int(frame.group(1)) > 200 and " camera " in f" {line} " and "no camera yet" not in line:
+            print(f"the game's scripts answer after {time.monotonic() - started:.0f} s", flush=True)
+            return
+
+        time.sleep(0.3)
+
+    raise TimeoutError(f"the game's scripts did not answer after {timeout:.0f} s: read {link() / 'launch.log'}")
 
 
 def boot(timeout=180.0):
