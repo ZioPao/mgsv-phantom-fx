@@ -30,9 +30,9 @@ std::uint32_t framesSincePoll{};
 std::optional<Script> running;
 
 std::mutex jobMutex;
-std::optional<PresentJob> job;
-std::optional<std::string> jobResult;
-bool jobWaiting{}; // The game thread waits for the job
+std::deque<PresentJob> jobs; // Run one a present, in the order asked
+std::string jobResults;      // Every answer so far, for the line that asked
+bool jobWaiting{};           // The game thread waits for the jobs
 
 std::optional<std::filesystem::path> nextCommandFile()
 {
@@ -106,10 +106,10 @@ bool waits(Script& current)
     if (jobWaiting)
     {
         std::scoped_lock lock(jobMutex);
-        if (!jobResult) return true;
+        if (!jobs.empty()) return true;
 
-        current.output += *jobResult;
-        jobResult.reset();
+        current.output += jobResults;
+        jobResults.clear();
         jobWaiting = false;
     }
 
@@ -164,8 +164,8 @@ void install(std::filesystem::path folder, Run run, Waiting waiting, ScriptStart
     presented.store(0, std::memory_order_relaxed);
     {
         std::scoped_lock lock(jobMutex);
-        job.reset();
-        jobResult.reset();
+        jobs.clear();
+        jobResults.clear();
     }
     jobWaiting = false;
 }
@@ -209,18 +209,19 @@ void onPresent(ID3D11DeviceContext* context, ID3D11Resource* backBuffer) noexcep
     presented.fetch_add(1, std::memory_order_relaxed);
 
     std::scoped_lock lock(jobMutex);
-    if (!job) return;
+    if (jobs.empty()) return;
+
+    PresentJob asked = std::move(jobs.front());
+    jobs.pop_front();
 
     try
     {
-        jobResult = (*job)(context, backBuffer);
+        jobResults += asked(context, backBuffer);
     }
     catch (const std::exception& error)
     {
-        jobResult = std::string("error: ") + error.what() + "\n";
+        jobResults += std::string("error: ") + error.what() + "\n";
     }
-
-    job.reset();
 }
 
 void start(std::deque<std::string> lines) noexcept
@@ -249,8 +250,7 @@ std::uint64_t presents() noexcept
 void askPresent(PresentJob asked) noexcept
 {
     std::scoped_lock lock(jobMutex);
-    job = std::move(asked);
-    jobResult.reset();
+    jobs.push_back(std::move(asked));
     jobWaiting = true;
 }
 
