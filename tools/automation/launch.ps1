@@ -36,6 +36,8 @@ $playerFiles = foreach ($folder in $playerFolders) {
 }
 
 $player = [Automation.Window]::GetForegroundWindow()
+# A show from the last session does not carry over: each launch starts off screen until asked.
+Remove-Item (Join-Path $Game 'DevKit\visible') -Force -ErrorAction SilentlyContinue
 $process = Start-Process (Join-Path $Game 'mgsvtpp.exe') -WorkingDirectory $Game -PassThru
 "Started the game, process $($process.Id)"
 # The game places its window as it starts, so it is moved again until it stays put. Off-screen it

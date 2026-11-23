@@ -497,6 +497,7 @@ def travel(destination, place=None, timeout=300.0):
             state = run([f"lua {BOOT_STEP}"], timeout=max(1.0, min(20.0, deadline - time.monotonic()))).splitlines()[1].split()
         except TimeoutError:
             # Loading has stopped the loop: the key goes from here or never.
+            loading_seen = True
             press_space()
             continue
         playing = state[-1] == "playing"
