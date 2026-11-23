@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <shared_mutex>
 
 namespace phantom_fx::game_loop
 {
@@ -37,6 +38,9 @@ std::atomic<std::uint32_t> current{};
 
 std::mutex callbacksMutex;
 std::array<FrameStartCallback, 8> frameStartCallbacks{};
+// Held shared while copied callbacks run, and taken alone by unregistration: it returns only once a callback that
+// was copied before it was cleared has finished. A callback must not register or unregister itself.
+std::shared_mutex dispatchMutex;
 
 std::uint32_t countOf(const std::uint8_t* loop)
 {
@@ -57,6 +61,7 @@ void frameStart(std::uint8_t* loop, void* argument)
             std::scoped_lock lock(callbacksMutex);
             callbacks = frameStartCallbacks;
         }
+        const std::shared_lock dispatch(dispatchMutex);
         for (const auto callback : callbacks)
             if (callback) callback();
     }
@@ -123,9 +128,15 @@ bool registerFrameStart(FrameStartCallback callback) noexcept
 
 void unregisterFrameStart(FrameStartCallback callback) noexcept
 {
-    std::scoped_lock lock(callbacksMutex);
-    for (auto& slot : frameStartCallbacks)
-        if (slot == callback) slot = nullptr;
+    {
+        std::scoped_lock lock(callbacksMutex);
+        for (auto& slot : frameStartCallbacks)
+            if (slot == callback) slot = nullptr;
+    }
+
+    // A frame start may have copied the callback before it was cleared: this returns when that call has finished,
+    // so the module can unload.
+    const std::unique_lock dispatch(dispatchMutex);
 }
 }
 
