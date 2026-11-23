@@ -306,6 +306,7 @@ def wait_for_scripts(timeout=120.0, least_seconds=45.0):
         now = time.monotonic()
         if now - last_press > 2.5:
             press_enter()
+            press_space()  # The startup notices take Enter; a loading screen before loop start takes Space
             last_press = now
 
         if now - started < least_seconds:
@@ -478,7 +479,7 @@ def travel(destination, place=None, timeout=300.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            state = run([f"lua {BOOT_STEP}"], timeout=max(5.0, min(20.0, deadline - time.monotonic()))).splitlines()[1].split()
+            state = run([f"lua {BOOT_STEP}"], timeout=max(1.0, min(20.0, deadline - time.monotonic()))).splitlines()[1].split()
         except TimeoutError:
             # Loading has stopped the loop: the key goes from here or never.
             press_space()
@@ -492,7 +493,10 @@ def travel(destination, place=None, timeout=300.0):
             asked = time.monotonic()
             press_space()
         elif not loading_seen and state[0] != str(code) and time.monotonic() - asked > 5:
-            run([f"travel {destination}" + (f" {place}" if place else "")])
+            try:
+                run([f"travel {destination}" + (f" {place}" if place else "")], timeout=max(1.0, min(30.0, deadline - time.monotonic())))
+            except TimeoutError:
+                press_space()
             asked = time.monotonic()
         time.sleep(0.5)
 
