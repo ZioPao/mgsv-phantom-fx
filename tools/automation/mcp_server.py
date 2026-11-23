@@ -389,8 +389,8 @@ def run(lines: list[str] | str, timeout_s: float = 120.0, target: Literal["playe
 def case_folder(name: str | None, target: str) -> Path | None:
     cases = GAMES[target] / fx.LINK / "cases"
     if name:
-        found = cases / name
-        return found if found.is_dir() else None
+        found = (cases / name).resolve()
+        return found if found.is_relative_to(cases.resolve()) and found.is_dir() else None
     if not cases.is_dir():
         return None
     folders = [folder for folder in cases.iterdir() if (folder / "state.txt").exists()]
@@ -398,8 +398,9 @@ def case_folder(name: str | None, target: str) -> Path | None:
 
 
 def bad_case_name(name: str) -> bool:
+    # One word: no separator, no rooted path, no way up, no whitespace.
     path = Path(name)
-    return path.is_absolute() or ".." in path.parts or any(character.isspace() for character in name)
+    return path.name != name or path.is_absolute() or ".." in path.parts or any(character.isspace() for character in name)
 
 
 def case_payload(folder: Path) -> tuple[dict, tuple[Path, ...]]:

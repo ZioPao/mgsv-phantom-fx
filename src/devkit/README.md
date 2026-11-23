@@ -50,7 +50,8 @@ like ReShade's other windows.
 4. Use the tools directly: `game_lua::run` and its console, `travel::go`, `cutscenes::play`,
    `save_redirect::install`, each with its `onFrameStart` called from the game thread. Paths for command results
    are `devkit::commands::folder()`. `frame_log.*` also needs `resource_dump.*` and `shader_bytecode.*` from
-   `src/` (and `d3dcompiler`), and is compiled in the DevKit add-on rather than in the library.
+   `src/`, which `devkit.cmake` does not compile. `frame_log.*` itself is in the `devkit` library; the add-on that
+   links it supplies those two and links `d3dcompiler`.
 5. Draw the devkit's page from the overlay callback, inside the window ReShade gives it:
 
    ```cpp
