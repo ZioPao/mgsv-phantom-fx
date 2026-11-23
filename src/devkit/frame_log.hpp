@@ -27,10 +27,10 @@ namespace devkit::frame_log
 // Registers the ReShade events when `addonDirectory` holds the DevKit/frame-log folder.
 void install(const std::filesystem::path& addonDirectory);
 bool installed();
-// Records the next frame, as F10 does (only with the frame-log folder). `recordings` counts those finished, and
-// `lastRecording` is the name of the latest: `frame-<n>`.
-// Records the next frame, as F10 does; its request ID, 0 when the frame log is off. `completedRequest` is the ID of
-// the latest capture that finished: a capture the script asked for is done when they are equal.
+// Records a frame as F10 does, after its warm-up (only with the frame-log folder). `recordings` counts those
+// finished, and `lastRecording` is the name of the latest: `frame-<n>`.
+// Records a frame as F10 does, after its warm-up; its request ID, 0 when the log is off or one is already pending.
+// `completedRequest` is the ID of the latest capture that finished: a capture asked for is done when they are equal.
 std::uint64_t request();
 std::uint64_t completedRequest();
 std::uint64_t recordings();

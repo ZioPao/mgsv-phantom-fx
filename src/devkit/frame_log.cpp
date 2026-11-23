@@ -48,8 +48,8 @@ constexpr UINT TargetSlots = D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT;
 // WKPDID_D3DDebugObjectName, defined here so dxguid.lib is not needed.
 constexpr GUID DebugObjectName{0x429b8c22, 0x9188, 0x4b0c, {0x87, 0x42, 0xac, 0xb0, 0xbf, 0x85, 0xc2, 0x00}};
 
-// A frame is recorded after one warm-up frame: the game records command lists on deferred
-// contexts ahead of executing them, and the warm-up catches lists executed early in the next frame.
+// A frame is recorded after thirty warm-up presents: the game records command lists on deferred contexts many
+// frames ahead of executing them, and a single warm-up frame misses the scene's own lists.
 enum class Capture { Off, WarmingUp, Recording };
 
 // The DevKit/frame-log folder, which turns the frame recording on and receives its files.
