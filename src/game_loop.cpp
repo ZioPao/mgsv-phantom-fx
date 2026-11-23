@@ -104,7 +104,8 @@ std::uint32_t currentFrame() noexcept
 
 bool registerFrameStart(FrameStartCallback callback) noexcept
 {
-    if (!callback) return false;
+    // Without the hook there is no frame start to call it from: the caller must fall back to its own.
+    if (!callback || !originalFrameStart) return false;
 
     std::scoped_lock lock(callbacksMutex);
     for (const auto registered : frameStartCallbacks)

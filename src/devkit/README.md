@@ -49,7 +49,8 @@ like ReShade's other windows.
    - The add-on's own key can call `devkit::commands::start({"line", "line"})`.
 4. Use the tools directly: `game_lua::run` and its console, `travel::go`, `cutscenes::play`,
    `save_redirect::install`, each with its `onFrameStart` called from the game thread. Paths for command results
-   are `devkit::commands::folder()`.
+   are `devkit::commands::folder()`. `frame_log.*` also needs `resource_dump.*` and `shader_bytecode.*` from
+   `src/` (and `d3dcompiler`), and is compiled in the DevKit add-on rather than in the library.
 5. Draw the devkit's page from the overlay callback, inside the window ReShade gives it:
 
    ```cpp
@@ -64,7 +65,7 @@ like ReShade's other windows.
 
    ```cpp
    const auto* kit = getApi();   // null until DevKit has loaded: try again at the first frames
-   kit->addCommand("hello", [](DevKitScript* script, const char* arguments, void*) { kit->say(script, "hi\n"); }, nullptr);
+   kit->addCommand("hello", [](DevKitScript* script, const char*, void* user) { static_cast<const DevKitApi*>(user)->say(script, "hi\n"); }, const_cast<DevKitApi*>(kit));
    kit->addState(&myState, nullptr);   // text for `state` and `status`
    kit->setKey(&myF9, nullptr);        // F9: usually kit->start("line\nline")
    ```

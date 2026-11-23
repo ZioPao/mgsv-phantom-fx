@@ -57,6 +57,8 @@ bool isNvidiaGPU(ID3D11Device* device)
 
 void savePendingSettings(std::uint64_t settle)
 {
+    // The tools build forces some settings off to keep the frame as it is: those are not the user's values to keep.
+    if constexpr (ToolsOnly) return;
     Settings unsaved;
     {
         std::lock_guard lock(settingsMutex);
@@ -104,12 +106,15 @@ void initialize(const std::filesystem::path& directory, bool supportedBuild) noe
     std::lock_guard lock(settingsMutex);
     try
     {
-        settings = unchanged(loadSettings(settingsPath));
+        settings = loadSettings(settingsPath);
     }
     catch (const std::exception& error)
     {
         log(std::string("Could not load the Phantom FX settings: ") + error.what());
     }
+
+    // Whatever came, the tools build takes none of it into the frame.
+    settings = unchanged(settings);
 
     configureModules();
     log(std::string(upscaler::label(settings.upscaling.upscaler)) + " mode " + std::string(upscaler::label(settings.upscaling.mode, settings.upscaling.upscaler))

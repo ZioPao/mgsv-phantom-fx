@@ -364,8 +364,8 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
 def run(lines: list[str] | str, timeout_s: float = 120.0, target: Literal["player", "copy"] | None = None, confirm: bool = False) -> CallToolResult:
     """Runs automation lines as one command file and returns what each printed. The escape hatch for anything the
     other tools do not cover; one string per line (src/devkit/automation.hpp lists them). `key space` presses Space at
-    the game's window, for a loading screen that waits for it. confirm=true allows a setting line to write the player's
-    ini."""
+    the game's window, but only while the game's loop runs: a stalled loading screen stops it, and `session action='recover'`
+    presses from outside. confirm=true allows a setting line to write the player's ini."""
     note_activity()
     clean = normalise(lines)
     if not clean:
@@ -434,6 +434,11 @@ def case(action: Literal["latest", "open", "record", "replay", "compare"] = "lat
             game, _ = resolve(target)
         except ValueError as error:
             return fail("BAD_TARGET", str(error), "Use target='player' or target='copy'.")
+        # A case is one name under cases/: never a path that could reach outside it.
+        if name and bad_case_name(name):
+            return fail("BAD_NAME", "A case name is one word under the cases folder.", "Use one word of letters, digits, - and _.")
+        if other and bad_case_name(other):
+            return fail("BAD_NAME", "A case name is one word under the cases folder.", "Use one word of letters, digits, - and _.")
 
         if action == "replay":
             refused = needs_steam()
@@ -561,7 +566,10 @@ def time_of_day(seconds: float | None = None, run: bool = False, target: Literal
         values = state_values()
         if "clock" not in values:
             return fail("NOT_LOADED", "The game did not answer with its clock.", "Start a dev build with PhantomFX loaded there.")
-        return ok({"target": target_label(), "clock": values["clock"], "running": run}, text=f"clock {values['clock']}")
+        payload = {"target": target_label(), "clock": values["clock"]}
+        if seconds is not None:
+            payload["running"] = run
+        return ok(payload, text=f"clock {values['clock']}")
 
 
 # ---------------------------------------------------------------- capture
@@ -595,10 +603,11 @@ def capture(kind: Literal["image", "inspect", "perf"], name: str | None = None, 
 
         rel = path.relative_to(fx.link()).with_suffix("").as_posix()
         if kind == "image":
+            dds = path.with_suffix(".dds")
+            dds.unlink(missing_ok=True)  # A failed save must not leave the earlier picture looking new
             result = send([f"image {rel}"], timeout=60)
             if result.is_error:
                 return result
-            dds = path.with_suffix(".dds")
             if not dds.exists():
                 return fail("NO_PICTURE", f"The game wrote no {dds.name}.", "Freeze on a frame that renders, then try again.")
             picture = fx.png(str(dds))
@@ -687,6 +696,9 @@ def setting(key: str, action: Literal["get", "set"] = "get", value: str | None =
         result = send([f"setting {key}={value}"], timeout=30)
         if result.is_error:
             return result
+        answer = result.structured_content.get("result", "")
+        if "error:" in answer:
+            return fail("SETTING_REFUSED", answer.strip(), "Read PhantomFX.ini for the key and the values it takes.")
         return ok({"key": key, "old": old, "new": value, "ini": str(ini)})
 
 

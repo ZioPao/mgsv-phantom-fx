@@ -128,7 +128,7 @@ enum class Dump { None, Constants, Everything };
 std::mutex recordMutex;
 std::ofstream record;
 std::filesystem::path dumpDirectory;
-std::string recordName;
+std::string recordName, completedRecording;
 std::uint64_t presents{}, calls{};
 command_list* immediate{};
 ID3D11Resource* backBuffer{};
@@ -841,6 +841,7 @@ void finishRecording()
     constantContents.clear();
     mappedConstants.clear();
     capture = Capture::Off;
+    completedRecording = recordName;
     ++recorded;
 }
 
@@ -1191,7 +1192,7 @@ std::string lastRecording()
 {
     std::lock_guard lock(recordMutex);
 
-    return recordName;
+    return completedRecording;
 }
 
 std::filesystem::path recordingDirectory()
@@ -1291,9 +1292,11 @@ std::optional<std::filesystem::path> saveShader(std::string_view hashOrName)
     std::filesystem::create_directories(shadersDirectory, error);
     const auto stem = shader->stage + "_" + shader->hash;
     std::ofstream(shadersDirectory / (stem + ".dxbc"), std::ios::binary).write(reinterpret_cast<const char*>(shader->code.data()), static_cast<std::streamsize>(shader->code.size()));
-    std::ofstream(shadersDirectory / (stem + ".asm"), std::ios::binary) << assemblyOf(*shader);
+    std::ofstream assembly(shadersDirectory / (stem + ".asm"), std::ios::binary);
+    assembly << assemblyOf(*shader);
+    assembly.close();
 
-    return shadersDirectory / (stem + ".dxbc");
+    return assembly.fail() ? std::nullopt : std::optional(shadersDirectory / (stem + ".dxbc"));
 }
 
 void uninstall()

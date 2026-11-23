@@ -32,11 +32,11 @@ Searching for `PHANTOM_FX_DEV_TOOLS` and `DevTools` finds every line the core ke
 
 ## Detaching it
 
-Delete this folder, `src/devkit/`, `tools/automation/` and `.agents/skills/mgsv-automation/`, then remove:
+Delete this folder, `src/devkit/`, `src/devaddon/`, `tools/automation/` and `.agents/skills/mgsv-automation/`, then remove:
 
 | File | Lines |
 | --- | --- |
-| `CMakeLists.txt` | The `include(src/dev/dev.cmake)` and `include(src/dev/tests.cmake)` blocks, `include(src/devkit/devkit.cmake)`, `target_link_libraries(phantom_fx PRIVATE devkit)` and `${PHANTOM_FX_DEV_SOURCES}` |
+| `CMakeLists.txt` | The `include(src/dev/dev.cmake)` and `include(src/dev/tests.cmake)` blocks, `include(src/devkit/devkit.cmake)`, `include(src/devaddon/devaddon.cmake)`, `target_link_libraries(phantom_fx PRIVATE devkit)` and `${PHANTOM_FX_DEV_SOURCES}` |
 | `src/addon.cpp` | The three `dev::` calls, the include, the Enter `photo_mode::teleport()` call, and the name of `onPresent`'s `swapChain` parameter |
 | `src/game_loop.cpp` | `dev::onFrameStart()` and the include |
 | `src/menu.cpp` | `dev::drawPage()` and the include |

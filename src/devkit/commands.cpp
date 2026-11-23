@@ -44,19 +44,31 @@ std::optional<std::filesystem::path> nextCommandFile()
     return first;
 }
 
-Script load(const std::filesystem::path& file)
+// A file is claimed by a rename first, so a failed claim never runs its lines twice, and a file that did not read
+// whole is not run at all.
+std::optional<Script> load(const std::filesystem::path& file)
 {
+    auto claimed = file;
+    claimed += ".running";
+    std::error_code error;
+    std::filesystem::rename(file, claimed, error);
+    if (error) return std::nullopt;
+
     Script loaded{.result = std::filesystem::path(file).replace_extension(".result")};
-    std::ifstream input(file);
+    std::ifstream input(claimed);
     for (std::string line; std::getline(input, line);)
     {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (!line.empty()) loaded.lines.push_back(std::move(line));
     }
+    const bool read = input.eof() && !input.bad();
     input.close();
-
-    std::error_code error;
-    std::filesystem::remove(file, error);
+    std::filesystem::remove(claimed, error);
+    if (!read)
+    {
+        log("Command file " + file.filename().string() + " could not be read; it is skipped.");
+        return std::nullopt;
+    }
 
     return loaded;
 }
@@ -96,10 +108,12 @@ bool waits(Script& current)
 // `wait` is the runner's; every other line is the add-on's.
 void runLineOf(Script& current, const std::string& line)
 {
-    if (line == "wait" || line.starts_with("wait "))
+    // An indented line counts as one too.
+    const auto trimmed = line.substr(line.find_first_not_of(" \t") == line.npos ? line.size() : line.find_first_not_of(" \t"));
+    if (trimmed == "wait" || trimmed.starts_with("wait "))
     {
         std::uint64_t frames{};
-        if (line.size() > 5 && (std::istringstream(line.substr(5)) >> frames)) current.waitUntil = presented.load(std::memory_order_relaxed) + frames;
+        if (trimmed.size() > 5 && (std::istringstream(trimmed.substr(5)) >> frames)) current.waitUntil = presented.load(std::memory_order_relaxed) + frames;
         else current.output += "error: wait <frames>\n";
         return;
     }

@@ -142,15 +142,28 @@ std::string stateText(const std::string& name, const char* caseFolder)
     return state + joined(stateTexts, caseFolder);
 }
 
-// What the game is at into the case's folder.
-void writeState(const std::string& name)
+// A case's folder: one word under cases/, never a path of the caller's own.
+std::optional<std::filesystem::path> caseFolder(const std::string& name)
 {
-    const auto caseFolder = commands::folder() / "cases" / name;
-    std::error_code error;
-    std::filesystem::create_directories(caseFolder, error);
+    if (name.empty() || name == "." || name == ".." || name.find_first_of("/\\:") != std::string::npos) return std::nullopt;
 
-    const auto folderText = utf8(caseFolder);
-    std::ofstream(caseFolder / "state.txt", std::ios::trunc) << stateText(name, folderText.c_str());
+    return commands::folder() / "cases" / name;
+}
+
+// What the game is at into the case's folder; false when it could not be written.
+bool writeState(const std::string& name)
+{
+    const auto folder = caseFolder(name);
+    if (!folder) return false;
+
+    std::error_code error;
+    std::filesystem::create_directories(*folder, error);
+    const auto folderText = utf8(*folder);
+    std::ofstream file(*folder / "state.txt", std::ios::trunc);
+    file << stateText(name, folderText.c_str());
+    file.close();
+
+    return !file.fail();
 }
 
 // The frame log's recording: the lines after `frame` wait for it.
@@ -246,7 +259,7 @@ void run(Script& running, const std::string& line)
     else if (command == "state")
     {
         if (rest.empty()) running.output += stateText("", nullptr);
-        else writeState(rest);
+        else if (!writeState(rest)) running.output += "error: the state could not be written to cases/" + rest + "\n";
     }
     else if (command == "status") running.output += statusText();
     else if (command == "help") running.output += listing();
@@ -320,9 +333,20 @@ void run(Script& running, const std::string& line)
     else if (command == "case_done")
     {
         // What the case's lines said, kept with the case.
-        std::ofstream(commands::folder() / "cases" / rest / "log.txt", std::ios::binary | std::ios::trunc) << running.output;
-        devkit::log("Debug case " + rest + " saved.");
-        devkit::toast(Tone::Ok, "Debug case saved", "cases/" + rest);
+        const auto folder = caseFolder(rest);
+        if (!folder) running.output += "error: case names are one word\n";
+        else
+        {
+            std::ofstream file(*folder / "log.txt", std::ios::binary | std::ios::trunc);
+            file << running.output;
+            file.close();
+            if (file.fail()) running.output += "error: the case log could not be written to cases/" + rest + "\n";
+            else
+            {
+                devkit::log("Debug case " + rest + " saved.");
+                devkit::toast(Tone::Ok, "Debug case saved", "cases/" + rest);
+            }
+        }
     }
     else if (const auto found = commandTable.find(command); found != commandTable.end())
         found->second.fn(reinterpret_cast<DevKitScript*>(&running), rest.c_str(), found->second.user);

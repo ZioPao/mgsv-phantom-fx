@@ -8,8 +8,9 @@
 #include <string_view>
 #include <vector>
 
-// Development diagnostics of any MGSV add-on's rendering, the DevKit add-on's: on only when a `DevKit/frame-log`
-// folder exists beside the add-ons as the game starts; otherwise no event is registered, so they cost nothing.
+// Development diagnostics of any MGSV add-on's rendering, the DevKit add-on's. The shaders the game creates are kept
+// whatever else is on; the frame recording is on only when a `DevKit/frame-log` folder exists beside the add-ons as the
+// game starts, and without it no recording event is registered, so that part costs nothing.
 // They only read the game's Direct3D 11 state, so the frame renders unchanged. The files go into that folder:
 // - Every shader the game creates is logged once to DevKit.log: stage, DXBC checksum, size. With a
 //   `shaders` folder inside, the bytecode is saved there too.

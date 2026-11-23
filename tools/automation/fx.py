@@ -210,6 +210,64 @@ def game_running():
     return any(Path(line.strip()).parent == game_folder for line in paths if line.strip())
 
 
+def game_window():
+    """The selected game's window, by its process's path: the title alone would match another copy."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    except (AttributeError, OSError):
+        return 0
+
+    wanted = str(game_folder.resolve()).lower()
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def look(window, _):
+        if not user32.IsWindowVisible(window):
+            return True
+        process = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(window, ctypes.byref(process))
+        handle = kernel32.OpenProcess(0x1000, False, process)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return True
+        try:
+            path = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(len(path))
+            if kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)) and str(Path(path.value).parent).lower() == wanted:
+                found.append(window)
+        finally:
+            kernel32.CloseHandle(handle)
+        return True
+
+    user32.EnumWindows(look, 0)
+
+    return found[0] if found else 0
+
+
+def sent_to_foreground(window, key):
+    """Key down and up to `window`, once it holds the foreground; False when Windows kept it elsewhere, so the key
+    cannot land in another program."""
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    previous = user32.GetForegroundWindow()
+    user32.keybd_event(0x12, 0, 0, 0)  # Alt: Windows then lets this process set the foreground
+    user32.SetForegroundWindow(window)
+    user32.keybd_event(0x12, 0, 2, 0)
+    time.sleep(0.2)
+    if user32.GetForegroundWindow() != window:
+        return False
+    user32.keybd_event(key, 0, 0, 0)
+    user32.keybd_event(key, 0, 2, 0)
+    time.sleep(0.3)
+    if previous and previous != window:
+        user32.SetForegroundWindow(previous)
+
+    return True
+
+
 def press_enter():
     """Enter to the game's window, for the notices before its scripts run (autosave, online information). The game
     reads the keyboard's state, not window messages, so the off-screen window is brought forward for the key and the
@@ -220,22 +278,11 @@ def press_enter():
     except (AttributeError, OSError):
         return False
 
-    hwnd = user32.FindWindowW(None, "METAL GEAR SOLID V: THE PHANTOM PAIN")
-    if not hwnd:
+    window = game_window()
+    if not window:
         return False
 
-    previous = user32.GetForegroundWindow()
-    user32.keybd_event(0x12, 0, 0, 0)  # Alt: Windows then lets this process set the foreground
-    user32.SetForegroundWindow(hwnd)
-    user32.keybd_event(0x12, 0, 2, 0)
-    time.sleep(0.25)
-    user32.keybd_event(0x0D, 0, 0, 0)
-    user32.keybd_event(0x0D, 0, 2, 0)
-    time.sleep(0.4)
-    if previous and previous != hwnd:
-        user32.SetForegroundWindow(previous)
-
-    return True
+    return sent_to_foreground(window, 0x0D)
 
 
 def wait_for_scripts(timeout=120.0, least_seconds=45.0):
@@ -251,7 +298,7 @@ def wait_for_scripts(timeout=120.0, least_seconds=45.0):
     except (TimeoutError, FileNotFoundError, IndexError):
         line = ""
     frame = re.match(r"frame (\d+)", line)
-    if frame and int(frame.group(1)) > 200 and " camera " in f" {line} ":
+    if frame and int(frame.group(1)) > 200 and " camera " in f" {line} " and "no camera yet" not in line:
         return
 
     print("waiting for the game's scripts; pressing its startup notices away", flush=True)
@@ -272,7 +319,7 @@ def wait_for_scripts(timeout=120.0, least_seconds=45.0):
             continue
 
         frame = re.match(r"frame (\d+)", line)
-        if frame and int(frame.group(1)) > 200 and " camera " in f" {line} ":
+        if frame and int(frame.group(1)) > 200 and " camera " in f" {line} " and "no camera yet" not in line:
             print(f"the game's scripts answer after {time.monotonic() - started:.0f} s", flush=True)
             return
 
@@ -316,7 +363,7 @@ def view(show=True):
     from ctypes import wintypes
 
     user32 = ctypes.windll.user32
-    hwnd = user32.FindWindowW(None, "METAL GEAR SOLID V: THE PHANTOM PAIN")
+    hwnd = game_window()
     if not hwnd:
         return False
 
@@ -348,22 +395,11 @@ def press_space():
     except (AttributeError, OSError):
         return False
 
-    hwnd = user32.FindWindowW(None, "METAL GEAR SOLID V: THE PHANTOM PAIN")
-    if not hwnd:
+    window = game_window()
+    if not window:
         return False
 
-    previous = user32.GetForegroundWindow()
-    user32.keybd_event(0x12, 0, 0, 0)  # Alt: Windows then lets this process set the foreground
-    user32.SetForegroundWindow(hwnd)
-    user32.keybd_event(0x12, 0, 2, 0)
-    time.sleep(0.2)
-    user32.keybd_event(0x20, 0, 0, 0)
-    user32.keybd_event(0x20, 0, 2, 0)
-    time.sleep(0.3)
-    if previous and previous != hwnd:
-        user32.SetForegroundWindow(previous)
-
-    return True
+    return sent_to_foreground(window, 0x20)
 
 
 def boot(timeout=180.0):
@@ -377,7 +413,11 @@ def boot(timeout=180.0):
         try:
             state = run([f"lua {BOOT_STEP}", "status"], timeout=30).splitlines()
         except (TimeoutError, FileNotFoundError):
-            continue  # The game is starting and not reading commands yet
+            # The game is starting, or stalled where it is not reading commands: the key must still come.
+            if time.monotonic() - pressed > 6:
+                pressed = time.monotonic()
+                press_space()
+            continue
 
         if state[1] != last:
             print(f"{time.monotonic() - start:6.1f} s  {state[1]} | {state[3]}", flush=True)
@@ -403,6 +443,7 @@ def unstick(timeout=90.0):
         try:
             state = run([f"lua {BOOT_STEP}", "status"], timeout=20).splitlines()
         except (TimeoutError, OSError, PermissionError):
+            press_space()
             time.sleep(1)
             continue
 
@@ -430,7 +471,12 @@ def travel(destination, place=None, timeout=300.0):
     asked = 0.0
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        state = run([f"lua {BOOT_STEP}"]).splitlines()[1].split()
+        try:
+            state = run([f"lua {BOOT_STEP}"], timeout=max(5.0, min(20.0, deadline - time.monotonic()))).splitlines()[1].split()
+        except TimeoutError:
+            # Loading has stopped the loop: the key goes from here or never.
+            press_space()
+            continue
         playing = state[-1] == "playing"
         if not playing:
             loading_seen = True
@@ -696,7 +742,8 @@ def main():
     elif command == "travel":
         travel(rest[0])
     elif command in ("show", "hide"):
-        print("on screen" if view(command == "show") else "no game window")
+        moved = view(command == "show")
+        print(("on screen" if command == "show" else "off screen") if moved else "no game window")
     elif command == "weather":
         print(weather(*rest))
     elif command == "clock":
