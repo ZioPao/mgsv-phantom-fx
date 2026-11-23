@@ -383,6 +383,7 @@ def travel(destination, place=None, timeout=300.0):
     it goes. Each poll is a boot step, which closes popups and leaves the loading tips."""
     code = MAPS[destination]
     loading_seen = False
+    sent = False
     asked = 0.0
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -390,12 +391,14 @@ def travel(destination, place=None, timeout=300.0):
             state = run([f"lua {BOOT_STEP}"], timeout=max(1.0, min(20.0, deadline - time.monotonic()))).splitlines()[1].split()
         except TimeoutError:
             # Loading has stopped the loop: the key goes from here or never.
-            loading_seen = True
+            if sent:
+                loading_seen = True
             press_space()
             continue
         playing = state[-1] == "playing"
         if not playing:
-            loading_seen = True
+            if sent:
+                loading_seen = True
         elif loading_seen and state[0] == str(code):
             return
         if loading_seen and time.monotonic() - asked > 6:
@@ -406,6 +409,7 @@ def travel(destination, place=None, timeout=300.0):
                 run([f"travel {destination}" + (f" {place}" if place else "")], timeout=max(1.0, min(30.0, deadline - time.monotonic())))
             except TimeoutError:
                 press_space()
+            sent = True
             asked = time.monotonic()
         time.sleep(0.5)
 

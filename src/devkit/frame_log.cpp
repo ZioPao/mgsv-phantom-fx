@@ -1190,6 +1190,9 @@ std::uint64_t request()
 {
     if (!active) return 0;
 
+    // A request already waiting for its present is not replaced: the caller is told it is busy.
+    if (requested.load() != 0) return 0;
+
     const auto id = ++requestsMade;
     requested = id;
 

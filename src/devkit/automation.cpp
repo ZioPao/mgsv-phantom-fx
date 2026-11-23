@@ -319,7 +319,7 @@ void run(Script& running, const std::string& line)
         recordingRequest = frame_log::request();
         if (!recordingRequest)
         {
-            running.output += "error: the frame log is off\\n";
+            running.output += "error: a frame is already being recorded; run this after it\n";
             return;
         }
         waits.push_back({&pollRecording, nullptr, commands::presents() + FrameWait});
