@@ -42,6 +42,8 @@ $process = Start-Process (Join-Path $Game 'mgsvtpp.exe') -WorkingDirectory $Game
 # should not take the keyboard either, so the window that had the focus gets it back.
 for ($second = 0; -not $Visible -and $second -lt 60 -and -not $process.HasExited; $second++) {
     Start-Sleep -Seconds 1
+    # show asked for the window: leave it where it is.
+    if (Test-Path (Join-Path $Game 'DevKit\visible')) { break }
     $process.Refresh()
     # While the window is created the handle is zero, and a zero handle passed as one cannot be. It is read
     # with the rect each time, as it changes.

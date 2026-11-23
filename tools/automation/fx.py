@@ -370,6 +370,12 @@ def view(show=True):
     class Rect(ctypes.Structure):
         _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG), ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
 
+    marker = link() / "visible"
+    if show:
+        marker.touch(exist_ok=True)
+    else:
+        marker.unlink(missing_ok=True)
+
     rect = Rect()
     user32.GetWindowRect(hwnd, ctypes.byref(rect))
     width, height = rect.right - rect.left, rect.bottom - rect.top
@@ -543,11 +549,15 @@ def windows_powershell():
 def steam_running():
     """Whether Steam runs: the game cannot initialize SteamAPI without it, and sits on its error dialog instead."""
     try:
-        listed = subprocess.run(["tasklist", "/FI", "IMAGENAME eq steam.exe"], capture_output=True, text=True, timeout=10).stdout
+        asked = subprocess.run(["tasklist", "/FI", "IMAGENAME eq steam.exe"], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return True  # A check that cannot answer must not stop a run
 
-    return "steam.exe" in listed.lower()
+    # The same for a query that failed: only a query that ran and found nothing is an answer.
+    if asked.returncode != 0 and not asked.stdout.strip():
+        return True
+
+    return "steam.exe" in asked.stdout.lower()
 
 
 def restart_copy(ini):
@@ -666,6 +676,9 @@ def run_scenarios(names, accept):
     import case as report
 
     scenarios = load_scenarios()
+    unknown = [name for name in names if name not in {scenario["name"] for scenario in scenarios}]
+    if unknown:
+        raise SystemExit(f"no scenario named {", ".join(unknown)}; `fx.py scenarios` lists them")
     chosen = [scenario for scenario in scenarios if not names or scenario["name"] in names]
     run_name = time.strftime("run-%Y-%m-%d_%H-%M-%S")
     game_folder = AUTOMATION_GAME

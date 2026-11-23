@@ -104,7 +104,7 @@ def stop_copy() -> bool:
 
     escaped = str(GAMES["copy"]).replace("'", "''")
     subprocess.run(["powershell", "-NoProfile", "-Command",
-        f"Get-Process mgsvtpp -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -like '{escaped}\\*' }} | Stop-Process -Force"],
+        f"Get-Process mgsvtpp -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{escaped}\\mgsvtpp.exe' }} | Stop-Process -Force"],
         capture_output=True, text=True, timeout=30)
     return True
 

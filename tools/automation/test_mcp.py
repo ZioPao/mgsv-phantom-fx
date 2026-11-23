@@ -35,7 +35,10 @@ class FakeGame:
                     file.unlink()
                 except (FileNotFoundError, PermissionError):  # Still being renamed, or already gone
                     continue
-                file.with_suffix(".result").write_text("\n".join(f"ok: {line}" for line in lines) + "\n", encoding="utf-8")
+                result = file.with_suffix(".result")
+                partial = result.with_name(result.name + ".partial")
+                partial.write_text("\n".join(f"ok: {line}" for line in lines) + "\n", encoding="utf-8")
+                partial.replace(result)  # As the runner publishes it: whole, under the name fx.py reads
             time.sleep(0.01)
 
     def close(self):
