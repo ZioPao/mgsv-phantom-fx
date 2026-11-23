@@ -40,6 +40,8 @@ std::mutex callbacksMutex;
 std::array<FrameStartCallback, 8> frameStartCallbacks{};
 // Held shared while copied callbacks run, and taken alone by unregistration: it returns only once a callback that
 // was copied before it was cleared has finished. A callback must not register or unregister itself.
+// Not needed in theory: ReShade unloads add-ons only from D3D12Device's destructor, once the last device is gone, which
+// in this game is after the main loop has stopped. Kept because the ordering should not rest on that.
 std::shared_mutex dispatchMutex;
 
 std::uint32_t countOf(const std::uint8_t* loop)
