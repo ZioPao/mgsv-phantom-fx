@@ -54,13 +54,17 @@ void press(std::uint32_t virtualKey)
         }
     }
 
+    // The arrows come back from MAPVK_VK_TO_VSC_EX with the extended prefix in the high byte; without it the scan
+    // code is the keypad's.
+    const auto scan = MapVirtualKeyW(virtualKey, MAPVK_VK_TO_VSC_EX);
+    const DWORD extended = (scan & 0xff00) ? KEYEVENTF_EXTENDEDKEY : 0;
     INPUT input[2]{};
     input[0].type = INPUT_KEYBOARD;
     input[0].ki.wVk = static_cast<WORD>(virtualKey);
-    input[0].ki.wScan = static_cast<WORD>(MapVirtualKeyW(virtualKey, MAPVK_VK_TO_VSC));
-    input[0].ki.dwFlags = KEYEVENTF_SCANCODE;
+    input[0].ki.wScan = static_cast<WORD>(scan & 0xff);
+    input[0].ki.dwFlags = KEYEVENTF_SCANCODE | extended;
     input[1] = input[0];
-    input[1].ki.dwFlags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
+    input[1].ki.dwFlags = input[0].ki.dwFlags | KEYEVENTF_KEYUP;
     SendInput(2, input, sizeof(INPUT));
 
     if (previous && previous != game && IsWindow(previous)) SetForegroundWindow(previous);

@@ -80,9 +80,20 @@ void finish(const Script& finished)
 
     auto partial = finished.result;
     partial += ".partial";
-    std::ofstream(partial, std::ios::binary) << finished.output;
+    {
+        std::ofstream file(partial, std::ios::binary);
+        file << finished.output;
+        file.close();
+        if (file.fail())
+        {
+            log("Command result could not be written: " + partial.filename().string() + ".");
+            return;
+        }
+    }
+
     std::error_code error;
     std::filesystem::rename(partial, finished.result, error);
+    if (error) log("Command result could not be published: " + finished.result.filename().string() + ".");
 }
 
 // Whether the line that last ran still has the render thread, or the add-on, working for it; a line it

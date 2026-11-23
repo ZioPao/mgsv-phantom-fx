@@ -54,7 +54,8 @@ struct DevKitApi
     void (*queue)(DevKitScript* script, const char* lines);
     // Holds the lines after this one until `fn` returns 0, or `presents` presents have gone.
     void (*waitUntil)(DevKitScript* script, DevKitWaitFn fn, std::uint64_t presents, void* user);
-    // Has the render thread run `fn` at its next present; the script waits for it.
+    // Has the render thread run `fn` at its next present; the script waits for it. One job is pending at a time: a
+    // second call before that present replaces the first, so call it once a line and let the wait end first.
     void (*presentJob)(DevKitScript* script, DevKitPresentFn fn, void* user);
 
     // From anywhere on the game thread.

@@ -29,7 +29,10 @@ void install(const std::filesystem::path& addonDirectory);
 bool installed();
 // Records the next frame, as F10 does (only with the frame-log folder). `recordings` counts those finished, and
 // `lastRecording` is the name of the latest: `frame-<n>`.
-void request();
+// Records the next frame, as F10 does; its request ID, 0 when the frame log is off. `completedRequest` is the ID of
+// the latest capture that finished: a capture the script asked for is done when they are equal.
+std::uint64_t request();
+std::uint64_t completedRequest();
 std::uint64_t recordings();
 std::string lastRecording();
 

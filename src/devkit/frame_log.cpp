@@ -73,7 +73,10 @@ bool tracking{};
 std::atomic<std::uint64_t> recorded{};
 
 std::atomic<Capture> capture{Capture::Off};
-std::atomic<bool> requested{};
+std::atomic<std::uint64_t> requested{};
+std::atomic<std::uint64_t> requestsMade{};
+std::uint64_t captureRequest{};
+std::atomic<std::uint64_t> completedRequestId{};
 // Presents recorded before the frame that is kept: the game records a list a frame or more before the immediate context
 // executes it, and only the lists recorded under way are read. The one frame this used to wait missed the scene's own.
 constexpr int WarmupFrames = 30;
@@ -825,13 +828,16 @@ void finishRecording()
     saveQueued();
     record << '#' << ++calls << " present " << describe(backBuffer, DXGI_FORMAT_UNKNOWN) << '\n';
     record.close();
-    log("Recorded " + std::to_string(calls) + " calls.");
+    const bool failed = record.fail();
+    log(failed ? "The frame record could not be written." : "Recorded " + std::to_string(calls) + " calls.");
     record.open(outputDirectory / (recordName + "-writers.txt"), std::ios::trunc);
     for (const auto& [writer, count] : constantWriters)
         record << count << "x " << writer << '\n';
 
     record.close();
-    devkit::toast(Tone::Ok, "Frame captured", recordName + ".txt");
+    const bool writersFailed = record.fail();
+    if (failed || writersFailed) devkit::toast(Tone::Bad, "Frame not saved", recordName + ".txt");
+    else devkit::toast(Tone::Ok, "Frame captured", recordName + ".txt");
     constantWriters.clear();
     for (auto& [list, lines] : pending)
         for (auto& line : lines)
@@ -842,6 +848,7 @@ void finishRecording()
     mappedConstants.clear();
     capture = Capture::Off;
     completedRecording = recordName;
+    completedRequestId = captureRequest;
     ++recorded;
 }
 
@@ -878,8 +885,9 @@ void onPresent(command_queue* queue, swapchain* chain, const rect*, const rect*,
         capture = Capture::Recording;
         log("Recording " + recordName + ".txt" + (dumpsLeft.empty() ? "." : ", with dumps in " + recordName + "/."));
     }
-    else if (requested.exchange(false))
+    else if (const auto request = requested.exchange(0))
     {
+        captureRequest = request;
         std::lock_guard lock(recordMutex);
         dumpsLeft = readDumpList();
         warmupLeft = WarmupFrames;
@@ -889,7 +897,7 @@ void onPresent(command_queue* queue, swapchain* chain, const rect*, const rect*,
 
 void onReshadePresent(effect_runtime* runtime)
 {
-    if (runtime->is_key_pressed(VK_F10)) requested = true;
+    if (runtime->is_key_pressed(VK_F10)) request();
 }
 
 bool onDraw(command_list* list, uint32_t vertices, uint32_t instances, uint32_t first, uint32_t firstInstance)
@@ -1178,9 +1186,19 @@ bool installed()
     return active;
 }
 
-void request()
+std::uint64_t request()
 {
-    if (active) requested = true;
+    if (!active) return 0;
+
+    const auto id = ++requestsMade;
+    requested = id;
+
+    return id;
+}
+
+std::uint64_t completedRequest()
+{
+    return completedRequestId.load();
 }
 
 std::uint64_t recordings()

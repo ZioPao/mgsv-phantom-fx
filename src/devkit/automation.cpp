@@ -168,12 +168,12 @@ bool writeState(const std::string& name)
 
 // The frame log's recording: the lines after `frame` wait for it.
 Script& scriptOf(DevKitScript* script);
-std::uint64_t recordingsBefore{};
+std::uint64_t recordingRequest{};
 
 int pollRecording(DevKitScript* script, int timedOut, void*)
 {
     auto& output = scriptOf(script).output;
-    if (frame_log::recordings() != recordingsBefore)
+    if (frame_log::completedRequest() == recordingRequest)
     {
         output += "recorded " + frame_log::lastRecording() + " in frame-log\n";
         return 0;
@@ -299,8 +299,12 @@ void run(Script& running, const std::string& line)
             return;
         }
 
-        recordingsBefore = frame_log::recordings();
-        frame_log::request();
+        recordingRequest = frame_log::request();
+        if (!recordingRequest)
+        {
+            running.output += "error: the frame log is off\\n";
+            return;
+        }
         waits.push_back({&pollRecording, nullptr, commands::presents() + FrameWait});
     }
     else if (command == "shaders")
@@ -542,7 +546,16 @@ void install(const std::filesystem::path& addonDirectory) noexcept
     // The automation copy must not change the player's saves. Left running without its own it would, even with
     // no commands, so it quits. Without a `saves` folder this is the player's game.
     const auto saves = candidate / "saves", userData = candidate / "local";
-    if (std::filesystem::is_directory(saves, error) && !(std::filesystem::is_directory(userData, error) && save_redirect::install(saves, userData)))
+    const auto savesStatus = std::filesystem::status(saves, error);
+    // A lookup that failed is not "no saves folder": running on the player's saves is the one thing this must not do.
+    if (error && error != std::errc::no_such_file_or_directory)
+    {
+        devkit::log("The automation copy quits: " + saves.string() + " could not be looked at (" + error.message() + ").");
+        TerminateProcess(GetCurrentProcess(), 1);
+    }
+
+    if (savesStatus.type() == std::filesystem::file_type::directory
+        && !(std::filesystem::is_directory(userData, error) && save_redirect::install(saves, userData)))
     {
         devkit::log("The automation copy quits: it needs " + saves.string() + " with the saves to start from and " + userData.string() + ", and the game's files redirected there.");
         TerminateProcess(GetCurrentProcess(), 1);
