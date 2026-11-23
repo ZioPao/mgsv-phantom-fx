@@ -128,12 +128,17 @@ def disown_copy() -> None:
     owned_path().unlink(missing_ok=True)
 
 
+def copy_owned() -> bool:
+    """Whether a launch made this copy: the marker fx.restart_copy writes, not a folder that happened to be running."""
+    return owned_path().exists()
+
+
 def auto_close() -> None:
-    """The backstop: a copy the tools started is closed after AUTO_CLOSE_SECONDS without a tool call, or when
+    """The backstop: a copy a launch made is closed after AUTO_CLOSE_SECONDS without a tool call, or when
     the server exits. A job still running keeps it; the task's own session stop should come first."""
     while True:
         time.sleep(30)
-        if AUTO_CLOSE_SECONDS <= 0 or not owned_copy:
+        if AUTO_CLOSE_SECONDS <= 0 or not copy_owned():
             continue
 
         with ACTIVITY_LOCK:
@@ -153,7 +158,7 @@ def auto_close() -> None:
 
 
 def close_on_exit() -> None:
-    if owned_copy:
+    if copy_owned():
         stop_copy()
         disown_copy()
 
@@ -296,7 +301,7 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
             if target == "player":
                 return fail("WRONG_TARGET", "The tools never stop the player's game.", "Ask the user to close it; only the copy can be stopped here.")
             stopped = stop_copy()
-            owned_copy = False
+            disown_copy()
             return ok({"stopped": stopped}, text="Stopped the automation copy." if stopped else "No copy is running.")
 
         if action == "recover":
@@ -324,7 +329,6 @@ def session(action: Literal["status", "open", "freeze", "release", "boot", "trav
             if not result.is_error:
                 session_target = "copy"
                 fx.game_folder = GAMES["copy"]
-                owned_copy = True
             return result
 
         try:
@@ -452,7 +456,6 @@ def case(action: Literal["latest", "open", "record", "replay", "compare"] = "lat
             if not result.is_error:
                 session_target = "copy"
                 fx.game_folder = GAMES["copy"]
-                owned_copy = True
             return result
 
         if action == "record":
@@ -651,7 +654,6 @@ def verify(names: list[str] | str | None = None, accept: bool = False) -> CallTo
     if not result.is_error:
         session_target = "copy"
         fx.game_folder = GAMES["copy"]
-        owned_copy = True
     return result
 
 

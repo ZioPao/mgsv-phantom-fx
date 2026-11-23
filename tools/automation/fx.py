@@ -247,180 +247,15 @@ def game_window():
     return found[0] if found else 0
 
 
-def sent_to_foreground(window, key):
-    """Key down and up to `window`, once it holds the foreground; False when Windows kept it elsewhere, so the key
-    cannot land in another program."""
-    import ctypes
-
-    user32 = ctypes.windll.user32
-    previous = user32.GetForegroundWindow()
-    user32.keybd_event(0x12, 0, 0, 0)  # Alt: Windows then lets this process set the foreground
-    user32.SetForegroundWindow(window)
-    user32.keybd_event(0x12, 0, 2, 0)
-    time.sleep(0.2)
-    if user32.GetForegroundWindow() != window:
-        return False
-    user32.keybd_event(key, 0, 0, 0)
-    user32.keybd_event(key, 0, 2, 0)
-    time.sleep(0.3)
-    if previous and previous != window:
-        user32.SetForegroundWindow(previous)
-
-    return True
-
-
 def press_enter():
     """A confirm for the notices before the game's scripts run (autosave, online information): a gamepad A, which the
-    game reads without any window taking the keyboard. Only when the game already has the foreground is Enter sent."""
-    try:
-        import ctypes
-        user32 = ctypes.windll.user32
-    except (AttributeError, OSError):
-        return False
-
-    import ctypes
-
-    window = game_window()
-    if window and ctypes.windll.user32.GetForegroundWindow() == window:
-        return sent_to_foreground(window, 0x0D)
-
+    game reads without any window taking the keyboard."""
     return press_pad("a")
 
 
-def wait_for_scripts(timeout=120.0, least_seconds=45.0):
-    """Until the game is far enough through start-up to answer a Lua call. With another mod's hooks over the
-    game's Lua (Infinite Heaven's IHHook), a call too early can crash the game, so the first 45 s only presses
-    the notices away and watches the process; from then on a camera and a frame past 200 mean it is ready."""
-    started = time.monotonic()
-    deadline = started + timeout
-    last_press = 0.0
-    # A game already in play answers at once; nothing is pressed into it.
-    try:
-        line = run(["status"], timeout=5).splitlines()[1]
-    except (TimeoutError, FileNotFoundError, IndexError):
-        line = ""
-    frame = re.match(r"frame (\d+)", line)
-    if frame and int(frame.group(1)) > 200 and " camera " in f" {line} " and "no camera yet" not in line:
-        return
-
-    print("waiting for the game's scripts; pressing its startup notices away", flush=True)
-    while time.monotonic() < deadline:
-        now = time.monotonic()
-        if now - last_press > 2.5:
-            press_enter()
-            press_space()  # The startup notices take Enter; a loading screen before loop start takes Space
-            last_press = now
-
-        if now - started < least_seconds:
-            time.sleep(0.4)
-            continue
-
-        try:
-            line = run(["status"], timeout=5).splitlines()[1]
-        except (TimeoutError, FileNotFoundError, IndexError):
-            time.sleep(0.3)
-            continue
-
-        frame = re.match(r"frame (\d+)", line)
-        if frame and int(frame.group(1)) > 200 and " camera " in f" {line} " and "no camera yet" not in line:
-            print(f"the game's scripts answer after {time.monotonic() - started:.0f} s", flush=True)
-            return
-
-        time.sleep(0.3)
-
-    raise TimeoutError(f"the game's scripts did not answer after {timeout:.0f} s: read {link() / 'launch.log'}")
-
-
-def state_field(name):
-    """One `state` line, as the game reports it."""
-    for line in run(["state"]).splitlines():
-        if line.startswith(name + "="):
-            return line
-
-    return ""
-
-
-def weather(setting=None, fog=None):
-    """The sky's weather: reads it, forces a type (0 sunny, 1 cloudy, 2 rainy, 3 sandstorm, 4 foggy), or `off`."""
-    if setting is None:
-        return state_field("weather")
-    line = "weather off" if setting == "off" else f"weather {setting}" + (f" {fog}" if fog is not None else "")
-    run([line])
-
-    return state_field("weather")
-
-
-def time_of_day(seconds=None, run_clock=False):
-    """The clock: reads it, or sets it (seconds since midnight), stopped there unless `run_clock`."""
-    if seconds is None:
-        return state_field("clock")
-    run([f"clock {seconds:g}" + (" run" if run_clock else "")])
-
-    return state_field("clock")
-
-
-def view(show=True):
-    """Shows the copy's window on screen, or hides it off-screen again as launch.ps1 leaves it. Returns whether the
-    game's window was there."""
-    import ctypes
-    from ctypes import wintypes
-
-    user32 = ctypes.windll.user32
-    hwnd = game_window()
-    if not hwnd:
-        return False
-
-    class Rect(ctypes.Structure):
-        _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG), ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
-
-    marker = link() / "visible"
-    if show:
-        marker.touch(exist_ok=True)
-    else:
-        marker.unlink(missing_ok=True)
-
-    rect = Rect()
-    user32.GetWindowRect(hwnd, ctypes.byref(rect))
-    width, height = rect.right - rect.left, rect.bottom - rect.top
-    if show:
-        work = Rect()
-        user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(work), 0)  # SPI_GETWORKAREA
-        area_width, area_height = work.right - work.left, work.bottom - work.top
-        width, height = min(width, area_width), min(height, area_height)
-        user32.SetWindowPos(hwnd, 0, work.left + (area_width - width) // 2, work.top + (area_height - height) // 2, width, height, 0x0040)  # SWP_SHOWWINDOW
-        user32.SetForegroundWindow(hwnd)
-    else:
-        user32.SetWindowPos(hwnd, 0, -6000, 100, 0, 0, 0x0011)  # SWP_NOSIZE | SWP_NOACTIVATE: off-screen, as launched
-
-    return True
-
-
-def press_pad(button="a"):
-    """A gamepad button to the game, through the file DevKit's XInput hook watches: the game reads it every frame, so
-    no window is brought forward and the user's focus is not touched. Works while the game loop is stopped."""
-    trigger = link() / "pad"
-    partial = trigger.with_name("pad.tmp")
-    partial.write_text(button + "\n", encoding="utf-8")
-    partial.replace(trigger)
-
-    return True
-
-
 def press_space():
-    """Space for a loading screen: a gamepad button, which the game reads every frame without this process taking the
-    keyboard or the foreground. If the game's own window is already in front, Space is sent instead (see the hooks)."""
-    try:
-        import ctypes
-        user32 = ctypes.windll.user32
-    except (AttributeError, OSError):
-        return False
-
-    import ctypes
-
-    window = game_window()
-    if window and ctypes.windll.user32.GetForegroundWindow() == window:
-        return sent_to_foreground(window, 0x20)
-
+    """The button a screen that waits for one takes: a gamepad A, which reaches the game even while its loop is
+    stopped, with no focus taken from the user."""
     return press_pad("a")
 
 
@@ -600,6 +435,8 @@ def restart_copy(ini):
     with open(link() / "launch.log", "w") as log:
         subprocess.Popen(["powershell", "-NoProfile", "-File", str(scripts / "launch.ps1")], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
             env=windows_powershell(), creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP)
+    # This launch made the copy, so the MCP may close it when the work is done: the marker is written only here.
+    (link() / "mcp-owned").write_text("mcp\n", encoding="utf-8")
 
 
 def go_back(state):

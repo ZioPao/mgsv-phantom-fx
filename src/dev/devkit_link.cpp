@@ -481,8 +481,9 @@ void enhancements(DevKitScript*, std::string_view rest)
 
 void reveal(DevKitScript* script, std::string_view rest)
 {
-    // The scene reads its models again with what it takes: restarted by the enhancements switch.
-    queue(script, {"wait_scene", "enhancements 1", "reveal_now " + std::string(rest), "wait 5", "enhancements 0"});
+    // The scene reads its models again with what it takes: restarted by the enhancements switch, and left on for the
+    // record or inspect that follows.
+    queue(script, {"wait_scene", "enhancements 0", "wait 5", "reveal_now " + std::string(rest), "enhancements 1", "wait_scene", "wait 45"});
 }
 
 void revealNow(DevKitScript*, std::string_view what)
