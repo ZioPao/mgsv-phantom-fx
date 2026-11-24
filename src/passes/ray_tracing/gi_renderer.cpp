@@ -180,8 +180,6 @@ struct State
 
     ComPtr<ID3D12RootSignature> rootSignature;
     Pipelines pipelines;
-    // Pipelines a hot reload replaced (dev/hot_kernels.hpp), kept while a frame in flight may still run them.
-    std::vector<ComPtr<ID3D12PipelineState>> retiredPipelines;
     ComPtr<ID3D12CommandSignature> dispatchSignature;
     ComPtr<ID3D12DescriptorHeap> heap;
     UINT descriptorSize{};
@@ -960,7 +958,10 @@ Result render(Frame& frame)
 #if PHANTOM_FX_DEV_TOOLS
     {
         hot_kernels::start();
-        for (auto& fresh : hot_kernels::take())
+        const auto reloaded = hot_kernels::take();
+        // The frames in flight may still run the pipelines about to be replaced: let them finish, once for the lot.
+        if (!reloaded.empty()) waitFor(s, *std::max_element(s.submitted.begin(), s.submitted.end()));
+        for (const auto& fresh : reloaded)
         {
             D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};
             pipeline.pRootSignature = s.rootSignature.Get();
@@ -972,9 +973,7 @@ Result render(Frame& frame)
                 log(std::format("Hot kernels: kernel {} compiled but its pipeline was refused; the one in use stays.", fresh.kernel));
                 continue;
             }
-            s.retiredPipelines.push_back(std::exchange(s.pipelines[fresh.kernel], made));
-            // A reload every few seconds while tuning: keep only the last few, older than any frame in flight.
-            if (s.retiredPipelines.size() > 8) s.retiredPipelines.erase(s.retiredPipelines.begin());
+            s.pipelines[fresh.kernel] = made;
             log(std::format("Hot kernels: kernel {} swapped in.", fresh.kernel));
         }
     }
