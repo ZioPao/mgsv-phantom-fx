@@ -30,4 +30,7 @@ void start() noexcept;
 void stop() noexcept;
 // What compiled since the last call.
 std::vector<Compiled> take() noexcept;
+// Every kernel's last good compile, for a renderer that has just started: it begins from the build's DXIL, and what was
+// taken before it is not taken again. Saves made before the add-on started are compiled when the watcher starts.
+std::vector<Compiled> replay() noexcept;
 }

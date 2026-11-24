@@ -33,7 +33,8 @@ const std::wstring Unique = std::to_wstring(GetCurrentProcessId());
 
 std::mutex mutex;
 std::mutex starting; // Guards `worker` between start and stop.
-std::vector<Compiled> published;
+std::vector<Compiled> published;             // Not yet taken.
+std::map<std::size_t, std::vector<std::uint8_t>> latest; // Every kernel's last good DXIL, for a renderer that starts again.
 std::jthread worker;
 
 fs::path outputFolder()
@@ -65,6 +66,17 @@ fs::file_time_type modified(const fs::path& file)
     return error ? fs::file_time_type{} : time;
 }
 
+// When this add-on was built: a source saved after that is newer than the DXIL the add-on carries.
+fs::file_time_type builtAt()
+{
+    HMODULE self{};
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&builtAt), &self))
+        return {};
+    wchar_t path[MAX_PATH]{};
+    if (!GetModuleFileNameW(self, path, MAX_PATH)) return {};
+    return modified(path);
+}
+
 std::string narrow(const std::wstring& text)
 {
     return fs::path(text).string();
@@ -93,7 +105,13 @@ bool launch(std::size_t kernel, const fs::path& folder, Running& running)
 
     SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
     HANDLE errors = CreateFileW(running.errors.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &inherit, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (errors == INVALID_HANDLE_VALUE) return false;
+    if (errors == INVALID_HANDLE_VALUE)
+    {
+        const auto error = GetLastError();
+        log(std::format("Hot kernels: {} not compiled, the diagnostics file {} could not be opened ({}).", narrow(row.entry),
+            running.errors.string(), error));
+        return false;
+    }
 
     STARTUPINFOW startup{sizeof(startup)};
     startup.dwFlags = STARTF_USESTDHANDLES;
@@ -152,6 +170,7 @@ void compile(const std::set<std::size_t>& kernels, const fs::path& folder, const
     std::lock_guard lock(mutex);
     for (auto& each : fresh)
     {
+        latest[each.kernel] = each.code;
         std::erase_if(published, [&](const Compiled& older) { return older.kernel == each.kernel; });
         published.push_back(std::move(each));
     }
@@ -174,6 +193,19 @@ void watch(std::stop_token stop)
     std::map<fs::path, fs::file_time_type> seen;
     for (const auto& [file, kernels] : touches) seen[file] = modified(file);
     log(std::format("Hot kernels: watching {} files for {} kernels.", touches.size(), every.size()));
+
+    // What was saved since this add-on was built (the renderer starts from its DXIL): compile it now, not at the next save.
+    if (const auto built = builtAt(); built != fs::file_time_type{})
+    {
+        std::set<std::size_t> newer;
+        for (const auto& [file, time] : seen)
+        {
+            if (time <= built) continue;
+            log("Hot kernels: " + file.filename().string() + " is newer than the build.");
+            newer.insert(touches[file].begin(), touches[file].end());
+        }
+        if (!newer.empty()) compile(newer, folder, stop);
+    }
 
     while (!stop.stop_requested())
     {
@@ -222,5 +254,14 @@ std::vector<Compiled> take() noexcept
 {
     std::lock_guard lock(mutex);
     return std::exchange(published, {});
+}
+
+std::vector<Compiled> replay() noexcept
+{
+    std::lock_guard lock(mutex);
+    published.clear(); // They are in `latest` too.
+    std::vector<Compiled> all;
+    for (const auto& [kernel, code] : latest) all.push_back({kernel, code});
+    return all;
 }
 }

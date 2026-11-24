@@ -72,7 +72,8 @@ run what they are told, which security software rightly flags.
 A dev build also reloads the ray tracing's Direct3D 12 kernels as their sources are saved (`src/dev/hot_kernels.hpp`):
 a thread watches each kernel's `.hlsl` and the shared includes, compiles what changed with the build's DXC, and the
 renderer swaps in the new pipelines at the start of a frame. An edit shows in about a second (saving a shared include
-recompiles every kernel, about 2 s). A failed compile is logged in `PhantomFX.log` and the kernel in use stays. Only a
+recompiles every kernel, about 2 s); what was saved after the add-on was built compiles when the game starts, and a
+renderer that starts again (ray effects switched off and on) gets every edit so far. A failed compile is logged in `PhantomFX.log` and the kernel in use stays. Only a
 kernel's body reloads: a new or moved register or binding still needs a rebuild.
 
 `cmake --install build/release --component addon --prefix <dir>` collects the add-on, its DLLs,

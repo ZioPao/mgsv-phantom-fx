@@ -180,6 +180,9 @@ struct State
 
     ComPtr<ID3D12RootSignature> rootSignature;
     Pipelines pipelines;
+#if PHANTOM_FX_DEV_TOOLS
+    bool hotReplayed{}; // Whether the hot-reloaded kernels so far have been applied to this state (dev/hot_kernels.hpp).
+#endif
     ComPtr<ID3D12CommandSignature> dispatchSignature;
     ComPtr<ID3D12DescriptorHeap> heap;
     UINT descriptorSize{};
@@ -958,7 +961,8 @@ Result render(Frame& frame)
 #if PHANTOM_FX_DEV_TOOLS
     {
         hot_kernels::start();
-        const auto reloaded = hot_kernels::take();
+        // A renderer that has just started (the effects were off, or switched off and on) has the build's DXIL: it gets every edit so far.
+        const auto reloaded = std::exchange(s.hotReplayed, true) ? hot_kernels::take() : hot_kernels::replay();
         // The frames in flight may still run the pipelines about to be replaced: let them finish, once for the lot.
         if (!reloaded.empty()) waitFor(s, *std::max_element(s.submitted.begin(), s.submitted.end()));
         for (const auto& fresh : reloaded)
