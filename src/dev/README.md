@@ -16,6 +16,7 @@ PhantomFX's own probes.
 | `game_shadow.*` | A debug case's reference: the game's shadow per pixel, drawn at the sun pass |
 | `held_camera.*` | A debug case's camera, which photo mode's camera update takes |
 | `perf_record.*` | What frames cost, on file: a row a second, and captures for comparing frames |
+| `hot_kernels.*` | The ray tracing's Direct3D 12 kernels, recompiled and swapped in as their sources are saved |
 | `remaster/` | The tool that writes the rules `src/remaster/` ships: marks, and the panel that tunes them |
 
 `tools/automation/` and `.agents/skills/mgsv-automation/` are the other side of the debug cases: the scripts that talk to
@@ -37,7 +38,7 @@ Delete this folder, `src/devkit/`, `src/devaddon/`, `tools/automation/` and `.ag
 | File | Lines |
 | --- | --- |
 | `CMakeLists.txt` | The `include(src/dev/dev.cmake)` and `include(src/dev/tests.cmake)` blocks, `include(src/devkit/devkit.cmake)`, `include(src/devaddon/devaddon.cmake)`, `target_link_libraries(phantom_fx PRIVATE devkit)` and `${PHANTOM_FX_DEV_SOURCES}` |
-| `src/addon.cpp` | The three `dev::` calls, the include, the Enter `photo_mode::teleport()` call, and the name of `onPresent`'s `swapChain` parameter |
+| `src/addon.cpp` | The `hot_kernels::stop()` call and its include; the three `dev::` calls, the include, the Enter `photo_mode::teleport()` call, and the name of `onPresent`'s `swapChain` parameter |
 | `src/game_loop.cpp` | `dev::onFrameStart()` and the include |
 | `src/menu.cpp` | `dev::drawPage()` and the include |
 | `src/menu_budget.cpp`, `src/features/setting_visitor.hpp` | The Developer section |
@@ -49,7 +50,8 @@ Delete this folder, `src/devkit/`, `src/devaddon/`, `tools/automation/` and `.ag
 | `src/features/photo_mode/photo_mode.cpp` | The `held_camera` calls, `heldCamera` and the include; the `game_lua` include, `teleportRequested`, the `Warp` state, its capture at `selectorUpdate`'s teleport and the clears `leave` makes, and `onFrameStart`'s teleport warp |
 | `src/features/photo_mode/photo_mode.hpp` | The `teleport()` and `onFrameStart()` declarations |
 | `src/passes/ray_tracing/ray_tracing.cpp`, `.hpp` | The `PHANTOM_FX_DEV_TOOLS` blocks: the probe's pixel and `saveTextures` |
-| `src/passes/ray_tracing/gi_renderer.cpp`, `.hpp` | `waitingWork`, `workWaiting`, `Frame::probePixel`, and the `perf_record` calls with `countersReadback`, `countersWritten` and `phaseTimes` |
+| `CMakeLists.txt` (kernels) | `GI_KERNEL_SOURCES` in `add_gi_kernels`, and the `hot_kernels` block that writes `gi_hot_kernels.h` |
+| `src/passes/ray_tracing/gi_renderer.cpp`, `.hpp` | The hot reload block at the start of `render` (`hot_kernels::start`, `take`), `waitingWork`, `workWaiting`, `Frame::probePixel`, and the `perf_record` calls with `countersReadback`, `countersWritten` and `phaseTimes` |
 | `src/phantom_fx_settings.cpp`, `.hpp` | `withLine` and `iniText` |
 | `docs/DEVELOPMENT.md` | The `src/dev/` rows, "Debug cases", "Travel", "Cutscenes", "Game Lua", and the mentions under "Build" |
 

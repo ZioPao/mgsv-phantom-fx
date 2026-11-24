@@ -3,6 +3,7 @@
 #include "log.hpp"
 
 #include "gi_hot_kernels.h"
+#include "gi_kernel_list.h"
 
 #include <Windows.h>
 
@@ -23,6 +24,9 @@ namespace phantom_fx::hot_kernels
 namespace
 {
 namespace fs = std::filesystem;
+
+// Compiled results index the renderer's pipelines by Kernel: both lists must come from the same GI_KERNELS.
+static_assert(std::size(HotKernelList) == static_cast<std::size_t>(gi_d3d12::Kernel::Count));
 
 // Per process, so two copies of the game (the player's and the automation's) cannot trade DXIL for the same kernel name.
 const std::wstring Unique = std::to_wstring(GetCurrentProcessId());

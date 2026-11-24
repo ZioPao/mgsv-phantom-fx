@@ -69,6 +69,12 @@ and the `InspectPixels` kernel, and the little the core keeps for it stands behi
 run what they are told, which security software rightly flags.
 `tools/automation/check_release.py` looks through a built add-on for the tools' known markers.
 
+A dev build also reloads the ray tracing's Direct3D 12 kernels as their sources are saved (`src/dev/hot_kernels.hpp`):
+a thread watches each kernel's `.hlsl` and the shared includes, compiles what changed with the build's DXC, and the
+renderer swaps in the new pipelines at the start of a frame. An edit shows in about a second (saving a shared include
+recompiles every kernel, about 2 s). A failed compile is logged in `PhantomFX.log` and the kernel in use stays. Only a
+kernel's body reloads: a new or moved register or binding still needs a rebuild.
+
 `cmake --install build/release --component addon --prefix <dir>` collects the add-on, its DLLs,
 player documentation and licenses for distribution. The DLLs are at the install root;
 documentation and licenses are in `PhantomFX/`.
